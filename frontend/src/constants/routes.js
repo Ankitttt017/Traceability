@@ -1,0 +1,15 @@
+export const APP_ROUTES = {
+  login: "/login",
+  root: "/",
+  dashboard: "/dashboard",
+  production: "/production",
+  traceability: "/traceability",
+  machines: "/machines",
+  users: "/users",
+  scanners: "/scanners",
+  shifts: "/shifts",
+  qrRules: "/qr-format-rules",
+  partJourney: "/component-journey",
+  operatorView: "/operator-view",
+  packing: "/packing",
+};

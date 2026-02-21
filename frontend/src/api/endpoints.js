@@ -1,0 +1,37 @@
+export const ENDPOINTS = {
+  auth: {
+    login: "/auth/login",
+    register: "/auth/register",
+    verifyMfa: "/auth/verify-mfa",
+  },
+  machines: "/machines",
+  scanners: "/scanners",
+  users: "/users",
+  shifts: "/shifts",
+  traceability: {
+    operations: "/traceability/operations",
+    byPart: (partId) => `/traceability/${encodeURIComponent(partId)}`,
+    journeyByPart: (partId) => `/traceability/journey/${encodeURIComponent(partId)}`,
+    liveState: "/traceability/live-state",
+    verify: "/traceability/verify",
+    process: "/scan/process",
+    plcStart: "/plc/operation/start",
+    plcEnd: "/plc/operation/end",
+    rework: "/traceability/rework",
+    resetInterlock: "/traceability/reset-interlock",
+    bypass: "/traceability/bypass",
+  },
+  qrFormatRules: "/qr-format-rules",
+  packing: {
+    overview: "/packing/overview",
+    startBox: "/packing/start-box",
+    scan: "/packing/scan",
+    boxByNumber: (boxNumber) => `/packing/box/${encodeURIComponent(boxNumber)}`,
+  },
+  dashboard: {
+    summary: "/dashboard/summary",
+    trends: "/dashboard/trends",
+    report: "/dashboard/report",
+    exportReport: "/dashboard/report/export",
+  },
+};
