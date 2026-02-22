@@ -16,7 +16,7 @@ function normalizeStation(stationNo) {
 }
 
 function getMachineOperationStage(machine) {
-  return normalizeStation(machine?.operation_no || machine?.station_no);
+  return normalizeStation(machine?.operation_no);
 }
 
 function uniqueStages(stages) {
@@ -100,6 +100,33 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     };
   }
 
+  const activeRule = await getActiveQrRule();
+  if (activeRule) {
+    const regex = new RegExp(activeRule.regex_pattern);
+    if (!regex.test(normalizedPartId)) {
+      await saveAuditLog(normalizedPartId, mId, "NG", "INVALID_QR_FORMAT", userId);
+      emitRealtime("scan_event", {
+        type: "WARNING",
+        partId: normalizedPartId,
+        stationNo: station,
+        machineId: mId || null,
+        decision: "BLOCK",
+        reason: "INVALID_QR_FORMAT",
+        message: "QR format mismatch",
+      });
+      return {
+        decision: "BLOCK",
+        reason: "INVALID_QR_FORMAT",
+        message: `QR format mismatch. Required format: ${activeRule.format_name || "ACTIVE_RULE"}`,
+        currentStatus: "REJECTED_QR_FORMAT",
+        qrRule: {
+          formatName: activeRule.format_name || "ACTIVE_RULE",
+          sampleValue: activeRule.sample_value,
+        },
+      };
+    }
+  }
+
   let part = await Part.findOne({ where: { part_id: normalizedPartId } });
   if (!part) {
     part = await Part.create({
@@ -112,33 +139,12 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     });
   }
 
-  const activeRule = await getActiveQrRule();
   if (activeRule) {
-    const regex = new RegExp(activeRule.regex_pattern);
-    if (!regex.test(normalizedPartId)) {
-      await setPartInterlock(part, "INVALID_QR_FORMAT");
-      await saveAuditLog(normalizedPartId, mId, "NG", "INVALID_QR_FORMAT", userId);
-      emitRealtime("scan_event", {
-        type: "WARNING",
-        partId: normalizedPartId,
-        stationNo: station,
-        decision: "BLOCK",
-        reason: "INVALID_QR_FORMAT",
-        message: "QR format mismatch",
-      });
-      return {
-        decision: "BLOCK",
-        reason: "INVALID_QR_FORMAT",
-        message: `QR format mismatch. Required format: ${activeRule.format_name || "ACTIVE_RULE"}`,
-        currentStatus: part.status,
-        qrRule: {
-          formatName: activeRule.format_name || "ACTIVE_RULE",
-          sampleValue: activeRule.sample_value,
-        },
-      };
+    const formatName = activeRule.format_name || "ACTIVE_RULE";
+    if (part.qr_format_name !== formatName) {
+      part.qr_format_name = formatName;
+      await part.save();
     }
-    part.qr_format_name = activeRule.format_name || "ACTIVE_RULE";
-    await part.save();
   }
 
   if (part.status === "COMPLETED") {
@@ -147,6 +153,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       type: "WARNING",
       partId: normalizedPartId,
       stationNo: station,
+      machineId: mId || null,
       decision: "BLOCK",
       reason: "ALREADY_COMPLETED",
       message: "Part already completed",
@@ -165,6 +172,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       type: "WARNING",
       partId: normalizedPartId,
       stationNo: station,
+      machineId: mId || null,
       decision: "BLOCK",
       reason: part.interlock_reason || "PART_INTERLOCKED",
       message: "Part is interlocked",
@@ -187,6 +195,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       type: "WARNING",
       partId: normalizedPartId,
       stationNo: station,
+      machineId: mId || null,
       decision: "BLOCK",
       reason: "DUPLICATE_SCAN",
       message: "Duplicate scan",
@@ -201,8 +210,16 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
 
   const sequence = await getActiveStations();
   if (!sequence.includes(station)) {
-    await setPartInterlock(part, "STATION_NOT_CONFIGURED");
     await saveAuditLog(normalizedPartId, mId, "NG", "STATION_NOT_CONFIGURED", userId);
+    emitRealtime("scan_event", {
+      type: "WARNING",
+      partId: normalizedPartId,
+      stationNo: station,
+      machineId: mId || null,
+      decision: "BLOCK",
+      reason: "STATION_NOT_CONFIGURED",
+      message: `Station ${station} not configured`,
+    });
     return {
       decision: "BLOCK",
       reason: "STATION_NOT_CONFIGURED",
@@ -213,12 +230,12 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
 
   const expectedStation = getExpectedStation(part, sequence);
   if (expectedStation && station !== expectedStation) {
-    await setPartInterlock(part, "PREVIOUS_STATION_NOT_COMPLETED");
     await saveAuditLog(normalizedPartId, mId, "NG", "PREVIOUS_STATION_NOT_COMPLETED", userId);
     emitRealtime("scan_event", {
       type: "WARNING",
       partId: normalizedPartId,
       stationNo: station,
+      machineId: mId || null,
       decision: "BLOCK",
       reason: "PREVIOUS_STATION_NOT_COMPLETED",
       expectedStation,
@@ -257,6 +274,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       type: "ERROR",
       partId: normalizedPartId,
       stationNo: station,
+      machineId: mId || null,
       decision: "BLOCK",
       reason: "SCAN_RESULT_NG",
       message: "Operation Failed (NG)",
@@ -292,6 +310,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     type: "INFO",
     partId: normalizedPartId,
     stationNo: station,
+    machineId: mId || null,
     decision: "ALLOW",
     reason: "QR_VALIDATED",
     message: "QR verified, waiting PLC ACK",

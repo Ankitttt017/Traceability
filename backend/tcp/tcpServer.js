@@ -22,7 +22,7 @@ function normalizeStation(value) {
 }
 
 function getMachineOperationStage(machine) {
-  return normalizeStation(machine?.operation_no || machine?.station_no);
+  return normalizeStation(machine?.operation_no);
 }
 
 function uniqueStages(stages) {
@@ -61,11 +61,12 @@ function parsePackingPayload(message) {
 
   const boxNumber = keyValues.BOX || keyValues.BOXNO || keyValues.BOX_NUMBER;
   const partId = keyValues.PART || keyValues.PARTID || keyValues.PART_ID;
+  const capacity = keyValues.CAPACITY || keyValues.CAP || keyValues.BOXCAP || keyValues.SLOTS;
 
   if (!boxNumber && !partId) {
     return null;
   }
-  return { boxNumber, partId };
+  return { boxNumber, partId, capacity };
 }
 
 function mapScanDecisionToPopupType(scanResult) {
@@ -209,6 +210,7 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine }) {
         type: "INFO",
         partId,
         stationNo,
+        machineId: machine.id,
         machineName: machine.machine_name,
         status: "STARTED",
         message: "PLC start acknowledged",
@@ -220,6 +222,7 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine }) {
         type: "SUCCESS",
         partId,
         stationNo,
+        machineId: machine.id,
         machineName: machine.machine_name,
         status: "ENDED_OK",
         message: "Operation Passed",
@@ -232,6 +235,7 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine }) {
         type: "ERROR",
         partId,
         stationNo,
+        machineId: machine.id,
         machineName: machine.machine_name,
         status: "ENDED_NG",
         message: "Operation Failed (NG)",
@@ -250,6 +254,7 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine }) {
         type: "WARNING",
         partId,
         stationNo,
+        machineId: machine.id,
         machineName: machine.machine_name,
         status: "INTERLOCKED",
         message: "PLC timeout/interruption - part interlocked",
@@ -280,7 +285,7 @@ const server = net.createServer((socket) => {
       const packingPayload = parsePackingPayload(rawMessage);
       if (packingPayload) {
         if (packingPayload.boxNumber && !packingPayload.partId) {
-          await createSessionIfMissing(packingPayload.boxNumber, 65);
+          await createSessionIfMissing(packingPayload.boxNumber, packingPayload.capacity);
           socket.write("BOX_READY\n");
           emitRealtime("operator_popup", {
             type: "INFO",
@@ -294,6 +299,7 @@ const server = net.createServer((socket) => {
           const packed = await packPart({
             boxNumber: packingPayload.boxNumber,
             partId: packingPayload.partId,
+            capacity: packingPayload.capacity,
           });
           socket.write("PACK_OK\n");
           emitRealtime("operator_popup", {
@@ -349,6 +355,7 @@ const server = net.createServer((socket) => {
         message: scanResult.message || scanResult.reason || "Scan processed",
         partId,
         stationNo,
+        machineId: machine.id,
         machineName: machine.machine_name,
         scannerName: scanner.scanner_name,
         scannerIp,

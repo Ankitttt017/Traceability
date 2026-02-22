@@ -244,7 +244,7 @@ const Traceability = () => {
 
         <div className="space-y-6">
           <div className="industrial-card p-5">
-            <h2 className="font-bold text-white mb-3 flex items-center gap-2">
+            <h2 className="font-bold text-text-main mb-3 flex items-center gap-2">
               <Route size={16} className="text-primary" />
               Configured Sequence
             </h2>
@@ -254,7 +254,11 @@ const Traceability = () => {
                   <p className="text-xs text-text-muted">SEQ {row.sequenceNo}</p>
                   <p className="text-sm text-text-main font-semibold">{row.machineName}</p>
                   <p className="text-xs font-mono text-primary mt-1">
-                    {row.stationNo} | {row.machineIp || "-"}
+                    {row.operationNo || row.stationNo || "-"} | {row.lineName || "-"}
+                  </p>
+                  <p className="text-xs font-mono text-text-muted mt-1">
+                    {row.plcIp || "-"}
+                    {row.plcPort ? `:${row.plcPort}` : ""} | {row.plcProtocol || "TCP_TEXT"}
                   </p>
                 </div>
               ))}
@@ -263,7 +267,7 @@ const Traceability = () => {
           </div>
 
           <div className="industrial-card p-5">
-            <h2 className="font-bold text-white mb-3 flex items-center gap-2">
+            <h2 className="font-bold text-text-main mb-3 flex items-center gap-2">
               <Clock3 size={16} className="text-primary" />
               Live Scan Feed
             </h2>

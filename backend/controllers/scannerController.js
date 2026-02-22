@@ -33,11 +33,13 @@ async function toResponse(scanner) {
     mappedMachineId: scanner.mapped_machine_id,
     isActive: scanner.is_active,
     mappedMachine: machine
-      ? {
-          id: machine.id,
-          machineName: machine.machine_name,
-          stationNo: machine.station_no,
-          sequenceNo: machine.sequence_no,
+        ? {
+            id: machine.id,
+            machineName: machine.machine_name,
+            stationNo: machine.operation_no,
+            operationNo: machine.operation_no,
+            lineName: machine.line_name,
+            sequenceNo: machine.sequence_no,
         }
       : null,
     createdAt: scanner.createdAt,

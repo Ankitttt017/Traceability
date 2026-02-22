@@ -1,20 +1,25 @@
 // components/Header.jsx
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { 
   Bell, 
   Search, 
-  Settings, 
   User,
   ChevronDown,
   Clock,
   AlertCircle,
   CheckCircle,
-  X
+  LogOut
 } from "lucide-react";
+import { clearAuthSession } from "../utils/authStorage";
+import { APP_ROUTES } from "../constants/routes";
+import ThemeToggleButton from "./ThemeToggleButton";
 
 const Header = () => {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const navigate = useNavigate();
+  const user = JSON.parse(localStorage.getItem("user") || "{}");
   const [notifications, setNotifications] = useState([
     { id: 1, message: "Machine M-101 maintenance due", type: "warning", time: "5 min ago", read: false },
     { id: 2, message: "Batch #B-2024 completed successfully", type: "success", time: "1 hour ago", read: false },
@@ -23,10 +28,22 @@ const Header = () => {
 
   const unreadCount = notifications.filter(n => !n.read).length;
 
+  const formatUserField = (value, fallback) => {
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+    return fallback;
+  };
+
   const markAsRead = (id) => {
     setNotifications(notifications.map(n => 
       n.id === id ? { ...n, read: true } : n
     ));
+  };
+
+  const handleLogout = () => {
+    clearAuthSession();
+    navigate(APP_ROUTES.login, { replace: true });
   };
 
   const getNotificationIcon = (type) => {
@@ -53,6 +70,9 @@ const Header = () => {
 
       {/* Right Section */}
       <div className="flex items-center space-x-4">
+        <ThemeToggleButton showLabel className="hidden sm:inline-flex" />
+        <ThemeToggleButton className="sm:hidden" />
+
         {/* Notifications */}
         <div className="relative">
           <button
@@ -99,11 +119,6 @@ const Header = () => {
           )}
         </div>
 
-        {/* Settings */}
-        <button className="p-2 hover:bg-bg-dark rounded-lg transition-colors">
-          <Settings size={20} />
-        </button>
-
         {/* Profile Dropdown */}
         <div className="relative">
           <button
@@ -117,18 +132,22 @@ const Header = () => {
           </button>
 
           {showProfile && (
-            <div className="absolute right-0 mt-2 w-48 bg-bg-card border border-border rounded-lg shadow-xl z-50">
+            <div className="absolute right-0 mt-2 w-56 bg-bg-card border border-border rounded-lg shadow-xl z-50">
               <div className="p-3 border-b border-border">
-                <p className="font-medium">My Profile</p>
-                <p className="text-xs text-text-muted">View account settings</p>
+                <p className="font-medium text-sm text-text-main">
+                  {formatUserField(user.username, "User")}
+                </p>
+                <p className="text-xs text-text-muted">
+                  {formatUserField(user.role, "Operator")}
+                </p>
               </div>
-              <div className="p-3 border-b border-border">
-                <p className="font-medium">Settings</p>
-                <p className="text-xs text-text-muted">Preferences</p>
-              </div>
-              <div className="p-3">
-                <p className="font-medium text-danger">Help & Support</p>
-              </div>
+              <button
+                onClick={handleLogout}
+                className="w-full flex items-center space-x-2 px-3 py-3 text-rose-400 hover:bg-rose-400/10 transition-colors"
+              >
+                <LogOut size={16} />
+                <span className="text-sm font-medium">Logout</span>
+              </button>
             </div>
           )}
         </div>

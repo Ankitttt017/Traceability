@@ -12,6 +12,7 @@ import QrFormatRules from "./pages/QrFormatRules";
 import Scanners from "./pages/Scanners";
 import Packing from "./pages/Packing";
 import Shifts from "./pages/Shifts";
+import MasterSettingsDashboard from "./pages/MasterSettingsDashboard";
 import { isAuthenticated } from "./utils/authStorage";
 import { APP_ROUTES } from "./constants/routes";
 
@@ -46,6 +47,7 @@ function App() {
         >
           <Route index element={<Navigate to={APP_ROUTES.dashboard} replace />} />
           <Route path={APP_ROUTES.dashboard.slice(1)} element={<Dashboard />} />
+          <Route path={APP_ROUTES.masterSettings.slice(1)} element={<MasterSettingsDashboard />} />
           <Route path={APP_ROUTES.production.slice(1)} element={<ProductionCharts />} />
           <Route path={APP_ROUTES.traceability.slice(1)} element={<Traceability />} />
           <Route path={APP_ROUTES.machines.slice(1)} element={<Machine />} />

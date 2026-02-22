@@ -18,7 +18,7 @@ require("./models/QrFormatRule");
 require("./models/ReworkLog");
 require("./models/PackingSession");
 require("./models/PackingItem");
-const { setSocketServer } = require("./services/realtimeService");
+const { getPartRoom, setSocketServer } = require("./services/realtimeService");
 
 require("./tcp/tcpServer");
 
@@ -46,6 +46,22 @@ app.get("/", (_req, res) => {
 
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
+
+  socket.on("subscribe_part", (payload = {}) => {
+    const partId = typeof payload === "string" ? payload : payload.partId;
+    const room = getPartRoom(partId);
+    if (room) {
+      socket.join(room);
+    }
+  });
+
+  socket.on("unsubscribe_part", (payload = {}) => {
+    const partId = typeof payload === "string" ? payload : payload.partId;
+    const room = getPartRoom(partId);
+    if (room) {
+      socket.leave(room);
+    }
+  });
 
   socket.on("disconnect", () => {
     console.log("Client disconnected");

@@ -21,7 +21,7 @@ function normalizeStation(value) {
 }
 
 function getMachineOperationStage(machine) {
-  return normalizeStation(machine?.operation_no || machine?.station_no);
+  return normalizeStation(machine?.operation_no);
 }
 
 function uniqueStages(stages) {
@@ -71,6 +71,80 @@ async function getActiveStationSequence() {
   });
 
   return uniqueStages(machines.map((machine) => getMachineOperationStage(machine)));
+}
+
+async function getActiveMachineSequenceData() {
+  const machines = await Machine.findAll({
+    where: { is_active: true },
+    order: [["sequence_no", "ASC"]],
+  });
+
+  const sequence = uniqueStages(machines.map((machine) => getMachineOperationStage(machine)));
+  const stationMachineMap = machines.reduce((acc, machine) => {
+    const station = getMachineOperationStage(machine);
+    if (!station) {
+      return acc;
+    }
+    if (!acc[station]) {
+      acc[station] = [];
+    }
+    acc[station].push(machine.id);
+    return acc;
+  }, {});
+
+  return { machines, sequence, stationMachineMap };
+}
+
+function toJourneyRow(log) {
+  return {
+    id: log.id,
+    stationNo: normalizeStation(log.station_no || log.operation_no),
+    plcStatus: log.plc_status,
+    plcStartTime: log.plc_start_time || log.plc_start_at,
+    plcEndTime: log.plc_end_time || log.plc_end_at,
+    result: log.result,
+    interlockReason: log.interlock_reason,
+    machineId: log.machine_id,
+    isBypassed: Boolean(log.is_bypassed),
+    bypassReason: log.bypass_reason,
+    createdAt: log.createdAt,
+  };
+}
+
+function getQualitySummaryFromOperationLogs(rows) {
+  const summary = {
+    okCount: 0,
+    ngCount: 0,
+    interlockedCount: 0,
+    inProgressCount: 0,
+  };
+
+  for (const row of rows) {
+    if (row.plc_status === "ENDED_OK" && row.result === "OK") {
+      summary.okCount += 1;
+      continue;
+    }
+    if (row.plc_status === "ENDED_NG" && row.result === "NG") {
+      summary.ngCount += 1;
+      continue;
+    }
+    if (row.plc_status === "INTERLOCKED") {
+      summary.interlockedCount += 1;
+      continue;
+    }
+    if (row.plc_status === "PENDING" || row.plc_status === "STARTED") {
+      summary.inProgressCount += 1;
+    }
+  }
+
+  const processedCount = summary.okCount + summary.ngCount;
+  const accuracy = processedCount > 0 ? Number(((summary.okCount / processedCount) * 100).toFixed(2)) : 0;
+
+  return {
+    ...summary,
+    processedCount,
+    accuracy,
+  };
 }
 
 async function getLatestOperationLog(partId, stationNo) {
@@ -228,6 +302,7 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId
       emitOperatorPopup("INFO", {
         partId,
         stationNo,
+        machineId: machine.id,
         machineName: machine.machine_name,
         status: "STARTED",
         message: "PLC start acknowledged",
@@ -245,6 +320,7 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId
       emitOperatorPopup("SUCCESS", {
         partId,
         stationNo,
+        machineId: machine.id,
         machineName: machine.machine_name,
         status: "ENDED_OK",
         message: "Operation Passed",
@@ -263,6 +339,7 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId
       emitOperatorPopup("ERROR", {
         partId,
         stationNo,
+        machineId: machine.id,
         machineName: machine.machine_name,
         status: "ENDED_NG",
         message: "Operation Failed (NG)",
@@ -281,6 +358,7 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId
       emitOperatorPopup("WARNING", {
         partId,
         stationNo,
+        machineId: machine.id,
         machineName: machine.machine_name,
         status: "INTERLOCKED",
         message: "PLC timeout/interruption - part interlocked",
@@ -344,16 +422,22 @@ exports.getLiveMachineState = async (req, res) => {
       limit: 20,
     });
 
-    const current = logs.find((row) => row.plc_status === "STARTED" || row.plc_status === "PENDING") || logs[0] || null;
+    const current = logs.find((row) => row.plc_status === "STARTED" || row.plc_status === "PENDING") || null;
+    const lastEvent = logs[0] || null;
 
     res.json({
       machine: {
         id: machine.id,
         machineName: machine.machine_name,
+        lineName: machine.line_name,
+        sequenceNo: machine.sequence_no,
+        operationNo: machine.operation_no,
         stationNo,
         machineIp: machine.machine_ip,
         plcIp: machine.plc_ip,
+        plcPort: machine.plc_port,
         plcProtocol: machine.plc_protocol || "TCP_TEXT",
+        plcRegisters: machine.plc_registers || null,
         isActive: machine.is_active,
       },
       scanner: scanner
@@ -377,6 +461,18 @@ exports.getLiveMachineState = async (req, res) => {
             createdAt: current.createdAt,
           }
         : null,
+      lastEvent: lastEvent
+        ? {
+            operationLogId: lastEvent.id,
+            partId: lastEvent.part_id,
+            plcStatus: lastEvent.plc_status,
+            result: lastEvent.result,
+            interlockReason: lastEvent.interlock_reason,
+            isBypassed: lastEvent.is_bypassed,
+            bypassReason: lastEvent.bypass_reason,
+            createdAt: lastEvent.createdAt,
+          }
+        : null,
       recent: logs.map((row) => ({
         id: row.id,
         partId: row.part_id,
@@ -396,41 +492,323 @@ exports.getLiveMachineState = async (req, res) => {
 exports.getPartJourney = async (req, res) => {
   try {
     const { partId } = req.params;
-    const part = await Part.findOne({ where: { part_id: partId } });
-    const logs = await OperationLog.findAll({
-      where: { part_id: partId },
-      order: [["createdAt", "ASC"]],
-    });
-    const reworkHistory = await ReworkLog.findAll({
-      where: { part_id: partId },
-      order: [["createdAt", "DESC"]],
-    });
+    const [part, logs, reworkHistory, auditLogs, sequenceData] = await Promise.all([
+      Part.findOne({ where: { part_id: partId } }),
+      OperationLog.findAll({
+        where: { part_id: partId },
+        order: [["createdAt", "ASC"]],
+      }),
+      ReworkLog.findAll({
+        where: { part_id: partId },
+        order: [["createdAt", "DESC"]],
+      }),
+      ProductionLog.findAll({
+        where: { part_id: partId },
+        order: [["createdAt", "DESC"]],
+        limit: 150,
+      }),
+      getActiveMachineSequenceData(),
+    ]);
 
     if (!part && logs.length === 0) {
       return res.status(404).json({ error: "Part not found" });
     }
 
+    const machineIds = uniqueStages(
+      [...logs.map((log) => Number(log.machine_id)), ...auditLogs.map((log) => Number(log.machine_id))]
+        .filter((entry) => Number.isFinite(entry) && entry > 0)
+        .map((entry) => String(entry))
+    )
+      .map((entry) => Number(entry))
+      .filter((entry) => Number.isFinite(entry));
+
+    const machineRows =
+      machineIds.length > 0
+        ? await Machine.findAll({
+            where: { id: { [Op.in]: machineIds } },
+            attributes: ["id", "machine_name", "operation_no", "sequence_no"],
+          })
+        : [];
+
+    const machineMap = machineRows.reduce((acc, machine) => {
+      acc[machine.id] = {
+        id: machine.id,
+        machineName: machine.machine_name,
+        stationNo: getMachineOperationStage(machine),
+        sequenceNo: machine.sequence_no,
+      };
+      return acc;
+    }, {});
+
+    const journey = logs.map(toJourneyRow);
+    const logsByStation = journey.reduce((acc, row) => {
+      if (!row.stationNo) {
+        return acc;
+      }
+      if (!acc[row.stationNo]) {
+        acc[row.stationNo] = [];
+      }
+      acc[row.stationNo].push(row);
+      return acc;
+    }, {});
+
+    const knownStations = uniqueStages([
+      ...sequenceData.sequence,
+      ...Object.keys(logsByStation),
+      ...auditLogs
+        .map((entry) => {
+          const machine = machineMap[Number(entry.machine_id)];
+          return normalizeStation(machine?.stationNo);
+        })
+        .filter(Boolean),
+    ]);
+
+    const currentStation = normalizeStation(part?.current_station);
+    const currentIndex = sequenceData.sequence.findIndex((station) => station === currentStation);
+    const expectedNextStation =
+      !part || part.status === "COMPLETED"
+        ? null
+        : currentIndex < 0
+        ? sequenceData.sequence[0] || null
+        : sequenceData.sequence[currentIndex + 1] || null;
+
+    const stationTimeline = knownStations.map((stationNo, idx) => {
+      const attempts = (logsByStation[stationNo] || []).map((row) => ({
+        id: row.id,
+        plcStatus: row.plcStatus,
+        result: row.result,
+        interlockReason: row.interlockReason,
+        isBypassed: row.isBypassed,
+        bypassReason: row.bypassReason,
+        plcStartTime: row.plcStartTime,
+        plcEndTime: row.plcEndTime,
+        createdAt: row.createdAt,
+        machine: machineMap[row.machineId] || null,
+      }));
+
+      const latestAttempt = attempts[attempts.length - 1] || null;
+      let stageState = "PENDING";
+      if (latestAttempt) {
+        if (latestAttempt.plcStatus === "ENDED_OK") {
+          stageState = "PASSED";
+        } else if (latestAttempt.plcStatus === "ENDED_NG") {
+          stageState = "FAILED";
+        } else if (latestAttempt.plcStatus === "INTERLOCKED") {
+          stageState = "INTERLOCKED";
+        } else {
+          stageState = "IN_PROGRESS";
+        }
+      } else if (expectedNextStation === stationNo) {
+        stageState = "NEXT";
+      }
+
+      return {
+        stationNo,
+        sequenceIndex: idx + 1,
+        stageState,
+        isNextExpected: expectedNextStation === stationNo,
+        latestStatus: latestAttempt?.plcStatus || null,
+        latestResult: latestAttempt?.result || null,
+        latestInterlockReason: latestAttempt?.interlockReason || null,
+        latestAt: latestAttempt?.createdAt || null,
+        attempts,
+      };
+    });
+
+    const auditTrail = auditLogs.map((entry) => {
+      const machine = machineMap[Number(entry.machine_id)] || null;
+      return {
+        id: entry.id,
+        status: entry.status,
+        reason: entry.ng_reason,
+        machineId: entry.machine_id,
+        machineName: machine?.machineName || null,
+        stationNo: machine?.stationNo || null,
+        createdAt: entry.createdAt,
+      };
+    });
+
     res.json({
       part,
-      journey: logs.map((log) => ({
-        id: log.id,
-        stationNo: log.station_no || log.operation_no,
-        plcStatus: log.plc_status,
-        plcStartTime: log.plc_start_time || log.plc_start_at,
-        plcEndTime: log.plc_end_time || log.plc_end_at,
-        result: log.result,
-        interlockReason: log.interlock_reason,
-        machineId: log.machine_id,
-      })),
-      interlockHistory: logs
-        .filter((log) => log.interlock_reason)
+      sequence: knownStations,
+      expectedNextStation,
+      journey,
+      stationTimeline,
+      interlockHistory: journey
+        .filter((log) => log.interlockReason)
         .map((log) => ({
           id: log.id,
-          stationNo: log.station_no || log.operation_no,
-          reason: log.interlock_reason,
+          stationNo: log.stationNo,
+          reason: log.interlockReason,
           createdAt: log.createdAt,
         })),
+      auditTrail,
       reworkHistory,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.getPartCatalog = async (req, res) => {
+  try {
+    const search = String(req.query.search || "").trim();
+    const limit = Math.min(Math.max(Number(req.query.limit || 120), 1), 400);
+
+    const where = search
+      ? {
+          part_id: {
+            [Op.like]: `%${search}%`,
+          },
+        }
+      : undefined;
+
+    const parts = await Part.findAll({
+      where,
+      order: [["updatedAt", "DESC"]],
+      limit,
+    });
+
+    if (!parts.length) {
+      return res.json([]);
+    }
+
+    const partIds = parts.map((part) => part.part_id);
+    const logs = await OperationLog.findAll({
+      where: { part_id: { [Op.in]: partIds } },
+      order: [["createdAt", "DESC"]],
+    });
+
+    const latestByPart = new Map();
+    for (const row of logs) {
+      if (!latestByPart.has(row.part_id)) {
+        latestByPart.set(row.part_id, row);
+      }
+    }
+
+    const response = parts.map((part) => {
+      const latest = latestByPart.get(part.part_id);
+      return {
+        partId: part.part_id,
+        status: part.status,
+        currentStation: part.current_station,
+        currentOperation: part.current_operation,
+        isInterlocked: Boolean(part.is_interlocked),
+        interlockReason: part.interlock_reason,
+        isRework: Boolean(part.is_rework),
+        qrFormatName: part.qr_format_name,
+        updatedAt: part.updatedAt,
+        latestStatus: latest?.plc_status || null,
+        latestResult: latest?.result || null,
+        latestStation: normalizeStation(latest?.station_no || latest?.operation_no),
+        latestAt: latest?.createdAt || null,
+      };
+    });
+
+    res.json(response);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.getMachineStationStats = async (req, res) => {
+  try {
+    const machineId = Number(req.query.machineId || 0);
+    if (!machineId) {
+      return res.status(400).json({ error: "machineId query param is required" });
+    }
+
+    const machine = await Machine.findByPk(machineId);
+    if (!machine) {
+      return res.status(404).json({ error: "Machine not found" });
+    }
+
+    const stationNo = getMachineOperationStage(machine);
+    const { from, to } = getDateRangeFromQuery(req.query);
+
+    const logs = await OperationLog.findAll({
+      where: {
+        machine_id: machine.id,
+        station_no: stationNo,
+        createdAt: {
+          [Op.gte]: from,
+          [Op.lte]: to,
+        },
+      },
+      order: [["createdAt", "DESC"]],
+      limit: 800,
+    });
+
+    const summary = getQualitySummaryFromOperationLogs(logs);
+    const hourlyMap = logs.reduce((acc, row) => {
+      const key = formatHourBucket(row.createdAt);
+      if (!acc[key]) {
+        acc[key] = { hour: key, ok: 0, ng: 0, interlocked: 0, total: 0 };
+      }
+
+      if (row.plc_status === "ENDED_OK" && row.result === "OK") {
+        acc[key].ok += 1;
+        acc[key].total += 1;
+      } else if (row.plc_status === "ENDED_NG" && row.result === "NG") {
+        acc[key].ng += 1;
+        acc[key].total += 1;
+      } else if (row.plc_status === "INTERLOCKED") {
+        acc[key].interlocked += 1;
+      }
+      return acc;
+    }, {});
+
+    const trend = Object.values(hourlyMap)
+      .sort((a, b) => String(a.hour).localeCompare(String(b.hour)))
+      .slice(-12);
+
+    const current = logs.find((row) => row.plc_status === "STARTED" || row.plc_status === "PENDING") || null;
+    const lastEvent = logs[0] || null;
+    const recentParts = logs.slice(0, 10).map((row) => ({
+      id: row.id,
+      partId: row.part_id,
+      plcStatus: row.plc_status,
+      result: row.result,
+      interlockReason: row.interlock_reason,
+      isBypassed: row.is_bypassed,
+      createdAt: row.createdAt,
+    }));
+
+    res.json({
+      machine: {
+        id: machine.id,
+        machineName: machine.machine_name,
+        lineName: machine.line_name,
+        sequenceNo: machine.sequence_no,
+        stationNo,
+      },
+      range: {
+        from,
+        to,
+      },
+      summary,
+      trend,
+      current: current
+        ? {
+            operationLogId: current.id,
+            partId: current.part_id,
+            plcStatus: current.plc_status,
+            result: current.result,
+            interlockReason: current.interlock_reason,
+            createdAt: current.createdAt,
+          }
+        : null,
+      lastEvent: lastEvent
+        ? {
+            operationLogId: lastEvent.id,
+            partId: lastEvent.part_id,
+            plcStatus: lastEvent.plc_status,
+            result: lastEvent.result,
+            interlockReason: lastEvent.interlock_reason,
+            createdAt: lastEvent.createdAt,
+          }
+        : null,
+      recentParts,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -562,6 +940,7 @@ exports.confirmOperationStart = async (req, res) => {
     emitOperatorPopup("INFO", {
       partId,
       stationNo: station,
+      machineId: machine.id,
       machineName: machine.machine_name,
       status: "STARTED",
       message: "Operation started by PLC",
@@ -617,6 +996,7 @@ exports.confirmOperationEnd = async (req, res) => {
       emitOperatorPopup("SUCCESS", {
         partId,
         stationNo: station,
+        machineId: machine.id,
         machineName: machine.machine_name,
         status: "ENDED_OK",
         message: "Operation Passed",
@@ -633,6 +1013,7 @@ exports.confirmOperationEnd = async (req, res) => {
       emitOperatorPopup("ERROR", {
         partId,
         stationNo: station,
+        machineId: machine.id,
         machineName: machine.machine_name,
         status: "ENDED_NG",
         message: "Operation Failed (NG)",
@@ -745,6 +1126,95 @@ exports.resetInterlock = async (req, res) => {
   }
 };
 
+exports.resetStationOperation = async (req, res) => {
+  try {
+    const partId = String(req.body.partId || "").trim();
+    const targetStation = normalizeStation(req.body.stationNo || req.body.operationNo);
+    const reason = String(req.body.reason || "").trim();
+
+    if (!partId || !targetStation) {
+      return res.status(400).json({ error: "partId and stationNo are required" });
+    }
+
+    const [part, sequenceData] = await Promise.all([Part.findOne({ where: { part_id: partId } }), getActiveMachineSequenceData()]);
+
+    if (!part) {
+      return res.status(404).json({ error: "Part not found" });
+    }
+
+    const targetIndex = sequenceData.sequence.findIndex((station) => station === targetStation);
+    if (targetIndex === -1) {
+      return res.status(400).json({ error: "Invalid stationNo for reset" });
+    }
+
+    const targetStations = sequenceData.sequence.slice(targetIndex);
+    const previousStation = targetIndex > 0 ? sequenceData.sequence[targetIndex - 1] : null;
+
+    const logs = await OperationLog.findAll({
+      where: { part_id: partId },
+      order: [["createdAt", "DESC"]],
+    });
+
+    const operationLogIdsToDelete = logs
+      .filter((log) => {
+        const station = normalizeStation(log.station_no || log.operation_no);
+        return targetStations.includes(station);
+      })
+      .map((log) => log.id);
+
+    if (operationLogIdsToDelete.length > 0) {
+      await OperationLog.destroy({
+        where: { id: { [Op.in]: operationLogIdsToDelete } },
+      });
+    }
+
+    const machineIdsForStations = targetStations.flatMap((station) => sequenceData.stationMachineMap[station] || []);
+    if (machineIdsForStations.length > 0) {
+      await ProductionLog.destroy({
+        where: {
+          part_id: partId,
+          machine_id: { [Op.in]: machineIdsForStations },
+        },
+      });
+    }
+
+    const fromStation = part.current_station || null;
+    part.current_station = previousStation;
+    part.current_operation = previousStation;
+    part.is_interlocked = false;
+    part.interlock_reason = null;
+    part.status = part.is_rework ? "REWORK" : "IN_PROGRESS";
+    await part.save();
+
+    await ReworkLog.create({
+      part_id: partId,
+      from_station: fromStation,
+      to_station: targetStation,
+      reason: reason || `Manual reset to ${targetStation}`,
+      user_id: req.user?.id || null,
+    });
+
+    emitOperatorPopup("WARNING", {
+      partId,
+      stationNo: targetStation,
+      status: "STATION_RESET",
+      message: `Station reset to ${targetStation}. Re-run process from this stage.`,
+    });
+    emitRealtime("dashboard_refresh", { reason: "STATION_RESET" });
+
+    res.json({
+      message: "Station reset successful",
+      partId,
+      resetFromStation: targetStation,
+      previousStation,
+      deletedLogs: operationLogIdsToDelete.length,
+      status: part.status,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 exports.bypassOperation = async (req, res) => {
   try {
     const { partId, machineId, stationNo, reason } = req.body;
@@ -817,6 +1287,7 @@ exports.bypassOperation = async (req, res) => {
     emitOperatorPopup("WARNING", {
       partId,
       stationNo: targetStation,
+      machineId: machine.id,
       machineName: machine.machine_name,
       status: "BYPASS",
       message: "Operation bypassed manually",
@@ -840,16 +1311,30 @@ exports.getOperationSequence = async (_req, res) => {
     const machines = await Machine.findAll({
       where: { is_active: true },
       order: [["sequence_no", "ASC"]],
-      attributes: ["id", "machine_name", "station_no", "operation_no", "sequence_no", "machine_ip", "machine_port"],
+      attributes: [
+        "id",
+        "machine_name",
+        "line_name",
+        "operation_no",
+        "sequence_no",
+        "plc_ip",
+        "plc_port",
+        "plc_protocol",
+        "plc_registers",
+      ],
     });
 
     const operations = machines.map((machine) => ({
       machineId: machine.id,
       machineName: machine.machine_name,
+      lineName: machine.line_name,
       stationNo: getMachineOperationStage(machine),
+      operationNo: machine.operation_no,
       sequenceNo: machine.sequence_no,
-      machineIp: machine.machine_ip,
-      machinePort: machine.machine_port,
+      plcIp: machine.plc_ip,
+      plcPort: machine.plc_port,
+      plcProtocol: machine.plc_protocol || "TCP_TEXT",
+      plcRegisters: machine.plc_registers || null,
     }));
 
     res.json(operations);

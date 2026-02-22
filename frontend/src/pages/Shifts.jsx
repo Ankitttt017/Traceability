@@ -87,7 +87,7 @@ const Shifts = () => {
           <Clock3 className="text-primary" size={24} />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-white">Shift Management</h1>
+          <h1 className="text-2xl font-bold text-text-main">Shift Management</h1>
           <p className="text-text-muted text-sm">Define dynamic shift timing for reporting and production filters.</p>
         </div>
       </div>
@@ -192,7 +192,7 @@ const Shifts = () => {
 
       <div className="industrial-card overflow-hidden">
         <div className="px-6 py-4 bg-bg-dark/50 border-b border-border">
-          <h2 className="font-bold text-white">Configured Shifts</h2>
+          <h2 className="font-bold text-text-main">Configured Shifts</h2>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -208,7 +208,7 @@ const Shifts = () => {
               {shifts.map((shift) => (
                 <tr key={shift.id} className="hover:bg-bg-dark/30">
                   <td className="px-6 py-4">
-                    <p className="font-medium text-white">{shift.shiftName}</p>
+                    <p className="font-medium text-text-main">{shift.shiftName}</p>
                     <p className="text-xs font-mono text-primary">{shift.shiftCode}</p>
                   </td>
                   <td className="px-6 py-4 text-text-main font-mono">

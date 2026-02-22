@@ -1,12 +1,10 @@
 import { useMemo, useState } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard,
   Factory,
-  Barcode,
   Package,
   Users,
-  LogOut,
   ChevronLeft,
   ChevronRight,
   QrCode,
@@ -16,20 +14,18 @@ import {
   ScanLine,
   Boxes,
   Clock3,
+  SlidersHorizontal,
 } from "lucide-react";
-import { clearAuthSession } from "../utils/authStorage";
 import { APP_ROUTES } from "../constants/routes";
 
 const Sidebar = () => {
   const [collapsed, setCollapsed] = useState(false);
-  const navigate = useNavigate();
-  const user = JSON.parse(localStorage.getItem("user") || "{}");
 
   const navigation = useMemo(
     () => [
       { name: "Dashboard", path: APP_ROUTES.dashboard, icon: LayoutDashboard },
+      { name: "Settings", path: APP_ROUTES.masterSettings, icon: SlidersHorizontal },
       { name: "Production", path: APP_ROUTES.production, icon: Factory },
-      { name: "Traceability", path: APP_ROUTES.traceability, icon: Barcode },
       { name: "Machines", path: APP_ROUTES.machines, icon: Package },
       { name: "Scanners", path: APP_ROUTES.scanners, icon: ScanLine },
       { name: "Shifts", path: APP_ROUTES.shifts, icon: Clock3 },
@@ -42,23 +38,11 @@ const Sidebar = () => {
     []
   );
 
-  const formatUserField = (value, fallback) => {
-    if (typeof value === "string" && value.trim()) {
-      return value;
-    }
-    return fallback;
-  };
-
-  const handleLogout = () => {
-    clearAuthSession();
-    navigate(APP_ROUTES.login, { replace: true });
-  };
-
   return (
     <aside
       className={`${
         collapsed ? "w-20" : "w-64"
-      } bg-bg-card/50 backdrop-blur-xl border-r border-border/50 flex flex-col transition-all duration-300`}
+      } bg-bg-card/50 backdrop-blur-xl border-r border-border/50 flex flex-col overflow-hidden transition-all duration-300`}
     >
       <div className="h-16 flex items-center justify-between px-4 border-b border-border/50">
         {!collapsed && (
@@ -84,7 +68,7 @@ const Sidebar = () => {
         </button>
       </div>
 
-      <nav className="flex-1 py-6">
+      <nav className="flex-1 min-h-0 overflow-y-auto py-6">
         <div className="space-y-1 px-3">
           {navigation.map((item) => {
             const Icon = item.icon;
@@ -107,27 +91,6 @@ const Sidebar = () => {
           })}
         </div>
       </nav>
-
-      <div className="p-4 border-t border-border/50">
-        <div className={`flex items-center ${collapsed ? "justify-center" : "space-x-3"} mb-4`}>
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg shadow-primary/20">
-            <UserCog size={18} className="text-bg-dark" />
-          </div>
-          {!collapsed && (
-            <div className="text-sm">
-              <p className="font-medium text-text-main">{formatUserField(user.username, "User")}</p>
-              <p className="text-text-muted text-xs">{formatUserField(user.role, "Operator")}</p>
-            </div>
-          )}
-        </div>
-        <button
-          onClick={handleLogout}
-          className={`w-full flex items-center ${collapsed ? "justify-center" : "space-x-3"} px-3 py-2 text-rose-400 hover:bg-rose-400/10 rounded-lg transition-colors`}
-        >
-          <LogOut size={18} />
-          {!collapsed && <span className="text-sm">Logout</span>}
-        </button>
-      </div>
     </aside>
   );
 };

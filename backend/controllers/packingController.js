@@ -40,7 +40,7 @@ exports.startBox = async (req, res) => {
     if (!boxNumber) {
       return res.status(400).json({ error: "boxNumber is required" });
     }
-    const session = await createSessionIfMissing(boxNumber, capacity || 65);
+    const session = await createSessionIfMissing(boxNumber, capacity);
     res.status(201).json({
       id: session.id,
       boxNumber: session.box_number,
@@ -55,11 +55,11 @@ exports.startBox = async (req, res) => {
 
 exports.scanPartToBox = async (req, res) => {
   try {
-    const { boxNumber, partId } = req.body;
+    const { boxNumber, partId, capacity } = req.body;
     if (!partId) {
       return res.status(400).json({ error: "partId is required" });
     }
-    const packed = await packPart({ boxNumber, partId });
+    const packed = await packPart({ boxNumber, partId, capacity });
     res.json({
       message: "Part packed successfully",
       box: {

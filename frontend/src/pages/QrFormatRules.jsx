@@ -88,7 +88,7 @@ const QrFormatRules = () => {
             <Regex className="text-primary" size={24} />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-white">QR Format Rules</h1>
+            <h1 className="text-2xl font-bold text-text-main">QR Format Rules</h1>
             <p className="text-text-muted text-sm">
               Define dynamic industrial QR validation patterns (regex).
             </p>
@@ -195,7 +195,7 @@ const QrFormatRules = () => {
 
       <div className="industrial-card overflow-hidden">
         <div className="px-6 py-4 bg-bg-dark/50 border-b border-border">
-          <h2 className="font-bold text-white">Configured QR Rules</h2>
+          <h2 className="font-bold text-text-main">Configured QR Rules</h2>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -212,7 +212,7 @@ const QrFormatRules = () => {
               {rules.map((rule) => (
                 <tr key={rule.id} className="hover:bg-bg-dark/30">
                   <td className="px-6 py-4">
-                    <p className="font-medium text-white">{rule.formatName}</p>
+                    <p className="font-medium text-text-main">{rule.formatName}</p>
                     <p className="text-xs text-text-muted">{rule.description || "-"}</p>
                   </td>
                   <td className="px-6 py-4 font-mono text-sm text-primary">{rule.regexPattern}</td>

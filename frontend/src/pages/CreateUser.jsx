@@ -27,7 +27,7 @@ const CreateUser = () => {
           <UserPlus size={32} />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-white">User Management</h1>
+          <h1 className="text-2xl font-bold text-text-main">User Management</h1>
           <p className="text-slate-500 text-sm">Create and manage access credentials for the production floor.</p>
         </div>
       </div>

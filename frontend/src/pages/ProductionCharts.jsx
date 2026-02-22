@@ -165,7 +165,7 @@ const ProductionPage = () => {
             <Factory size={32} />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-white">Production Overview</h1>
+            <h1 className="text-2xl font-bold text-text-main">Production Overview</h1>
             <p className="text-text-muted text-sm">Dynamic production and quality metrics from live logs</p>
           </div>
         </div>

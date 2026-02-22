@@ -7,10 +7,6 @@ const Machine = sequelize.define("Machine", {
     allowNull: false,
     unique: true,
   },
-  station_no: {
-    type: DataTypes.STRING,
-    allowNull: true,
-  },
   line_name: {
     type: DataTypes.STRING,
     allowNull: false,
@@ -51,6 +47,10 @@ const Machine = sequelize.define("Machine", {
   plc_protocol: {
     type: DataTypes.ENUM("TCP_TEXT", "MODBUS_TCP"),
     defaultValue: "TCP_TEXT",
+  },
+  plc_registers: {
+    type: DataTypes.TEXT,
+    allowNull: true,
   },
   plc_unit_id: {
     type: DataTypes.INTEGER,

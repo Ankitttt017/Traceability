@@ -1,61 +1,76 @@
 import { useEffect } from "react";
-import { CheckCircle, XCircle, AlertTriangle, Info } from "lucide-react";
-
-const stylesByType = {
-  SUCCESS: {
-    container: "bg-accent/15 border-accent/40 text-accent",
-    icon: CheckCircle,
-  },
-  ERROR: {
-    container: "bg-danger/15 border-danger/40 text-danger",
-    icon: XCircle,
-  },
-  WARNING: {
-    container: "bg-warning/15 border-warning/40 text-warning",
-    icon: AlertTriangle,
-  },
-  INFO: {
-    container: "bg-primary/15 border-primary/40 text-primary",
-    icon: Info,
-  },
-};
+import { CheckCircle, X, XCircle, AlertTriangle, Info, ShieldCheck, Cpu } from "lucide-react";
 
 const GlobalPopup = ({ popup, onClose }) => {
+  // We keep the auto-close for SUCCESS, but stay open for ERROR to ensure operator sees it
   useEffect(() => {
-    if (!popup) {
-      return undefined;
-    }
-    const timer = setTimeout(() => {
-      onClose?.();
-    }, 3000);
+    if (!popup || popup.type === "ERROR") return;
+    const timer = setTimeout(() => onClose?.(), 4000);
     return () => clearTimeout(timer);
   }, [popup, onClose]);
 
-  if (!popup) {
-    return null;
-  }
+  if (!popup) return null;
 
   const type = String(popup.type || "INFO").toUpperCase();
-  const meta = stylesByType[type] || stylesByType.INFO;
-  const Icon = meta.icon;
+  const isSuccess = type === "SUCCESS";
+  const isError = type === "ERROR";
 
   return (
-    <div className="fixed top-6 right-6 z-[1000] max-w-sm w-full">
-      <div className={`border rounded-xl p-4 shadow-2xl backdrop-blur-lg ${meta.container}`}>
-        <div className="flex items-start gap-3">
-          <Icon size={20} className="mt-0.5 flex-shrink-0" />
-          <div className="min-w-0">
-            <p className="font-bold text-sm">{popup.title || type}</p>
-            <p className="text-sm mt-1 break-words text-text-main">{popup.message}</p>
-            {(popup.partId || popup.stationNo || popup.machineName) && (
-              <p className="text-xs mt-2 text-text-muted">
-                {popup.partId ? `Part: ${popup.partId}` : ""}
-                {popup.partId && popup.stationNo ? " | " : ""}
-                {popup.stationNo ? `Station: ${popup.stationNo}` : ""}
-                {popup.machineName ? ` | Machine: ${popup.machineName}` : ""}
-              </p>
-            )}
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/80 backdrop-blur-md px-4">
+      <div className="w-full max-w-lg bg-white rounded-2xl overflow-hidden shadow-[0_0_50px_rgba(0,0,0,0.5)] animate-in zoom-in duration-200">
+        
+        {/* Header - Industrial Color Coded */}
+        <div className={`p-6 flex items-center gap-4 text-white ${
+          isSuccess ? "bg-emerald-600" : isError ? "bg-red-600" : "bg-amber-500"
+        }`}>
+          {isSuccess ? <ShieldCheck size={40} /> : <AlertTriangle size={40} />}
+          <div>
+            <h2 className="text-2xl font-black uppercase italic tracking-tighter leading-none">
+              {popup.title || type}
+            </h2>
+            <p className="text-xs font-bold opacity-80 mt-1 uppercase tracking-widest">
+              Station: {popup.stationNo || "System Process"}
+            </p>
           </div>
+        </div>
+
+        <div className="p-8 space-y-6">
+          {/* Scanned ID Section */}
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+            <div className="flex items-center gap-2 text-slate-400 mb-1">
+              <Cpu size={14} />
+              <span className="text-[10px] font-black uppercase tracking-widest">Component Identity</span>
+            </div>
+            <p className="text-xl font-mono font-bold text-slate-800 break-all">
+              {popup.partId || "NO DATA DETECTED"}
+            </p>
+          </div>
+
+          {/* Checklist */}
+          <div className="space-y-3">
+            <div className="flex justify-between items-center py-2 border-b border-slate-100">
+              <span className="text-slate-600 font-bold uppercase text-xs">QR Validation</span>
+              {isSuccess ? <CheckCircle size={20} className="text-emerald-500" /> : <XCircle size={20} className="text-red-500" />}
+            </div>
+            <div className="flex justify-between items-center py-2 border-b border-slate-100">
+              <span className="text-slate-600 font-bold uppercase text-xs">Sequence Check</span>
+              <CheckCircle size={20} className="text-emerald-500" />
+            </div>
+          </div>
+
+          {/* Message Area */}
+          <div>
+             <p className={`text-lg font-bold ${isError ? "text-red-600" : "text-slate-700"}`}>
+               {popup.message}
+             </p>
+          </div>
+
+          <button
+            onClick={() => onClose?.()}
+            className="w-full bg-slate-900 text-white py-4 rounded-xl font-black uppercase tracking-widest hover:bg-black transition-all active:scale-95"
+          >
+            Acknowledge
+          </button>
         </div>
       </div>
     </div>

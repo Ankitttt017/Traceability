@@ -3,10 +3,22 @@ const PackingItem = require("../models/PackingItem");
 const Part = require("../models/Part");
 const { emitRealtime } = require("./realtimeService");
 
+const DEFAULT_PACKING_CAPACITY = Math.max(Number(process.env.DEFAULT_PACKING_CAPACITY || 65), 1);
+const MIN_PACKING_CAPACITY = 1;
+const MAX_PACKING_CAPACITY = 500;
+
 function normalizeBoxNumber(value) {
   return String(value || "")
     .trim()
     .toUpperCase();
+}
+
+function normalizeCapacity(value, fallback = DEFAULT_PACKING_CAPACITY) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(MAX_PACKING_CAPACITY, Math.max(MIN_PACKING_CAPACITY, Math.round(parsed)));
 }
 
 async function getOpenSessionByBox(boxNumber) {
@@ -26,7 +38,7 @@ async function getLatestOpenSession() {
   });
 }
 
-async function createSessionIfMissing(boxNumber, capacity = 65) {
+async function createSessionIfMissing(boxNumber, capacity = DEFAULT_PACKING_CAPACITY) {
   const normalized = normalizeBoxNumber(boxNumber);
   if (!normalized) {
     throw new Error("boxNumber is required");
@@ -46,13 +58,13 @@ async function createSessionIfMissing(boxNumber, capacity = 65) {
 
   return PackingSession.create({
     box_number: normalized,
-    capacity: Number(capacity) || 65,
+    capacity: normalizeCapacity(capacity),
     packed_count: 0,
     status: "OPEN",
   });
 }
 
-async function packPart({ boxNumber, partId }) {
+async function packPart({ boxNumber, partId, capacity }) {
   const normalizedPartId = String(partId || "").trim();
   if (!normalizedPartId) {
     throw new Error("partId is required for packing");
@@ -73,7 +85,7 @@ async function packPart({ boxNumber, partId }) {
 
   let session = null;
   if (boxNumber) {
-    session = await createSessionIfMissing(boxNumber);
+    session = await createSessionIfMissing(boxNumber, capacity);
   } else {
     session = await getLatestOpenSession();
     if (!session) {
@@ -86,7 +98,8 @@ async function packPart({ boxNumber, partId }) {
   }
 
   const nextSlot = Number(session.packed_count || 0) + 1;
-  if (nextSlot > Number(session.capacity || 65)) {
+  const resolvedCapacity = normalizeCapacity(session.capacity);
+  if (nextSlot > resolvedCapacity) {
     session.status = "CLOSED";
     await session.save();
     throw new Error("Box capacity reached");
@@ -99,7 +112,7 @@ async function packPart({ boxNumber, partId }) {
   });
 
   session.packed_count = nextSlot;
-  if (nextSlot >= Number(session.capacity || 65)) {
+  if (nextSlot >= resolvedCapacity) {
     session.status = "CLOSED";
   }
   await session.save();
@@ -149,4 +162,5 @@ module.exports = {
   createSessionIfMissing,
   getPackingOverview,
   getLatestOpenSession,
+  normalizeCapacity,
 };

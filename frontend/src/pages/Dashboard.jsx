@@ -14,6 +14,7 @@ import {
   Line,
 } from "recharts";
 import { dashboardApi, machineApi } from "../api/services";
+import { formatMachineLabel } from "../utils/machineFields";
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
 
@@ -153,7 +154,7 @@ const Dashboard = () => {
 
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-white">Production Dashboard</h1>
+          <h1 className="text-2xl font-bold text-text-main">Production Dashboard</h1>
           <p className="text-text-muted text-sm">Live industrial traceability and production intelligence</p>
         </div>
         <div className="flex items-center gap-2">
@@ -204,7 +205,7 @@ const Dashboard = () => {
             <option value="">All Machines</option>
             {machines.map((machine) => (
               <option key={machine.id} value={machine.id}>
-                {machine.stationNo || machine.operationNo} - {machine.machineName}
+                {formatMachineLabel(machine)}
               </option>
             ))}
           </select>
@@ -242,7 +243,7 @@ const Dashboard = () => {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4">
         <div className="industrial-card p-4">
           <p className="text-xs text-text-muted">Total Machines</p>
-          <p className="text-2xl font-bold text-white">{summary.machines.total}</p>
+          <p className="text-2xl font-bold text-text-main">{summary.machines.total}</p>
         </div>
         <div className="industrial-card p-4">
           <p className="text-xs text-text-muted">In Progress</p>
@@ -271,7 +272,7 @@ const Dashboard = () => {
           {Object.entries(report.shiftProduction).map(([shift, row]) => (
             <div key={shift} className="industrial-card p-4">
               <p className="text-xs text-text-muted">{shift}</p>
-              <p className="text-xl font-bold text-white">{row.total}</p>
+              <p className="text-xl font-bold text-text-main">{row.total}</p>
               <p className="text-xs text-text-muted mt-1">
                 <span className="text-accent font-semibold">{row.ok}</span> OK /{" "}
                 <span className="text-danger font-semibold">{row.ng}</span> NG
@@ -283,7 +284,7 @@ const Dashboard = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="industrial-card p-5">
-          <h2 className="font-bold text-white mb-3">Machine-wise OK/NG</h2>
+          <h2 className="font-bold text-text-main mb-3">Machine-wise OK/NG</h2>
           <ResponsiveContainer width="100%" height={280}>
             <BarChart data={machineWiseData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
@@ -298,7 +299,7 @@ const Dashboard = () => {
         </div>
 
         <div className="industrial-card p-5">
-          <h2 className="font-bold text-white mb-3">Hourly Production</h2>
+          <h2 className="font-bold text-text-main mb-3">Hourly Production</h2>
           <ResponsiveContainer width="100%" height={280}>
             <LineChart data={hourlyData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
@@ -312,7 +313,7 @@ const Dashboard = () => {
       </div>
 
       <div className="industrial-card p-5">
-        <h2 className="font-bold text-white mb-3">Interlock History</h2>
+        <h2 className="font-bold text-text-main mb-3">Interlock History</h2>
         <div className="space-y-2 max-h-[260px] overflow-y-auto">
           {(report?.interlockHistory || []).map((row) => (
             <div key={row.id} className="p-3 bg-bg-dark border border-border rounded-lg">

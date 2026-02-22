@@ -2,6 +2,7 @@ export const APP_ROUTES = {
   login: "/login",
   root: "/",
   dashboard: "/dashboard",
+  masterSettings: "/master-settings",
   production: "/production",
   traceability: "/traceability",
   machines: "/machines",

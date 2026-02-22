@@ -93,6 +93,10 @@ export const traceabilityApi = {
     const { data } = await apiClient.get(ENDPOINTS.traceability.operations);
     return data;
   },
+  partCatalog: async (params) => {
+    const { data } = await apiClient.get(ENDPOINTS.traceability.parts, { params });
+    return data;
+  },
   historyByPart: async (partId) => {
     const { data } = await apiClient.get(ENDPOINTS.traceability.byPart(partId));
     return data;
@@ -103,6 +107,12 @@ export const traceabilityApi = {
   },
   liveState: async (machineId) => {
     const { data } = await apiClient.get(ENDPOINTS.traceability.liveState, { params: { machineId } });
+    return data;
+  },
+  machineStats: async (machineId, params = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.traceability.machineStats, {
+      params: { ...params, machineId },
+    });
     return data;
   },
   process: async (payload) => {
@@ -127,6 +137,10 @@ export const traceabilityApi = {
   },
   resetInterlock: async (payload) => {
     const { data } = await apiClient.post(ENDPOINTS.traceability.resetInterlock, payload);
+    return data;
+  },
+  resetStation: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.traceability.resetStation, payload);
     return data;
   },
   bypass: async (payload) => {

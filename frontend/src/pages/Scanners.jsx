@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ScanLine, Plus, Save, Trash2, CheckCircle, AlertCircle } from "lucide-react";
 import { scannerApi, machineApi } from "../api/services";
+import { formatMachineLabel } from "../utils/machineFields";
 
 const emptyForm = {
   scannerName: "",
@@ -95,7 +96,7 @@ const Scanners = () => {
           <ScanLine className="text-primary" size={24} />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-white">Scanner IP Management</h1>
+          <h1 className="text-2xl font-bold text-text-main">Scanner IP Management</h1>
           <p className="text-text-muted text-sm">Map scanner TCP endpoints to machine stations dynamically.</p>
         </div>
       </div>
@@ -162,7 +163,7 @@ const Scanners = () => {
               <option value="">Select machine</option>
               {machines.map((machine) => (
                 <option key={machine.id} value={machine.id}>
-                  {machine.stationNo || machine.operationNo} - {machine.machineName}
+                  {formatMachineLabel(machine)}
                 </option>
               ))}
             </select>
@@ -202,7 +203,7 @@ const Scanners = () => {
 
       <div className="industrial-card overflow-hidden">
         <div className="px-6 py-4 bg-bg-dark/50 border-b border-border">
-          <h2 className="font-bold text-white">Configured Scanners</h2>
+          <h2 className="font-bold text-text-main">Configured Scanners</h2>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -225,7 +226,7 @@ const Scanners = () => {
                   </td>
                   <td className="px-6 py-4 text-text-main">
                     {scanner.mappedMachine
-                      ? `${scanner.mappedMachine.stationNo} - ${scanner.mappedMachine.machineName}`
+                      ? formatMachineLabel(scanner.mappedMachine)
                       : `Machine #${scanner.mappedMachineId}`}
                   </td>
                   <td className="px-6 py-4">

@@ -5,6 +5,24 @@ import { packingApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
+const LOCAL_STORAGE_BOX_CAPACITY_KEY = "packing-default-capacity";
+const MIN_CAPACITY = 1;
+const MAX_CAPACITY = 500;
+
+function normalizeCapacity(value, fallback = 65) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(MAX_CAPACITY, Math.max(MIN_CAPACITY, Math.round(parsed)));
+}
+
+function readStoredCapacity() {
+  if (typeof window === "undefined") {
+    return 65;
+  }
+  return normalizeCapacity(localStorage.getItem(LOCAL_STORAGE_BOX_CAPACITY_KEY), 65);
+}
 
 function getSessionFromResponse(response) {
   if (!response) {
@@ -19,6 +37,7 @@ function getSessionFromResponse(response) {
 const Packing = () => {
   const [overview, setOverview] = useState({ activeSession: null, activeItems: [], recentSessions: [] });
   const [boxNumber, setBoxNumber] = useState("");
+  const [newBoxCapacity, setNewBoxCapacity] = useState(() => readStoredCapacity());
   const [searchBox, setSearchBox] = useState("");
   const [searchedSession, setSearchedSession] = useState(null);
   const [popup, setPopup] = useState(null);
@@ -27,7 +46,7 @@ const Packing = () => {
 
   const activeSession = overview.activeSession;
   const activeItems = useMemo(() => overview.activeItems || [], [overview.activeItems]);
-  const capacity = Number(activeSession?.capacity || 65);
+  const capacity = normalizeCapacity(activeSession?.capacity, newBoxCapacity);
 
   const filledSlots = useMemo(() => {
     const map = new Map();
@@ -123,16 +142,19 @@ const Packing = () => {
     }
     setLoading(true);
     try {
+      const requestedCapacity = normalizeCapacity(newBoxCapacity, 65);
       await packingApi.startBox({
         boxNumber: value,
-        capacity: 65,
+        capacity: requestedCapacity,
       });
       setBoxNumber("");
+      setNewBoxCapacity(requestedCapacity);
+      localStorage.setItem(LOCAL_STORAGE_BOX_CAPACITY_KEY, String(requestedCapacity));
       await loadOverview();
       setPopup({
         type: "SUCCESS",
         title: "Box Ready",
-        message: `Box ${value} opened. Scanner can now fill slots automatically.`,
+        message: `Box ${value} opened with capacity ${requestedCapacity}. Scanner can now fill slots automatically.`,
       });
     } catch (error) {
       setPopup({
@@ -180,7 +202,7 @@ const Packing = () => {
             <Boxes className="text-primary" size={22} />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-white">Packing Station</h1>
+            <h1 className="text-2xl font-bold text-text-main">Packing Station</h1>
             <p className="text-text-muted text-sm">
               Box/part scans are consumed from scanner Ethernet feed. UI auto-fills slots in real-time.
             </p>
@@ -204,8 +226,8 @@ const Packing = () => {
             </div>
             <div className="text-right">
               <p className="text-xs uppercase text-text-muted">Progress</p>
-              <p className="text-xl font-bold text-white">
-                {activeSession ? `${activeSession.packedCount}/${capacity}` : "0/65"}
+              <p className="text-xl font-bold text-text-main">
+                {activeSession ? `${activeSession.packedCount}/${capacity}` : `0/${newBoxCapacity}`}
               </p>
             </div>
           </div>
@@ -237,7 +259,7 @@ const Packing = () => {
         </div>
 
         <div className="industrial-card p-6 space-y-4">
-          <h2 className="font-bold text-white flex items-center gap-2">
+          <h2 className="font-bold text-text-main flex items-center gap-2">
             <ScanLine size={18} className="text-primary" />
             Box Controls
           </h2>
@@ -250,6 +272,25 @@ const Packing = () => {
               className="w-full bg-bg-dark border border-border rounded-lg p-3 text-text-main focus:border-primary outline-none font-mono"
               placeholder="Scan/enter box number"
             />
+            <div>
+              <label className="text-[11px] uppercase tracking-wide text-text-muted font-semibold">Box capacity</label>
+              <input
+                type="number"
+                min={MIN_CAPACITY}
+                max={MAX_CAPACITY}
+                value={newBoxCapacity}
+                onChange={(event) => {
+                  const normalized = normalizeCapacity(event.target.value, newBoxCapacity);
+                  setNewBoxCapacity(normalized);
+                  localStorage.setItem(LOCAL_STORAGE_BOX_CAPACITY_KEY, String(normalized));
+                }}
+                className="mt-1 w-full bg-bg-dark border border-border rounded-lg p-3 text-text-main focus:border-primary outline-none font-mono"
+                placeholder="65"
+              />
+              <p className="text-[11px] text-text-muted mt-1">
+                Configure per box. Supported range {MIN_CAPACITY}-{MAX_CAPACITY} slots.
+              </p>
+            </div>
             <button
               type="submit"
               disabled={loading}
@@ -293,7 +334,7 @@ const Packing = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="industrial-card p-6">
-          <h2 className="font-bold text-white mb-3 flex items-center gap-2">
+          <h2 className="font-bold text-text-main mb-3 flex items-center gap-2">
             <PackageCheck size={18} className="text-primary" />
             Live Packing Feed
           </h2>
@@ -309,7 +350,7 @@ const Packing = () => {
         </div>
 
         <div className="industrial-card p-6">
-          <h2 className="font-bold text-white mb-3">Recent Box Sessions</h2>
+          <h2 className="font-bold text-text-main mb-3">Recent Box Sessions</h2>
           <div className="space-y-2 max-h-[280px] overflow-y-auto">
             {(overview.recentSessions || []).map((session) => (
               <div key={session.id} className="p-3 rounded-lg bg-bg-dark border border-border">

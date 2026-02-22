@@ -135,7 +135,7 @@ const UsersPage = () => {
             <Users size={32} />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-white">User Management</h1>
+            <h1 className="text-2xl font-bold text-text-main">User Management</h1>
             <p className="text-text-muted text-sm">Manage system users and access permissions</p>
           </div>
         </div>
@@ -258,7 +258,7 @@ const UsersPage = () => {
                           <UserCog size={18} className="text-primary" />
                         </div>
                         <div>
-                          <div className="text-sm font-medium text-white">{user.username}</div>
+                          <div className="text-sm font-medium text-text-main">{user.username}</div>
                         </div>
                       </div>
                     </td>
@@ -332,7 +332,7 @@ const UsersPage = () => {
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-bg-card rounded-xl w-full max-w-md border border-border/50 shadow-2xl">
             <div className="p-6 border-b border-border flex items-center justify-between">
-              <h2 className="text-xl font-bold text-white flex items-center space-x-2">
+              <h2 className="text-xl font-bold text-text-main flex items-center space-x-2">
                 {editingUser ? (
                   <>
                     <Edit size={20} className="text-primary" />

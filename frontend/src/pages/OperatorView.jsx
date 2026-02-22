@@ -1,184 +1,235 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import {
-  Activity,
   AlertTriangle,
-  CheckCircle,
+  CheckCircle2,
   Clock3,
   Factory,
-  ScanLine,
-  ShieldAlert,
-  Wifi,
-  WifiOff,
-  XCircle,
+  Gauge,
+  RefreshCw,
+  ShieldCheck,
+  Wrench,
 } from "lucide-react";
-import { dashboardApi, machineApi, scannerApi, traceabilityApi } from "../api/services";
+import { machineApi, traceabilityApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
+import { getMachineStage } from "../utils/machineFields";
+import { getStationFeatureSettings, getStationFeatures } from "../utils/stationSettings";
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
 
-function getBadgeClass(status) {
-  if (!status) {
-    return "bg-bg-dark text-text-muted border border-border";
+function formatDateTime(value) {
+  if (!value) {
+    return "-";
   }
-  if (status === "ENDED_OK") {
-    return "bg-accent/10 text-accent border border-accent/20";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
   }
-  if (status === "ENDED_NG" || status === "NG") {
-    return "bg-danger/10 text-danger border border-danger/20";
-  }
-  if (status === "INTERLOCKED") {
-    return "bg-warning/10 text-warning border border-warning/20";
-  }
-  if (status === "STARTED") {
-    return "bg-primary/10 text-primary border border-primary/20";
-  }
-  return "bg-bg-dark text-text-main border border-border";
+  return date.toLocaleString();
 }
 
-function normalizePopupType(rawType, decision) {
-  const normalized = String(rawType || "").toUpperCase();
-  if (normalized) {
-    return normalized;
+function formatElapsedTime(timestamp, now) {
+  if (!timestamp) {
+    return "0m 00s";
   }
-  if (decision === "ALLOW") {
-    return "SUCCESS";
+  const start = new Date(timestamp).getTime();
+  if (Number.isNaN(start)) {
+    return "0m 00s";
   }
-  return "WARNING";
+  const diff = Math.max(0, Math.floor((now - start) / 1000));
+  const hours = Math.floor(diff / 3600);
+  const minutes = Math.floor((diff % 3600) / 60);
+  const seconds = diff % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
 }
 
 const OperatorView = () => {
+  const user = useMemo(() => {
+    try {
+      return JSON.parse(localStorage.getItem("user") || "{}");
+    } catch (_error) {
+      return {};
+    }
+  }, []);
+
   const [machines, setMachines] = useState([]);
-  const [scanners, setScanners] = useState([]);
   const [selectedMachineId, setSelectedMachineId] = useState("");
   const [liveState, setLiveState] = useState(null);
-  const [loadingLive, setLoadingLive] = useState(false);
-  const [bypassLoading, setBypassLoading] = useState(false);
+  const [stationStats, setStationStats] = useState(null);
+  const [stationSettings, setStationSettings] = useState(() => getStationFeatureSettings());
+  const [loadingMachines, setLoadingMachines] = useState(true);
+  const [loadingStats, setLoadingStats] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [popup, setPopup] = useState(null);
-  const [connectionStatus, setConnectionStatus] = useState("connecting");
-  const [recentEvents, setRecentEvents] = useState([]);
-  const [stats, setStats] = useState({
-    ok: 0,
-    ng: 0,
-    total: 0,
-    currentRunningPart: "-",
-  });
+  const [clockTick, setClockTick] = useState(Date.now());
+
+  const selectedMachineIdRef = useRef("");
+  const selectedStationRef = useRef("");
 
   const selectedMachine = useMemo(
-    () => machines.find((machine) => machine.id === Number(selectedMachineId)),
+    () => machines.find((entry) => entry.id === Number(selectedMachineId)) || null,
     [machines, selectedMachineId]
   );
 
-  const mappedScanner = useMemo(() => {
-    if (!selectedMachine) {
-      return null;
-    }
-    if (liveState?.scanner) {
-      return {
-        scannerName: liveState.scanner.scannerName,
-        scannerIp: liveState.scanner.scannerIp,
-        scannerPort: liveState.scanner.scannerPort,
-        isActive: liveState.scanner.isActive,
-      };
-    }
-    return scanners.find((scanner) => Number(scanner.mappedMachineId) === Number(selectedMachine.id)) || null;
-  }, [liveState?.scanner, scanners, selectedMachine]);
+  const selectedStation = useMemo(() => getMachineStage(selectedMachine), [selectedMachine]);
 
-  const currentPartId = useMemo(() => liveState?.current?.partId || "", [liveState]);
-  const currentPlcStatus = useMemo(() => String(liveState?.current?.plcStatus || ""), [liveState]);
-  const canBypassCurrent = useMemo(
-    () => Boolean(selectedMachineId && currentPartId && currentPlcStatus && currentPlcStatus !== "ENDED_OK"),
-    [currentPartId, currentPlcStatus, selectedMachineId]
-  );
-
-  const pushEvent = useCallback((event) => {
-    setRecentEvents((prev) =>
-      [
-        {
-          id: `${Date.now()}-${Math.random()}`,
-          timestamp: new Date().toISOString(),
-          ...event,
-        },
-        ...prev,
-      ].slice(0, 20)
-    );
-  }, []);
-
-  const loadMachinesAndScanners = useCallback(async () => {
-    const [machineData, scannerData] = await Promise.all([machineApi.list(), scannerApi.list()]);
-    const activeMachines = machineData.filter((machine) => machine.isActive !== false);
-    setMachines(activeMachines);
-    setScanners(scannerData);
-
-    if (!selectedMachineId && activeMachines.length > 0) {
-      setSelectedMachineId(String(activeMachines[0].id));
-    }
+  useEffect(() => {
+    selectedMachineIdRef.current = String(selectedMachineId || "");
   }, [selectedMachineId]);
 
-  const loadStats = useCallback(async () => {
-    const summary = await dashboardApi.summary();
-    const ok = Number(summary?.quality?.ok || 0);
-    const ng = Number(summary?.quality?.ng || 0);
-    setStats((prev) => ({
-      ...prev,
-      ok,
-      ng,
-      total: ok + ng,
-    }));
-  }, []);
+  useEffect(() => {
+    selectedStationRef.current = String(selectedStation || "").toUpperCase();
+  }, [selectedStation]);
 
-  const loadLiveState = useCallback(async () => {
-    const machineId = Number(selectedMachineId);
-    if (!machineId) {
-      setLiveState(null);
-      return;
-    }
-    setLoadingLive(true);
+  const stationFeatureConfig = useMemo(
+    () => getStationFeatures(selectedStation, stationSettings),
+    [selectedStation, stationSettings]
+  );
+
+  const qualitySummary = stationStats?.summary || {
+    okCount: 0,
+    ngCount: 0,
+    interlockedCount: 0,
+    inProgressCount: 0,
+    processedCount: 0,
+    accuracy: 0,
+  };
+
+  const expectedCount = Math.max(
+    Number(qualitySummary.processedCount || 0) +
+      Number(qualitySummary.inProgressCount || 0) +
+      Number(qualitySummary.interlockedCount || 0),
+    1
+  );
+  const producedCount = Number(qualitySummary.processedCount || 0);
+  const progressPercent = Math.min(100, Math.round((producedCount / expectedCount) * 100));
+  const qualityPercent = Number(qualitySummary.accuracy || 0);
+  const machineMode = liveState?.current ? "Running" : liveState?.lastEvent ? "Idle" : "Waiting";
+  const machineClock = formatElapsedTime(
+    liveState?.current?.createdAt || liveState?.lastEvent?.createdAt,
+    clockTick
+  );
+
+  const currentContext = liveState?.current || stationStats?.current || liveState?.lastEvent || stationStats?.lastEvent || null;
+
+  const rejectionSummary = useMemo(() => {
+    const rows = stationStats?.recentParts || [];
+    const grouped = rows.reduce((acc, row) => {
+      const hasRejection = Boolean(row.interlockReason) || String(row.result || "").toUpperCase() === "NG";
+      const reason = hasRejection ? row.interlockReason || "NG without reason" : null;
+      if (!reason) {
+        return acc;
+      }
+      acc[reason] = (acc[reason] || 0) + 1;
+      return acc;
+    }, {});
+
+    return Object.entries(grouped)
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+  }, [stationStats?.recentParts]);
+
+  const trendRows = useMemo(() => {
+    return [...(stationStats?.trend || [])].slice(-6);
+  }, [stationStats?.trend]);
+
+  const loadMachines = useCallback(async () => {
+    setLoadingMachines(true);
     try {
-      const response = await traceabilityApi.liveState(machineId);
-      setLiveState(response);
-      if (response?.current?.partId) {
-        setStats((prev) => ({
-          ...prev,
-          currentRunningPart: response.current.partId,
-        }));
+      const rows = await machineApi.list();
+      setMachines(rows || []);
+      if ((rows || []).length > 0) {
+        setSelectedMachineId((current) => current || String(rows[0].id));
+      } else {
+        setSelectedMachineId("");
       }
     } catch (error) {
       setPopup({
         type: "ERROR",
-        title: "Live State Error",
-        message: error.response?.data?.error || "Unable to load machine live state",
+        title: "Machine Load Failed",
+        message: error.response?.data?.error || "Unable to load machines",
       });
     } finally {
-      setLoadingLive(false);
+      setLoadingMachines(false);
     }
-  }, [selectedMachineId]);
+  }, []);
+
+  const loadMachineTelemetry = useCallback(async (machineId, showLoader = true) => {
+    const id = Number(machineId || 0);
+    if (!id) {
+      setLiveState(null);
+      setStationStats(null);
+      return;
+    }
+
+    if (showLoader) {
+      setLoadingStats(true);
+    } else {
+      setRefreshing(true);
+    }
+
+    try {
+      const [live, stats] = await Promise.all([
+        traceabilityApi.liveState(id),
+        traceabilityApi.machineStats(id),
+      ]);
+      setLiveState(live || null);
+      setStationStats(stats || null);
+    } catch (error) {
+      setPopup({
+        type: "ERROR",
+        title: "Station Data Error",
+        message: error.response?.data?.error || "Unable to load machine telemetry",
+      });
+    } finally {
+      setLoadingStats(false);
+      setRefreshing(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const bootstrap = async () => {
-      try {
-        await Promise.all([loadMachinesAndScanners(), loadStats()]);
-      } catch (error) {
-        setPopup({
-          type: "ERROR",
-          title: "Load Error",
-          message: error.response?.data?.error || "Unable to load operator screen",
-        });
+    loadMachines();
+  }, [loadMachines]);
+
+  useEffect(() => {
+    if (!selectedMachineId) {
+      return;
+    }
+    loadMachineTelemetry(selectedMachineId, true);
+  }, [selectedMachineId, loadMachineTelemetry]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!selectedMachineIdRef.current) {
+        return;
       }
+      loadMachineTelemetry(selectedMachineIdRef.current, false);
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [loadMachineTelemetry]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setClockTick(Date.now());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const syncSettings = () => {
+      setStationSettings(getStationFeatureSettings());
     };
-    bootstrap();
-  }, [loadMachinesAndScanners, loadStats]);
-
-  useEffect(() => {
-    loadLiveState().catch(() => {});
-  }, [loadLiveState]);
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      Promise.all([loadStats(), loadLiveState()]).catch(() => {});
-    }, 10000);
-    return () => clearInterval(timer);
-  }, [loadLiveState, loadStats]);
+    window.addEventListener("focus", syncSettings);
+    window.addEventListener("storage", syncSettings);
+    return () => {
+      window.removeEventListener("focus", syncSettings);
+      window.removeEventListener("storage", syncSettings);
+    };
+  }, []);
 
   useEffect(() => {
     const socket = io(SOCKET_URL, {
@@ -186,131 +237,43 @@ const OperatorView = () => {
       transports: ["websocket", "polling"],
     });
 
-    socket.on("connect", () => {
-      setConnectionStatus("connected");
-    });
-    socket.on("disconnect", () => {
-      setConnectionStatus("disconnected");
-    });
-    socket.on("connect_error", () => {
-      setConnectionStatus("disconnected");
-    });
-
     socket.on("operator_popup", (payload = {}) => {
-      const eventType = normalizePopupType(payload.type);
-      const event = {
-        type: eventType,
-        message: payload.message,
-        partId: payload.partId || null,
-        stationNo: payload.stationNo || null,
-        machineName: payload.machineName || null,
-        scannerName: payload.scannerName || null,
-        scannerIp: payload.scannerIp || null,
-        status: payload.status || null,
-        timestamp: payload.timestamp || new Date().toISOString(),
-      };
-      setPopup({ ...payload, type: eventType });
-      pushEvent(event);
-      if (payload.partId) {
-        setStats((prev) => ({ ...prev, currentRunningPart: payload.partId }));
-      }
-      Promise.all([loadStats(), loadLiveState()]).catch(() => {});
-    });
+      const payloadStation = String(payload.stationNo || "").trim().toUpperCase();
+      const payloadMachine = String(payload.machineId || "");
+      const activeMachine = selectedMachineIdRef.current;
+      const activeStation = selectedStationRef.current;
+      const isRelevant = payloadMachine === activeMachine || (payloadStation && payloadStation === activeStation);
 
-    socket.on("scan_event", (payload = {}) => {
-      const eventType = normalizePopupType(payload.type, payload.decision);
-      const event = {
-        type: eventType,
-        message: payload.message,
-        partId: payload.partId || null,
-        stationNo: payload.stationNo || null,
-        expectedStation: payload.expectedStation || null,
-        status: payload.decision || null,
-        timestamp: payload.timestamp || new Date().toISOString(),
-      };
-      pushEvent(event);
-      if (event.partId) {
-        setStats((prev) => ({ ...prev, currentRunningPart: event.partId }));
+      if (!isRelevant) {
+        return;
       }
-    });
-
-    socket.on("plc_connection_event", (payload = {}) => {
-      pushEvent({
-        type: payload.state === "COMPLETED" ? "SUCCESS" : payload.state === "RETRYING" ? "WARNING" : "INFO",
-        message: payload.error ? `PLC ${payload.state}: ${payload.error}` : `PLC ${payload.state}`,
-        partId: payload.partId || null,
-        stationNo: payload.stationNo || null,
-        timestamp: new Date().toISOString(),
-      });
+      setPopup(payload);
+      if (activeMachine) {
+        loadMachineTelemetry(activeMachine, false);
+      }
     });
 
     socket.on("dashboard_refresh", () => {
-      Promise.all([loadStats(), loadLiveState()]).catch(() => {});
-    });
-
-    socket.on("scanner_status", (rows = []) => {
-      const mapped = Array.isArray(rows)
-        ? rows.map((row) => ({
-            id: row.id,
-            scannerName: row.scanner_name,
-            scannerIp: row.scanner_ip,
-            scannerPort: row.scanner_port,
-            mappedMachineId: row.mapped_machine_id,
-            isActive: row.is_active,
-          }))
-        : [];
-      if (mapped.length > 0) {
-        setScanners(mapped);
+      if (selectedMachineIdRef.current) {
+        loadMachineTelemetry(selectedMachineIdRef.current, false);
       }
     });
 
     return () => {
       socket.disconnect();
     };
-  }, [loadLiveState, loadStats, pushEvent]);
+  }, [loadMachineTelemetry]);
 
-  const handleBypassCurrent = async () => {
-    const machineId = Number(selectedMachineId);
-    if (!machineId || !currentPartId || !canBypassCurrent) {
-      setPopup({
-        type: "WARNING",
-        title: "Bypass Blocked",
-        message: "No bypass-eligible part found on selected machine",
-      });
-      return;
-    }
+  const gaugeStyle = useMemo(
+    () => ({
+      background: `conic-gradient(var(--app-primary) ${progressPercent * 3.6}deg, color-mix(in srgb, var(--app-bg-dark), #ffffff 6%) 0deg)`,
+    }),
+    [progressPercent]
+  );
 
-    setBypassLoading(true);
-    try {
-      const response = await traceabilityApi.bypass({
-        machineId,
-        partId: currentPartId,
-        reason: "MANUAL_BYPASS_FROM_OPERATOR_VIEW",
-      });
-      setPopup({
-        type: "WARNING",
-        title: "Bypass Success",
-        message: response.message || "Operation bypassed",
-        partId: currentPartId,
-        stationNo: selectedMachine?.stationNo,
-        machineName: selectedMachine?.machineName,
-      });
-      pushEvent({
-        type: "WARNING",
-        message: response.message || "Operation bypassed",
-        partId: currentPartId,
-        stationNo: selectedMachine?.stationNo,
-        machineName: selectedMachine?.machineName,
-      });
-      await Promise.all([loadStats(), loadLiveState()]);
-    } catch (error) {
-      setPopup({
-        type: "ERROR",
-        title: "Bypass Failed",
-        message: error.response?.data?.error || "Unable to bypass current operation",
-      });
-    } finally {
-      setBypassLoading(false);
+  const handleRefresh = () => {
+    if (selectedMachineId) {
+      loadMachineTelemetry(selectedMachineId, false);
     }
   };
 
@@ -318,208 +281,266 @@ const OperatorView = () => {
     <div className="space-y-6">
       <GlobalPopup popup={popup} onClose={() => setPopup(null)} />
 
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="p-3 rounded-xl bg-primary/10 border border-primary/20">
-            <Factory className="text-primary" size={22} />
-          </div>
+      <section className="industrial-card p-6 overflow-hidden relative">
+        <div className="absolute inset-0 pointer-events-none opacity-60 bg-[radial-gradient(circle_at_15%_20%,rgba(25,179,199,0.2),transparent_40%),radial-gradient(circle_at_80%_10%,rgba(215,91,91,0.18),transparent_40%)]" />
+        <div className="relative flex flex-wrap items-center justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-white">Operator Live Station</h1>
-            <p className="text-text-muted text-sm">
-              QR input is disabled here. Part IDs come from Scanner TCP/IP mapped to station.
+            <p className="text-xs uppercase tracking-[0.2em] text-primary font-semibold">Live Station Monitor</p>
+            <h1 className="text-3xl font-bold text-text-main mt-1">
+              {selectedMachine?.machineName || "Station Not Selected"}
+            </h1>
+            <p className="text-sm text-text-muted mt-1">
+              Job: {selectedMachine?.lineName || "LINE"} | Station: {selectedStation || "-"}
             </p>
-          </div>
-        </div>
-
-        <div
-          className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${
-            connectionStatus === "connected"
-              ? "bg-accent/10 border-accent/30 text-accent"
-              : "bg-danger/10 border-danger/30 text-danger"
-          }`}
-        >
-          {connectionStatus === "connected" ? <Wifi size={14} /> : <WifiOff size={14} />}
-          {connectionStatus === "connected" ? "LIVE CONNECTED" : "DISCONNECTED"}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="industrial-card p-4">
-          <p className="text-xs text-text-muted uppercase">OK Count</p>
-          <p className="text-2xl font-bold text-accent">{stats.ok}</p>
-        </div>
-        <div className="industrial-card p-4">
-          <p className="text-xs text-text-muted uppercase">NG Count</p>
-          <p className="text-2xl font-bold text-danger">{stats.ng}</p>
-        </div>
-        <div className="industrial-card p-4">
-          <p className="text-xs text-text-muted uppercase">Today Production</p>
-          <p className="text-2xl font-bold text-primary">{stats.total}</p>
-        </div>
-        <div className="industrial-card p-4">
-          <p className="text-xs text-text-muted uppercase">Current Running Part</p>
-          <p className="text-sm font-mono text-primary break-all">{stats.currentRunningPart || "-"}</p>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 industrial-card p-6 space-y-5">
-          <h2 className="font-bold text-white flex items-center gap-2">
-            <ScanLine size={18} className="text-primary" />
-            Live Station Context
-          </h2>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <label className="text-xs font-bold uppercase text-text-muted">
-                Machine <span className="text-primary">*</span>
-              </label>
-              <select
-                value={selectedMachineId}
-                onChange={(e) => setSelectedMachineId(e.target.value)}
-                className="w-full bg-bg-dark border border-border rounded-lg p-3 text-text-main focus:border-primary outline-none"
-              >
-                <option value="">Select machine</option>
-                {machines.map((machine) => (
-                  <option key={machine.id} value={machine.id}>
-                    {machine.stationNo || machine.operationNo} - {machine.machineName}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-xs font-bold uppercase text-text-muted">Live Status</label>
-              <div className="h-[46px] flex items-center px-3 rounded-lg bg-bg-dark border border-border">
-                <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${getBadgeClass(liveState?.current?.plcStatus)}`}>
-                  {loadingLive ? "LOADING" : liveState?.current?.plcStatus || "IDLE"}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-            <div className="bg-bg-dark p-3 rounded-lg border border-border">
-              <p className="text-text-muted text-xs uppercase">Machine</p>
-              <p className="text-text-main font-semibold">{selectedMachine?.machineName || "-"}</p>
-            </div>
-            <div className="bg-bg-dark p-3 rounded-lg border border-border">
-              <p className="text-text-muted text-xs uppercase">Station</p>
-              <p className="text-primary font-mono">{selectedMachine?.stationNo || selectedMachine?.operationNo || "-"}</p>
-            </div>
-            <div className="bg-bg-dark p-3 rounded-lg border border-border">
-              <p className="text-text-muted text-xs uppercase">Running Part</p>
-              <p className="text-primary font-mono break-all">{currentPartId || "-"}</p>
-            </div>
-            <div className="bg-bg-dark p-3 rounded-lg border border-border">
-              <p className="text-text-muted text-xs uppercase">Machine IP</p>
-              <p className="text-text-main font-mono">{selectedMachine?.machineIp || "-"}</p>
-            </div>
-            <div className="bg-bg-dark p-3 rounded-lg border border-border">
-              <p className="text-text-muted text-xs uppercase">PLC IP</p>
-              <p className="text-text-main font-mono">{selectedMachine?.plcIp || "-"}</p>
-            </div>
-            <div className="bg-bg-dark p-3 rounded-lg border border-border">
-              <p className="text-text-muted text-xs uppercase">PLC Protocol</p>
-              <p className="text-text-main font-mono">{selectedMachine?.plcProtocol || "TCP_TEXT"}</p>
-            </div>
-            <div className="bg-bg-dark p-3 rounded-lg border border-border">
-              <p className="text-text-muted text-xs uppercase">Scanner Mapping</p>
-              <p className="text-text-main font-mono">
-                {mappedScanner
-                  ? `${mappedScanner.scannerName} (${mappedScanner.scannerIp}${mappedScanner.scannerPort ? `:${mappedScanner.scannerPort}` : ""})`
-                  : "Not mapped"}
-              </p>
-            </div>
-          </div>
-
-          <div className="p-4 bg-warning/10 border border-warning/20 rounded-lg text-sm text-warning">
-            Scanner IP mapping controls scan authorization. If scanner/machine mapping is wrong, scans are blocked automatically.
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
+            <div className="min-w-[240px]">
+              <label className="text-xs uppercase tracking-wide text-text-muted">Select Machine</label>
+              <select
+                value={selectedMachineId}
+                onChange={(event) => setSelectedMachineId(event.target.value)}
+                disabled={loadingMachines}
+                className="mt-1.5 w-full rounded-xl border border-border bg-bg-dark px-3 py-2.5 text-sm text-text-main focus:border-primary focus:outline-none"
+              >
+                {machines.map((machine) => (
+                  <option key={machine.id} value={machine.id}>
+                    {machine.machineName} | {machine.operationNo}
+                  </option>
+                ))}
+                {machines.length === 0 && <option value="">No machine available</option>}
+              </select>
+            </div>
+
             <button
-              type="button"
-              onClick={handleBypassCurrent}
-              disabled={bypassLoading || !canBypassCurrent}
-              className="px-5 py-2.5 bg-warning/15 border border-warning/30 text-warning rounded-lg font-bold hover:bg-warning/25 disabled:opacity-60 inline-flex items-center gap-2"
+              onClick={handleRefresh}
+              disabled={loadingStats || refreshing || !selectedMachineId}
+              className="inline-flex items-center gap-2 rounded-xl border border-border bg-bg-card px-3 py-2.5 text-sm text-text-main hover:border-primary disabled:opacity-60"
             >
-              <ShieldAlert size={16} />
-              {bypassLoading ? "Bypassing..." : "Bypass Current Operation"}
+              <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />
+              Refresh
             </button>
-            {!canBypassCurrent && (
-              <p className="text-xs text-text-muted">Bypass is enabled only when part status is not ENDED_OK.</p>
-            )}
           </div>
         </div>
+      </section>
 
-        <div className="industrial-card p-6">
-          <h2 className="font-bold text-white mb-4 flex items-center gap-2">
-            <Activity size={18} className="text-primary" />
-            Live Operation
-          </h2>
-          {liveState?.current ? (
-            <div className="space-y-3 text-sm">
-              <div className="bg-bg-dark p-3 rounded-lg border border-border">
-                <p className="text-text-muted text-xs uppercase">Part ID</p>
-                <p className="font-mono text-primary break-all">{liveState.current.partId}</p>
-              </div>
-              <div className="bg-bg-dark p-3 rounded-lg border border-border">
-                <p className="text-text-muted text-xs uppercase">PLC Status</p>
-                <p className="font-semibold text-text-main">{liveState.current.plcStatus}</p>
-              </div>
-              <div className="bg-bg-dark p-3 rounded-lg border border-border">
-                <p className="text-text-muted text-xs uppercase">Result</p>
-                <p className="font-semibold text-text-main">{liveState.current.result || "-"}</p>
-              </div>
-              <div className="bg-bg-dark p-3 rounded-lg border border-border">
-                <p className="text-text-muted text-xs uppercase">Bypass</p>
-                <p className={liveState.current.isBypassed ? "text-warning font-semibold" : "text-text-main"}>
-                  {liveState.current.isBypassed ? `YES (${liveState.current.bypassReason || "MANUAL"})` : "NO"}
+      {(loadingStats || loadingMachines) && (
+        <section className="industrial-card p-6 text-sm text-text-muted">Loading operator telemetry...</section>
+      )}
+
+      {!loadingStats && (
+        <>
+          <section className="grid grid-cols-1 xl:grid-cols-12 gap-6">
+            <div className="xl:col-span-3 industrial-card p-5">
+              <h2 className="text-sm font-semibold text-text-main flex items-center gap-2">
+                <Factory size={16} className="text-primary" />
+                Station Context
+              </h2>
+              <div className="mt-4 space-y-2 text-sm text-text-main">
+                <p>
+                  <span className="text-text-muted">Mode:</span> {machineMode}
+                </p>
+                <p>
+                  <span className="text-text-muted">Elapsed:</span> {machineClock}
+                </p>
+                <p>
+                  <span className="text-text-muted">Operator:</span> {user.username || "Operator 1"}
+                </p>
+                <p>
+                  <span className="text-text-muted">Status:</span> {currentContext?.plcStatus || "WAITING"}
                 </p>
               </div>
-              <div className="bg-bg-dark p-3 rounded-lg border border-border">
-                <p className="text-text-muted text-xs uppercase">Interlock Reason</p>
-                <p className="text-warning">{liveState.current.interlockReason || "-"}</p>
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm text-text-muted">No active part at selected station.</p>
-          )}
-        </div>
-      </div>
 
-      <div className="industrial-card p-6">
-        <h2 className="font-bold text-white mb-4 flex items-center gap-2">
-          <Clock3 size={18} className="text-primary" />
-          Live Events
-        </h2>
-        <div className="space-y-2 max-h-[380px] overflow-y-auto">
-          {recentEvents.map((event) => (
-            <div key={event.id} className="p-3 rounded-lg bg-bg-dark border border-border">
-              <div className="flex items-center gap-2">
-                {event.type === "SUCCESS" ? (
-                  <CheckCircle size={14} className="text-accent" />
-                ) : event.type === "ERROR" ? (
-                  <XCircle size={14} className="text-danger" />
-                ) : event.type === "WARNING" ? (
-                  <AlertTriangle size={14} className="text-warning" />
-                ) : (
-                  <Activity size={14} className="text-primary" />
-                )}
-                <span className="text-xs font-bold">{event.type}</span>
+              <div className="mt-4 rounded-xl border border-border bg-bg-dark/70 p-3">
+                <p className="text-[11px] uppercase text-text-muted">Last Scanned QR</p>
+                <p className="text-xs font-mono text-text-main mt-2 break-all">
+                  {currentContext?.partId || "--- WAITING FOR SCAN ---"}
+                </p>
+                <p className="text-[11px] text-text-muted mt-2">
+                  Updated: {formatDateTime(currentContext?.createdAt)}
+                </p>
               </div>
-              <p className="text-sm text-text-main mt-1">{event.message || "-"}</p>
-              <p className="text-xs text-text-muted mt-1">
-                {event.partId ? `Part: ${event.partId}` : ""}
-                {event.stationNo ? ` | Station: ${event.stationNo}` : ""}
-                {event.expectedStation ? ` | Expected: ${event.expectedStation}` : ""}
-              </p>
             </div>
-          ))}
-          {recentEvents.length === 0 && <p className="text-sm text-text-muted">No live events yet.</p>}
-        </div>
-      </div>
+
+            <div className="xl:col-span-6 industrial-card p-5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold text-text-main flex items-center gap-2">
+                  <Gauge size={16} className="text-primary" />
+                  Production Gauge
+                </h2>
+                <span className="rounded-full border border-border px-2.5 py-1 text-xs text-text-muted">
+                  {producedCount}/{expectedCount} processed
+                </span>
+              </div>
+
+              <div className="mt-4 flex flex-col items-center">
+                <div className="h-52 w-52 rounded-full p-4" style={gaugeStyle}>
+                  <div className="h-full w-full rounded-full bg-bg-card border border-border flex flex-col items-center justify-center text-center">
+                    <p className="text-4xl font-bold text-text-main">{progressPercent}%</p>
+                    <p className="text-xs uppercase tracking-wide text-text-muted mt-1">Shift Progress</p>
+                    <p className="text-[11px] text-text-muted mt-2">
+                      Quality: <span className="text-accent font-semibold">{qualityPercent}%</span>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid grid-cols-2 gap-3 w-full max-w-md">
+                  <button className="rounded-xl border border-border bg-bg-dark py-2 text-sm font-semibold text-text-main hover:border-accent">
+                    OK ({qualitySummary.okCount || 0})
+                  </button>
+                  <button className="rounded-xl border border-border bg-bg-dark py-2 text-sm font-semibold text-text-main hover:border-danger">
+                    NG ({qualitySummary.ngCount || 0})
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-5">
+                <div className="mb-2 flex items-center justify-between text-xs text-text-muted">
+                  <span>Produced: {producedCount}</span>
+                  <span>Expected: {expectedCount}</span>
+                </div>
+                <div className="h-2.5 w-full rounded-full border border-border bg-bg-dark">
+                  <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${progressPercent}%` }} />
+                </div>
+              </div>
+            </div>
+
+            <div className="xl:col-span-3 industrial-card p-5">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold text-text-main flex items-center gap-2">
+                  <ShieldCheck size={16} className="text-primary" />
+                  Station Rules
+                </h2>
+              </div>
+
+              <div className="mt-4 space-y-2 text-sm">
+                <div className="rounded-lg border border-border bg-bg-dark/70 px-3 py-2 flex items-center justify-between">
+                  <span className="text-text-main">QR Validation</span>
+                  <span className={stationFeatureConfig.qr ? "text-accent" : "text-text-muted"}>
+                    {stationFeatureConfig.qr ? "Enabled" : "Disabled"}
+                  </span>
+                </div>
+                <div className="rounded-lg border border-border bg-bg-dark/70 px-3 py-2 flex items-center justify-between">
+                  <span className="text-text-main">Operation Rule</span>
+                  <span className={stationFeatureConfig.operation ? "text-accent" : "text-text-muted"}>
+                    {stationFeatureConfig.operation ? "Enabled" : "Disabled"}
+                  </span>
+                </div>
+                <div className="rounded-lg border border-border bg-bg-dark/70 px-3 py-2 flex items-center justify-between">
+                  <span className="text-text-main">Rejection Bin</span>
+                  <span className={stationFeatureConfig.rejectionBin ? "text-accent" : "text-text-muted"}>
+                    {stationFeatureConfig.rejectionBin ? "Enabled" : "Disabled"}
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-xl border border-border bg-bg-dark/70 overflow-hidden">
+                <div className="px-3 py-2 border-b border-border text-xs uppercase text-text-muted font-semibold flex items-center gap-2">
+                  <AlertTriangle size={12} className="text-danger" />
+                  Rejection Summary
+                </div>
+                <div className="max-h-[160px] overflow-y-auto">
+                  {stationFeatureConfig.rejectionBin && rejectionSummary.length === 0 && (
+                    <p className="px-3 py-3 text-xs text-text-muted">No rejections in latest events.</p>
+                  )}
+                  {stationFeatureConfig.rejectionBin &&
+                    rejectionSummary.map((entry) => (
+                      <div
+                        key={entry.reason}
+                        className="px-3 py-2 text-xs border-b last:border-b-0 border-border/60 flex items-center justify-between gap-2"
+                      >
+                        <span className="text-text-main truncate">{entry.reason}</span>
+                        <span className="text-danger font-semibold">{entry.count}</span>
+                      </div>
+                    ))}
+                  {!stationFeatureConfig.rejectionBin && (
+                    <p className="px-3 py-3 text-xs text-text-muted">
+                      Rejection Bin is disabled for this station in Master Settings.
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            <div className="industrial-card p-5">
+              <h2 className="font-semibold text-text-main mb-3 flex items-center gap-2">
+                <Clock3 size={16} className="text-primary" />
+                Hourly Trend
+              </h2>
+              <div className="space-y-2">
+                {trendRows.length === 0 && <p className="text-sm text-text-muted">No trend data for this station.</p>}
+                {trendRows.map((row) => (
+                  <div
+                    key={row.hour}
+                    className="rounded-lg border border-border bg-bg-dark/70 px-3 py-2.5 flex items-center justify-between gap-3"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-text-main">{row.hour}</p>
+                      <p className="text-xs text-text-muted">Total: {row.total}</p>
+                    </div>
+                    <div className="flex gap-2 text-xs font-semibold">
+                      <span className="rounded-md bg-accent/20 px-2 py-1 text-accent">OK {row.ok}</span>
+                      <span className="rounded-md bg-danger/20 px-2 py-1 text-danger">NG {row.ng}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="industrial-card p-5">
+              <h2 className="font-semibold text-text-main mb-3 flex items-center gap-2">
+                <Wrench size={16} className="text-primary" />
+                Recent Events
+              </h2>
+              <div className="space-y-2 max-h-[260px] overflow-y-auto">
+                {(stationStats?.recentParts || []).map((row) => (
+                  <div key={row.id} className="rounded-lg border border-border bg-bg-dark/70 px-3 py-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-mono text-text-main">{row.partId}</p>
+                      <span className="text-xs text-text-muted">{row.plcStatus || "-"}</span>
+                    </div>
+                    <p className="text-xs text-text-muted mt-1">
+                      Result: {row.result || "-"} | {formatDateTime(row.createdAt)}
+                    </p>
+                    {row.interlockReason && <p className="text-xs text-danger mt-1">Reason: {row.interlockReason}</p>}
+                  </div>
+                ))}
+                {(stationStats?.recentParts || []).length === 0 && (
+                  <p className="text-sm text-text-muted">No recent station events.</p>
+                )}
+              </div>
+            </div>
+          </section>
+
+          <section className="industrial-card p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-5 text-xs text-text-muted">
+                <button className="inline-flex items-center gap-1 hover:text-primary transition-colors">
+                  <CheckCircle2 size={14} />
+                  Change Job
+                </button>
+                <button className="inline-flex items-center gap-1 hover:text-danger transition-colors">
+                  <AlertTriangle size={14} />
+                  Reject Part
+                </button>
+              </div>
+              <div className="flex gap-4 text-xs">
+                <span className="rounded-md bg-bg-dark border border-border px-2 py-1 text-text-main">
+                  Availability: {Math.max(0, 100 - (qualitySummary.interlockedCount || 0))}%
+                </span>
+                <span className="rounded-md bg-bg-dark border border-border px-2 py-1 text-text-main">
+                  Quality: {qualityPercent}%
+                </span>
+                <span className="rounded-md bg-bg-dark border border-border px-2 py-1 text-text-main">
+                  In Progress: {qualitySummary.inProgressCount || 0}
+                </span>
+              </div>
+            </div>
+          </section>
+        </>
+      )}
     </div>
   );
 };
