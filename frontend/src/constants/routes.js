@@ -6,6 +6,8 @@ export const APP_ROUTES = {
   production: "/production",
   traceability: "/traceability",
   machines: "/machines",
+  plcConfig: "/plc-configuration",
+  ioMonitor: "/io-monitor",
   users: "/users",
   scanners: "/scanners",
   shifts: "/shifts",

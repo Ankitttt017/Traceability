@@ -38,11 +38,16 @@ const Packing = () => {
   const [overview, setOverview] = useState({ activeSession: null, activeItems: [], recentSessions: [] });
   const [boxNumber, setBoxNumber] = useState("");
   const [newBoxCapacity, setNewBoxCapacity] = useState(() => readStoredCapacity());
+  const [editBoxNumber, setEditBoxNumber] = useState("");
+  const [editCapacity, setEditCapacity] = useState(() => readStoredCapacity());
   const [searchBox, setSearchBox] = useState("");
   const [searchedSession, setSearchedSession] = useState(null);
   const [popup, setPopup] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [updatingBox, setUpdatingBox] = useState(false);
+  const [deletingBox, setDeletingBox] = useState(false);
   const [feed, setFeed] = useState([]);
+  const [hoveredSlot, setHoveredSlot] = useState(null);
 
   const activeSession = overview.activeSession;
   const activeItems = useMemo(() => overview.activeItems || [], [overview.activeItems]);
@@ -55,6 +60,16 @@ const Packing = () => {
     }
     return map;
   }, [activeItems]);
+
+  useEffect(() => {
+    if (!activeSession) {
+      setEditBoxNumber("");
+      setEditCapacity(readStoredCapacity());
+      return;
+    }
+    setEditBoxNumber(activeSession.boxNumber || "");
+    setEditCapacity(normalizeCapacity(activeSession.capacity, readStoredCapacity()));
+  }, [activeSession, activeSession?.id, activeSession?.boxNumber, activeSession?.capacity]);
 
   const loadOverview = async () => {
     const data = await packingApi.overview();
@@ -83,6 +98,15 @@ const Packing = () => {
 
     socket.on("packing_update", (payload = {}) => {
       setOverview((prev) => {
+        if (payload.event === "BOX_DELETED") {
+          const isDeletedActive = Number(prev.activeSession?.id || 0) === Number(payload.sessionId || 0);
+          return {
+            ...prev,
+            activeSession: isDeletedActive ? null : prev.activeSession,
+            activeItems: isDeletedActive ? [] : prev.activeItems,
+          };
+        }
+
         const session = {
           id: payload.sessionId,
           boxNumber: payload.boxNumber,
@@ -111,21 +135,29 @@ const Packing = () => {
         };
       });
 
-      setFeed((prev) =>
-        [
-          {
-            id: `${Date.now()}-${Math.random()}`,
-            message: `Packed ${payload.partId || "-"} in ${payload.boxNumber || "-"} slot ${payload.slotNo || "-"}`,
-            timestamp: new Date().toISOString(),
-          },
-          ...prev,
-        ].slice(0, 20)
-      );
+      const event = String(payload.event || "").toUpperCase();
+      const message =
+        event === "BOX_UPDATED"
+          ? `Box updated: ${payload.boxNumber || "-"} (capacity ${payload.capacity || "-"})`
+          : event === "BOX_DELETED"
+          ? `Box deleted: ${payload.boxNumber || "-"}`
+          : `Packed ${payload.partId || "-"} in ${payload.boxNumber || "-"} slot ${payload.slotNo || "-"}`;
+
+      setFeed((prev) => [{ id: `${Date.now()}-${Math.random()}`, message, timestamp: new Date().toISOString() }, ...prev].slice(0, 20));
     });
 
     socket.on("operator_popup", (payload = {}) => {
       if (payload.stationNo === "PACKING" || String(payload.message || "").toUpperCase().includes("PACK")) {
-        setPopup(payload);
+        setPopup((prev) => ({
+          ...prev,
+          ...(payload.qrResult && { qrResult: payload.qrResult }),
+          ...(payload.plcStatus && { plcStatus: payload.plcStatus }),
+          ...(payload.message && { message: payload.message }),
+          ...(payload.partId && { partId: payload.partId }),
+          ...(payload.stationNo && { stationNo: payload.stationNo }),
+          ...(payload.type && { type: payload.type }),
+          ...(payload.title && { title: payload.title }),
+        }));
       }
     });
 
@@ -190,6 +222,79 @@ const Packing = () => {
     }
   };
 
+  const handleUpdateBox = async (event) => {
+    event.preventDefault();
+    if (!activeSession?.id) {
+      return;
+    }
+
+    const nextBox = String(editBoxNumber || "").trim().toUpperCase();
+    if (!nextBox) {
+      setPopup({
+        type: "ERROR",
+        title: "Update Failed",
+        message: "Box number is required",
+      });
+      return;
+    }
+
+    const nextCapacity = normalizeCapacity(editCapacity, capacity);
+    setUpdatingBox(true);
+    try {
+      await packingApi.updateBox(activeSession.id, {
+        boxNumber: nextBox,
+        capacity: nextCapacity,
+      });
+      localStorage.setItem(LOCAL_STORAGE_BOX_CAPACITY_KEY, String(nextCapacity));
+      await loadOverview();
+      setPopup({
+        type: "SUCCESS",
+        title: "Box Updated",
+        message: `Box updated to ${nextBox} with capacity ${nextCapacity}.`,
+      });
+    } catch (error) {
+      setPopup({
+        type: "ERROR",
+        title: "Update Failed",
+        message: error.response?.data?.error || "Unable to update active box",
+      });
+    } finally {
+      setUpdatingBox(false);
+    }
+  };
+
+  const handleDeleteBox = async () => {
+    if (!activeSession?.id || deletingBox) {
+      return;
+    }
+
+    const confirmDelete = window.confirm(
+      `Delete box ${activeSession.boxNumber}? Only empty boxes can be deleted.`
+    );
+    if (!confirmDelete) {
+      return;
+    }
+
+    setDeletingBox(true);
+    try {
+      await packingApi.deleteBox(activeSession.id);
+      await loadOverview();
+      setPopup({
+        type: "SUCCESS",
+        title: "Box Deleted",
+        message: `Box ${activeSession.boxNumber} deleted successfully.`,
+      });
+    } catch (error) {
+      setPopup({
+        type: "ERROR",
+        title: "Delete Failed",
+        message: error.response?.data?.error || "Unable to delete box",
+      });
+    } finally {
+      setDeletingBox(false);
+    }
+  };
+
   const progress = activeSession ? Math.min(100, Math.round(((activeSession.packedCount || 0) / capacity) * 100)) : 0;
 
   return (
@@ -244,6 +349,8 @@ const Packing = () => {
               return (
                 <div
                   key={slotNo}
+                  onMouseEnter={() => setHoveredSlot({ slotNo, partId: part || null })}
+                  onMouseLeave={() => setHoveredSlot(null)}
                   className={`h-9 rounded-md border flex items-center justify-center text-[11px] font-mono ${
                     part
                       ? "bg-accent/20 border-accent/40 text-accent"
@@ -255,6 +362,16 @@ const Packing = () => {
                 </div>
               );
             })}
+          </div>
+          <div className="mt-2 text-xs text-text-muted min-h-[18px]">
+            {hoveredSlot ? (
+              <span>
+                Slot {hoveredSlot.slotNo}:{" "}
+                <span className="font-mono text-text-main">{hoveredSlot.partId || "EMPTY"}</span>
+              </span>
+            ) : (
+              <span>Hover on slot to view packed part ID.</span>
+            )}
           </div>
         </div>
 
@@ -299,6 +416,45 @@ const Packing = () => {
               {loading ? "Starting..." : "Start Box"}
             </button>
           </form>
+
+          {activeSession && (
+            <form onSubmit={handleUpdateBox} className="space-y-2 border-t border-border/60 pt-3">
+              <label className="text-xs text-text-muted uppercase font-bold">Update Active Box</label>
+              <input
+                value={editBoxNumber}
+                onChange={(e) => setEditBoxNumber(e.target.value.toUpperCase())}
+                className="w-full bg-bg-dark border border-border rounded-lg p-3 text-text-main focus:border-primary outline-none font-mono"
+                placeholder="Correct box number"
+              />
+              <input
+                type="number"
+                min={MIN_CAPACITY}
+                max={MAX_CAPACITY}
+                value={editCapacity}
+                onChange={(event) => setEditCapacity(normalizeCapacity(event.target.value, editCapacity))}
+                className="w-full bg-bg-dark border border-border rounded-lg p-3 text-text-main focus:border-primary outline-none font-mono"
+                placeholder="Correct capacity"
+              />
+              <p className="text-[11px] text-text-muted">
+                Use this when wrong box number/capacity was entered. Capacity cannot be less than packed count.
+              </p>
+              <button
+                type="submit"
+                disabled={loading || updatingBox}
+                className="w-full py-2.5 rounded-lg bg-warning text-black font-bold hover:brightness-110 disabled:opacity-60"
+              >
+                {updatingBox ? "Updating..." : "Update Active Box"}
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteBox}
+                disabled={loading || updatingBox || deletingBox}
+                className="w-full py-2.5 rounded-lg bg-red-600 text-white font-bold hover:bg-red-700 disabled:opacity-60"
+              >
+                {deletingBox ? "Deleting..." : "Delete Active Box"}
+              </button>
+            </form>
+          )}
 
           <form onSubmit={handleSearchBox} className="space-y-2">
             <label className="text-xs text-text-muted uppercase font-bold">Search Box</label>

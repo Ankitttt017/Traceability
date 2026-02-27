@@ -1,6 +1,6 @@
 const PackingSession = require("../models/PackingSession");
 const PackingItem = require("../models/PackingItem");
-const { packPart, createSessionIfMissing, getPackingOverview } = require("../services/packingService");
+const { packPart, createSessionIfMissing, getPackingOverview, updateOpenSession, deleteSession } = require("../services/packingService");
 
 exports.getOverview = async (_req, res) => {
   try {
@@ -74,6 +74,48 @@ exports.scanPartToBox = async (req, res) => {
         partId: packed.item.part_id,
         slotNo: packed.item.slot_no,
       },
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+exports.updateBox = async (req, res) => {
+  try {
+    const sessionId = Number(req.params.sessionId || 0);
+    if (!sessionId) {
+      return res.status(400).json({ error: "sessionId is required" });
+    }
+
+    const updated = await updateOpenSession({
+      sessionId,
+      boxNumber: req.body.boxNumber,
+      capacity: req.body.capacity,
+    });
+
+    res.json({
+      id: updated.id,
+      boxNumber: updated.box_number,
+      capacity: updated.capacity,
+      packedCount: updated.packed_count,
+      status: updated.status,
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+exports.deleteBox = async (req, res) => {
+  try {
+    const sessionId = Number(req.params.sessionId || 0);
+    if (!sessionId) {
+      return res.status(400).json({ error: "sessionId is required" });
+    }
+
+    const deleted = await deleteSession(sessionId);
+    res.json({
+      message: "Box deleted successfully",
+      ...deleted,
     });
   } catch (error) {
     res.status(400).json({ error: error.message });

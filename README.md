@@ -2,6 +2,12 @@
 
 Industry-focused traceability system with dynamic QR validation, scanner-to-machine IP mapping, PLC handshake, interlock logic, live operator feedback, and packing management.
 
+## Documentation
+
+- System logic and architecture: `docs/PROJECT_DOCUMENTATION.md`
+- Deployment and rollout checklist: `docs/IMPLEMENTATION_GUIDE.md`
+- Sequence diagrams: `sequence.md`
+
 ## Stack
 
 - Frontend: React (Vite), Tailwind, Axios, Socket.IO client, Recharts

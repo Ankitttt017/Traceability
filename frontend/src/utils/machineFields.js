@@ -24,37 +24,69 @@ export const MACHINE_FORM_FIELD_CONFIG = [
     required: true,
   },
   {
-    key: "plcIp",
-    label: "PLC IP",
-    type: "text",
-    required: true,
-  },
-  {
-    key: "plcPort",
-    label: "PLC Port",
-    type: "number",
-    required: true,
-  },
-  {
     key: "plcProtocol",
-    label: "PLC Protocol",
+    label: "Protocol",
     type: "select",
     required: true,
     options: ["TCP_TEXT", "MODBUS_TCP"],
   },
+];
+
+export const MACHINE_REGISTER_ROLE_FIELDS = [
   {
-    key: "plcRegisters",
-    label: "PLC Registers",
-    type: "text",
+    key: "startRegister",
+    label: "Trigger Register",
     required: true,
-    placeholder: "100,101,102,103,104",
+    description: "Handshake trigger command register.",
   },
   {
-    key: "status",
-    label: "Status",
-    type: "select",
+    key: "statusRegister",
+    label: "Interlock Register",
     required: true,
-    options: ["ACTIVE", "INACTIVE"],
+    description: "Interlock/feedback status register.",
+  },
+  {
+    key: "stationRegister",
+    label: "Complete Register",
+    required: true,
+    description: "Cycle completion register.",
+  },
+  {
+    key: "resetRegister",
+    label: "Reset Register",
+    required: true,
+    description: "Reset command register.",
+  },
+];
+
+export const MACHINE_MODBUS_TUNING_FIELD_CONFIG = [
+  {
+    key: "startValue",
+    label: "Start Value",
+    type: "number",
+    required: true,
+    placeholder: "1",
+  },
+  {
+    key: "startedValue",
+    label: "Started Value",
+    type: "number",
+    required: true,
+    placeholder: "2",
+  },
+  {
+    key: "endOkValue",
+    label: "End OK Value",
+    type: "number",
+    required: true,
+    placeholder: "3",
+  },
+  {
+    key: "endNgValue",
+    label: "End NG Value",
+    type: "number",
+    required: true,
+    placeholder: "4",
   },
 ];
 
@@ -63,10 +95,11 @@ export const MACHINE_TABLE_COLUMNS = [
   { key: "lineName", label: "Line Name", sortable: true },
   { key: "sequenceNo", label: "Sequence No", sortable: true },
   { key: "operationNo", label: "Operation No", sortable: true },
+  { key: "plcProtocol", label: "PLC Protocol", sortable: true },
   { key: "plcIp", label: "PLC IP", sortable: true },
   { key: "plcPort", label: "PLC Port", sortable: true },
-  { key: "plcProtocol", label: "PLC Protocol", sortable: true },
-  { key: "plcRegisters", label: "PLC Registers", sortable: false },
+  { key: "plcRangeId", label: "PLC Range", sortable: true },
+  { key: "plcConfig", label: "PLC Config", sortable: false },
   { key: "status", label: "Status", sortable: true },
 ];
 

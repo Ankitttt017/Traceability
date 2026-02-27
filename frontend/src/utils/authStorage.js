@@ -18,4 +18,18 @@ export const clearAuthSession = () => {
 
 export const getToken = () => localStorage.getItem(TOKEN_KEY);
 
+export const getUser = () => {
+  const raw = localStorage.getItem(USER_KEY);
+  if (!raw) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+};
+
+export const getUserRole = () => String(getUser()?.role || "").trim();
+
 export const isAuthenticated = () => Boolean(getToken());

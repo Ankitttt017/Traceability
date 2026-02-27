@@ -50,6 +50,15 @@ function downloadBlob(blob, filename) {
   window.URL.revokeObjectURL(url);
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 const Dashboard = () => {
   const [machines, setMachines] = useState([]);
   const [summary, setSummary] = useState(EMPTY_SUMMARY);
@@ -135,6 +144,123 @@ const Dashboard = () => {
     }
   };
 
+  const handleExportPdf = () => {
+    const generatedAt = new Date().toLocaleString();
+    const filterLine = [
+      filters.dateFrom ? `From: ${filters.dateFrom}` : null,
+      filters.dateTo ? `To: ${filters.dateTo}` : null,
+      filters.machineId ? `Machine: ${filters.machineId}` : "Machine: All",
+      filters.status ? `Status: ${filters.status}` : "Status: All",
+      filters.shiftCode ? `Shift: ${filters.shiftCode}` : "Shift: All",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+    const machineRows = (report?.machineWise || [])
+      .map(
+        (row, index) => `
+          <tr>
+            <td>${index + 1}</td>
+            <td>${escapeHtml(row.machine_id)}</td>
+            <td>${escapeHtml(row.ok ?? 0)}</td>
+            <td>${escapeHtml(row.ng ?? 0)}</td>
+            <td>${escapeHtml((Number(row.ok || 0) + Number(row.ng || 0)).toString())}</td>
+          </tr>
+        `
+      )
+      .join("");
+
+    const interlockRows = (report?.interlockHistory || [])
+      .slice(0, 100)
+      .map(
+        (row, index) => `
+          <tr>
+            <td>${index + 1}</td>
+            <td>${escapeHtml(row.part_id || "-")}</td>
+            <td>${escapeHtml(row.station_no || row.operation_no || "-")}</td>
+            <td>${escapeHtml(row.interlock_reason || "-")}</td>
+            <td>${escapeHtml(new Date(row.createdAt).toLocaleString())}</td>
+          </tr>
+        `
+      )
+      .join("");
+
+    const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Traceability Production Report</title>
+    <style>
+      body { font-family: Arial, sans-serif; color: #111; padding: 24px; }
+      h1 { margin: 0 0 4px; font-size: 22px; }
+      .meta { color: #444; font-size: 12px; margin-bottom: 16px; }
+      .cards { display: grid; grid-template-columns: repeat(5, minmax(100px, 1fr)); gap: 8px; margin-bottom: 16px; }
+      .card { border: 1px solid #ddd; border-radius: 6px; padding: 8px; font-size: 12px; }
+      .card strong { display: block; font-size: 16px; margin-top: 4px; }
+      h2 { font-size: 14px; margin: 18px 0 8px; }
+      table { width: 100%; border-collapse: collapse; font-size: 11px; }
+      th, td { border: 1px solid #d4d4d4; padding: 6px; text-align: left; vertical-align: top; }
+      th { background: #f5f5f5; }
+      .empty { color: #666; font-style: italic; }
+    </style>
+  </head>
+  <body>
+    <h1>IndusTrace Production Report</h1>
+    <div class="meta">Generated: ${escapeHtml(generatedAt)}</div>
+    <div class="meta">${escapeHtml(filterLine || "No filters applied")}</div>
+
+    <div class="cards">
+      <div class="card">Total Machines<strong>${escapeHtml(summary.machines.total)}</strong></div>
+      <div class="card">In Progress<strong>${escapeHtml(summary.parts.inProgress)}</strong></div>
+      <div class="card">Completed<strong>${escapeHtml(summary.parts.completed)}</strong></div>
+      <div class="card">NG<strong>${escapeHtml(summary.parts.ng)}</strong></div>
+      <div class="card">Interlocked<strong>${escapeHtml(summary.parts.interlocked || 0)}</strong></div>
+    </div>
+
+    <h2>Machine-wise Production</h2>
+    ${
+      machineRows
+        ? `<table>
+            <thead>
+              <tr><th>#</th><th>Machine</th><th>OK</th><th>NG</th><th>Total</th></tr>
+            </thead>
+            <tbody>${machineRows}</tbody>
+          </table>`
+        : '<div class="empty">No machine production rows for selected range.</div>'
+    }
+
+    <h2>Interlock History</h2>
+    ${
+      interlockRows
+        ? `<table>
+            <thead>
+              <tr><th>#</th><th>Part ID</th><th>Station</th><th>Reason</th><th>Time</th></tr>
+            </thead>
+            <tbody>${interlockRows}</tbody>
+          </table>`
+        : '<div class="empty">No interlock entries for selected range.</div>'
+    }
+  </body>
+</html>`;
+
+    const printWindow = window.open("", "_blank", "noopener,noreferrer");
+    if (!printWindow) {
+      setStatus({
+        type: "error",
+        message: "Popup blocked. Enable popups to export PDF.",
+      });
+      return;
+    }
+
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+      printWindow.print();
+    }, 300);
+  };
+
   const machineWiseData = (report?.machineWise || []).map((row) => ({
     machineId: row.machine_id,
     ok: Number(row.ok || 0),
@@ -178,6 +304,13 @@ const Dashboard = () => {
           >
             <Download size={14} />
             Export CSV
+          </button>
+          <button
+            onClick={handleExportPdf}
+            className="px-3 py-2 rounded-lg border border-border bg-bg-card text-text-main font-semibold inline-flex items-center gap-1 hover:border-primary"
+          >
+            <Download size={14} />
+            Export PDF
           </button>
         </div>
       </div>
@@ -240,7 +373,7 @@ const Dashboard = () => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <div className="industrial-card p-4">
           <p className="text-xs text-text-muted">Total Machines</p>
           <p className="text-2xl font-bold text-text-main">{summary.machines.total}</p>
@@ -260,10 +393,6 @@ const Dashboard = () => {
         <div className="industrial-card p-4">
           <p className="text-xs text-text-muted">Interlocked</p>
           <p className="text-2xl font-bold text-warning">{summary.parts.interlocked || 0}</p>
-        </div>
-        <div className="industrial-card p-4">
-          <p className="text-xs text-text-muted">Rework</p>
-          <p className="text-2xl font-bold text-secondary">{summary.parts.rework || 0}</p>
         </div>
       </div>
 

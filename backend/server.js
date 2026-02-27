@@ -18,7 +18,11 @@ require("./models/QrFormatRule");
 require("./models/ReworkLog");
 require("./models/PackingSession");
 require("./models/PackingItem");
+require("./models/StationFeatureSetting");
+require("./models/PlcRegisterRange");
 const { getPartRoom, setSocketServer } = require("./services/realtimeService");
+const { startPlcHealthMonitor } = require("./services/plcHealthService");
+const { resetAllMachineLocks } = require("./services/machineLockService");
 
 require("./tcp/tcpServer");
 
@@ -131,8 +135,10 @@ server.listen(PORT, async () => {
   try {
     await sequelize.authenticate();
     await sequelize.sync({ alter: syncAlter });
+    await resetAllMachineLocks();
     await ensureDefaultAdminUser();
     await ensureDefaultShifts();
+    startPlcHealthMonitor();
     console.log(`Server Running on ${PORT}`);
   } catch (error) {
     console.error("Unable to connect to the database:", error);

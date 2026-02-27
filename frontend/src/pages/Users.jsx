@@ -121,6 +121,9 @@ const UsersPage = () => {
     if (role === "Admin") {
       return "bg-danger/10 text-danger border border-danger/20";
     }
+    if (role === "Engineer") {
+      return "bg-accent/10 text-accent border border-accent/20";
+    }
     if (role === "Supervisor") {
       return "bg-warning/10 text-warning border border-warning/20";
     }
@@ -190,6 +193,7 @@ const UsersPage = () => {
           >
             <option value="all">All Roles</option>
             <option value="Admin">Admin</option>
+            <option value="Engineer">Engineer</option>
             <option value="Supervisor">Supervisor</option>
             <option value="Operator">Operator</option>
           </select>
@@ -396,8 +400,8 @@ const UsersPage = () => {
                   </span>
                   <span className="text-primary">*</span>
                 </label>
-                <div className="grid grid-cols-3 gap-3">
-                  {["Operator", "Supervisor", "Admin"].map((role) => (
+                <div className="grid grid-cols-4 gap-3">
+                  {["Operator", "Engineer", "Supervisor", "Admin"].map((role) => (
                     <button
                       key={role}
                       type="button"
@@ -406,6 +410,8 @@ const UsersPage = () => {
                         formData.role === role
                           ? role === "Admin"
                             ? "border-danger bg-danger/10 text-danger"
+                            : role === "Engineer"
+                              ? "border-accent bg-accent/10 text-accent"
                             : role === "Supervisor"
                               ? "border-warning bg-warning/10 text-warning"
                               : "border-primary bg-primary/10 text-primary"

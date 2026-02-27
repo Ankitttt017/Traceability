@@ -189,7 +189,10 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     where: { part_id: normalizedPartId, station_no: station },
     order: [["createdAt", "DESC"]],
   });
-  if (existingAtStation && !part.is_rework) {
+  // Production rule: once scanned at a station, next scan must be blocked as duplicate
+  // unless operator/admin explicitly performs reset-operation.
+  const isRetryableCommFailure = String(existingAtStation?.plc_status || "") === "RESET";
+  if (existingAtStation && !part.is_rework && !isRetryableCommFailure) {
     await saveAuditLog(normalizedPartId, mId, "NG", "DUPLICATE_SCAN", userId);
     emitRealtime("scan_event", {
       type: "WARNING",

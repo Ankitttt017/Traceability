@@ -29,8 +29,46 @@ export const machineApi = {
     const { data } = await apiClient.put(`${ENDPOINTS.machines}/${id}`, payload);
     return data;
   },
+  testPlc: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.machineTestPlc, payload);
+    return data;
+  },
+  resetPlc: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.machineResetPlc, payload);
+    return data;
+  },
+  writePlcValue: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.machineWritePlcValue, payload);
+    return data;
+  },
   remove: async (id) => {
     await apiClient.delete(`${ENDPOINTS.machines}/${id}`);
+  },
+};
+
+export const plcConfigApi = {
+  listRanges: async () => {
+    const { data } = await apiClient.get(ENDPOINTS.plcConfig.ranges);
+    return data;
+  },
+  createRange: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.plcConfig.ranges, payload);
+    return data;
+  },
+  updateRange: async (id, payload) => {
+    const { data } = await apiClient.put(`${ENDPOINTS.plcConfig.ranges}/${id}`, payload);
+    return data;
+  },
+  deleteRange: async (id) => {
+    await apiClient.delete(`${ENDPOINTS.plcConfig.ranges}/${id}`);
+  },
+  rangeRegisters: async (rangeId, params = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.plcConfig.rangeRegisters(rangeId), { params });
+    return data;
+  },
+  exportPlan: async () => {
+    const { data } = await apiClient.get(ENDPOINTS.plcConfig.export, { responseType: "blob" });
+    return data;
   },
 };
 
@@ -88,6 +126,17 @@ export const shiftApi = {
   },
 };
 
+export const stationSettingsApi = {
+  list: async () => {
+    const { data } = await apiClient.get(ENDPOINTS.stationSettings);
+    return data;
+  },
+  save: async (settings) => {
+    const { data } = await apiClient.put(ENDPOINTS.stationSettings, { settings });
+    return data;
+  },
+};
+
 export const traceabilityApi = {
   operations: async () => {
     const { data } = await apiClient.get(ENDPOINTS.traceability.operations);
@@ -109,9 +158,32 @@ export const traceabilityApi = {
     const { data } = await apiClient.get(ENDPOINTS.traceability.liveState, { params: { machineId } });
     return data;
   },
+  ioSnapshot: async ({ machineId, plcIp } = {}) => {
+    const params = {};
+    if (machineId) {
+      params.machineId = machineId;
+    }
+    if (plcIp) {
+      params.plcIp = plcIp;
+    }
+    const { data } = await apiClient.get(ENDPOINTS.traceability.ioSnapshot, { params });
+    return data;
+  },
   machineStats: async (machineId, params = {}) => {
     const { data } = await apiClient.get(ENDPOINTS.traceability.machineStats, {
       params: { ...params, machineId },
+    });
+    return data;
+  },
+  plcHealth: async (machineId) => {
+    const { data } = await apiClient.get(ENDPOINTS.traceability.plcHealth, {
+      params: machineId ? { machineId } : undefined,
+    });
+    return data;
+  },
+  scannerHealth: async (machineId) => {
+    const { data } = await apiClient.get(ENDPOINTS.traceability.scannerHealth, {
+      params: machineId ? { machineId } : undefined,
     });
     return data;
   },
@@ -141,6 +213,10 @@ export const traceabilityApi = {
   },
   resetStation: async (payload) => {
     const { data } = await apiClient.post(ENDPOINTS.traceability.resetStation, payload);
+    return data;
+  },
+  resetOperation: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.traceability.resetOperation, payload);
     return data;
   },
   bypass: async (payload) => {
@@ -204,6 +280,14 @@ export const packingApi = {
   },
   boxByNumber: async (boxNumber) => {
     const { data } = await apiClient.get(ENDPOINTS.packing.boxByNumber(boxNumber));
+    return data;
+  },
+  updateBox: async (sessionId, payload) => {
+    const { data } = await apiClient.put(ENDPOINTS.packing.updateBox(sessionId), payload);
+    return data;
+  },
+  deleteBox: async (sessionId) => {
+    const { data } = await apiClient.delete(ENDPOINTS.packing.deleteBox(sessionId));
     return data;
   },
 };

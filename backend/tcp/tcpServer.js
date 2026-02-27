@@ -7,7 +7,9 @@ const ProductionLog = require("../models/ProductionLog");
 const { saveScan } = require("../services/scanService");
 const { executePlcHandshake } = require("../services/plcSocketService");
 const { emitRealtime } = require("../services/realtimeService");
+const { markScannerHeartbeat } = require("../services/scannerHealthService");
 const { packPart, createSessionIfMissing } = require("../services/packingService");
+const { tryAcquireMachineLock, clearMachineLock } = require("../services/machineLockService");
 
 const tcpPort = Number(process.env.TCP_PORT || 5000);
 
@@ -73,10 +75,7 @@ function mapScanDecisionToPopupType(scanResult) {
   if (scanResult.decision === "ALLOW") {
     return "INFO";
   }
-  if (scanResult.reason === "SCAN_RESULT_NG") {
-    return "ERROR";
-  }
-  return "WARNING";
+  return "ERROR";
 }
 
 async function getActiveStationSequence() {
@@ -164,11 +163,11 @@ async function markEndNg({ operationLogId, partId, stationNo, machineId, reason 
   });
 }
 
-async function markInterlock({ operationLogId, partId, stationNo, machineId, reason }) {
+async function markCommunicationError({ operationLogId, partId, stationNo, reason }) {
   const opLog = await OperationLog.findByPk(operationLogId);
   if (opLog) {
     await opLog.update({
-      plc_status: "INTERLOCKED",
+      plc_status: "PLC_COMM_ERROR",
       interlock_reason: reason || "PLC_COMMUNICATION_FAILED",
       plc_end_time: new Date(),
       plc_end_at: new Date(),
@@ -177,99 +176,122 @@ async function markInterlock({ operationLogId, partId, stationNo, machineId, rea
 
   const part = await Part.findOne({ where: { part_id: partId } });
   if (part) {
-    part.current_station = normalizeStation(stationNo);
     part.current_operation = normalizeStation(stationNo);
-    part.status = "INTERLOCKED";
-    part.is_interlocked = true;
+    part.status = part.is_rework ? "REWORK" : "IN_PROGRESS";
+    part.is_interlocked = false;
     part.interlock_reason = reason || "PLC_COMMUNICATION_FAILED";
     await part.save();
   }
+}
 
-  await ProductionLog.create({
-    part_id: partId,
-    machine_id: machineId,
-    status: "NG",
-    ng_reason: reason || "PLC_COMMUNICATION_FAILED",
-  });
+async function rollbackPendingOperation({ partId, operationLogId }) {
+  if (operationLogId) {
+    await OperationLog.destroy({ where: { id: operationLogId } });
+  }
+
+  const part = await Part.findOne({ where: { part_id: partId } });
+  if (!part) {
+    return;
+  }
+
+  part.current_operation = normalizeStation(part.current_station || null);
+  if (!part.current_operation) {
+    part.current_operation = null;
+  }
+  await part.save();
 }
 
 async function startPlcFlow({ operationLogId, partId, stationNo, machine }) {
   const plcIp = machine.plc_ip || machine.machine_ip;
   const plcPort = machine.plc_port || machine.machine_port;
 
-  await executePlcHandshake({
-    ip: plcIp,
-    port: plcPort,
-    partId,
-    stationNo,
-    machineId: machine.id,
-    machine,
-    onAckStart: async () => {
-      await markStart(operationLogId, machine.id);
-      emitRealtime("operator_popup", {
-        type: "INFO",
-        partId,
-        stationNo,
-        machineId: machine.id,
-        machineName: machine.machine_name,
-        status: "STARTED",
-        message: "PLC start acknowledged",
-      });
-    },
-    onAckEndOk: async () => {
-      await markEndOk({ operationLogId, partId, stationNo, machineId: machine.id });
-      emitRealtime("operator_popup", {
-        type: "SUCCESS",
-        partId,
-        stationNo,
-        machineId: machine.id,
-        machineName: machine.machine_name,
-        status: "ENDED_OK",
-        message: "Operation Passed",
-      });
-      emitRealtime("dashboard_refresh", { reason: "PLC_END_OK" });
-    },
-    onAckEndNg: async () => {
-      await markEndNg({ operationLogId, partId, stationNo, machineId: machine.id, reason: "PLC_END_NG" });
-      emitRealtime("operator_popup", {
-        type: "ERROR",
-        partId,
-        stationNo,
-        machineId: machine.id,
-        machineName: machine.machine_name,
-        status: "ENDED_NG",
-        message: "Operation Failed (NG)",
-      });
-      emitRealtime("dashboard_refresh", { reason: "PLC_END_NG" });
-    },
-    onFailure: async (error) => {
-      await markInterlock({
-        operationLogId,
-        partId,
-        stationNo,
-        machineId: machine.id,
-        reason: `PLC_TIMEOUT_${String(error.message || "").slice(0, 120)}`,
-      });
-      emitRealtime("operator_popup", {
-        type: "WARNING",
-        partId,
-        stationNo,
-        machineId: machine.id,
-        machineName: machine.machine_name,
-        status: "INTERLOCKED",
-        message: "PLC timeout/interruption - part interlocked",
-      });
-      emitRealtime("dashboard_refresh", { reason: "PLC_FAILURE" });
-    },
-  });
+  try {
+    await executePlcHandshake({
+      ip: plcIp,
+      port: plcPort,
+      partId,
+      stationNo,
+      machineId: machine.id,
+      machine,
+      onAckStart: async () => {
+        await markStart(operationLogId, machine.id);
+        emitRealtime("operator_popup", {
+          type: "INFO",
+          partId,
+          stationNo,
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          status: "STARTED",
+          plcStatus: "STARTED",
+          qrResult: "PASS",
+          message: "PLC start acknowledged",
+        });
+      },
+      onAckEndOk: async () => {
+        await markEndOk({ operationLogId, partId, stationNo, machineId: machine.id });
+        emitRealtime("operator_popup", {
+          type: "SUCCESS",
+          partId,
+          stationNo,
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          status: "ENDED_OK",
+          plcStatus: "ENDED_OK",
+          qrResult: "PASS",
+          message: "Operation Passed",
+        });
+        emitRealtime("dashboard_refresh", { reason: "PLC_END_OK" });
+      },
+      onAckEndNg: async () => {
+        await markEndNg({ operationLogId, partId, stationNo, machineId: machine.id, reason: "PLC_END_NG" });
+        emitRealtime("operator_popup", {
+          type: "ERROR",
+          partId,
+          stationNo,
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          status: "ENDED_NG",
+          plcStatus: "ENDED_NG",
+          qrResult: "PASS",
+          message: "Operation Failed (NG)",
+        });
+        emitRealtime("dashboard_refresh", { reason: "PLC_END_NG" });
+      },
+      onFailure: async (error) => {
+        await markCommunicationError({
+          operationLogId,
+          partId,
+          stationNo,
+          reason: `PLC_TIMEOUT_${String(error.message || "").slice(0, 120)}`,
+        });
+        emitRealtime("operator_popup", {
+          type: "WARNING",
+          partId,
+          stationNo,
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          status: "PLC_COMM_ERROR",
+          plcStatus: "PLC_COMM_ERROR",
+          qrResult: "PASS",
+          message: "PLC communication issue. Use Reset Operation, then scan again.",
+        });
+        emitRealtime("dashboard_refresh", { reason: "PLC_COMM_ERROR" });
+      },
+    });
+  } finally {
+    await clearMachineLock(machine.id);
+  }
 }
 
 const server = net.createServer((socket) => {
   const scannerIp = normalizeIp(socket.remoteAddress);
   console.log("Scanner Connected:", scannerIp);
+  markScannerHeartbeat({ scannerIp });
 
   socket.on("data", async (buffer) => {
     try {
+      markScannerHeartbeat({ scannerIp });
+
       const rawMessage = String(buffer.toString() || "").trim();
       if (!rawMessage) {
         socket.write("BLOCK\n");
@@ -346,8 +368,36 @@ const server = net.createServer((socket) => {
         return;
       }
 
+      markScannerHeartbeat({
+        scannerId: scanner.id,
+        scannerIp: scanner.scanner_ip || scannerIp,
+        scannerName: scanner.scanner_name,
+        machineId: machine.id,
+      });
+
       const stationNo = getMachineOperationStage(machine);
       const scanResult = await saveScan(partId, stationNo, "OK", machine.id);
+
+      if (scanResult.decision === "ALLOW" && scanResult.operationLogId) {
+        const lock = await tryAcquireMachineLock({
+          machineId: machine.id,
+          partId,
+          stationNo,
+        });
+        if (!lock.acquired) {
+          await rollbackPendingOperation({
+            partId,
+            operationLogId: scanResult.operationLogId,
+          });
+          scanResult.decision = "BLOCK";
+          scanResult.reason = "MACHINE_RUNNING";
+          scanResult.message = lock.runningPartId
+            ? `Machine busy. Current part ${lock.runningPartId} is in operation.`
+            : "Machine busy with another cycle. Retry after current operation completes.";
+          scanResult.operationLogId = null;
+          scanResult.currentStatus = "IN_PROGRESS";
+        }
+      }
       socket.write(`${scanResult.decision}\n`);
 
       emitRealtime("operator_popup", {
@@ -359,7 +409,12 @@ const server = net.createServer((socket) => {
         machineName: machine.machine_name,
         scannerName: scanner.scanner_name,
         scannerIp,
-        status: scanResult.decision === "ALLOW" ? "PENDING" : "INTERLOCKED",
+        status: scanResult.decision === "ALLOW" ? "PENDING" : "WAIT",
+        plcStatus: scanResult.decision === "ALLOW" ? "PENDING" : "WAIT",
+        qrResult: scanResult.decision === "ALLOW" || scanResult.reason === "MACHINE_RUNNING" ? "PASS" : "FAIL",
+        reason: scanResult.reason || null,
+        expectedStation: scanResult.expectedStation || null,
+        qrReason: scanResult.reason || null,
         timestamp: new Date().toISOString(),
       });
 

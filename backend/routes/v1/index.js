@@ -7,6 +7,8 @@ const dashboardRoutes = require("./dashboardRoutes");
 const qrFormatRoutes = require("./qrFormatRoutes");
 const packingRoutes = require("./packingRoutes");
 const shiftRoutes = require("./shiftRoutes");
+const stationSettingsRoutes = require("./stationSettingsRoutes");
+const plcConfigRoutes = require("./plcConfigRoutes");
 
 const router = express.Router();
 
@@ -16,6 +18,8 @@ router.use("/users", userRoutes);
 router.use("/qr-format-rules", qrFormatRoutes);
 router.use("/packing", packingRoutes);
 router.use("/shifts", shiftRoutes);
+router.use("/station-settings", stationSettingsRoutes);
+router.use("/plc-config", plcConfigRoutes);
 router.use(traceabilityRoutes);
 router.use(dashboardRoutes);
 

@@ -69,8 +69,8 @@ const CreateUser = () => {
 
           <div className="space-y-2">
             <label className="text-xs font-bold uppercase tracking-widest text-slate-500 ml-1">System Privilege</label>
-            <div className="grid grid-cols-2 gap-4">
-              {["Operator", "Admin"].map((role) => (
+            <div className="grid grid-cols-3 gap-4">
+              {["Operator", "Engineer", "Admin"].map((role) => (
                 <button
                   key={role}
                   type="button"

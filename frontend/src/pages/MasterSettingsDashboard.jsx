@@ -13,12 +13,11 @@ import {
   Settings2,
   ShieldCheck,
 } from "lucide-react";
-import { dashboardApi, machineApi } from "../api/services";
+import { dashboardApi, machineApi, stationSettingsApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
 import { formatMachineLabel, getMachineStage } from "../utils/machineFields";
 import {
   DEFAULT_STATION_FEATURES,
-  getStationFeatureCoverage,
   getStationFeatureSettings,
   mergeStationFeatureSettings,
   normalizeStationKey,
@@ -49,6 +48,19 @@ const TABS = [
   { id: "master", label: "Master Dashboard", icon: LayoutPanelTop },
   { id: "stations", label: "Station Controls", icon: Settings2 },
   { id: "reports", label: "Report Dashboard", icon: FileText },
+];
+
+const ACCESS_MATRIX = [
+  { module: "Master Settings", admin: "View/Edit", engineer: "View", supervisor: "View", operator: "Hidden" },
+  { module: "Machines", admin: "View/Edit", engineer: "View/Edit", supervisor: "View", operator: "Hidden" },
+  { module: "PLC Config", admin: "View/Edit", engineer: "View/Edit", supervisor: "View", operator: "Hidden" },
+  { module: "Scanners", admin: "View/Edit", engineer: "View/Edit", supervisor: "View", operator: "Hidden" },
+  { module: "QR Rules", admin: "View/Edit", engineer: "View/Edit", supervisor: "View", operator: "Hidden" },
+  { module: "Shifts", admin: "View/Edit", engineer: "View", supervisor: "View", operator: "Hidden" },
+  { module: "Users", admin: "View/Edit", engineer: "Hidden", supervisor: "Hidden", operator: "Hidden" },
+  { module: "Operator View", admin: "View", engineer: "View", supervisor: "View", operator: "View" },
+  { module: "I/O Monitor", admin: "View/Control", engineer: "View/Control", supervisor: "View", operator: "View" },
+  { module: "Packing", admin: "View", engineer: "View", supervisor: "View", operator: "View" },
 ];
 
 function getTodayRange() {
@@ -140,11 +152,6 @@ const MasterSettingsDashboard = () => {
     [stationKeys, stationSettings]
   );
 
-  const coverage = useMemo(
-    () => getStationFeatureCoverage(normalizedSettings, stationKeys),
-    [normalizedSettings, stationKeys]
-  );
-
   const machineById = useMemo(
     () =>
       machines.reduce((acc, machine) => {
@@ -173,19 +180,23 @@ const MasterSettingsDashboard = () => {
 
       try {
         const query = getTodayRange();
-        const [machineRows, summaryRows, reportRows] = await Promise.all([
+        const [machineRows, summaryRows, reportRows, remoteSettings] = await Promise.all([
           machineApi.list(),
           dashboardApi.summary(query),
           dashboardApi.report(query),
+          stationSettingsApi.list().catch(() => null),
         ]);
 
         setMachines(machineRows || []);
         setSummary(summaryRows || EMPTY_SUMMARY);
         setReport(reportRows || EMPTY_REPORT);
         setStationSettings((prev) => {
+          const localFallback = Object.keys(prev).length > 0 ? prev : getStationFeatureSettings();
+          const sourceSettings =
+            remoteSettings && Object.keys(remoteSettings).length > 0 ? remoteSettings : localFallback;
           const merged = mergeStationFeatureSettings(
             (machineRows || []).map((machine) => getMachineStage(machine)),
-            Object.keys(prev).length > 0 ? prev : getStationFeatureSettings()
+            sourceSettings
           );
           saveStationFeatureSettings(merged);
           return merged;
@@ -249,14 +260,23 @@ const MasterSettingsDashboard = () => {
     };
   }, [scheduleRealtimeRefresh]);
 
-  const saveCurrentSettings = () => {
-    saveStationFeatureSettings(normalizedSettings);
-    localStorage.setItem(LOCAL_STORAGE_BOX_CAPACITY_KEY, String(defaultBoxCapacity));
-    setPopup({
-      type: "SUCCESS",
-      title: "Configuration Saved",
-      message: "Master settings and station controls have been saved.",
-    });
+  const saveCurrentSettings = async () => {
+    try {
+      await stationSettingsApi.save(normalizedSettings);
+      saveStationFeatureSettings(normalizedSettings);
+      localStorage.setItem(LOCAL_STORAGE_BOX_CAPACITY_KEY, String(defaultBoxCapacity));
+      setPopup({
+        type: "SUCCESS",
+        title: "Configuration Saved",
+        message: "Master settings and station controls have been saved.",
+      });
+    } catch (error) {
+      setPopup({
+        type: "ERROR",
+        title: "Save Failed",
+        message: error.response?.data?.error || "Unable to save settings to server",
+      });
+    }
   };
 
   const updateStationToggle = (stationNo, key, value) => {
@@ -510,6 +530,37 @@ const MasterSettingsDashboard = () => {
           </div>
 
           <div className="industrial-card p-5">
+            <h2 className="font-bold text-text-main mb-3">Role Access Matrix</h2>
+            <p className="text-sm text-text-muted mb-3">
+              Reference matrix for production deployment. Final enforcement stays on backend API permissions.
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[860px] text-sm">
+                <thead className="bg-bg-dark/70 text-text-muted text-xs uppercase tracking-wide">
+                  <tr>
+                    <th className="px-4 py-3 text-left">Module</th>
+                    <th className="px-4 py-3 text-left">Admin</th>
+                    <th className="px-4 py-3 text-left">Engineer</th>
+                    <th className="px-4 py-3 text-left">Supervisor</th>
+                    <th className="px-4 py-3 text-left">Operator</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ACCESS_MATRIX.map((row) => (
+                    <tr key={row.module} className="border-t border-border/60">
+                      <td className="px-4 py-3 font-semibold text-text-main">{row.module}</td>
+                      <td className="px-4 py-3 text-text-main">{row.admin}</td>
+                      <td className="px-4 py-3 text-text-main">{row.engineer}</td>
+                      <td className="px-4 py-3 text-text-main">{row.supervisor}</td>
+                      <td className="px-4 py-3 text-text-main">{row.operator}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="industrial-card p-5">
             <h2 className="font-bold text-text-main mb-3">Recent Rejection Alerts</h2>
             <div className="space-y-2 max-h-[220px] overflow-y-auto">
               {incidents.slice(0, 10).map((row) => (
@@ -662,10 +713,6 @@ const MasterSettingsDashboard = () => {
                 <div className="rounded-lg border border-border bg-bg-dark/70 p-3">
                   <p className="text-xs text-text-muted uppercase">NG Parts</p>
                   <p className="text-xl font-bold text-danger">{summary.parts.ng || 0}</p>
-                </div>
-                <div className="rounded-lg border border-border bg-bg-dark/70 p-3">
-                  <p className="text-xs text-text-muted uppercase">Rework</p>
-                  <p className="text-xl font-bold text-warning">{summary.parts.rework || 0}</p>
                 </div>
               </div>
             </div>

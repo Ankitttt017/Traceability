@@ -13,6 +13,8 @@ import Scanners from "./pages/Scanners";
 import Packing from "./pages/Packing";
 import Shifts from "./pages/Shifts";
 import MasterSettingsDashboard from "./pages/MasterSettingsDashboard";
+import PlcConfiguration from "./pages/PlcConfiguration";
+import IoMonitor from "./pages/IoMonitor";
 import { isAuthenticated } from "./utils/authStorage";
 import { APP_ROUTES } from "./constants/routes";
 
@@ -51,6 +53,8 @@ function App() {
           <Route path={APP_ROUTES.production.slice(1)} element={<ProductionCharts />} />
           <Route path={APP_ROUTES.traceability.slice(1)} element={<Traceability />} />
           <Route path={APP_ROUTES.machines.slice(1)} element={<Machine />} />
+          <Route path={APP_ROUTES.plcConfig.slice(1)} element={<PlcConfiguration />} />
+          <Route path={APP_ROUTES.ioMonitor.slice(1)} element={<IoMonitor />} />
           <Route path={APP_ROUTES.users.slice(1)} element={<UsersPage />} />
           <Route path={APP_ROUTES.scanners.slice(1)} element={<Scanners />} />
           <Route path={APP_ROUTES.shifts.slice(1)} element={<Shifts />} />

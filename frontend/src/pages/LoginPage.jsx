@@ -21,7 +21,17 @@ const LoginPage = () => {
     () => localStorage.getItem("rememberedUser") || ""
   );
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(() => {
+    if (typeof window === "undefined") {
+      return "";
+    }
+    const reason = localStorage.getItem("auth_error_reason");
+    if (reason === "SESSION_EXPIRED") {
+      localStorage.removeItem("auth_error_reason");
+      return "Session expired. Please login again.";
+    }
+    return "";
+  });
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(

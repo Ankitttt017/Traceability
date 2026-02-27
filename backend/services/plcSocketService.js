@@ -5,7 +5,20 @@ const DEFAULT_CONNECT_TIMEOUT_MS = Number(process.env.PLC_CONNECT_TIMEOUT_MS || 
 const DEFAULT_START_ACK_TIMEOUT_MS = Number(process.env.PLC_START_ACK_TIMEOUT_MS || 3000);
 const DEFAULT_END_ACK_TIMEOUT_MS = Number(process.env.PLC_END_ACK_TIMEOUT_MS || 120000);
 const DEFAULT_RETRIES = Number(process.env.PLC_RETRY_COUNT || 3);
+const DEFAULT_TEST_TIMEOUT_MS = Number(process.env.PLC_TEST_TIMEOUT_MS || DEFAULT_CONNECT_TIMEOUT_MS);
+const DEFAULT_TEST_RETRY_COUNT = Math.max(Number(process.env.PLC_TEST_RETRY_COUNT || 2), 1);
 const DEFAULT_MODBUS_POLL_INTERVAL_MS = Number(process.env.PLC_MODBUS_POLL_INTERVAL_MS || 150);
+const DEFAULT_CIRCUIT_FAILURE_THRESHOLD = Math.max(Number(process.env.PLC_CIRCUIT_FAILURE_THRESHOLD || 5), 1);
+const DEFAULT_CIRCUIT_OPEN_MS = Math.max(Number(process.env.PLC_CIRCUIT_OPEN_MS || 30000), 1000);
+const circuitStateMap = new Map();
+
+function toBoundedInt(value, fallback, min = 1, max = 120000) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(Math.max(Math.round(parsed), min), max);
+}
 
 function normalizeMessage(raw) {
   return String(raw || "").trim().replace(/\r/g, "");
@@ -22,6 +35,84 @@ function normalizeProtocol(value) {
   return protocol === "MODBUS_TCP" ? "MODBUS_TCP" : "TCP_TEXT";
 }
 
+function getCircuitKey(machineId, ip, port) {
+  if (machineId) {
+    return `machine:${machineId}`;
+  }
+  return `endpoint:${ip}:${port}`;
+}
+
+function getCircuitState(key) {
+  const existing = circuitStateMap.get(key);
+  if (existing) {
+    return existing;
+  }
+  const initial = {
+    consecutiveFailures: 0,
+    openUntil: 0,
+    lastError: null,
+    lastFailureAt: null,
+    lastSuccessAt: null,
+  };
+  circuitStateMap.set(key, initial);
+  return initial;
+}
+
+function isCircuitOpen(state) {
+  return Number(state.openUntil || 0) > Date.now();
+}
+
+function recordCircuitSuccess({ key, machineId, partId, stationNo, protocol }) {
+  const state = getCircuitState(key);
+  const hadFailures = state.consecutiveFailures > 0 || state.openUntil > 0;
+  state.consecutiveFailures = 0;
+  state.openUntil = 0;
+  state.lastSuccessAt = new Date().toISOString();
+  state.lastError = null;
+  if (hadFailures) {
+    emitRealtime("plc_circuit_event", {
+      machineId: machineId || null,
+      partId: partId || null,
+      stationNo: stationNo || null,
+      protocol,
+      key,
+      state: "CLOSED",
+      checkedAt: state.lastSuccessAt,
+    });
+  }
+}
+
+function recordCircuitFailure({ key, machineId, partId, stationNo, protocol, error }) {
+  const state = getCircuitState(key);
+  state.consecutiveFailures += 1;
+  state.lastError = String(error?.message || "Unknown PLC failure");
+  state.lastFailureAt = new Date().toISOString();
+
+  if (state.consecutiveFailures >= DEFAULT_CIRCUIT_FAILURE_THRESHOLD) {
+    state.openUntil = Date.now() + DEFAULT_CIRCUIT_OPEN_MS;
+    emitRealtime("plc_circuit_event", {
+      machineId: machineId || null,
+      partId: partId || null,
+      stationNo: stationNo || null,
+      protocol,
+      key,
+      state: "OPEN",
+      openUntil: new Date(state.openUntil).toISOString(),
+      consecutiveFailures: state.consecutiveFailures,
+      lastError: state.lastError,
+      checkedAt: state.lastFailureAt,
+    });
+  }
+}
+
+function getPlcCircuitSnapshot() {
+  return Array.from(circuitStateMap.entries()).map(([key, value]) => ({
+    key,
+    ...value,
+    isOpen: isCircuitOpen(value),
+  }));
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -35,7 +126,7 @@ function withTimeout(promise, timeoutMs, message) {
   ]);
 }
 
-function createSocketClient({ ip, port }) {
+function createSocketClient({ ip, port, timeoutMs = DEFAULT_CONNECT_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
     const socket = new net.Socket();
     let settled = false;
@@ -48,7 +139,7 @@ function createSocketClient({ ip, port }) {
       fn(value);
     };
 
-    socket.setTimeout(DEFAULT_CONNECT_TIMEOUT_MS);
+    socket.setTimeout(timeoutMs);
     socket.once("error", done((error) => reject(error)));
     socket.once("timeout", done(() => reject(new Error("PLC connect timeout"))));
     socket.connect(
@@ -249,9 +340,9 @@ async function runModbusHandshakeOnce({ ip, port, partId, stationNo, machine }) 
     ? null
     : Number(machine.plc_reset_register);
   const startValue = Number(machine?.plc_start_value ?? 1);
-  const startedValue = Number(machine?.plc_started_value ?? 1);
-  const endOkValue = Number(machine?.plc_end_ok_value ?? 2);
-  const endNgValue = Number(machine?.plc_end_ng_value ?? 3);
+  const startedValue = Number(machine?.plc_started_value ?? 2);
+  const endOkValue = Number(machine?.plc_end_ok_value ?? 3);
+  const endNgValue = Number(machine?.plc_end_ng_value ?? 4);
 
   if (!Number.isFinite(startRegister) || !Number.isFinite(statusRegister)) {
     throw new Error("MODBUS registers missing (plc_start_register/plc_status_register)");
@@ -291,6 +382,7 @@ async function runModbusHandshakeOnce({ ip, port, partId, stationNo, machine }) 
     throw new Error(`PLC Modbus status timeout (${acceptedValues.join(",")})`);
   };
 
+  let startCommandActive = false;
   try {
     if (partRegister !== null) {
       await writeRegister(partRegister, hashToRegisterValue(partId));
@@ -300,6 +392,7 @@ async function runModbusHandshakeOnce({ ip, port, partId, stationNo, machine }) 
     }
 
     await writeRegister(startRegister, startValue);
+    startCommandActive = true;
 
     let firstStatus = await waitForStatus([startedValue, endOkValue, endNgValue], DEFAULT_START_ACK_TIMEOUT_MS);
     const startAck = { type: "ACK_START", partId, protocol: "MODBUS_TCP", value: firstStatus };
@@ -308,6 +401,10 @@ async function runModbusHandshakeOnce({ ip, port, partId, stationNo, machine }) 
     if (firstStatus !== endOkValue && firstStatus !== endNgValue) {
       finalStatus = await waitForStatus([endOkValue, endNgValue], DEFAULT_END_ACK_TIMEOUT_MS);
     }
+
+    // Mandatory reset after each cycle to prevent START latch/stuck next cycle.
+    await writeRegister(startRegister, 0);
+    startCommandActive = false;
 
     if (resetRegister !== null) {
       await writeRegister(resetRegister, 0);
@@ -327,6 +424,13 @@ async function runModbusHandshakeOnce({ ip, port, partId, stationNo, machine }) 
       protocol: "MODBUS_TCP",
     };
   } finally {
+    if (startCommandActive) {
+      try {
+        await writeRegister(startRegister, 0);
+      } catch (_error) {
+        // noop
+      }
+    }
     try {
       socket.destroy();
     } catch (_e) {
@@ -340,6 +444,185 @@ async function runHandshakeOnceByProtocol({ protocol, ip, port, partId, stationN
     return runModbusHandshakeOnce({ ip, port, partId, stationNo, machine });
   }
   return runTextHandshakeOnce({ ip, port, partId, stationNo });
+}
+
+async function runTextResetOnce({ ip, port, stationNo }) {
+  const socket = await createSocketClient({ ip, port });
+  try {
+    const station = String(stationNo || "").trim();
+    const command = station ? `RESET_OPERATION|${station}\n` : "RESET_OPERATION\n";
+    socket.write(command);
+    return {
+      protocol: "TCP_TEXT",
+      connected: true,
+      resetCommand: command.trim(),
+    };
+  } finally {
+    try {
+      socket.destroy();
+    } catch (_error) {
+      // noop
+    }
+  }
+}
+
+async function runModbusResetOnce({ ip, port, machine }) {
+  const unitId = Number(machine?.plc_unit_id || 1);
+  const resetRegister = Number(machine?.plc_reset_register);
+  const startRegister = Number(machine?.plc_start_register);
+  const resetValue = Number(machine?.plc_reset_value ?? 9);
+
+  if (!Number.isFinite(resetRegister)) {
+    throw new Error("MODBUS reset register is required for reset command");
+  }
+
+  const socket = await createSocketClient({ ip, port });
+  let transactionId = 0;
+  const nextTransactionId = () => {
+    transactionId += 1;
+    if (transactionId > 65535) {
+      transactionId = 1;
+    }
+    return transactionId;
+  };
+
+  const writeRegister = async (register, value) => {
+    const frame = buildWriteSingleRegisterFrame(nextTransactionId(), unitId, register, value);
+    const packet = await sendAndReceivePacket(socket, frame, DEFAULT_CONNECT_TIMEOUT_MS);
+    parseModbusWriteResponse(packet);
+  };
+
+  try {
+    await writeRegister(resetRegister, resetValue);
+    if (Number.isFinite(startRegister)) {
+      await writeRegister(startRegister, 0);
+    }
+
+    return {
+      protocol: "MODBUS_TCP",
+      connected: true,
+      resetRegister,
+      resetValue,
+      startRegister: Number.isFinite(startRegister) ? startRegister : null,
+      startValue: Number.isFinite(startRegister) ? 0 : null,
+    };
+  } finally {
+    try {
+      socket.destroy();
+    } catch (_error) {
+      // noop
+    }
+  }
+}
+
+async function runTextProbeOnce({ ip, port, timeoutMs }) {
+  const socket = await createSocketClient({ ip, port, timeoutMs });
+  try {
+    return {
+      protocol: "TCP_TEXT",
+      connected: true,
+    };
+  } finally {
+    try {
+      socket.destroy();
+    } catch (_error) {
+      // noop
+    }
+  }
+}
+
+async function runModbusProbeOnce({ ip, port, machine, timeoutMs }) {
+  const unitId = Number(machine?.plc_unit_id || 1);
+  const statusRegister = Number(machine?.plc_status_register);
+  if (!Number.isFinite(statusRegister)) {
+    throw new Error("MODBUS status register is required for probe");
+  }
+
+  const socket = await createSocketClient({ ip, port, timeoutMs });
+  let transactionId = 0;
+  const nextTransactionId = () => {
+    transactionId += 1;
+    if (transactionId > 65535) {
+      transactionId = 1;
+    }
+    return transactionId;
+  };
+
+  try {
+    const frame = buildReadHoldingFrame(nextTransactionId(), unitId, statusRegister, 1);
+    const packet = await sendAndReceivePacket(socket, frame, timeoutMs);
+    const statusValue = parseModbusReadResponse(packet);
+
+    return {
+      protocol: "MODBUS_TCP",
+      connected: true,
+      statusRegister,
+      statusValue,
+    };
+  } finally {
+    try {
+      socket.destroy();
+    } catch (_error) {
+      // noop
+    }
+  }
+}
+
+async function testPlcConnection({ ip, port, protocol = "TCP_TEXT", machine = {} }) {
+  if (!ip || !port) {
+    throw new Error("PLC IP and port are required");
+  }
+
+  const timeoutMs = toBoundedInt(
+    machine?.plc_test_timeout_ms ?? machine?.testTimeoutMs,
+    DEFAULT_TEST_TIMEOUT_MS,
+    300,
+    60000
+  );
+  const retryCount = toBoundedInt(
+    machine?.plc_test_retry_count ?? machine?.testRetryCount,
+    DEFAULT_TEST_RETRY_COUNT,
+    1,
+    10
+  );
+  const normalizedProtocol = normalizeProtocol(protocol || machine?.plc_protocol);
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= retryCount; attempt += 1) {
+    try {
+      const probe =
+        normalizedProtocol === "MODBUS_TCP"
+          ? await runModbusProbeOnce({ ip, port, machine, timeoutMs })
+          : await runTextProbeOnce({ ip, port, timeoutMs });
+
+      return {
+        ...probe,
+        attempt,
+        retryCount,
+        timeoutMs,
+      };
+    } catch (error) {
+      lastError = error;
+      if (attempt < retryCount) {
+        await sleep(Math.min(150 * attempt, 600));
+      }
+    }
+  }
+
+  throw new Error(`PLC test failed after ${retryCount} attempt(s): ${String(lastError?.message || "Unknown error")}`);
+}
+
+async function resetPlcState({ ip, port, protocol = "TCP_TEXT", machine = {}, stationNo = "" }) {
+  if (!ip || !port) {
+    throw new Error("PLC IP and port are required");
+  }
+
+  const normalizedProtocol = normalizeProtocol(protocol || machine?.plc_protocol);
+  if (normalizedProtocol === "MODBUS_TCP") {
+    return runModbusResetOnce({ ip, port, machine });
+  }
+
+  return runTextResetOnce({ ip, port, stationNo });
 }
 
 async function executePlcHandshake({
@@ -363,6 +646,29 @@ async function executePlcHandshake({
   }
 
   const protocol = normalizeProtocol(machine?.plc_protocol || process.env.PLC_PROTOCOL || "TCP_TEXT");
+  const circuitKey = getCircuitKey(machineId, ip, port);
+  const circuitState = getCircuitState(circuitKey);
+
+  if (isCircuitOpen(circuitState)) {
+    const error = new Error(`PLC circuit open until ${new Date(circuitState.openUntil).toISOString()}`);
+    emitRealtime("plc_connection_event", {
+      machineId,
+      partId,
+      stationNo,
+      protocol,
+      state: "CIRCUIT_OPEN",
+      error: error.message,
+    });
+    if (typeof onFailure === "function") {
+      await onFailure(error);
+    }
+    return {
+      ok: false,
+      protocol,
+      circuitOpen: true,
+      error: error.message,
+    };
+  }
 
   for (let attempt = 1; attempt <= DEFAULT_RETRIES; attempt += 1) {
     try {
@@ -406,6 +712,14 @@ async function executePlcHandshake({
         finalAck: result.endAck.type,
       });
 
+      recordCircuitSuccess({
+        key: circuitKey,
+        machineId,
+        partId,
+        stationNo,
+        protocol,
+      });
+
       return {
         ok: true,
         protocol,
@@ -424,6 +738,14 @@ async function executePlcHandshake({
       });
 
       if (attempt === DEFAULT_RETRIES) {
+        recordCircuitFailure({
+          key: circuitKey,
+          machineId,
+          partId,
+          stationNo,
+          protocol,
+          error,
+        });
         if (typeof onFailure === "function") {
           await onFailure(error);
         }
@@ -437,4 +759,7 @@ async function executePlcHandshake({
 
 module.exports = {
   executePlcHandshake,
+  getPlcCircuitSnapshot,
+  testPlcConnection,
+  resetPlcState,
 };
