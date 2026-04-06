@@ -132,6 +132,9 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
   const forcedNgReason = String(options?.ngReason || "SCAN_RESULT_NG")
     .trim()
     .toUpperCase();
+  const skipInterlockValidation = options?.skipInterlockValidation === true;
+  const skipDuplicateValidation = options?.skipDuplicateValidation === true;
+  const skipSequenceValidation = options?.skipSequenceValidation === true;
   const mId = Number(machineId) || 0;
 
   if (!normalizedPartId || !station) {
@@ -242,7 +245,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
   const isInterlockRecovery = (part.status === "INTERLOCKED" || part.is_interlocked) && 
                               (part.current_operation === station || part.current_station === station);
 
-  if ((part.is_interlocked || part.status === "INTERLOCKED") && !isInterlockRecovery) {
+  if (!skipInterlockValidation && (part.is_interlocked || part.status === "INTERLOCKED") && !isInterlockRecovery) {
     await saveAuditLog(normalizedPartId, mId, "NG", part.interlock_reason || "PART_INTERLOCKED", userId);
     emitRealtime("scan_event", {
       type: "WARNING",
@@ -268,7 +271,36 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
   
   const isRetryableCommFailure = String(existingAtStation?.plc_status || "") === "RESET";
 
-  if (existingAtStation && !part.is_rework && !isRetryableCommFailure && !isInterlockRecovery) {
+  if (
+    !skipDuplicateValidation &&
+    existingAtStation &&
+    String(existingAtStation.plc_status || "").toUpperCase() === "PLC_COMM_ERROR"
+  ) {
+    emitRealtime("scan_event", {
+      type: "WARNING",
+      code: "RESET_REQUIRED_AFTER_PLC_COMM_ERROR",
+      partId: normalizedPartId,
+      stationNo: station,
+      machineId: mId || null,
+      decision: "BLOCK",
+      reason: "RESET_REQUIRED_AFTER_PLC_COMM_ERROR",
+      message: `Previous PLC cycle timed out at ${station}. Use Reset Operation, then scan again.`,
+    });
+    return {
+      decision: "BLOCK",
+      reason: "RESET_REQUIRED_AFTER_PLC_COMM_ERROR",
+      message: `Previous PLC cycle timed out at ${station}. Use Reset Operation, then scan again.`,
+      currentStatus: part.status,
+    };
+  }
+
+  if (
+    !skipDuplicateValidation &&
+    existingAtStation &&
+    !part.is_rework &&
+    !isRetryableCommFailure &&
+    !isInterlockRecovery
+  ) {
     await saveAuditLog(normalizedPartId, mId, "NG", "DUPLICATE_SCAN", userId);
     emitRealtime("scan_event", {
       type: "WARNING",
@@ -317,7 +349,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
   }
 
   const expectedStation = getExpectedStation(part, sequence);
-  if (expectedStation && station !== expectedStation) {
+  if (!skipSequenceValidation && expectedStation && station !== expectedStation) {
     const errorDetail = {
       level: "ERROR",
       code: "SEQ_VIOLATION",

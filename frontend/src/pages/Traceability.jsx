@@ -29,7 +29,7 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
 function eventTypeClass(type) {
   if (type === "SUCCESS") return "text-emerald-400";
   if (type === "ERROR") return "text-red-400";
-  if (type === "WARNING") return "text-amber-400";
+  if (type === "WARNING") return "text-primary";
   return "text-primary";
 }
 
@@ -137,7 +137,7 @@ const Traceability = () => {
                 { label: "Identity Hash", val: partSummary.part_id, icon: Fingerprint, color: "text-primary" },
                 { label: "Ledger State", val: partSummary.status || "IDLE", icon: ShieldCheck, color: partSummary.status === 'OK' ? 'text-emerald-400' : 'text-red-400' },
                 { label: "Node Position", val: partSummary.current_station || "NOT STARTED", icon: Workflow, color: "text-text-main" },
-                { label: "Signal Bypass", val: partSummary.interlock_reason || "NOMINAL", icon: Zap, color: partSummary.interlock_reason ? 'text-amber-400' : 'text-emerald-400 opacity-40' }
+                { label: "Signal Bypass", val: partSummary.interlock_reason || "NOMINAL", icon: Zap, color: partSummary.interlock_reason ? 'text-primary' : 'text-emerald-400 opacity-40' }
               ].map((k, i) => (
                 <div key={i} className="industrial-card p-5 group hover:border-primary/40 transition-all relative overflow-hidden">
                   <div className="absolute right-0 top-0 p-3 opacity-5 group-hover:opacity-10 transition-opacity"><k.icon size={24} /></div>
@@ -198,7 +198,7 @@ const Traceability = () => {
                             <p className="text-[9px] font-black uppercase tracking-widest mb-2 opacity-60">Interlock Status</p>
                             <div className="flex items-center gap-2">
                               {row.interlock_reason ? (
-                                <p className="text-xs font-black text-amber-400 truncate uppercase">{row.interlock_reason}</p>
+                                <p className="text-xs font-black text-primary truncate uppercase">{row.interlock_reason}</p>
                               ) : (
                                 <div className="flex items-center gap-2 text-emerald-400">
                                   <ShieldCheck size={14} />
@@ -224,7 +224,7 @@ const Traceability = () => {
           {reworkRows.length > 0 && (
             <div className="industrial-card p-6 border-l-8 border-l-amber-500 bg-amber-500/5 ring-1 ring-amber-500/20 animate-pulse-slow">
               <div className="flex items-center gap-4 mb-6">
-                <div className="w-12 h-12 rounded-xl bg-amber-500/20 flex items-center justify-center text-amber-400 shadow-lg shadow-amber-500/10">
+                <div className="w-12 h-12 rounded-xl bg-amber-500/20 flex items-center justify-center text-primary shadow-lg shadow-amber-500/10">
                   <History size={24} />
                 </div>
                 <div>
@@ -236,11 +236,11 @@ const Traceability = () => {
                 {reworkRows.map((row) => (
                   <div key={row.id} className="bg-bg-dark border border-amber-500/20 p-4 rounded-2xl group hover:border-amber-500/40 transition-all">
                     <div className="flex items-center gap-2 mb-3">
-                      <span className="text-[9px] font-black bg-amber-500/10 text-amber-400 px-2 py-1 rounded uppercase">{row.from_station}</span>
+                      <span className="text-[9px] font-black bg-amber-500/10 text-primary px-2 py-1 rounded uppercase">{row.from_station}</span>
                       <ChevronRight size={12} className="text-amber-500/40" />
                       <span className="text-[9px] font-black bg-emerald-500/10 text-emerald-400 px-2 py-1 rounded uppercase">{row.to_station}</span>
                     </div>
-                    <p className="text-sm font-black text-text-main group-hover:text-amber-400 transition-colors uppercase leading-tight mb-2">{row.reason || "Manual Intervention Override"}</p>
+                    <p className="text-sm font-black text-text-main group-hover:text-primary transition-colors uppercase leading-tight mb-2">{row.reason || "Manual Intervention Override"}</p>
                     <p className="text-[9px] font-black text-text-muted opacity-60 uppercase">{new Date(row.createdAt).toLocaleString()}</p>
                   </div>
                 ))}
@@ -291,7 +291,7 @@ const Traceability = () => {
                 <div key={event.id} className="p-4 rounded-2xl bg-bg-card/40 border-l-4 border-border hover:bg-bg-dark/40 transition-all">
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
-                      <div className={`w-2 h-2 rounded-full ${event.type === 'SUCCESS' ? 'bg-emerald-400 shadow-[0_0_8px_#10b981]' : (event.type === 'ERROR' ? 'bg-red-400 shadow-[0_0_8px_#ef4444]' : 'bg-amber-400 shadow-[0_0_8px_#f59e0b]')}`} />
+                      <div className={`w-2 h-2 rounded-full ${event.type === 'SUCCESS' ? 'bg-emerald-400 shadow-[0_0_8px_#10b981]' : (event.type === 'ERROR' ? 'bg-red-400 shadow-[0_0_8px_#ef4444]' : 'bg-primary shadow-[0_0_8px_#f59e0b]')}`} />
                       <span className={`text-[10px] font-black uppercase tracking-widest ${eventTypeClass(event.type)}`}>{event.type}</span>
                     </div>
                     <span className="text-[8px] text-text-muted font-mono bg-bg-dark px-1.5 py-0.5 rounded border border-border">{new Date(event.timestamp).toLocaleTimeString()}</span>
@@ -316,3 +316,6 @@ const Traceability = () => {
 };
 
 export default Traceability;
+
+
+

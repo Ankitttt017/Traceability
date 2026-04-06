@@ -8,7 +8,7 @@ const ReworkLog = require("../models/ReworkLog");
 const Shift = require("../models/Shift");
 const { saveScan } = require("../services/scanService");
 const { executePlcHandshake, getPlcCircuitSnapshot } = require("../services/plcCommunicationService");
-const { readModbusRegisters, probeTcpEndpoint } = require("../services/plcIoService");
+const { readModbusRegisters, readSlmpRegisters, probeTcpEndpoint } = require("../services/plcIoService");
 const { getPlcHealthSnapshot } = require("../services/plcHealthService");
 const { getScannerHealthSnapshot } = require("../services/scannerHealthService");
 const { getScannerConnectionSnapshot } = require("../services/scannerConnectionService");
@@ -19,7 +19,19 @@ const {
   isPlcConfirmationEnabled,
   normalizePlcPartCount,
 } = require("../services/stationFeatureService");
+const {
+  setMachineBypass,
+  getMachineBypass,
+  isMachineBypassEnabled,
+} = require("../services/machineBypassService");
 const { normalizeIp, sameIp } = require("../utils/networkAddress");
+
+const IO_SNAPSHOT_MIN_INTERVAL_MS = Math.max(Number(process.env.IO_SNAPSHOT_MIN_INTERVAL_MS || 2500), 1000);
+const IO_SNAPSHOT_CACHE_MAX_AGE_MS = Math.max(
+  Number(process.env.IO_SNAPSHOT_CACHE_MAX_AGE_MS || IO_SNAPSHOT_MIN_INTERVAL_MS * 2),
+  IO_SNAPSHOT_MIN_INTERVAL_MS
+);
+const ioSnapshotCache = new Map();
 
 function normalizeStation(value) {
   return String(value || "")
@@ -29,6 +41,10 @@ function normalizeStation(value) {
 
 function getMachineOperationStage(machine) {
   return normalizeStation(machine?.operation_no);
+}
+
+function getIoSnapshotCacheKey(machineId, plcIp) {
+  return `${Number(machineId) || 0}:${normalizeIp(plcIp || "")}`;
 }
 
 function uniqueStages(stages) {
@@ -127,7 +143,7 @@ function evaluateSignalState(signalKey, value, machine, latestPlcStatus) {
     if (value === 0) {
       return { status: "WAIT", tone: "idle" };
     }
-    return { status: "UNKNOWN", tone: "warn" };
+    return { status: `RAW_${value}`, tone: "warn" };
   }
 
   if (signalKey === "COMPLETE") {
@@ -143,7 +159,7 @@ function evaluateSignalState(signalKey, value, machine, latestPlcStatus) {
     if (value === 0) {
       return { status: "WAIT", tone: "idle" };
     }
-    return { status: "UNKNOWN", tone: "warn" };
+    return { status: `RAW_${value}`, tone: "warn" };
   }
 
   if (signalKey === "RESET") {
@@ -156,7 +172,7 @@ function evaluateSignalState(signalKey, value, machine, latestPlcStatus) {
     return { status: "ACTIVE", tone: "warn" };
   }
 
-  return { status: "UNKNOWN", tone: "warn" };
+  return { status: `RAW_${value}`, tone: "warn" };
 }
 
 function normalizeSignalDirection(value, fallback = "PLC -> PC") {
@@ -193,11 +209,11 @@ function getDefaultIoSignals(machine) {
     },
     {
       key: "COMPLETE",
-      label: "COMPLETE",
+      label: "STATION_HASH",
       register: toIntegerOrNull(machine?.plc_station_register),
-      direction: "PLC -> PC",
-      writable: false,
-      description: "Completion/confirmation signal read by software",
+      direction: "PC -> PLC",
+      writable: true,
+      description: "Optional station/hash payload written by software",
     },
     {
       key: "RESET",
@@ -251,13 +267,26 @@ function parseMachineSignalMap(machine) {
       key,
       label: String(row?.label || key).trim() || key,
       register: toIntegerOrNull(row?.register ?? row?.registerNo ?? row?.address),
+      device: String(row?.device || "").trim().toUpperCase() || null,
       direction,
       writable: row?.writable === undefined ? direction !== "PLC -> PC" : Boolean(row.writable),
       description: String(row?.description || "").trim() || "Configured signal mapping",
     });
   }
 
-  return normalized.length > 0 ? normalized : getDefaultIoSignals(machine);
+  if (normalized.length === 0) {
+    return getDefaultIoSignals(machine);
+  }
+
+  // Ensure core handshake signals always exist even if custom map omitted them.
+  const defaults = getDefaultIoSignals(machine);
+  for (const def of defaults) {
+    if (!seen.has(def.key)) {
+      normalized.push(def);
+    }
+  }
+
+  return normalized;
 }
 
 function buildIoSignalRows(machine, registerValues, latestPlcStatus) {
@@ -275,6 +304,7 @@ function buildIoSignalRows(machine, registerValues, latestPlcStatus) {
       signalKey: entry.key,
       signal: entry.label,
       register: entry.register,
+      device: entry.device || null,
       direction: entry.direction,
       writable: Boolean(entry.writable),
       currentValue,
@@ -1132,6 +1162,28 @@ exports.getIoSnapshot = async (req, res) => {
     if (requestedPlcIp && effectivePlcIp && requestedPlcIp !== effectivePlcIp) {
       return res.status(400).json({ error: "Selected machine does not belong to requested PLC IP" });
     }
+    const cacheKey = getIoSnapshotCacheKey(machine.id, effectivePlcIp);
+    const forceRefresh = String(req.query.force || "")
+      .trim()
+      .toLowerCase();
+    const bypassCache = forceRefresh === "1" || forceRefresh === "true";
+    const nowMs = Date.now();
+    const cachedEntry = ioSnapshotCache.get(cacheKey) || null;
+    if (!bypassCache && cachedEntry?.payload) {
+      const ageMs = Math.max(0, nowMs - Number(cachedEntry.savedAtMs || 0));
+      if (ageMs <= IO_SNAPSHOT_CACHE_MAX_AGE_MS) {
+        return res.json({
+          ...cachedEntry.payload,
+          monitorPolicy: {
+            minIntervalMs: IO_SNAPSHOT_MIN_INTERVAL_MS,
+            cacheMaxAgeMs: IO_SNAPSHOT_CACHE_MAX_AGE_MS,
+            servedFromCache: true,
+            throttled: ageMs <= IO_SNAPSHOT_MIN_INTERVAL_MS,
+            cacheAgeMs: ageMs,
+          },
+        });
+      }
+    }
 
     const stationNo = getMachineOperationStage(machine);
     const [latestLog, scanner] = await Promise.all([
@@ -1155,28 +1207,64 @@ exports.getIoSnapshot = async (req, res) => {
     const plcPort = toIntegerOrNull(machine.plc_port || machine.machine_port);
     const plcUnitId = toIntegerOrNull(machine.plc_unit_id) || 1;
     const timeoutMs = toIntegerOrNull(machine.plc_test_timeout_ms) || 2000;
-    const registerList = parseMachineSignalMap(machine)
+    const signalMapEntries = parseMachineSignalMap(machine);
+    const registerList = signalMapEntries
       .map((entry) => toIntegerOrNull(entry.register))
       .filter((entry, index, array) => entry !== null && array.indexOf(entry) === index);
+    const slmpDefaultDevice = String(machine.plc_slmp_device || "D").trim().toUpperCase() || "D";
+    const slmpRegisterSpecs = registerList.map((registerNo) => {
+      const mapped = signalMapEntries.find((entry) => toIntegerOrNull(entry.register) === registerNo);
+      return {
+        register: registerNo,
+        device: String(mapped?.device || slmpDefaultDevice).trim().toUpperCase() || slmpDefaultDevice,
+      };
+    });
 
     const errors = [];
     const registerValues = {};
     const checkedAt = new Date().toISOString();
     const plcConnection = {
       connected: false,
+      transportConnected: false,
+      readConnected: false,
       protocol,
       checkedAt,
       error: null,
+      transportError: null,
+      readError: null,
     };
 
     if (!plcIp || !plcPort) {
       plcConnection.error = "PLC endpoint missing on machine configuration";
       errors.push(plcConnection.error);
-    } else if (protocol === "MODBUS_TCP") {
+    } else {
+      try {
+        await probeTcpEndpoint({
+          ip: plcIp,
+          port: plcPort,
+          timeoutMs: Math.min(timeoutMs, 2000),
+        });
+        plcConnection.transportConnected = true;
+      } catch (error) {
+        const message = withPlcConnectivityHint(String(error.message || "Unable to connect to PLC endpoint"), {
+          ip: plcIp,
+          port: plcPort,
+          protocol,
+        });
+        plcConnection.transportError = message;
+        plcConnection.error = message;
+        errors.push(message);
+      }
+    }
+
+    if (plcIp && plcPort && protocol === "MODBUS_TCP") {
       if (registerList.length === 0) {
         const message = "No Modbus register mapped on this machine";
         errors.push(message);
-        plcConnection.error = message;
+        plcConnection.readError = message;
+        if (!plcConnection.error) {
+          plcConnection.error = message;
+        }
       } else {
         try {
           const readResult = await readModbusRegisters({
@@ -1186,7 +1274,7 @@ exports.getIoSnapshot = async (req, res) => {
             registers: registerList,
             timeoutMs,
           });
-          plcConnection.connected = true;
+          plcConnection.readConnected = true;
           for (const [registerNo, value] of Object.entries(readResult.values || {})) {
             registerValues[Number(registerNo)] = value;
           }
@@ -1203,28 +1291,64 @@ exports.getIoSnapshot = async (req, res) => {
             port: plcPort,
             protocol,
           });
+          plcConnection.readError = message;
           plcConnection.error = message;
           errors.push(message);
         }
       }
-    } else {
-      try {
-        await probeTcpEndpoint({
-          ip: plcIp,
-          port: plcPort,
-          timeoutMs,
-        });
-        plcConnection.connected = true;
-      } catch (error) {
-        const message = withPlcConnectivityHint(String(error.message || "Unable to connect to PLC endpoint"), {
-          ip: plcIp,
-          port: plcPort,
-          protocol,
-        });
-        plcConnection.error = message;
+    } else if (plcIp && plcPort && protocol === "SLMP") {
+      if (registerList.length === 0) {
+        const message = "No SLMP register mapped on this machine";
         errors.push(message);
+        plcConnection.readError = message;
+        if (!plcConnection.error) {
+          plcConnection.error = message;
+        }
+      } else {
+        try {
+          let slmpFrameMode = "AUTO";
+          try {
+            const parsed = machine?.plc_registers ? JSON.parse(machine.plc_registers) : null;
+            const rawMode = String(parsed?.slmpFrameMode ?? parsed?.slmpFrame ?? parsed?.frameMode ?? "").trim().toUpperCase();
+            if (["ASCII", "BINARY", "AUTO"].includes(rawMode)) slmpFrameMode = rawMode;
+          } catch (_error) {
+            // keep AUTO
+          }
+          const readResult = await readSlmpRegisters({
+            ip: plcIp,
+            port: plcPort,
+            registers: slmpRegisterSpecs,
+            timeoutMs,
+            defaultDevice: slmpDefaultDevice,
+            frameMode: slmpFrameMode,
+          });
+          plcConnection.readConnected = true;
+          for (const [registerNo, value] of Object.entries(readResult.values || {})) {
+            registerValues[Number(registerNo)] = value;
+          }
+          if (Array.isArray(readResult.errors) && readResult.errors.length > 0) {
+            for (const row of readResult.errors) {
+              errors.push(`Register ${row.device || slmpDefaultDevice}${row.register}: ${row.message}`);
+            }
+          }
+        } catch (error) {
+          const message = withPlcConnectivityHint(String(error.message || "Unable to read SLMP register values"), {
+            ip: plcIp,
+            port: plcPort,
+            protocol,
+          });
+          plcConnection.readError = message;
+          plcConnection.error = message;
+          errors.push(message);
+        }
       }
     }
+
+    plcConnection.connected = Boolean(
+      protocol === "TCP_TEXT"
+        ? plcConnection.transportConnected
+        : plcConnection.transportConnected || plcConnection.readConnected
+    );
 
     const latestPlcStatus = toUpper(latestLog?.plc_status);
     const rows = buildIoSignalRows(machine, registerValues, latestPlcStatus);
@@ -1232,7 +1356,7 @@ exports.getIoSnapshot = async (req, res) => {
     const plcCircuit = getPlcCircuitSnapshot().find((entry) => entry.key === `machine:${machine.id}`) || null;
     const scannerHealth = await buildScannerHealth(scanner, machine.id);
 
-    res.json({
+    const payload = {
       snapshotAt: checkedAt,
       machine: {
         id: machine.id,
@@ -1277,7 +1401,16 @@ exports.getIoSnapshot = async (req, res) => {
         : null,
       rows,
       errors,
-    });
+      monitorPolicy: {
+        minIntervalMs: IO_SNAPSHOT_MIN_INTERVAL_MS,
+        cacheMaxAgeMs: IO_SNAPSHOT_CACHE_MAX_AGE_MS,
+        servedFromCache: false,
+        throttled: false,
+        cacheAgeMs: 0,
+      },
+    };
+    ioSnapshotCache.set(cacheKey, { payload, savedAtMs: Date.now() });
+    res.json(payload);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1681,10 +1814,15 @@ exports.processScan = async (req, res) => {
       : hasManualResultInput
       ? "PLC_PAYLOAD"
       : "DEFAULT_OK";
+    const machineBypassEnabled = isMachineBypassEnabled(machine.id);
+    const bypassState = machineBypassEnabled ? getMachineBypass(machine.id) : null;
     const response = await saveScan(normalizedPartId, normalizedStation, finalResult, machine.id, req.user?.id, {
       ...(ngReason ? { ngReason } : {}),
       resultSource,
       resultInput: hasManualResultInput ? resultInput : finalResult,
+      skipInterlockValidation: machineBypassEnabled,
+      skipDuplicateValidation: machineBypassEnabled,
+      skipSequenceValidation: machineBypassEnabled,
     });
 
     const plcConfirmationRequired = await isPlcConfirmationEnabled(normalizedStation);
@@ -1726,6 +1864,8 @@ exports.processScan = async (req, res) => {
     response.plcPartCountRequired = requiredPlcPartCount;
     response.resultSource = resultSource;
     response.manualResultEnabled = manualResultEnabled;
+    response.machineBypassEnabled = machineBypassEnabled;
+    response.machineBypassReason = bypassState?.reason || null;
 
     res.json({
       ...response,
@@ -1774,10 +1914,15 @@ exports.verifyScanForOperator = async (req, res) => {
       : hasManualResultInput
       ? "PLC_PAYLOAD"
       : "DEFAULT_OK";
+    const machineBypassEnabled = isMachineBypassEnabled(machine.id);
+    const bypassState = machineBypassEnabled ? getMachineBypass(machine.id) : null;
     const response = await saveScan(normalizedPartId, stationNo, finalResult, machine.id, req.user?.id, {
       ...(ngReason ? { ngReason } : {}),
       resultSource,
       resultInput: hasManualResultInput ? resultInput : finalResult,
+      skipInterlockValidation: machineBypassEnabled,
+      skipDuplicateValidation: machineBypassEnabled,
+      skipSequenceValidation: machineBypassEnabled,
     });
     const plcConfirmationRequired = await isPlcConfirmationEnabled(stationNo);
     const requiredPlcPartCount = plcConfirmationRequired
@@ -1818,6 +1963,8 @@ exports.verifyScanForOperator = async (req, res) => {
     response.plcPartCountRequired = requiredPlcPartCount;
     response.resultSource = resultSource;
     response.manualResultEnabled = manualResultEnabled;
+    response.machineBypassEnabled = machineBypassEnabled;
+    response.machineBypassReason = bypassState?.reason || null;
 
     res.json({
       status: response.decision === "ALLOW" ? "OK" : "NG",
@@ -2228,9 +2375,9 @@ exports.resetStationOperation = async (req, res) => {
 
 exports.bypassOperation = async (req, res) => {
   try {
-    const { partId, machineId, stationNo, reason } = req.body;
-    if (!partId || (!machineId && !stationNo)) {
-      return res.status(400).json({ error: "partId and machineId/stationNo are required" });
+    const { partId, machineId, stationNo, reason, bypassEnabled } = req.body;
+    if (!machineId && !stationNo) {
+      return res.status(400).json({ error: "machineId or stationNo is required" });
     }
 
     let machine = null;
@@ -2247,11 +2394,34 @@ exports.bypassOperation = async (req, res) => {
     }
 
     const targetStation = normalizeStation(stationNo || getMachineOperationStage(machine));
-    let opLog = await getLatestOperationLog(partId, targetStation);
+    const normalizedPartId = String(partId || "").trim();
+    const hasPartId = Boolean(normalizedPartId);
+
+    if (!hasPartId) {
+      const enabled = typeof bypassEnabled === "boolean" ? bypassEnabled : true;
+      const state = setMachineBypass(
+        machine.id,
+        enabled,
+        reason || (enabled ? "MACHINE_BYPASS_ENABLED" : "MACHINE_BYPASS_DISABLED"),
+        req.user?.id || null
+      );
+      emitRealtime("dashboard_refresh", { reason: "MACHINE_BYPASS_TOGGLED", machineId: machine.id, enabled });
+      return res.json({
+        message: enabled
+          ? "Machine bypass enabled (part-level interlock checks skipped)"
+          : "Machine bypass disabled",
+        machineId: machine.id,
+        stationNo: targetStation,
+        bypassEnabled: state.enabled,
+        bypassReason: state.reason,
+        updatedAt: state.updatedAt,
+      });
+    }
+    let opLog = await getLatestOperationLog(normalizedPartId, targetStation);
 
     if (!opLog) {
       opLog = await OperationLog.create({
-        part_id: partId,
+        part_id: normalizedPartId,
         machine_id: machine.id,
         operation_no: targetStation,
         station_no: targetStation,
@@ -2275,7 +2445,7 @@ exports.bypassOperation = async (req, res) => {
       machine_id: machine.id,
     });
 
-    const part = await Part.findOne({ where: { part_id: partId } });
+    const part = await Part.findOne({ where: { part_id: normalizedPartId } });
     if (part) {
       const sequence = await getActiveStationSequence();
       const isLastStation = sequence.length > 0 && targetStation === sequence[sequence.length - 1];
@@ -2288,7 +2458,7 @@ exports.bypassOperation = async (req, res) => {
     }
 
     await ProductionLog.create({
-      part_id: partId,
+      part_id: normalizedPartId,
       machine_id: machine.id,
       user_id: req.user?.id || null,
       status: "OK",
@@ -2296,7 +2466,7 @@ exports.bypassOperation = async (req, res) => {
     });
 
     emitOperatorPopup("WARNING", {
-      partId,
+      partId: normalizedPartId,
       stationNo: targetStation,
       machineId: machine.id,
       machineName: machine.machine_name,
@@ -2307,7 +2477,7 @@ exports.bypassOperation = async (req, res) => {
 
     res.json({
       message: "Bypass successful",
-      partId,
+      partId: normalizedPartId,
       stationNo: targetStation,
       operationLogId: opLog.id,
       status: part?.status || "IN_PROGRESS",

@@ -7,6 +7,15 @@ const DEFAULT_START_ACK_TIMEOUT_MS = Number(process.env.PLC_START_ACK_TIMEOUT_MS
 const DEFAULT_END_ACK_TIMEOUT_MS = Number(process.env.PLC_END_ACK_TIMEOUT_MS || 120000);
 const DEFAULT_MODBUS_POLL_INTERVAL_MS = Number(process.env.PLC_MODBUS_POLL_INTERVAL_MS || 150);
 
+function normalizeModbusRegisterAddress(register) {
+  const n = Number(register);
+  if (!Number.isFinite(n)) return n;
+  const raw = Math.trunc(n);
+  if (raw >= 40001 && raw <= 49999) return raw - 40001;
+  if (raw >= 400001 && raw <= 465536) return raw - 400001;
+  return raw;
+}
+
 function buildReadHoldingFrame(transactionId, unitId, register, quantity) {
   const frame = Buffer.alloc(12);
   frame.writeUInt16BE(transactionId, 0);
@@ -141,20 +150,20 @@ async function sendAndReceivePacket(socket, frame, timeoutMs) {
 
 async function handshake({ ip, port, partId, stationNo, machine }) {
   const unitId = Number(machine?.plc_unit_id || 1);
-  const startRegister = Number(machine?.plc_start_register);
-  const statusRegister = Number(machine?.plc_status_register);
+  const startRegister = normalizeModbusRegisterAddress(machine?.plc_start_register);
+  const statusRegister = normalizeModbusRegisterAddress(machine?.plc_status_register);
   const partRegister =
     machine?.plc_part_register === null || machine?.plc_part_register === undefined
       ? null
-      : Number(machine.plc_part_register);
+      : normalizeModbusRegisterAddress(machine.plc_part_register);
   const stationRegister =
     machine?.plc_station_register === null || machine?.plc_station_register === undefined
       ? null
-      : Number(machine.plc_station_register);
+      : normalizeModbusRegisterAddress(machine.plc_station_register);
   const resetRegister =
     machine?.plc_reset_register === null || machine?.plc_reset_register === undefined
       ? null
-      : Number(machine.plc_reset_register);
+      : normalizeModbusRegisterAddress(machine.plc_reset_register);
   const startValue = Number(machine?.plc_start_value ?? 1);
   const startedValue = Number(machine?.plc_started_value ?? 2);
   const endOkValue = Number(machine?.plc_end_ok_value ?? 3);
@@ -279,7 +288,7 @@ async function handshake({ ip, port, partId, stationNo, machine }) {
 
 async function probe({ ip, port, machine, timeoutMs }) {
   const unitId = Number(machine?.plc_unit_id || 1);
-  const statusRegister = Number(machine?.plc_status_register);
+  const statusRegister = normalizeModbusRegisterAddress(machine?.plc_status_register);
   if (!Number.isFinite(statusRegister)) {
   return withSocket({ ip, port, timeoutMs }, async () => ({
     protocol: "MODBUS_TCP",
@@ -311,8 +320,8 @@ async function probe({ ip, port, machine, timeoutMs }) {
 
 async function reset({ ip, port, machine }) {
   const unitId = Number(machine?.plc_unit_id || 1);
-  const resetRegister = Number(machine?.plc_reset_register);
-  const startRegister = Number(machine?.plc_start_register);
+  const resetRegister = normalizeModbusRegisterAddress(machine?.plc_reset_register);
+  const startRegister = normalizeModbusRegisterAddress(machine?.plc_start_register);
   const resetValue = Number(machine?.plc_reset_value ?? 9);
 
   if (!Number.isFinite(resetRegister)) {
@@ -354,8 +363,8 @@ async function reset({ ip, port, machine }) {
 async function sendCommand({ ip, port, command, machine, partId, stationNo }) {
   const normalized = String(command || "").trim().toUpperCase();
   const unitId = Number(machine?.plc_unit_id || 1);
-  const commandRegister = Number(machine?.plc_start_register);
-  const resetRegister = Number(machine?.plc_reset_register);
+  const commandRegister = normalizeModbusRegisterAddress(machine?.plc_start_register);
+  const resetRegister = normalizeModbusRegisterAddress(machine?.plc_reset_register);
   if (!Number.isFinite(commandRegister)) {
     throw new Error("MODBUS command register (plc_start_register) is required");
   }
@@ -383,19 +392,19 @@ async function sendCommand({ ip, port, command, machine, partId, stationNo }) {
       parseModbusWriteResponse(packet);
     };
 
-    if (normalized === "START_OPERATION" && Number.isFinite(machine?.plc_part_register)) {
+    if (normalized === "START_OPERATION" && partId && Number.isFinite(machine?.plc_part_register)) {
       const hash32p = hashToRegisterValue(partId);
       const [phigh, plow] = split32To16(hash32p);
-      const pBase = Number(machine.plc_part_register);
+      const pBase = normalizeModbusRegisterAddress(machine.plc_part_register);
       console.log(`[PLC:MODBUS] sendCommand PART_ID_HASH hash32=${hash32p} reg[${pBase}]=0x${phigh.toString(16)} reg[${pBase+1}]=0x${plow.toString(16)}`);
       const pFrame = buildWriteMultipleRegistersFrame(nextTransactionId(), unitId, pBase, [phigh, plow]);
       const pPacket = await sendAndReceivePacket(socket, pFrame, DEFAULT_CONNECT_TIMEOUT_MS);
       parseModbusFC16WriteResponse(pPacket);
     }
-    if (normalized === "START_OPERATION" && Number.isFinite(machine?.plc_station_register)) {
+    if (normalized === "START_OPERATION" && stationNo && Number.isFinite(machine?.plc_station_register)) {
       const hash32s = hashToRegisterValue(stationNo);
       const [shigh, slow] = split32To16(hash32s);
-      const sBase = Number(machine.plc_station_register);
+      const sBase = normalizeModbusRegisterAddress(machine.plc_station_register);
       console.log(`[PLC:MODBUS] sendCommand STATION_HASH hash32=${hash32s} reg[${sBase}]=0x${shigh.toString(16)} reg[${sBase+1}]=0x${slow.toString(16)}`);
       const sFrame = buildWriteMultipleRegistersFrame(nextTransactionId(), unitId, sBase, [shigh, slow]);
       const sPacket = await sendAndReceivePacket(socket, sFrame, DEFAULT_CONNECT_TIMEOUT_MS);

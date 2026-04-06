@@ -8,13 +8,14 @@ import {
 import { clearAuthSession } from "../utils/authStorage";
 import { APP_ROUTES } from "../constants/routes";
 import ThemeToggleButton from "./ThemeToggleButton";
+import { useNotifications } from "../context/NotificationContext";
 
 const Header = ({ onMenuClick }) => {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const navigate = useNavigate();
   const user = JSON.parse(localStorage.getItem("user") || "{}");
-  const [notifications, setNotifications] = useState([]);
+  const { notifications, markAsRead, markAllRead } = useNotifications();
 
   const unreadCount = notifications.filter((n) => !n.read).length;
 
@@ -23,13 +24,6 @@ const Header = ({ onMenuClick }) => {
     return fallback;
   };
 
-  const markAsRead = (id) => {
-    setNotifications(notifications.map((n) => (n.id === id ? { ...n, read: true } : n)));
-  };
-
-  const markAllRead = () => {
-    setNotifications(notifications.map((n) => ({ ...n, read: true })));
-  };
 
   const handleLogout = () => {
     clearAuthSession();

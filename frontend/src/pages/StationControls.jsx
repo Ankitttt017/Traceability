@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { RefreshCw, Save, Settings2, Activity, Monitor } from "lucide-react";
+import { RefreshCw, Save, Settings2 } from "lucide-react";
 import { machineApi, stationSettingsApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
 import { getMachineStage } from "../utils/machineFields";
@@ -8,18 +8,120 @@ import {
   getStationFeatureSettings,
   mergeStationFeatureSettings,
   normalizeStationKey,
-  saveStationFeatureSettings,
 } from "../utils/stationSettings";
 
+/* ── Toggle component ─────────────────────────────────────── */
+const Toggle = ({ checked, onChange, color = "blue" }) => {
+  const colorMap = {
+    blue:   { on: "#3b82f6", glow: "rgba(59,130,246,0.25)" },
+    teal:   { on: "#14b8a6", glow: "rgba(20,184,166,0.25)" },
+    violet: { on: "#8b5cf6", glow: "rgba(139,92,246,0.25)" },
+    rose:   { on: "#f43f5e", glow: "rgba(244,63,94,0.25)"  },
+    emerald:{ on: "#10b981", glow: "rgba(16,185,129,0.25)" },
+    sky:    { on: "#0ea5e9", glow: "rgba(14,165,233,0.25)" },
+  };
+  const c = colorMap[color] || colorMap.blue;
+
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      style={{
+        position: "relative",
+        display: "inline-flex",
+        alignItems: "center",
+        width: 44,
+        height: 24,
+        borderRadius: 999,
+        border: "none",
+        cursor: "pointer",
+        padding: 0,
+        transition: "background 0.22s ease, box-shadow 0.22s ease",
+        background: checked ? c.on : "rgba(148,163,184,0.18)",
+        boxShadow: checked ? `0 0 0 3px ${c.glow}` : "none",
+        flexShrink: 0,
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          left: checked ? 22 : 2,
+          width: 20,
+          height: 20,
+          borderRadius: "50%",
+          background: "#fff",
+          boxShadow: "0 1px 4px rgba(0,0,0,0.22)",
+          transition: "left 0.22s cubic-bezier(.4,0,.2,1)",
+        }}
+      />
+    </button>
+  );
+};
+
+/* ── Feature column config ────────────────────────────────── */
+const FEATURE_COLS = [
+  {
+    key: "qr",
+    label: "QR Check",
+    desc: "Barcode / QR scan validation",
+    color: "blue",
+    type: "toggle",
+  },
+  {
+    key: "operation",
+    label: "OP Validation",
+    desc: "Operation sequence check",
+    color: "violet",
+    type: "toggle",
+  },
+  {
+    key: "plcConfirmation",
+    label: "PLC Handshake",
+    desc: "SLMP read/write cycle",
+    color: "teal",
+    type: "toggle",
+  },
+  {
+    key: "rejectionBin",
+    label: "Rework Bin",
+    desc: "Rejection bin routing",
+    color: "rose",
+    type: "toggle",
+  },
+  {
+    key: "plcPartCount",
+    label: "Pcs / Cycle",
+    desc: "Parts per PLC trigger",
+    color: "sky",
+    type: "number",
+  },
+  {
+    key: "finalPacking",
+    label: "Final Exit",
+    desc: "End-of-line packing gate",
+    color: "emerald",
+    type: "toggle",
+  },
+];
+
+/* ── Color dot for column header ──────────────────────────── */
+const DOT_COLORS = {
+  blue:    "#3b82f6",
+  violet:  "#8b5cf6",
+  teal:    "#14b8a6",
+  rose:    "#f43f5e",
+  sky:     "#0ea5e9",
+  emerald: "#10b981",
+};
+
+/* ── Main component ───────────────────────────────────────── */
 const StationControl = () => {
   const [machines, setMachines] = useState([]);
   const [stationSettings, setStationSettings] = useState(() => getStationFeatureSettings());
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [popup, setPopup] = useState(null);
-
-  // PLC values per station
-  const [plcValues, setPlcValues] = useState({});
 
   const stationRows = useMemo(() => {
     const grouped = new Map();
@@ -53,7 +155,7 @@ const StationControl = () => {
       .sort((a, b) => a.sequenceNo - b.sequenceNo);
   }, [machines]);
 
-  const stationKeys = useMemo(() => stationRows.map((entry) => entry.stationNo), [stationRows]);
+  const stationKeys = useMemo(() => stationRows.map((e) => e.stationNo), [stationRows]);
   const normalizedSettings = useMemo(
     () => mergeStationFeatureSettings(stationKeys, stationSettings),
     [stationKeys, stationSettings]
@@ -68,209 +170,223 @@ const StationControl = () => {
       ]);
       setMachines(m || []);
       if (s) setStationSettings(s);
-    } catch (error) {
-      console.error(error);
+    } catch (err) {
+      console.error(err);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+  useEffect(() => { loadData(); }, [loadData]);
+
+  const updateField = (stationNo, key, value) => {
+    setStationSettings((prev) => ({
+      ...prev,
+      [stationNo]: { ...(prev[stationNo] || {}), [key]: value },
+    }));
+  };
 
   const saveSettings = async () => {
     try {
       await stationSettingsApi.save(normalizedSettings);
-      setPopup({
-        type: "SUCCESS",
-        title: "Settings Saved",
-        message: "Station protocols have been synchronized.",
-      });
-    } catch (error) {
-      setPopup({
-        type: "ERROR",
-        title: "Save Error",
-        message: error.response?.data?.error || "Unable to save station configuration.",
-      });
+      setPopup({ type: "SUCCESS", title: "Settings Saved", message: "Station protocols have been synchronized." });
+    } catch (err) {
+      setPopup({ type: "ERROR", title: "Save Error", message: err.response?.data?.error || "Unable to save station configuration." });
     }
   };
 
-  // Simulate reading PLC value – replace with actual API call
-  const fetchPlcValue = async (stationNo) => {
-    // e.g., const res = await plcApi.read(stationNo);
-    return new Promise((resolve) => {
-      setTimeout(() => resolve(Math.floor(Math.random() * 1000)), 500);
-    });
-  };
-
-  const handleRefreshPlc = async (stationNo) => {
-    try {
-      const value = await fetchPlcValue(stationNo);
-      setPlcValues((prev) => ({ ...prev, [stationNo]: value }));
-    } catch (error) {
-      console.error(`Failed to read PLC for ${stationNo}`, error);
-      setPlcValues((prev) => ({ ...prev, [stationNo]: "Error" }));
+  /* count active toggles across all stations */
+  const activeCount = useMemo(() => {
+    let n = 0;
+    for (const key of stationKeys) {
+      const cfg = normalizedSettings[key] || DEFAULT_STATION_FEATURES;
+      for (const col of FEATURE_COLS) {
+        if (col.type === "toggle" && cfg[col.key]) n++;
+      }
     }
-  };
-
-  const handleRefreshAll = () => {
-    stationRows.forEach((row) => handleRefreshPlc(row.stationNo));
-  };
+    return n;
+  }, [normalizedSettings, stationKeys]);
 
   return (
-    <div className="space-y-6 rise-in">
+    <div className="space-y-6 rise-in text-slate-900">
       <GlobalPopup popup={popup} onClose={() => setPopup(null)} />
 
-      {/* Header */}
-      <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
-        <div className="flex items-center gap-5">
-          <div className="w-14 h-14 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center shadow-lg shadow-primary/5">
-            <Settings2 className="text-primary" size={32} />
-          </div>
-          <div>
-            <h1 className="text-3xl font-black text-text-main tracking-tight uppercase">
-              Station Control
-            </h1>
-            <div className="flex items-center gap-3 mt-1">
-              <span className="badge badge-info uppercase">Logic Engine</span>
-              <p className="text-text-muted text-sm font-medium tracking-tight">
-                Configure station protocols & read live PLC data
-              </p>
+      {/* ── Header ── */}
+      <div className="db-header-card mb-6">
+        <div className="db-header-gradient-bar" />
+        <div className="db-header-inner">
+          <div className="db-header-title-group">
+            <div className="db-header-icon-box">
+              <Settings2 size={22} />
+            </div>
+            <div>
+              <h1 className="db-header-title">Station Control</h1>
+              <p className="db-header-subtitle">Configure station protocols &amp; logic parameters</p>
             </div>
           </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            onClick={saveSettings}
-            className="h-10 px-5 rounded-xl bg-primary text-on-strong font-black uppercase tracking-widest flex items-center gap-2 hover:brightness-110 shadow-lg shadow-primary/20 transition-all"
-          >
-            <Save size={16} /> Save Settings
-          </button>
+          <div className="flex items-center gap-3">
+            {/* live summary pill */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 6,
+              padding: "5px 12px", borderRadius: 999,
+              background: "rgba(59,130,246,0.08)",
+              border: "1px solid rgba(59,130,246,0.18)",
+              fontSize: 11, fontWeight: 700, color: "#3b82f6",
+              letterSpacing: "0.04em",
+            }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#3b82f6", animation: "pulse 2s infinite" }} />
+              {activeCount} active
+            </div>
+            <button onClick={saveSettings} className="db-action-btn">
+              <Save size={14} /> Save Settings
+            </button>
+          </div>
         </div>
       </div>
 
+      {/* ── Table ── */}
       {loading ? (
-        <div className="industrial-card p-20 flex flex-col items-center justify-center text-text-muted/20">
+        <div className="industrial-card p-20 flex flex-col items-center justify-center text-slate-700/80">
           <RefreshCw size={48} className="animate-spin mb-4" />
           <p className="text-xs font-black uppercase tracking-widest">Loading station data...</p>
         </div>
       ) : (
         <div className="industrial-card p-0 overflow-hidden">
-          <div className="px-6 py-5 border-b border-border bg-bg-dark/40 flex items-center justify-between">
-            <h2 className="text-sm font-black text-text-main uppercase tracking-widest">
+          <div className="px-6 py-4 border-b border-border bg-white flex items-center justify-between">
+            <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest">
               Station Protocol Engine
             </h2>
-            <div className="flex gap-2">
-              <button
-                onClick={handleRefreshAll}
-                className="text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-lg border border-border hover:border-primary transition-all bg-bg-card flex items-center gap-1"
-              >
-                <Activity size={12} /> Refresh All PLC
-              </button>
-            </div>
+            <p className="text-[10px] text-slate-700 font-semibold uppercase tracking-widest">
+              {stationRows.length} station{stationRows.length !== 1 ? "s" : ""}
+            </p>
           </div>
+
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1400px] text-left">
-              <thead className="bg-bg-dark/60 text-[9px] font-black text-text-muted uppercase tracking-widest border-b border-border">
-                <tr>
-                  <th className="px-6 py-4">Station ID</th>
-                  <th className="px-6 py-4 text-center">QR Check</th>
-                  <th className="px-6 py-4 text-center">OP Validation</th>
-                  <th className="px-6 py-4 text-center">PLC Handshake</th>
-                  <th className="px-6 py-4 text-center">Rework Bin</th>
-                  <th className="px-6 py-4 text-center">Pcs/Cycle</th>
-                  <th className="px-6 py-4 text-center">Final Exit</th>
-                  <th className="px-6 py-4 text-center">PLC Readout</th>
+            <table className="w-full text-left" style={{ minWidth: 900 }}>
+              <thead>
+                <tr style={{ background: "rgba(15,23,42,0.04)", borderBottom: "1px solid rgba(15,23,42,0.10)" }}>
+                  {/* Station col */}
+                  <th style={{ padding: "12px 20px", width: 160 }}>
+                    <span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.1em", color: "rgba(15,23,42,0.75)" }}>
+                      Station
+                    </span>
+                  </th>
+
+                  {/* Feature cols */}
+                  {FEATURE_COLS.map((col) => (
+                    <th key={col.key} style={{ padding: "12px 16px", textAlign: "center" }}>
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+                        <span style={{
+                          width: 8, height: 8, borderRadius: "50%",
+                          background: DOT_COLORS[col.color],
+                          boxShadow: `0 0 6px ${DOT_COLORS[col.color]}`,
+                          display: "block",
+                        }} />
+                        <span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.09em", color: "rgba(15,23,42,0.75)", whiteSpace: "nowrap" }}>
+                          {col.label}
+                        </span>
+                      </div>
+                    </th>
+                  ))}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-border/20 text-xs">
-                {stationRows.map((row) => {
+
+              <tbody>
+                {stationRows.map((row, idx) => {
                   const config = normalizedSettings[row.stationNo] || DEFAULT_STATION_FEATURES;
-                  const plcValue = plcValues[row.stationNo] ?? "—";
+                  const isEven = idx % 2 === 1;
+
                   return (
-                    <tr key={row.stationNo} className="hover:bg-primary/5 transition-colors">
-                      <td className="px-6 py-4">
-                        <p className="font-black text-primary font-mono text-sm uppercase">
+                    <tr
+                      key={row.stationNo}
+                      style={{
+                        background: isEven ? "rgba(15,23,42,0.03)" : "transparent",
+                        borderBottom: "1px solid rgba(15,23,42,0.08)",
+                        transition: "background 0.15s",
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(59,130,246,0.04)"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = isEven ? "rgba(15,23,42,0.03)" : "transparent"; }}
+                    >
+                      {/* Station ID cell */}
+                      <td style={{ padding: "14px 20px" }}>
+                        <p style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 13, color: "#0f172a", letterSpacing: "0.04em", margin: 0 }}>
                           {row.stationNo}
                         </p>
-                        <p className="text-[9px] text-text-muted leading-tight mt-0.5">
-                          SEQ: {row.sequenceNo}
+                        <p style={{ fontSize: 9, color: "rgba(51,65,85,0.8)", margin: "2px 0 0", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                          SEQ {String(row.sequenceNo).padStart(2, "0")}
+                          {row.lineNames[0] && row.lineNames[0] !== "-" ? ` · ${row.lineNames[0]}` : ""}
                         </p>
                       </td>
-                      {["qr", "operation", "plcConfirmation", "rejectionBin"].map((key) => (
-                        <td key={key} className="px-6 py-4 text-center">
-                          <input
-                            type="checkbox"
-                            checked={config[key]}
-                            onChange={(e) => {
-                              const next = {
-                                ...stationSettings,
-                                [row.stationNo]: {
-                                  ...(stationSettings[row.stationNo] || {}),
-                                  [key]: e.target.checked,
-                                },
-                              };
-                              setStationSettings(next);
-                            }}
-                            className="w-4 h-4 accent-primary cursor-pointer"
-                          />
+
+                      {/* Feature cells */}
+                      {FEATURE_COLS.map((col) => (
+                        <td key={col.key} style={{ padding: "14px 16px", textAlign: "center" }}>
+                          {col.type === "toggle" ? (
+                            <div style={{ display: "flex", justifyContent: "center" }}>
+                              <Toggle
+                                checked={Boolean(config[col.key])}
+                                color={col.color}
+                                onChange={(val) => updateField(row.stationNo, col.key, val)}
+                              />
+                            </div>
+                          ) : (
+                            /* number input for plcPartCount */
+                            <input
+                              type="number"
+                              min={1}
+                              max={99}
+                              value={config[col.key] || 1}
+                              onChange={(e) => updateField(row.stationNo, col.key, Number(e.target.value))}
+                              style={{
+                                width: 52,
+                                height: 28,
+                                borderRadius: 7,
+                                border: "1px solid rgba(14,165,233,0.25)",
+                                background: "rgba(14,165,233,0.06)",
+                                color: "#0f172a",
+                                fontFamily: "monospace",
+                                fontWeight: 800,
+                                fontSize: 13,
+                                textAlign: "center",
+                                outline: "none",
+                                cursor: "text",
+                              }}
+                              onFocus={(e) => { e.currentTarget.style.borderColor = "rgba(14,165,233,0.6)"; e.currentTarget.style.boxShadow = "0 0 0 3px rgba(14,165,233,0.12)"; }}
+                              onBlur={(e) => { e.currentTarget.style.borderColor = "rgba(14,165,233,0.25)"; e.currentTarget.style.boxShadow = "none"; }}
+                            />
+                          )}
                         </td>
                       ))}
-                      <td className="px-6 py-4 text-center">
-                        <input
-                          type="number"
-                          value={config.plcPartCount || 1}
-                          onChange={(e) => {
-                            const next = {
-                              ...stationSettings,
-                              [row.stationNo]: {
-                                ...(stationSettings[row.stationNo] || {}),
-                                plcPartCount: Number(e.target.value),
-                              },
-                            };
-                            setStationSettings(next);
-                          }}
-                          className="w-14 bg-bg-dark border border-border rounded px-2 py-1 text-center font-mono font-bold"
-                        />
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <input
-                          type="checkbox"
-                          checked={config.finalPacking}
-                          onChange={(e) => {
-                            const next = {
-                              ...stationSettings,
-                              [row.stationNo]: {
-                                ...(stationSettings[row.stationNo] || {}),
-                                finalPacking: e.target.checked,
-                              },
-                            };
-                            setStationSettings(next);
-                          }}
-                          className="w-4 h-4 accent-emerald-500 cursor-pointer"
-                        />
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <div className="flex items-center justify-center gap-2">
-                          <span className="font-mono font-bold bg-bg-dark/50 px-2 py-1 rounded">
-                            {plcValue}
-                          </span>
-                          <button
-                            onClick={() => handleRefreshPlc(row.stationNo)}
-                            className="p-1 rounded hover:bg-primary/20 transition-colors"
-                            title="Read from PLC"
-                          >
-                            <RefreshCw size={12} className="text-primary" />
-                          </button>
-                        </div>
-                      </td>
                     </tr>
                   );
                 })}
+
+                {stationRows.length === 0 && (
+                  <tr>
+                    <td colSpan={FEATURE_COLS.length + 1} style={{ padding: "60px 24px", textAlign: "center", color: "rgba(51,65,85,0.85)", fontSize: 13, fontWeight: 600 }}>
+                      No stations configured. Add machines with operation codes first.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
+          </div>
+
+          {/* ── Legend ── */}
+          <div style={{
+            padding: "12px 20px",
+            borderTop: "1px solid rgba(15,23,42,0.10)",
+            background: "rgba(15,23,42,0.03)",
+            display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap",
+          }}>
+            {FEATURE_COLS.filter((c) => c.type === "toggle").map((col) => (
+              <div key={col.key} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: DOT_COLORS[col.color], flexShrink: 0 }} />
+                <span style={{ fontSize: 10, color: "rgba(51,65,85,0.9)", fontWeight: 600 }}>
+                  {col.label} — {col.desc}
+                </span>
+              </div>
+            ))}
           </div>
         </div>
       )}

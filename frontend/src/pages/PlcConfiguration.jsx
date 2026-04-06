@@ -35,7 +35,21 @@ const PlcConfiguration = () => {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  const updateField = (key, value) => setFormData(prev => ({ ...prev, [key]: value }));
+  const updateField = (key, value) => {
+    if (key === "plcProtocol") {
+      const protocol = String(value || "").toUpperCase();
+      setFormData(prev => {
+        const next = { ...prev, plcProtocol: protocol };
+        if (!String(prev.plcPort || "").trim()) {
+          if (protocol === "MODBUS_TCP") next.plcPort = "502";
+          else if (protocol === "SLMP") next.plcPort = "5000";
+        }
+        return next;
+      });
+      return;
+    }
+    setFormData(prev => ({ ...prev, [key]: value }));
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -72,33 +86,36 @@ const PlcConfiguration = () => {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 rise-in">
       {/* Header */}
-      <div className="flex justify-between items-center">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-primary/10 rounded-2xl flex items-center justify-center text-primary">
-            <Cpu size={24} />
+      <div className="db-header-card mb-6">
+        <div className="db-header-gradient-bar" />
+        <div className="db-header-inner">
+          <div className="db-header-title-group">
+            <div className="db-header-icon-box">
+              <Cpu size={22} />
+            </div>
+            <div>
+              <h1 className="db-header-title">PLC Configuration</h1>
+              <p className="db-header-subtitle">Manage register blocks and PLC endpoints</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-2xl font-bold text-text-main">PLC Configuration</h1>
-            <p className="text-text-muted text-sm">Manage register blocks and PLC endpoints</p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={loadData} className="db-secondary-btn">
+              <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> Refresh
+            </button>
+            <button onClick={() => setShowAddModal(true)} className="db-action-btn">
+              <Plus size={14} /> Add Register Block
+            </button>
           </div>
-        </div>
-        <div className="flex gap-3">
-          <button onClick={loadData} className="flex items-center gap-2 px-4 py-2 border border-border rounded-xl hover:bg-bg-dark transition">
-            <RefreshCw size={16} /> Refresh
-          </button>
-          <button onClick={() => setShowAddModal(true)} className="flex items-center gap-2 bg-primary text-on-strong px-5 py-2 rounded-2xl font-semibold hover:brightness-105 transition">
-            <Plus size={18} /> Add Register Block
-          </button>
         </div>
       </div>
 
       {/* Table */}
-      <div className="bg-bg-card border border-border rounded-3xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-border flex justify-between bg-bg-dark/50">
-          <h2 className="font-semibold">Registered Blocks</h2>
-          <span className="text-sm text-text-muted">{ranges.length} blocks</span>
+      <div className="bg-bg-card border border-border rounded-2xl overflow-hidden">
+        <div className="px-5 py-4 border-b border-border flex justify-between bg-bg-dark/30 items-center">
+          <h2 className="text-xs font-bold text-text-main uppercase tracking-wider">Registered Blocks</h2>
+          <span className="text-[11px] text-text-muted bg-bg-dark px-3 py-1 rounded-lg border border-border">{ranges.length} blocks</span>
         </div>
 
         {loading ? (
@@ -108,27 +125,29 @@ const PlcConfiguration = () => {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border bg-bg-dark/30 text-text-muted text-xs uppercase tracking-widest">
-                  <th className="px-6 py-4 text-left">PLC Name</th>
-                  <th className="px-6 py-4 text-left">Endpoint</th>
-                  <th className="px-6 py-4 text-left">Protocol</th>
-                  <th className="px-6 py-4 text-left">Range</th>
-                  <th className="px-6 py-4 text-right">Actions</th>
+              <thead className="bg-bg-dark/50 text-[10px] font-semibold uppercase tracking-widest text-text-muted border-b border-border">
+                <tr>
+                  <th className="px-5 py-3 text-left">PLC Name</th>
+                  <th className="px-5 py-3 text-left">Endpoint</th>
+                  <th className="px-5 py-3 text-left">Protocol</th>
+                  <th className="px-5 py-3 text-left">Range</th>
+                  <th className="px-5 py-3 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-border/50">
+              <tbody className="divide-y divide-border/40">
                 {ranges.map(r => (
-                  <tr key={r.id} className="hover:bg-bg-dark/10 transition">
-                    <td className="px-6 py-4 font-medium">{r.plcName || "—"}</td>
-                    <td className="px-6 py-4 font-mono text-primary">{r.plcIp}:{r.plcPort}</td>
-                    <td className="px-6 py-4">
-                      <span className="px-3 py-1 text-xs bg-primary/10 text-primary rounded-full">{r.plcProtocol}</span>
+                  <tr key={r.id} className="hover:bg-bg-dark/20 transition-colors group">
+                    <td className="px-5 py-4 font-bold text-text-main">{r.plcName || "—"}</td>
+                    <td className="px-5 py-4 font-mono text-primary flex flex-col gap-0.5 text-xs"><span>{r.plcIp}</span><span className="text-text-muted">Port {r.plcPort}</span></td>
+                    <td className="px-5 py-4">
+                      <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-primary/10 text-primary border border-primary/20 rounded-md">{r.plcProtocol}</span>
                     </td>
-                    <td className="px-6 py-4 font-mono">R{r.rangeStart}–R{r.rangeEnd}</td>
-                    <td className="px-6 py-4 text-right">
-                      <button onClick={() => setDeleteId(r.id)} className="p-2 text-danger hover:bg-danger/10 rounded-xl transition">
-                        <Trash2 size={18} />
+                    <td className="px-5 py-4">
+                      <span className="px-3 py-1 text-xs font-mono font-semibold bg-bg-dark border border-border rounded-lg text-text-muted">R{r.rangeStart}–R{r.rangeEnd}</span>
+                    </td>
+                    <td className="px-5 py-4 text-right">
+                      <button onClick={() => setDeleteId(r.id)} className="p-2 text-text-muted hover:text-danger hover:bg-danger/10 rounded-lg transition-all" title="Delete">
+                        <Trash2 size={14} />
                       </button>
                     </td>
                   </tr>
@@ -141,11 +160,11 @@ const PlcConfiguration = () => {
 
       {/* Add Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-          <div className="bg-bg-card border border-border rounded-3xl max-w-lg w-full overflow-hidden">
-            <div className="px-6 py-5 border-b border-border flex justify-between items-center">
-              <h3 className="font-semibold text-lg">Add New Register Block</h3>
-              <button onClick={() => setShowAddModal(false)} className="text-text-muted hover:text-text-main">✕</button>
+        <div className="fixed inset-0 bg-bg-dark/90 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-bg-card border border-border/60 rounded-2xl max-w-lg w-full overflow-hidden rise-in shadow-2xl">
+            <div className="px-6 py-5 border-b border-border flex justify-between items-center bg-bg-dark/30">
+              <h3 className="font-bold text-text-main">Add New Register Block</h3>
+              <button onClick={() => setShowAddModal(false)} className="p-2 text-text-muted hover:text-text-main hover:bg-bg-dark rounded-xl transition-all">✕</button>
             </div>
 
             <form onSubmit={handleSubmit} className="p-6 space-y-5">
@@ -183,13 +202,14 @@ const PlcConfiguration = () => {
                 <input value={formData.rangeInput} onChange={e => updateField("rangeInput", e.target.value)}
                   placeholder="100-12" className="w-full bg-bg-dark border border-border rounded-2xl px-4 py-3 text-sm font-mono focus:border-primary outline-none" />
                 <p className="text-xs text-text-muted mt-1">Example: 100-12 means R100 to R111 (min 6 registers recommended)</p>
+                <p className="text-xs text-text-muted mt-1">For SLMP, these are word addresses (e.g. D100–D111 with device selected in machine mapping).</p>
               </div>
 
-              <div className="flex gap-3 pt-4">
-                <button type="button" onClick={() => setShowAddModal(false)} className="flex-1 py-3 text-text-muted font-medium border border-border rounded-2xl hover:bg-bg-dark transition">
+              <div className="flex gap-3 pt-4 border-t border-border mt-4">
+                <button type="button" onClick={() => setShowAddModal(false)} className="px-4 py-2 text-sm text-text-muted hover:text-text-main transition-colors font-semibold">
                   Cancel
                 </button>
-                <button type="submit" disabled={saving} className="flex-1 py-3 bg-primary text-on-strong font-semibold rounded-2xl hover:brightness-105 transition disabled:opacity-70">
+                <button type="submit" disabled={saving} className="px-6 py-2 bg-primary text-on-strong font-bold rounded-xl text-sm hover:brightness-110 transition-all ml-auto disabled:opacity-50">
                   {saving ? "Saving..." : "Add Block"}
                 </button>
               </div>

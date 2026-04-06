@@ -1,0 +1,114 @@
+{
+  "summary": {
+    "pass": 12,
+    "fail": 3,
+    "skip": 0
+  },
+  "results": [
+    {
+      "section": "7.1",
+      "desc": "Valid login → 200 + JWT token",
+      "status": "PASS",
+      "actual": "200 OK, token acquired (eyJhbGciOiJIUzI1NiIs...)",
+      "severity": "-"
+    },
+    {
+      "section": "7.1",
+      "desc": "Invalid password → 401",
+      "status": "PASS",
+      "actual": "401 — Invalid credentials",
+      "severity": "-"
+    },
+    {
+      "section": "7.1",
+      "desc": "SQL Injection → rejected",
+      "status": "PASS",
+      "actual": "Status: 401 — login not bypassed",
+      "severity": "-"
+    },
+    {
+      "section": "7.2",
+      "desc": "No-token: GET /dashboard/summary",
+      "status": "PASS",
+      "actual": "403 Unauthorized/Forbidden",
+      "severity": "-"
+    },
+    {
+      "section": "7.2",
+      "desc": "No-token: GET /traceability/operations",
+      "status": "FAIL",
+      "actual": "Status: 200 — route not protected",
+      "severity": "High"
+    },
+    {
+      "section": "7.2",
+      "desc": "No-token: GET /machines",
+      "status": "PASS",
+      "actual": "403 Unauthorized/Forbidden",
+      "severity": "-"
+    },
+    {
+      "section": "7.3",
+      "desc": "Dashboard: GET /dashboard/summary",
+      "status": "PASS",
+      "actual": "200 OK, JSON returned",
+      "severity": "-"
+    },
+    {
+      "section": "7.3",
+      "desc": "Dashboard: GET /dashboard/trends",
+      "status": "PASS",
+      "actual": "200 OK, JSON returned",
+      "severity": "-"
+    },
+    {
+      "section": "7.3",
+      "desc": "Dashboard: GET /dashboard/report",
+      "status": "PASS",
+      "actual": "200 OK, JSON returned",
+      "severity": "-"
+    },
+    {
+      "section": "7.3",
+      "desc": "Dashboard: GET /dashboard/oee",
+      "status": "PASS",
+      "actual": "200 OK, JSON returned",
+      "severity": "-"
+    },
+    {
+      "section": "7.4",
+      "desc": "Traceability invalid partId → 200/404",
+      "status": "PASS",
+      "actual": "Status: 404 — {\"error\":\"Part not found\"}",
+      "severity": "-"
+    },
+    {
+      "section": "7.5",
+      "desc": "Reports Export endpoint",
+      "status": "PASS",
+      "actual": "200 OK, Content-Type: text/csv; charset=utf-8",
+      "severity": "-"
+    },
+    {
+      "section": "7.6",
+      "desc": "POST /machines (valid body) → 201",
+      "status": "FAIL",
+      "actual": "Status: 400 — {\"error\":\"Required fields: machineName, plcIp, plcPort\"}",
+      "severity": "High"
+    },
+    {
+      "section": "7.6",
+      "desc": "POST /machines (empty body) → 400",
+      "status": "PASS",
+      "actual": "Status: 400",
+      "severity": "-"
+    },
+    {
+      "section": "10",
+      "desc": "Login flood (10 rapid requests) → rate limited",
+      "status": "FAIL",
+      "actual": "Statuses: 401 — No rate-limiting (429) detected",
+      "severity": "Critical"
+    }
+  ]
+}

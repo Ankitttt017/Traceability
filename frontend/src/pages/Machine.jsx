@@ -1,16 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Cpu, Plus, Save, Trash2, Edit, RefreshCw, Search,
-  X, Network, Terminal, Activity, Layers, Settings,
-  Layout, Database, ChevronRight, Info, AlertTriangle, Eye
+  X, Network, Terminal, Activity, Settings,
+  Layout, Database, ChevronRight, Info, AlertTriangle, Eye, Zap, Copy
 } from "lucide-react";
 import toast from "react-hot-toast";
 import ConfirmModal from "../components/ConfirmModal";
-import { machineApi, plcConfigApi } from "../api/services";
+import { machineApi, plcConfigApi, traceabilityApi } from "../api/services";
 import {
   MACHINE_MODBUS_TUNING_FIELD_CONFIG,
   MACHINE_REGISTER_ROLE_FIELDS,
-  formatMachineLabel,
 } from "../utils/machineFields";
 
 /* ─── helpers ─────────────────────────────────────────────── */
@@ -34,49 +33,224 @@ function normalizeProtocol(value, fallback = "TCP_TEXT") {
   if (["TCP", "TEXT"].includes(n)) return "TCP_TEXT";
   return n;
 }
-function createEmptyForm() {
+function normalizeDirectionLabel(direction) {
+  const v = String(direction || "").trim().toUpperCase();
+  if (v === "PC -> PLC" || v === "PC_TO_PLC" || v === "PC->PLC" || v === "WRITE") return "WRITE  SW->PLC";
+  if (v === "PLC -> PC" || v === "PLC_TO_PC" || v === "PLC->PC" || v === "READ") return "READ   PLC->SW";
+  if (v === "BIDIRECTIONAL" || v === "BOTH") return "BOTH   PLC<->SW";
+  return "READ   PLC->SW";
+}
+function toRegNumberText(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const n = Number(value);
+  return Number.isFinite(n) ? String(Math.trunc(n)) : "";
+}
+function escapeLine(value) {
+  return String(value || "").replace(/\r?\n/g, " ").trim();
+}
+function csvEscape(value) {
+  const text = String(value ?? "");
+  if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+function createHandshakeRow(overrides = {}) {
   return {
-    machineName: "", lineName: "", sequenceNo: "", operationNo: "",
-    dailyTargetQty: "0", plcIp: "", plcPort: "", plcProtocol: "TCP_TEXT",
-    plcRangeId: "", plcSlmpDevice: "D", status: "ACTIVE",
-    plcConfig: {
-      rangeId: "", startRegister: "", statusRegister: "", partRegister: "",
-      stationRegister: "", resetRegister: "",
-      startValue: "1", startedValue: "2", endOkValue: "3", endNgValue: "4", blockValue: "2",
-    },
-    // New: registers to read live values
-    readRegisters: {
-      temperature: "",   // user-defined register for temperature
-    },
+    id: `HS_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    signal: "", direction: "READ", register: "", value: "", meaning: "", required: true,
+    ...overrides,
   };
+}
+function buildDefaultHandshakeRows(cfg = {}) {
+  return [
+    createHandshakeRow({ signal: "Start", direction: "WRITE", register: toFormValue(cfg.startRegister, ""), value: toFormValue(cfg.startValue, "1"), meaning: "Start machine cycle", required: true }),
+    createHandshakeRow({ signal: "Block / Interlock", direction: "WRITE", register: toFormValue(cfg.startRegister, ""), value: toFormValue(cfg.blockValue, "2"), meaning: "Block cycle on NG / duplicate / interlock", required: true }),
+    createHandshakeRow({ signal: "Running", direction: "READ", register: toFormValue(cfg.statusRegister, ""), value: toFormValue(cfg.startedValue, "2"), meaning: "Machine is running", required: true }),
+    createHandshakeRow({ signal: "End OK", direction: "READ", register: toFormValue(cfg.statusRegister, ""), value: toFormValue(cfg.endOkValue, "3"), meaning: "Cycle completed OK", required: true }),
+    createHandshakeRow({ signal: "End NG", direction: "READ", register: toFormValue(cfg.statusRegister, ""), value: toFormValue(cfg.endNgValue, "4"), meaning: "Cycle completed NG", required: true }),
+    createHandshakeRow({ signal: "Reset", direction: "WRITE", register: toFormValue(cfg.resetRegister, ""), value: toFormValue(cfg.resetValue, "9"), meaning: "Reset/clear machine state", required: true }),
+  ];
+}
+const STANDARD_HANDSHAKE_SYNC = {
+  Start: { direction: "WRITE", registerKey: "startRegister", valueKey: "startValue", defaultMeaning: "Start machine cycle" },
+  "Block / Interlock": { direction: "WRITE", registerKey: "startRegister", valueKey: "blockValue", defaultMeaning: "Block cycle on NG / duplicate / interlock" },
+  Running: { direction: "READ", registerKey: "statusRegister", valueKey: "startedValue", defaultMeaning: "Machine is running" },
+  "End OK": { direction: "READ", registerKey: "statusRegister", valueKey: "endOkValue", defaultMeaning: "Cycle completed OK" },
+  "End NG": { direction: "READ", registerKey: "statusRegister", valueKey: "endNgValue", defaultMeaning: "Cycle completed NG" },
+  Reset: { direction: "WRITE", registerKey: "resetRegister", valueKey: "resetValue", defaultMeaning: "Reset/clear machine state" },
+};
+function normalizeHandshakeRows(rows, cfg = {}) {
+  if (!Array.isArray(rows) || rows.length === 0) return buildDefaultHandshakeRows(cfg);
+  return rows.map((row) => createHandshakeRow({
+    id: row?.id || row?.key || undefined,
+    signal: toFormValue(row?.signal ?? row?.label, ""),
+    direction: String(row?.direction || "READ").toUpperCase(),
+    register: toFormValue(row?.register, ""),
+    value: toFormValue(row?.value, ""),
+    meaning: toFormValue(row?.meaning ?? row?.purpose ?? row?.description, ""),
+    required: row?.required === undefined ? true : Boolean(row.required),
+  }));
+}
+function syncStandardHandshakeRows(rows, cfg = {}) {
+  return normalizeHandshakeRows(rows, cfg).map((row) => {
+    const signal = String(row?.signal || "").trim();
+    const meta = STANDARD_HANDSHAKE_SYNC[signal];
+    if (!meta) return row;
+    return { ...row, direction: meta.direction, register: toFormValue(cfg?.[meta.registerKey], ""), value: toFormValue(cfg?.[meta.valueKey], ""), meaning: row.meaning || meta.defaultMeaning };
+  });
+}
+function buildMachinePlcSpecCsv(formData) {
+  const cfg = formData?.plcConfig || {};
+  const protocol = normalizeProtocol(formData?.plcProtocol, "TCP_TEXT");
+  const machineName = escapeLine(formData?.machineName || "Machine");
+  const op = escapeLine(formData?.operationNo || "-");
+  const line = escapeLine(formData?.lineName || "-");
+  const ip = escapeLine(formData?.plcIp || "-");
+  const port = escapeLine(formData?.plcPort || "-");
+  const slmpDevice = escapeLine(formData?.plcSlmpDevice || "D");
+  const rows = [];
+  rows.push(["SECTION","FIELD","REGISTER_NO","DEVICE","DIRECTION","VALUES","PURPOSE","MACHINE","LINE","OPERATION"]);
+
+  const pushRow = ({ section, field, registerNo, device, direction, values, purpose }) => {
+    rows.push([
+      section || "",
+      field || "",
+      registerNo === null || registerNo === undefined ? "" : String(registerNo),
+      protocol === "SLMP" ? String(device || slmpDevice || "D") : "",
+      direction || "",
+      values || "",
+      purpose || "",
+      machineName,
+      line,
+      op,
+    ]);
+  };
+
+  pushRow({ section: "META", field: "protocol", registerNo: protocol });
+  pushRow({ section: "META", field: "ip", registerNo: ip });
+  pushRow({ section: "META", field: "port", registerNo: port });
+  if (protocol === "SLMP") {
+    pushRow({ section: "META", field: "slmpDevice", registerNo: slmpDevice, device: slmpDevice });
+    pushRow({ section: "META", field: "slmpFrameMode", registerNo: escapeLine(formData?.plcSlmpFrameMode || "AUTO"), device: slmpDevice });
+  }
+
+  const coreRows = [
+    { key: "startRegister", field: "startRegister", direction: "WRITE", values: `${toFormValue(cfg.startValue, "1")}=Start, ${toFormValue(cfg.blockValue, "2")}=Block`, purpose: "PLC start/block command register" },
+    { key: "statusRegister", field: "statusRegister", direction: "READ", values: `${toFormValue(cfg.startedValue, "2")}=Running, ${toFormValue(cfg.endOkValue, "3")}=End OK, ${toFormValue(cfg.endNgValue, "4")}=End NG`, purpose: "PLC status feedback register" },
+    { key: "stationRegister", field: "stationRegister", direction: "WRITE", values: "Station/Hash payload (optional)", purpose: "Station hash payload register" },
+    { key: "partRegister", field: "partRegister", direction: "WRITE", values: "Part/Hash payload (optional)", purpose: "Part hash payload register" },
+    { key: "resetRegister", field: "resetRegister", direction: "WRITE", values: `${toFormValue(cfg.resetValue, "9")}=Reset`, purpose: "PLC reset command register" },
+  ];
+
+  for (const row of coreRows) {
+    const registerNo = toRegNumberText(cfg?.[row.key]);
+    if (!registerNo) continue;
+    pushRow({
+      section: "CORE_REGISTER",
+      field: row.field,
+      registerNo,
+      device: slmpDevice,
+      direction: row.direction,
+      values: row.values,
+      purpose: row.purpose,
+    });
+  }
+
+  if (toRegNumberText(cfg?.heartbeatRegister)) {
+    pushRow({
+      section: "CORE_REGISTER",
+      field: "heartbeatRegister",
+      registerNo: toRegNumberText(cfg.heartbeatRegister),
+      device: slmpDevice,
+      direction: "BOTH",
+      values: "Heartbeat signal (optional)",
+      purpose: "PLC communication health register",
+    });
+  }
+
+  const syncedHandshakeRows = syncStandardHandshakeRows(normalizeHandshakeRows(formData?.plcConfig?.handshakeMap, cfg), cfg);
+  for (const row of syncedHandshakeRows) {
+    const registerNo = toRegNumberText(row?.register);
+    if (!registerNo) continue;
+    pushRow({
+      section: "HANDSHAKE",
+      field: escapeLine(row?.signal || "Signal"),
+      registerNo,
+      device: slmpDevice,
+      direction: String(row?.direction || "READ").toUpperCase(),
+      values: row?.value === "" || row?.value === null || row?.value === undefined ? "" : String(row.value),
+      purpose: escapeLine(row?.meaning || "Handshake signal"),
+    });
+  }
+
+  if (Array.isArray(formData?.plcSignalMap)) {
+    for (const row of formData.plcSignalMap) {
+      const registerNo = toRegNumberText(row?.register);
+      if (!registerNo) continue;
+      pushRow({
+        section: "LIVE_REGISTER",
+        field: escapeLine(row?.label || row?.key || "liveRegister"),
+        registerNo,
+        device: row?.device || slmpDevice || "D",
+        direction: normalizeDirectionLabel(row?.direction),
+        values: "",
+        purpose: escapeLine(row?.description || "Live signal"),
+      });
+    }
+  }
+
+  const tuningRows = [
+    ["startValue", toFormValue(cfg.startValue, "1")],
+    ["startedValue", toFormValue(cfg.startedValue, "2")],
+    ["endOkValue", toFormValue(cfg.endOkValue, "3")],
+    ["endNgValue", toFormValue(cfg.endNgValue, "4")],
+    ["blockValue", toFormValue(cfg.blockValue, "2")],
+    ["resetValue", toFormValue(cfg.resetValue, "9")],
+  ];
+  for (const [field, value] of tuningRows) {
+    pushRow({ section: "TUNING", field, registerNo: value, device: slmpDevice });
+  }
+
+  return rows.map((r) => r.map(csvEscape).join(",")).join("\r\n");
+}
+const SLMP_DOUBLE_WORD_KEYS = new Set(["partRegister", "stationRegister"]);
+function toWholeNumberOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+function getRegisterSpanWords(registerKey, protocol) {
+  if (String(protocol || "").toUpperCase() !== "SLMP") return 1;
+  return SLMP_DOUBLE_WORD_KEYS.has(String(registerKey || "")) ? 2 : 1;
+}
+function expandRegisterWindow(registerNo, registerKey, protocol) {
+  const base = toWholeNumberOrNull(registerNo);
+  if (base === null) return [];
+  const width = getRegisterSpanWords(registerKey, protocol);
+  return Array.from({ length: width }, (_, index) => base + index);
+}
+function getConfigOccupiedRegisters(cfg = {}, protocol = "MODBUS_TCP", excludeKey = null) {
+  const occupied = new Set();
+  for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
+    if (excludeKey && field.key === excludeKey) continue;
+    const words = expandRegisterWindow(cfg?.[field.key], field.key, protocol);
+    words.forEach((w) => occupied.add(w));
+  }
+  return occupied;
+}
+function createEmptyForm() {
+  const plcConfig = { rangeId: "", startRegister: "", statusRegister: "", partRegister: "", stationRegister: "", resetRegister: "", heartbeatRegister: "", startValue: "1", startedValue: "2", endOkValue: "3", endNgValue: "4", blockValue: "2", resetValue: "9" };
+  return { machineName: "", lineName: "", sequenceNo: "", operationNo: "", cycleTimeSec: "0", loadingTimeSec: "0", dailyTargetQty: "0", plcIp: "", plcPort: "", plcProtocol: "TCP_TEXT", plcRangeId: "", plcSlmpDevice: "D", plcSlmpFrameMode: "AUTO", status: "ACTIVE", plcConfig: { ...plcConfig, handshakeMap: buildDefaultHandshakeRows(plcConfig) }, plcSignalMap: [] };
 }
 function buildFormFromMachine(m) {
   const cfg = m.plcConfig || {};
   const plcRangeId = cfg.rangeId ?? m.plcRangeId ?? "";
   return {
-    machineName: m.machineName || "", lineName: m.lineName || "",
-    sequenceNo: toFormValue(m.sequenceNo, ""), operationNo: m.operationNo || "",
-    dailyTargetQty: toFormValue(m.dailyTargetQty, "0"),
-    plcIp: m.plcIp || "", plcPort: toFormValue(m.plcPort, ""),
-    plcProtocol: m.plcProtocol || "TCP_TEXT",
-    plcRangeId: toFormValue(plcRangeId, ""),
-    plcSlmpDevice: m.plcSlmpDevice || "D", status: m.status || "ACTIVE",
+    machineName: m.machineName || "", lineName: m.lineName || "", sequenceNo: toFormValue(m.sequenceNo, ""), operationNo: m.operationNo || "", cycleTimeSec: toFormValue(m.cycleTimeSec, "0"), loadingTimeSec: toFormValue(m.loadingTimeSec, "0"), dailyTargetQty: toFormValue(m.dailyTargetQty, "0"), plcIp: m.plcIp || "", plcPort: toFormValue(m.plcPort, ""), plcProtocol: m.plcProtocol || "TCP_TEXT", plcRangeId: toFormValue(plcRangeId, ""), plcSlmpDevice: m.plcSlmpDevice || "D", plcSlmpFrameMode: m.plcSlmpFrameMode || m.plcConfig?.slmpFrameMode || "AUTO", status: m.status || "ACTIVE",
     plcConfig: {
-      rangeId: toFormValue(plcRangeId, ""),
-      startRegister: toFormValue(cfg.startRegister ?? m.plcStartRegister, ""),
-      statusRegister: toFormValue(cfg.statusRegister ?? m.plcStatusRegister, ""),
-      partRegister: toFormValue(cfg.partRegister ?? m.plcPartRegister, ""),
-      stationRegister: toFormValue(cfg.stationRegister ?? m.plcStationRegister, ""),
-      resetRegister: toFormValue(cfg.resetRegister ?? m.plcResetRegister, ""),
-      startValue: toFormValue(cfg.startValue ?? m.plcStartValue, "1"),
-      startedValue: toFormValue(cfg.startedValue ?? m.plcStartedValue, "2"),
-      endOkValue: toFormValue(cfg.endOkValue ?? m.plcEndOkValue, "3"),
-      endNgValue: toFormValue(cfg.endNgValue ?? m.plcEndNgValue, "4"),
-      blockValue: toFormValue(cfg.blockValue ?? m.plcBlockValue, "2"),
+      rangeId: toFormValue(plcRangeId, ""), startRegister: toFormValue(cfg.startRegister ?? m.plcStartRegister, ""), statusRegister: toFormValue(cfg.statusRegister ?? m.plcStatusRegister, ""), partRegister: toFormValue(cfg.partRegister ?? m.plcPartRegister, ""), stationRegister: toFormValue(cfg.stationRegister ?? m.plcStationRegister, ""), resetRegister: toFormValue(cfg.resetRegister ?? m.plcResetRegister, ""), heartbeatRegister: toFormValue(cfg.heartbeatRegister ?? m.plcHeartbeatRegister, ""), startValue: toFormValue(cfg.startValue ?? m.plcStartValue, "1"), startedValue: toFormValue(cfg.startedValue ?? m.plcStartedValue, "2"), endOkValue: toFormValue(cfg.endOkValue ?? m.plcEndOkValue, "3"), endNgValue: toFormValue(cfg.endNgValue ?? m.plcEndNgValue, "4"), blockValue: toFormValue(cfg.blockValue ?? m.plcBlockValue, "2"), resetValue: toFormValue(cfg.resetValue ?? m.plcResetValue, "9"),
+      handshakeMap: normalizeHandshakeRows(cfg.handshakeMap, { startRegister: cfg.startRegister ?? m.plcStartRegister, statusRegister: cfg.statusRegister ?? m.plcStatusRegister, resetRegister: cfg.resetRegister ?? m.plcResetRegister, startValue: cfg.startValue ?? m.plcStartValue, startedValue: cfg.startedValue ?? m.plcStartedValue, endOkValue: cfg.endOkValue ?? m.plcEndOkValue, endNgValue: cfg.endNgValue ?? m.plcEndNgValue, blockValue: cfg.blockValue ?? m.plcBlockValue, resetValue: cfg.resetValue ?? m.plcResetValue }),
     },
-    readRegisters: {
-      temperature: toFormValue(m.readRegisters?.temperature ?? "", ""),
-    },
+    plcSignalMap: m.plcSignalMap || [],
   };
 }
 function toSubmitPayload(f) {
@@ -84,65 +258,158 @@ function toSubmitPayload(f) {
   const plcPort = toNullableNumber(f.plcPort);
   const plcRangeId = toNullableNumber(f.plcRangeId);
   const cfg = f.plcConfig || {};
-  const plcConfig = {
-    rangeId: plcRangeId,
-    startRegister: toNullableNumber(cfg.startRegister),
-    statusRegister: toNullableNumber(cfg.statusRegister),
-    partRegister: toNullableNumber(cfg.partRegister),
-    stationRegister: toNullableNumber(cfg.stationRegister),
-    resetRegister: toNullableNumber(cfg.resetRegister),
-    startValue: toNumberWithDefault(cfg.startValue, 1),
-    startedValue: toNumberWithDefault(cfg.startedValue, 2),
-    endOkValue: toNumberWithDefault(cfg.endOkValue, 3),
-    endNgValue: toNumberWithDefault(cfg.endNgValue, 4),
-    blockValue: toNumberWithDefault(cfg.blockValue, 2),
-  };
-  return {
-    machineName: String(f.machineName || "").trim(),
-    lineName: String(f.lineName || "").trim(),
-    sequenceNo: toNullableNumber(f.sequenceNo),
-    operationNo: String(f.operationNo || "").trim().toUpperCase(),
-    dailyTargetQty: Math.max(toNullableNumber(f.dailyTargetQty) ?? 0, 0),
-    plcIp, plcPort, plcProtocol: f.plcProtocol, plcRangeId, plcConfig,
-    plcBlockValue: plcConfig.blockValue,
-    plcSlmpDevice: String(f.plcSlmpDevice || "").trim().toUpperCase() || null,
-    status: f.status || "ACTIVE",
-    machineIp: plcIp, machinePort: plcPort,
-    readRegisters: {
-      temperature: toNullableNumber(f.readRegisters?.temperature) ?? null,
-    },
-  };
+  const plcConfig = { rangeId: plcRangeId, startRegister: toNullableNumber(cfg.startRegister), statusRegister: toNullableNumber(cfg.statusRegister), partRegister: toNullableNumber(cfg.partRegister), stationRegister: toNullableNumber(cfg.stationRegister), resetRegister: toNullableNumber(cfg.resetRegister), heartbeatRegister: toNullableNumber(cfg.heartbeatRegister), startValue: toNumberWithDefault(cfg.startValue, 1), startedValue: toNumberWithDefault(cfg.startedValue, 2), endOkValue: toNumberWithDefault(cfg.endOkValue, 3), endNgValue: toNumberWithDefault(cfg.endNgValue, 4), blockValue: toNumberWithDefault(cfg.blockValue, 2), resetValue: toNumberWithDefault(cfg.resetValue, 9), handshakeMap: normalizeHandshakeRows(cfg.handshakeMap, cfg).map((row) => ({ id: row.id || null, signal: String(row.signal || "").trim(), direction: String(row.direction || "READ").trim().toUpperCase(), register: toNullableNumber(row.register), value: toNullableNumber(row.value), meaning: String(row.meaning || "").trim(), required: row.required !== false })).filter((row) => row.signal || row.register !== null), slmpFrameMode: String(f.plcSlmpFrameMode || "AUTO").trim().toUpperCase() };
+  return { machineName: String(f.machineName || "").trim(), lineName: String(f.lineName || "").trim(), sequenceNo: toNullableNumber(f.sequenceNo), operationNo: String(f.operationNo || "").trim().toUpperCase(), cycleTimeSec: Math.max(toNullableNumber(f.cycleTimeSec) ?? 0, 0), loadingTimeSec: Math.max(toNullableNumber(f.loadingTimeSec) ?? 0, 0), dailyTargetQty: Math.max(toNullableNumber(f.dailyTargetQty) ?? 0, 0), plcIp, plcPort, plcProtocol: f.plcProtocol, plcRangeId, plcConfig, plcBlockValue: plcConfig.blockValue, plcSlmpDevice: String(f.plcSlmpDevice || "").trim().toUpperCase() || null, plcSlmpFrameMode: plcConfig.slmpFrameMode, status: f.status || "ACTIVE", machineIp: plcIp, machinePort: plcPort, plcSignalMap: f.plcSignalMap || [] };
 }
 
 const FORM_TABS = [
-  { id: "general", label: "Identity", icon: Layout },
-  { id: "network", label: "Network", icon: Network },
-  { id: "registers", label: "Registers", icon: Terminal },
-  { id: "tuning", label: "Tuning", icon: Settings },
-  { id: "live", label: "Live Data", icon: Eye }, // new tab
+  { id: "general",   label: "Identity",      icon: Layout   },
+  { id: "network",   label: "Network & PLC", icon: Network  },
+  { id: "registers", label: "Registers",     icon: Terminal },
+  { id: "tuning",    label: "Tuning",        icon: Settings },
+  { id: "live",      label: "Live Registers",icon: Eye      },
 ];
 
-/* ─── sub-components ───────────────────────────────────────── */
-function FieldLabel({ children, hint }) {
-  return (
-    <div className="flex items-center gap-1 mb-1.5">
-      <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest">{children}</label>
-      {hint && <span className="text-[10px] text-text-muted/50 normal-case tracking-normal font-normal">— {hint}</span>}
-    </div>
-  );
-}
+const REGISTER_IO_HELP = {
+  startRegister:     { action: "WRITE", flow: "PC → PLC", purpose: "Start/trigger command sent to PLC" },
+  statusRegister:    { action: "READ",  flow: "PLC → PC", purpose: "Interlock/status feedback from PLC" },
+  partRegister:      { action: "WRITE", flow: "PC → PLC", purpose: "Optional part/hash payload register" },
+  stationRegister:   { action: "WRITE", flow: "PC → PLC", purpose: "Optional station/hash payload register" },
+  resetRegister:     { action: "WRITE", flow: "PC → PLC", purpose: "Reset/fault clear command register" },
+  heartbeatRegister: { action: "BOTH",  flow: "PLC ↔ PC", purpose: "Heartbeat communication check (optional)" },
+};
 
-function InputField({ label, hint, children }) {
+const TUNING_VALUE_HELP = {
+  startValue:   { label: "Start Value",   direction: "WRITE", usage: "Written to Start Register to trigger cycle start",           registerKey: "startRegister"  },
+  blockValue:   { label: "Block Value",   direction: "WRITE", usage: "Written to Start Register to block on NG / interlock",       registerKey: "startRegister"  },
+  startedValue: { label: "Running Value", direction: "READ",  usage: "Read from Status Register as running acknowledgment",        registerKey: "statusRegister" },
+  endOkValue:   { label: "End OK Value",  direction: "READ",  usage: "Read from Status Register when cycle completes OK",          registerKey: "statusRegister" },
+  endNgValue:   { label: "End NG Value",  direction: "READ",  usage: "Read from Status Register when cycle completes NG",          registerKey: "statusRegister" },
+  resetValue:   { label: "Reset Value",   direction: "WRITE", usage: "Written to Reset Register to clear fault or reset state",    registerKey: "resetRegister"  },
+};
+
+/* ── Design tokens ─────────────────────────────────────────── */
+const T = {
+  // Neutral professional palette — dark navy base
+  navy:       "#0f172a",
+  navyMid:    "#1e293b",
+  navyLight:  "#334155",
+  slate:      "#475569",
+  slateLight: "#64748b",
+  border:     "#cbd5e1",
+  borderLight:"#e2e8f0",
+  bg:         "#f8fafc",
+  bgCard:     "#ffffff",
+  bgMuted:    "#f1f5f9",
+  text:       "#0f172a",   // very dark — primary text
+  textSec:    "#334155",   // secondary text
+  textMuted:  "#64748b",   // muted
+  // Accents — no orange
+  blue:       "#1d4ed8",
+  blueMid:    "#2563eb",
+  blueLight:  "#dbeafe",
+  blueBorder: "#bfdbfe",
+  green:      "#16a34a",
+  greenLight: "#dcfce7",
+  greenBorder:"#bbf7d0",
+  red:        "#dc2626",
+  redLight:   "#fee2e2",
+  redBorder:  "#fecaca",
+  teal:       "#0d9488",
+  tealLight:  "#ccfbf1",
+  tealBorder: "#99f6e4",
+};
+
+/* ── Shared input / select styles ──────────────────────────── */
+const inp = {
+  width: "100%", boxSizing: "border-box",
+  height: 38, padding: "0 12px",
+  background: T.bgCard,
+  border: `1px solid ${T.border}`,
+  borderRadius: 8,
+  fontSize: 13, color: T.text,
+  outline: "none",
+  transition: "border-color .15s, box-shadow .15s",
+};
+
+/* ── Tiny reusable atoms ───────────────────────────────────── */
+const Label = ({ children, required }) => (
+  <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: T.textMuted, marginBottom: 6, display: "flex", alignItems: "center", gap: 3 }}>
+    {children}{required && <span style={{ color: T.red }}>*</span>}
+  </p>
+);
+
+const FieldInput = ({ value, onChange, placeholder, type = "text", mono, readOnly, style: sx = {} }) => {
+  const [focus, setFocus] = useState(false);
   return (
-    <div>
-      <FieldLabel hint={hint}>{label}</FieldLabel>
+    <input
+      type={type} value={value} onChange={onChange} placeholder={placeholder}
+      readOnly={readOnly}
+      style={{ ...inp, fontFamily: mono ? "ui-monospace, monospace" : "inherit", background: readOnly ? T.bgMuted : T.bgCard, boxShadow: focus ? `0 0 0 3px ${T.blueLight}` : "none", borderColor: focus ? T.blueMid : T.border, ...sx }}
+      onFocus={() => setFocus(true)} onBlur={() => setFocus(false)}
+    />
+  );
+};
+
+const FieldSelect = ({ value, onChange, children, mono, style: sx = {} }) => {
+  const [focus, setFocus] = useState(false);
+  return (
+    <select
+      value={value} onChange={onChange}
+      style={{ ...inp, fontFamily: mono ? "ui-monospace, monospace" : "inherit", boxShadow: focus ? `0 0 0 3px ${T.blueLight}` : "none", borderColor: focus ? T.blueMid : T.border, cursor: "pointer", ...sx }}
+      onFocus={() => setFocus(true)} onBlur={() => setFocus(false)}
+    >
       {children}
-    </div>
+    </select>
   );
-}
+};
 
-const inputCls = "w-full bg-bg-dark border border-border rounded-lg px-3 py-2 text-sm text-text-main outline-none focus:border-primary/60 transition-colors placeholder:text-text-muted/40";
-const selectCls = "w-full bg-bg-dark border border-border rounded-lg px-3 py-2 text-sm text-text-main outline-none focus:border-primary/60 transition-colors";
+const ActionBadge = ({ action }) => {
+  const isWrite = action === "WRITE";
+  const isBoth  = action === "BOTH";
+  return (
+    <span style={{
+      fontSize: 9, fontWeight: 800, letterSpacing: "0.07em", padding: "2px 7px", borderRadius: 4,
+      background: isWrite ? T.blueLight : isBoth ? T.tealLight : T.greenLight,
+      color:      isWrite ? T.blue     : isBoth ? T.teal     : T.green,
+      border:     `1px solid ${isWrite ? T.blueBorder : isBoth ? T.tealBorder : T.greenBorder}`,
+      whiteSpace: "nowrap",
+    }}>
+      {action}
+    </span>
+  );
+};
+
+const Chip = ({ label, color = "blue" }) => {
+  const map = {
+    blue:  { bg: T.blueLight,  text: T.blue,  border: T.blueBorder  },
+    green: { bg: T.greenLight, text: T.green, border: T.greenBorder },
+    red:   { bg: T.redLight,   text: T.red,   border: T.redBorder   },
+    teal:  { bg: T.tealLight,  text: T.teal,  border: T.tealBorder  },
+    gray:  { bg: T.bgMuted,    text: T.slate, border: T.border       },
+  };
+  const c = map[color] || map.gray;
+  return (
+    <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: c.bg, color: c.text, border: `1px solid ${c.border}`, whiteSpace: "nowrap", letterSpacing: "0.05em" }}>
+      {label}
+    </span>
+  );
+};
+
+const SectionCard = ({ title, icon: Icon, accent, children, action }) => (
+  <div style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 12, overflow: "hidden" }}>
+    {title && (
+      <div style={{ padding: "12px 18px", borderBottom: `1px solid ${T.borderLight}`, background: T.bgMuted, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {Icon && <Icon size={14} color={accent || T.blue} />}
+          <p style={{ fontSize: 11, fontWeight: 700, color: T.text, textTransform: "uppercase", letterSpacing: "0.07em", margin: 0 }}>{title}</p>
+        </div>
+        {action}
+      </div>
+    )}
+    <div style={{ padding: 18 }}>{children}</div>
+  </div>
+);
 
 /* ─── main component ───────────────────────────────────────── */
 const MachinePage = () => {
@@ -157,43 +424,30 @@ const MachinePage = () => {
   const [statusFilter, setStatusFilter] = useState("all");
   const [activeTab, setActiveTab] = useState("general");
   const [saving, setSaving] = useState(false);
-
-  // Live data read states
-  const [reading, setReading] = useState(false);
-  const [liveValues, setLiveValues] = useState({ temperature: null });
+  const [bypassModalMachine, setBypassModalMachine] = useState(null);
+  const [bypassEnabled, setBypassEnabled] = useState(true);
+  const [bypassReason, setBypassReason] = useState("");
+  const [bypassing, setBypassing] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
-      const [machineRows, rangeRows] = await Promise.all([
-        machineApi.list(),
-        plcConfigApi.listRanges().catch(() => []),
-      ]);
+      const [machineRows, rangeRows] = await Promise.all([machineApi.list(), plcConfigApi.listRanges().catch(() => [])]);
       setMachines(machineRows || []);
       setPlcRanges(rangeRows || []);
-    } catch {
-      toast.error("Failed to load machine data");
-    }
+    } catch { toast.error("Failed to load machine data"); }
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  const rangeById = useMemo(() =>
-    plcRanges.reduce((acc, r) => { acc[r.id] = r; return acc; }, {}),
-    [plcRanges]
-  );
-
+  const rangeById = useMemo(() => plcRanges.reduce((acc, r) => { acc[r.id] = r; return acc; }, {}), [plcRanges]);
   const normalizedProtocol = normalizeProtocol(formData.plcProtocol, "TCP_TEXT");
   const isModbus = normalizedProtocol === "MODBUS_TCP";
-  const isSlmp = normalizedProtocol === "SLMP";
+  const isSlmp   = normalizedProtocol === "SLMP";
   const usesRange = isModbus || isSlmp;
 
   const selectableRanges = useMemo(() => {
     const selectedIp = String(formData.plcIp || "").trim();
-    const pool = plcRanges.filter(r =>
-      String(r.status || "").toUpperCase() === "ACTIVE" &&
-      (!usesRange || normalizeProtocol(r.plcProtocol, "MODBUS_TCP") === normalizedProtocol) &&
-      (!selectedIp || String(r.plcIp || "").trim() === selectedIp)
-    );
+    const pool = plcRanges.filter(r => String(r.status || "").toUpperCase() === "ACTIVE" && (!usesRange || normalizeProtocol(r.plcProtocol, "MODBUS_TCP") === normalizedProtocol) && (!selectedIp || String(r.plcIp || "").trim() === selectedIp));
     const map = new Map(pool.map(r => [String(r.id), r]));
     const editRangeId = toNullableNumber(editingMachine?.plcRangeId || editingMachine?.plcConfig?.rangeId);
     if (editRangeId && rangeById[editRangeId]) map.set(String(editRangeId), rangeById[editRangeId]);
@@ -219,461 +473,836 @@ const MachinePage = () => {
     inactive: machines.filter(m => m.status === "INACTIVE").length,
   }), [machines]);
 
+  const handshakeRows = useMemo(() => normalizeHandshakeRows(formData?.plcConfig?.handshakeMap, formData?.plcConfig || {}), [formData?.plcConfig]);
+  const registerConflicts = useMemo(() => {
+    if (!usesRange) return [];
+    const cfg = formData?.plcConfig || {};
+    const conflicts = [];
+    const range = rangeById[formData?.plcRangeId];
+    const selfOccupancy = new Map();
+
+    for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
+      const base = toWholeNumberOrNull(cfg[field.key]);
+      if (base === null) continue;
+      const words = expandRegisterWindow(base, field.key, normalizedProtocol);
+      for (const word of words) {
+        if (range && (word < Number(range.rangeStart) || word > Number(range.rangeEnd))) {
+          conflicts.push(`${field.label} uses R${word}, outside selected range R${range.rangeStart}–R${range.rangeEnd}.`);
+          continue;
+        }
+        if (selfOccupancy.has(word) && selfOccupancy.get(word) !== field.key) {
+          const otherKey = selfOccupancy.get(word);
+          const otherField = MACHINE_REGISTER_ROLE_FIELDS.find((f) => f.key === otherKey);
+          conflicts.push(`R${word} overlaps between ${otherField?.label || otherKey} and ${field.label}.`);
+        } else {
+          selfOccupancy.set(word, field.key);
+        }
+      }
+    }
+
+    if (!formData?.plcRangeId) return [...new Set(conflicts)];
+    const currentMachineId = Number(editingMachine?.id || 0);
+    const selfConfig = formData?.plcConfig || {};
+    const peerOccupied = new Map();
+    for (const machine of machines) {
+      if (Number(machine?.id || 0) === currentMachineId) continue;
+      if (Number(machine?.plcRangeId || machine?.plcConfig?.rangeId || 0) !== Number(formData.plcRangeId)) continue;
+      const peerProtocol = normalizeProtocol(machine?.plcProtocol, "MODBUS_TCP");
+      const peerCfg = machine?.plcConfig || {};
+      for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
+        const words = expandRegisterWindow(peerCfg[field.key], field.key, peerProtocol);
+        words.forEach((word) => peerOccupied.set(word, `${machine.machineName || "Machine"} (${machine.operationNo || "-"})`));
+      }
+    }
+
+    for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
+      const words = expandRegisterWindow(selfConfig[field.key], field.key, normalizedProtocol);
+      for (const word of words) {
+        if (peerOccupied.has(word)) {
+          conflicts.push(`R${word} for ${field.label} conflicts with ${peerOccupied.get(word)}.`);
+        }
+      }
+    }
+
+    return [...new Set(conflicts)];
+  }, [usesRange, formData?.plcConfig, formData?.plcRangeId, rangeById, normalizedProtocol, machines, editingMachine?.id]);
+
   const updateField = (key, value) => {
     if (key === "plcProtocol") {
-      setFormData(prev => ({
-        ...prev, plcProtocol: String(value).toUpperCase(), plcRangeId: "",
-        plcConfig: { ...prev.plcConfig, rangeId: "", startRegister: "", statusRegister: "", partRegister: "", stationRegister: "", resetRegister: "" },
-      }));
+      setFormData(prev => ({ ...prev, plcProtocol: String(value).toUpperCase(), plcRangeId: "", plcConfig: { ...prev.plcConfig, rangeId: "", startRegister: "", statusRegister: "", partRegister: "", stationRegister: "", resetRegister: "", heartbeatRegister: "" } }));
       return;
     }
     setFormData(prev => ({ ...prev, [key]: value }));
   };
-  const updateCfg = (k, v) => setFormData(p => ({ ...p, plcConfig: { ...(p.plcConfig || {}), [k]: v } }));
-  const updateReadReg = (k, v) => setFormData(p => ({ ...p, readRegisters: { ...p.readRegisters, [k]: v } }));
+
+  const updateCfg = (k, v) => setFormData((p) => {
+    const nextCfg = { ...(p.plcConfig || {}), [k]: v };
+    const syncKeys = new Set(["startRegister","statusRegister","resetRegister","startValue","startedValue","endOkValue","endNgValue","blockValue","resetValue"]);
+    if (!syncKeys.has(k)) return { ...p, plcConfig: nextCfg };
+    return { ...p, plcConfig: { ...nextCfg, handshakeMap: syncStandardHandshakeRows(nextCfg.handshakeMap, nextCfg) } };
+  });
+
+  const addHandshakeRow = () => setFormData((p) => ({ ...p, plcConfig: { ...(p.plcConfig || {}), handshakeMap: [...normalizeHandshakeRows(p?.plcConfig?.handshakeMap, p.plcConfig), createHandshakeRow({ signal: "New Signal" })] } }));
+  const updateHandshakeRow = (index, key, value) => setFormData((p) => { const rows = [...normalizeHandshakeRows(p?.plcConfig?.handshakeMap, p.plcConfig)]; rows[index] = { ...rows[index], [key]: value }; return { ...p, plcConfig: { ...(p.plcConfig || {}), handshakeMap: rows } }; });
+  const removeHandshakeRow = (index) => setFormData((p) => { const rows = [...normalizeHandshakeRows(p?.plcConfig?.handshakeMap, p.plcConfig)]; rows.splice(index, 1); return { ...p, plcConfig: { ...(p.plcConfig || {}), handshakeMap: rows.length > 0 ? rows : buildDefaultHandshakeRows(p.plcConfig || {}) } }; });
+  const syncHandshakeRowsFromRegisters = () => setFormData((p) => ({ ...p, plcConfig: { ...(p.plcConfig || {}), handshakeMap: buildDefaultHandshakeRows(p.plcConfig || {}) } }));
+  const addSignal = () => setFormData(p => ({ ...p, plcSignalMap: [...(p.plcSignalMap || []), { key: `SIG_${Date.now()}`, label: "New Register", register: "", description: "", direction: "PLC -> PC", device: p.plcProtocol === "SLMP" ? (p.plcSlmpDevice || "D") : "" }] }));
+  const updateSignal = (index, field, value) => setFormData(p => { const list = [...(p.plcSignalMap || [])]; list[index] = { ...list[index], [field]: value }; if (field === "label" && (!list[index].key || list[index].key.startsWith("SIG_"))) list[index].key = value.replace(/\s+/g, "_").toUpperCase(); return { ...p, plcSignalMap: list }; });
+  const removeSignal = (index) => setFormData(p => { const list = [...(p.plcSignalMap || [])]; list.splice(index, 1); return { ...p, plcSignalMap: list }; });
+  const applyStandardTuning = () => setFormData((p) => ({ ...p, plcConfig: (() => { const nextCfg = { ...(p.plcConfig || {}), startValue: "1", startedValue: "2", endOkValue: "3", endNgValue: "4", blockValue: "2", resetValue: "9" }; return { ...nextCfg, handshakeMap: buildDefaultHandshakeRows(nextCfg) }; })() }));
+
+  const copyPlcGuide = async () => {
+    const cfg = formData.plcConfig || {};
+    const syncedHandshakeRows = syncStandardHandshakeRows(normalizeHandshakeRows(cfg.handshakeMap, cfg), cfg);
+    const guide = [
+      `MACHINE: ${formData.machineName || "-"} | LINE: ${formData.lineName || "-"} | OP: ${formData.operationNo || "-"}`,
+      `IP: ${formData.plcIp || "-"}  PORT: ${formData.plcPort || "-"}`,
+      "",
+      "REGISTER ROLE MATRIX (RUNTIME)",
+      ...MACHINE_REGISTER_ROLE_FIELDS.map((field) => {
+        const io = REGISTER_IO_HELP[field.key] || {};
+        const reg = cfg?.[field.key] ? `R${cfg[field.key]}` : "-";
+        const must = field.required ? "Must" : "Optional";
+        return `${field.label} | ${io.action || "-"} | ${io.flow || "-"} | ${reg} | ${must} | ${io.purpose || field.description || "-"}`;
+      }),
+      "",
+      "HANDSHAKE COMMAND MATRIX",
+      ...syncedHandshakeRows.map((row) => {
+        const reg = row.register ? `R${row.register}` : "-";
+        const val = row.value === "" ? "-" : String(row.value);
+        return `${row.signal || "Signal"} | ${row.direction || "READ"} | ${reg} | ${val} | ${row.meaning || "-"} | ${row.required ? "Must" : "Optional"}`;
+      }),
+      "",
+      "NG / DUPLICATE FLOW",
+      `On NG/duplicate, writes BLOCK value (${cfg.blockValue || 2}) to Start Register (${cfg.startRegister || "-"})`,
+    ].join("\n");
+    try { await navigator.clipboard.writeText(guide); toast.success("PLC guide copied"); }
+    catch { toast.error("Unable to copy PLC guide"); }
+  };
+
+  const downloadCurrentPlcSpec = () => {
+    try {
+      const csv = buildMachinePlcSpecCsv(formData);
+      const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const base = String(formData.machineName || "machine").trim().replace(/[^\w-]+/g, "_");
+      a.href = url; a.download = `${base || "machine"}_plc_register_spec.csv`;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      toast.success("PLC register spec downloaded");
+    } catch { toast.error("Unable to generate PLC register spec"); }
+  };
 
   const openCreate = () => { setFormData(createEmptyForm()); setEditingMachine(null); setActiveTab("general"); setShowModal(true); };
   const openEdit = (m) => { setFormData(buildFormFromMachine(m)); setEditingMachine(m); setActiveTab("general"); setShowModal(true); };
   const closeModal = () => { setShowModal(false); setEditingMachine(null); };
+  const openBypassModal = (machine) => { setBypassModalMachine(machine); setBypassEnabled(true); setBypassReason("MANUAL_BYPASS_FROM_MACHINE_PAGE"); };
+  const closeBypassModal = () => { setBypassModalMachine(null); setBypassEnabled(true); setBypassReason(""); };
 
   const handleSubmit = async (e) => {
-    e.preventDefault();
-    setSaving(true);
+    e.preventDefault(); setSaving(true);
     try {
+      if (registerConflicts.length > 0) {
+        toast.error(registerConflicts[0]);
+        return;
+      }
       const payload = toSubmitPayload(formData);
       if (editingMachine) await machineApi.update(editingMachine.id, payload);
       else await machineApi.create(payload);
-      toast.success(editingMachine ? "Machine updated successfully" : "Machine deployed successfully");
-      closeModal();
-      await loadData();
-    } catch (err) {
-      toast.error(err.response?.data?.error || "Failed to save machine");
-    } finally { setSaving(false); }
+      toast.success(editingMachine ? "Machine updated" : "Machine created");
+      closeModal(); await loadData();
+    } catch (err) { toast.error(err.response?.data?.error || "Failed to save machine"); }
+    finally { setSaving(false); }
   };
 
   const confirmDelete = async () => {
     if (!deleteConfirmId) return;
-    try {
-      await machineApi.remove(deleteConfirmId);
-      toast.success("Machine removed from registry");
-      await loadData();
-    } catch { toast.error("Failed to remove machine"); }
+    try { await machineApi.remove(deleteConfirmId); toast.success("Machine removed"); await loadData(); }
+    catch { toast.error("Failed to remove machine"); }
     finally { setDeleteConfirmId(null); }
   };
 
-  // Live read from PLC
-  const readTemperature = async () => {
-    if (!editingMachine && !formData.plcIp) {
-      toast.error("Configure the machine's PLC first");
-      return;
-    }
-    const tempReg = formData.readRegisters.temperature;
-    if (!tempReg) {
-      toast.error("No temperature register configured");
-      return;
-    }
-    setReading(true);
+  const submitBypass = async (e) => {
+    e.preventDefault();
+    if (!bypassModalMachine) return;
     try {
-      // Simulate API call: read register from PLC
-      // In real implementation, you'd call machineApi.readRegister(machineId, register)
-      const response = await machineApi.readRegister(editingMachine?.id, { register: tempReg });
-      setLiveValues({ temperature: response.value });
-      toast.success(`Temperature = ${response.value} °C`);
-    } catch {
-      toast.error("Failed to read temperature register");
-    } finally {
-      setReading(false);
-    }
+      setBypassing(true);
+      const response = await traceabilityApi.bypass({ machineId: bypassModalMachine.id, stationNo: bypassModalMachine.operationNo, reason: String(bypassReason || "").trim() || "MANUAL_BYPASS_FROM_MACHINE_PAGE", bypassEnabled });
+      toast.success(response?.bypassEnabled === false ? `Bypass disabled for ${bypassModalMachine.machineName}` : `Bypass enabled for ${bypassModalMachine.machineName}`);
+      closeBypassModal();
+    } catch (err) { toast.error(err.response?.data?.error || "Bypass failed"); }
+    finally { setBypassing(false); }
   };
+
+  /* ── STAT CARDS ── */
+  const statCards = [
+    { label: "Total Machines",  value: stats.total,      color: T.text,  border: T.borderLight },
+    { label: "Active",          value: stats.active,     color: T.green, border: T.greenBorder },
+    { label: "PLC Configured",  value: stats.configured, color: T.blue,  border: T.blueBorder  },
+    { label: "Offline",         value: stats.inactive,   color: T.red,   border: T.redBorder   },
+  ];
+
+  /* ── MODAL SHARED STYLE ── */
+  const modalOverlay = { position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(15,23,42,0.65)", backdropFilter: "blur(4px)" };
 
   return (
     <div className="space-y-6 rise-in">
-      {/* ── Page Header ── */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center text-primary">
-            <Layout size={22} />
+      {/* ── Header ── */}
+      <div className="db-header-card mb-6">
+        <div className="db-header-gradient-bar" />
+        <div className="db-header-inner">
+          <div className="db-header-title-group">
+            <div className="db-header-icon-box"><Cpu size={22} /></div>
+            <div>
+              <h1 className="db-header-title">Machine Registry</h1>
+              <p className="db-header-subtitle">Manage production equipment, PLC connections &amp; register mapping</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-xl font-bold text-text-main tracking-tight">Machine Registry</h1>
-            <p className="text-text-muted text-xs mt-0.5">All production equipment, PLC endpoints &amp; register assignments</p>
+          <div className="flex items-center gap-2">
+            <button onClick={loadData} className="db-secondary-btn"><RefreshCw size={13} /> Refresh</button>
+            <button onClick={openCreate} className="db-action-btn"><Plus size={14} /> Add Machine</button>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={loadData} className="h-9 px-4 rounded-xl border border-border bg-bg-card text-text-muted hover:text-text-main hover:border-primary/40 transition-all flex items-center gap-2 text-sm font-semibold">
-            <RefreshCw size={14} /> Refresh
-          </button>
-          <button onClick={openCreate} className="h-9 px-5 rounded-xl bg-primary text-on-strong font-bold flex items-center gap-2 text-sm hover:brightness-110 transition-all shadow-lg shadow-primary/15">
-            <Plus size={16} /> Add Machine
-          </button>
         </div>
       </div>
 
       {/* ── Stats ── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {[
-          { label: "Total machines", value: stats.total, color: "text-text-main" },
-          { label: "Active / live", value: stats.active, color: "text-accent" },
-          { label: "PLC configured", value: stats.configured, color: "text-primary" },
-          { label: "Offline", value: stats.inactive, color: "text-danger" },
-        ].map((s, i) => (
-          <div key={i} className="bg-bg-card border border-border rounded-xl p-4">
-            <p className="text-[10px] font-semibold text-text-muted uppercase tracking-widest mb-1">{s.label}</p>
-            <p className={`text-2xl font-bold tabular-nums ${s.color}`}>{s.value}</p>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 12 }}>
+        {statCards.map((s) => (
+          <div key={s.label} style={{ background: T.bgCard, border: `1px solid ${s.border}`, borderRadius: 12, padding: "16px 18px", borderLeft: `3px solid ${s.color}` }}>
+            <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: T.textMuted, marginBottom: 6 }}>{s.label}</p>
+            <p style={{ fontSize: 26, fontWeight: 800, color: s.color, fontFamily: "ui-monospace, monospace", lineHeight: 1 }}>{s.value}</p>
           </div>
         ))}
       </div>
 
       {/* ── Filters ── */}
-      <div className="flex flex-col sm:flex-row gap-3">
-        <div className="relative flex-1">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 220 }}>
+          <Search size={14} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: T.textMuted }} />
           <input
             value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
             placeholder="Search by name, line, IP or operation…"
-            className="w-full h-9 bg-bg-card border border-border rounded-xl pl-9 pr-4 text-sm text-text-main outline-none focus:border-primary/50 placeholder:text-text-muted/50"
+            style={{ ...inp, height: 38, paddingLeft: 36, width: "100%", boxSizing: "border-box" }}
           />
         </div>
-        <select value={lineFilter} onChange={e => setLineFilter(e.target.value)}
-          className="h-9 bg-bg-card border border-border rounded-xl px-3 text-sm text-text-main outline-none focus:border-primary/50">
-          <option value="all">All lines</option>
+        <FieldSelect value={lineFilter} onChange={e => setLineFilter(e.target.value)} style={{ width: 160 }}>
+          <option value="all">All Lines</option>
           {lines.map(l => <option key={l} value={l}>{l}</option>)}
-        </select>
-        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
-          className="h-9 bg-bg-card border border-border rounded-xl px-3 text-sm text-text-main outline-none focus:border-primary/50">
-          <option value="all">All status</option>
+        </FieldSelect>
+        <FieldSelect value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={{ width: 140 }}>
+          <option value="all">All Status</option>
           <option value="ACTIVE">Active</option>
           <option value="INACTIVE">Inactive</option>
-        </select>
+        </FieldSelect>
       </div>
 
-      {/* ── Machine Grid ── */}
-      {filteredMachines.length === 0 ? (
-        <div className="bg-bg-card border border-border rounded-2xl p-20 flex flex-col items-center text-center text-text-muted">
-          <Database size={40} className="opacity-20 mb-3" />
-          <p className="font-semibold">No machines found</p>
-          <p className="text-sm mt-1 text-text-muted/60">Try adjusting your search or filters</p>
+      {/* ── Table ── */}
+      <div style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 14, overflow: "hidden" }}>
+        <div style={{ padding: "14px 20px", borderBottom: `1px solid ${T.borderLight}`, background: T.bgMuted, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Database size={14} color={T.blue} />
+            <p style={{ fontSize: 11, fontWeight: 700, color: T.text, textTransform: "uppercase", letterSpacing: "0.07em", margin: 0 }}>Machine Registry</p>
+          </div>
+          <span style={{ fontSize: 11, color: T.textMuted, background: T.bg, border: `1px solid ${T.border}`, padding: "3px 10px", borderRadius: 6 }}>
+            {filteredMachines.length} machine{filteredMachines.length !== 1 ? "s" : ""}
+          </span>
         </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {filteredMachines.map(m => {
-            const isActive = m.status === "ACTIVE";
-            const hasCfg = m.plcConfig && (m.plcProtocol === "MODBUS_TCP" || m.plcProtocol === "SLMP");
-            return (
-              <div key={m.id} className="bg-bg-card border border-border rounded-2xl overflow-hidden hover:border-primary/30 transition-all group">
-                {/* Card head */}
-                <div className="px-5 pt-5 pb-4 border-b border-border flex items-start justify-between gap-3">
-                  <div className="flex items-start gap-3 min-w-0">
-                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${isActive ? "bg-primary/10 text-primary border border-primary/20" : "bg-bg-dark text-text-muted border border-border"}`}>
-                      <Cpu size={18} />
-                    </div>
-                    <div className="min-w-0">
-                      <h3 className="font-bold text-text-main text-sm leading-tight truncate">{m.machineName}</h3>
-                      <p className="text-[11px] text-text-muted mt-0.5 flex items-center gap-1">
-                        <Layers size={9} /> {m.lineName || "Global"} · Seq {String(m.sequenceNo || 0).padStart(2, "0")}
-                      </p>
-                    </div>
-                  </div>
-                  <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold flex-shrink-0 ${isActive ? "bg-accent/10 border border-accent/20 text-accent" : "bg-bg-dark border border-border text-text-muted"}`}>
-                    {isActive && <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />}
-                    {isActive ? "Live" : "Offline"}
-                  </div>
-                </div>
 
-                {/* Card body */}
-                <div className="px-5 py-4 space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <p className="text-[10px] text-text-muted uppercase tracking-wider font-semibold mb-0.5">Operation</p>
-                      <p className="text-sm font-bold text-text-main font-mono">{m.operationNo || "—"}</p>
-                    </div>
-                    <div>
-                      <p className="text-[10px] text-text-muted uppercase tracking-wider font-semibold mb-0.5">Daily target</p>
-                      <p className="text-sm font-bold text-text-main">{m.dailyTargetQty || 0} units</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between bg-bg-dark/60 border border-border rounded-lg px-3 py-2">
-                    <span className="text-xs font-mono text-primary">{m.plcIp || "Not configured"}</span>
-                    <span className="text-[10px] text-text-muted font-semibold uppercase">{m.plcProtocol || "—"}</span>
-                  </div>
-                  {hasCfg && (
-                    <div className="flex gap-1.5 flex-wrap">
-                      {[
-                        { label: "TRG", val: m.plcConfig.startRegister },
-                        { label: "STS", val: m.plcConfig.statusRegister },
-                        { label: "PRT", val: m.plcConfig.partRegister },
-                        { label: "RST", val: m.plcConfig.resetRegister },
-                      ].map(chip => (
-                        <span key={chip.label} className="px-2 py-0.5 bg-bg-dark border border-border rounded text-[10px] font-mono">
-                          <span className="text-primary font-bold">{chip.label}</span>
-                          <span className="text-text-muted ml-1">R{chip.val}</span>
+        {filteredMachines.length === 0 ? (
+          <div style={{ padding: "60px 24px", textAlign: "center", color: T.textMuted }}>
+            <Database size={36} style={{ margin: "0 auto 12px", opacity: 0.2 }} />
+            <p style={{ fontWeight: 600, fontSize: 13 }}>No machines found</p>
+            <p style={{ fontSize: 12, marginTop: 4, opacity: 0.6 }}>Try adjusting your search or filters</p>
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: T.bgMuted, borderBottom: `1px solid ${T.borderLight}` }}>
+                  {["Seq","Machine","Line","Operation","PLC / Protocol","Range","Target","Status","Actions"].map(h => (
+                    <th key={h} style={{ padding: "10px 16px", textAlign: h === "Actions" ? "right" : "left", fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.09em", color: T.textMuted, whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filteredMachines.map((m, idx) => {
+                  const isActive = m.status === "ACTIVE";
+                  const range = rangeById[m.plcRangeId || m.plcConfig?.rangeId];
+                  return (
+                    <tr key={m.id} style={{ borderBottom: `1px solid ${T.borderLight}`, background: idx % 2 === 1 ? T.bgMuted : T.bgCard, transition: "background .1s" }}
+                      onMouseEnter={e => e.currentTarget.style.background = T.blueLight + "55"}
+                      onMouseLeave={e => e.currentTarget.style.background = idx % 2 === 1 ? T.bgMuted : T.bgCard}>
+                      <td style={{ padding: "12px 16px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.textMuted, fontSize: 12 }}>{String(m.sequenceNo || 0).padStart(2, "0")}</td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <p style={{ fontWeight: 700, color: T.text, margin: 0 }}>{m.machineName}</p>
+                      </td>
+                      <td style={{ padding: "12px 16px", color: T.textSec }}>{m.lineName || "—"}</td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <span style={{ fontFamily: "ui-monospace,monospace", color: T.blue, fontWeight: 700 }}>{m.operationNo || "—"}</span>
+                      </td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <p style={{ fontFamily: "ui-monospace,monospace", fontSize: 12, color: T.blue, margin: 0 }}>{m.plcIp || "Not set"}{m.plcPort ? `:${m.plcPort}` : ""}</p>
+                        <p style={{ fontSize: 10, color: T.textMuted, margin: "2px 0 0", textTransform: "uppercase" }}>{m.plcProtocol || "—"}</p>
+                      </td>
+                      <td style={{ padding: "12px 16px" }}>
+                        {range ? (
+                          <span style={{ padding: "2px 8px", background: T.blueLight, border: `1px solid ${T.blueBorder}`, borderRadius: 4, fontSize: 11, fontFamily: "ui-monospace,monospace", color: T.blue, fontWeight: 600 }}>
+                            {range.rangeName} [R{range.rangeStart}–R{range.rangeEnd}]
+                          </span>
+                        ) : <span style={{ color: T.textMuted, fontSize: 12 }}>—</span>}
+                      </td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <p style={{ fontWeight: 700, color: T.text, margin: 0 }}>{m.dailyTargetQty || 0}</p>
+                        <p style={{ fontSize: 10, color: T.textMuted, margin: "2px 0 0" }}>CT {Number(m.cycleTimeSec || 0)}s / LT {Number(m.loadingTimeSec || 0)}s</p>
+                      </td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 10px", borderRadius: 999, fontSize: 10, fontWeight: 700, background: isActive ? T.greenLight : T.bgMuted, color: isActive ? T.green : T.textMuted, border: `1px solid ${isActive ? T.greenBorder : T.border}` }}>
+                          {isActive && <span style={{ width: 5, height: 5, borderRadius: "50%", background: T.green, animation: "pulse 2s infinite" }} />}
+                          {isActive ? "Active" : "Offline"}
                         </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                      </td>
+                      <td style={{ padding: "12px 16px", textAlign: "right" }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 4 }}>
+                          {[
+                            { icon: Zap,    title: "Bypass", onClick: () => openBypassModal(m),        hoverColor: T.blue },
+                            { icon: Edit,   title: "Edit",   onClick: () => openEdit(m),               hoverColor: T.blue },
+                            { icon: Trash2, title: "Delete", onClick: () => setDeleteConfirmId(m.id),  hoverColor: T.red  },
+                          ].map(({ icon, title, onClick, hoverColor }) => {
+                            const IconComp = icon;
+                            return (
+                              <button key={title} onClick={onClick} title={title}
+                                style={{ width: 30, height: 30, border: `1px solid ${T.border}`, borderRadius: 7, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.textMuted, transition: "all .12s" }}
+                                onMouseEnter={e => { e.currentTarget.style.color = hoverColor; e.currentTarget.style.borderColor = hoverColor; e.currentTarget.style.background = hoverColor + "14"; }}
+                                onMouseLeave={e => { e.currentTarget.style.color = T.textMuted; e.currentTarget.style.borderColor = T.border; e.currentTarget.style.background = "transparent"; }}>
+                                <IconComp size={13} />
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
-                {/* Card footer */}
-                <div className="px-5 py-3 border-t border-border bg-bg-dark/20 flex items-center justify-end gap-2">
-                  <button onClick={() => setDeleteConfirmId(m.id)}
-                    className="p-2 text-text-muted hover:text-danger hover:bg-danger/10 rounded-lg transition-all">
-                    <Trash2 size={14} />
-                  </button>
-                  <button onClick={() => openEdit(m)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-primary/10 text-primary border border-primary/20 rounded-lg text-xs font-bold hover:bg-primary hover:text-on-strong transition-all">
-                    <Edit size={12} /> Configure
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* ── Edit / Create Modal ── */}
+      {/* ══ Add / Edit Modal ══ */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-bg-dark/90 backdrop-blur-sm" onClick={closeModal} />
-          <div className="relative w-full max-w-3xl bg-bg-card border border-border/60 rounded-2xl overflow-hidden flex flex-col max-h-[90vh] rise-in shadow-2xl">
+        <div style={modalOverlay}>
+          <div style={{ position: "absolute", inset: 0 }} onClick={closeModal} />
+          <div style={{ position: "relative", width: "100%", maxWidth: 860, background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 16, overflow: "hidden", display: "flex", flexDirection: "column", maxHeight: "94vh", boxShadow: "0 24px 60px rgba(15,23,42,.22)" }}>
+            {/* accent top bar */}
+            <div style={{ height: 3, background: `linear-gradient(90deg, ${T.navy}, ${T.blue})` }} />
+
             {/* Modal header */}
-            <div className="px-6 py-5 border-b border-border flex items-center justify-between bg-bg-dark/30">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center text-primary">
-                  <Cpu size={18} />
+            <div style={{ padding: "18px 24px", borderBottom: `1px solid ${T.borderLight}`, background: T.bgCard, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ width: 40, height: 40, borderRadius: 10, background: T.blueLight, border: `1px solid ${T.blueBorder}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Cpu size={18} color={T.blue} />
                 </div>
                 <div>
-                  <h2 className="font-bold text-text-main">{editingMachine ? "Configure machine" : "Register new machine"}</h2>
-                  <p className="text-xs text-text-muted mt-0.5">{editingMachine ? `ID: ${editingMachine.id}` : "Add new equipment to the production line"}</p>
+                  <h2 style={{ fontWeight: 700, color: T.text, margin: 0, fontSize: 15 }}>{editingMachine ? "Edit Machine" : "Add New Machine"}</h2>
+                  <p style={{ fontSize: 11, color: T.textMuted, margin: "2px 0 0" }}>{editingMachine ? `Machine ID: ${editingMachine.id}` : "Fill in the details to register a new machine"}</p>
                 </div>
               </div>
-              <button onClick={closeModal} className="p-2 text-text-muted hover:text-text-main hover:bg-bg-dark rounded-xl transition-all">
-                <X size={18} />
+              <button onClick={closeModal} style={{ width: 32, height: 32, border: `1px solid ${T.border}`, borderRadius: 8, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.textMuted }}
+                onMouseEnter={e => e.currentTarget.style.background = T.bgMuted}
+                onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                <X size={16} />
               </button>
             </div>
 
             {/* Tabs */}
-            <div className="flex items-center border-b border-border bg-bg-dark/20 px-6 gap-1 overflow-x-auto">
-              {FORM_TABS.map(tab => (
-                <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-1.5 px-4 py-3.5 text-xs font-semibold border-b-2 transition-all whitespace-nowrap ${activeTab === tab.id ? "border-primary text-primary" : "border-transparent text-text-muted hover:text-text-main"}`}>
-                  <tab.icon size={13} /> {tab.label}
-                </button>
-              ))}
+            <div style={{ padding: "0 24px", borderBottom: `1px solid ${T.borderLight}`, background: T.bgMuted, display: "flex", gap: 0 }}>
+              {FORM_TABS.map(tab => {
+                const active = activeTab === tab.id;
+                const TI = tab.icon;
+                return (
+                  <button key={tab.id} type="button" onClick={() => setActiveTab(tab.id)}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "12px 14px", border: "none", borderBottom: `2px solid ${active ? T.blue : "transparent"}`, background: "transparent", color: active ? T.blue : T.textMuted, fontSize: 12, fontWeight: active ? 700 : 600, cursor: "pointer", whiteSpace: "nowrap", transition: "all .15s" }}>
+                    <TI size={13} />{tab.label}
+                  </button>
+                );
+              })}
             </div>
 
             {/* Form body */}
-            <form id="machine-form" onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6">
-              {/* ── GENERAL TAB ── */}
+            <form id="machine-form" onSubmit={handleSubmit} style={{ flex: 1, overflowY: "auto", padding: 24, background: T.bg }}>
+
+              {/* ── GENERAL ── */}
               {activeTab === "general" && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                  <div className="md:col-span-2">
-                    <InputField label="Machine name">
-                      <input required value={formData.machineName} onChange={e => updateField("machineName", e.target.value)}
-                        placeholder="e.g. OP-010 Press" className={inputCls} />
-                    </InputField>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  <div style={{ gridColumn: "1 / -1" }}>
+                    <Label required>Machine Name</Label>
+                    <FieldInput required value={formData.machineName} onChange={e => updateField("machineName", e.target.value)} placeholder="e.g. OP-010 Press" />
                   </div>
-                  <InputField label="Line / department">
-                    <input value={formData.lineName} onChange={e => updateField("lineName", e.target.value)}
-                      placeholder="Assembly Line A" className={inputCls} />
-                  </InputField>
-                  <InputField label="Status">
-                    <select value={formData.status} onChange={e => updateField("status", e.target.value)} className={selectCls}>
-                      <option value="ACTIVE">Active — live tracing</option>
-                      <option value="INACTIVE">Inactive — maintenance</option>
-                    </select>
-                  </InputField>
-                  <InputField label="Sequence number" hint="order on the line">
-                    <input type="number" value={formData.sequenceNo} onChange={e => updateField("sequenceNo", e.target.value)}
-                      placeholder="1" className={`${inputCls} font-mono`} />
-                  </InputField>
-                  <InputField label="Operation code">
-                    <input value={formData.operationNo} onChange={e => updateField("operationNo", e.target.value.toUpperCase())}
-                      placeholder="OP010" className={`${inputCls} font-mono uppercase`} />
-                  </InputField>
-                  <InputField label="Daily production target">
-                    <input type="number" value={formData.dailyTargetQty} onChange={e => updateField("dailyTargetQty", e.target.value)}
-                      placeholder="480" className={`${inputCls} font-mono font-bold`} />
-                  </InputField>
+                  <div>
+                    <Label>Line / Department</Label>
+                    <FieldInput value={formData.lineName} onChange={e => updateField("lineName", e.target.value)} placeholder="Assembly Line A" />
+                  </div>
+                  <div>
+                    <Label>Status</Label>
+                    <FieldSelect value={formData.status} onChange={e => updateField("status", e.target.value)}>
+                      <option value="ACTIVE">Active</option>
+                      <option value="INACTIVE">Inactive</option>
+                    </FieldSelect>
+                  </div>
+                  <div>
+                    <Label>Sequence No</Label>
+                    <FieldInput type="number" value={formData.sequenceNo} onChange={e => updateField("sequenceNo", e.target.value)} placeholder="1" mono />
+                  </div>
+                  <div>
+                    <Label>Operation Code</Label>
+                    <FieldInput value={formData.operationNo} onChange={e => updateField("operationNo", e.target.value.toUpperCase())} placeholder="OP010" mono />
+                  </div>
+                  <div>
+                    <Label>Daily Target</Label>
+                    <FieldInput type="number" value={formData.dailyTargetQty} onChange={e => updateField("dailyTargetQty", e.target.value)} placeholder="480" mono />
+                  </div>
+                  <div>
+                    <Label>Cycle Time (sec)</Label>
+                    <FieldInput type="number" value={formData.cycleTimeSec} onChange={e => updateField("cycleTimeSec", e.target.value)} placeholder="45" mono />
+                  </div>
+                  <div>
+                    <Label>Loading Time (sec)</Label>
+                    <FieldInput type="number" value={formData.loadingTimeSec} onChange={e => updateField("loadingTimeSec", e.target.value)} placeholder="15" mono />
+                  </div>
                 </div>
               )}
 
-              {/* ── NETWORK TAB ── */}
+              {/* ── NETWORK & PLC ── */}
               {activeTab === "network" && (
-                <div className="space-y-5">
-                  <InputField label="PLC protocol">
-                    <select value={formData.plcProtocol} onChange={e => updateField("plcProtocol", e.target.value)} className={`${selectCls} font-semibold`}>
-                      <option value="TCP_TEXT">Generic TCP text</option>
-                      <option value="MODBUS_TCP">Modbus TCP (standard industrial)</option>
-                      <option value="SLMP">SLMP — Mitsubishi Melsec</option>
-                    </select>
-                  </InputField>
-                  <div className="grid grid-cols-2 gap-4">
-                    <InputField label="PLC IP address">
-                      <input required value={formData.plcIp} onChange={e => updateField("plcIp", e.target.value)}
-                        placeholder="192.168.1.10" className={`${inputCls} font-mono`} />
-                    </InputField>
-                    <InputField label="Port">
-                      <input type="number" value={formData.plcPort} onChange={e => updateField("plcPort", e.target.value)}
-                        placeholder="502" className={`${inputCls} font-mono`} />
-                    </InputField>
+                <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+                  <div>
+                    <Label>PLC Protocol</Label>
+                    <FieldSelect value={formData.plcProtocol} onChange={e => updateField("plcProtocol", e.target.value)}>
+                      <option value="TCP_TEXT">Generic TCP Text</option>
+                      <option value="MODBUS_TCP">Modbus TCP</option>
+                      <option value="SLMP">SLMP — Mitsubishi</option>
+                    </FieldSelect>
                   </div>
-                  {usesRange && (
-                    <InputField label="Register block (range)" hint="assigned from PLC config page">
-                      <select value={formData.plcRangeId} onChange={e => updateField("plcRangeId", e.target.value)}
-                        className={`${selectCls} font-semibold`}>
-                        <option value="">— Select reserved memory block —</option>
-                        {selectableRanges.map(r => (
-                          <option key={r.id} value={r.id}>{r.rangeName} [R{r.rangeStart}–R{r.rangeEnd}]</option>
-                        ))}
-                      </select>
-                    </InputField>
+
+                  {isSlmp && (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                      <div>
+                        <Label>SLMP Device Family</Label>
+                        <FieldInput value={formData.plcSlmpDevice} onChange={e => updateField("plcSlmpDevice", String(e.target.value || "").toUpperCase())} placeholder="D" mono />
+                        <p style={{ fontSize: 10, color: T.textMuted, marginTop: 5 }}>Example: D, W, R — must match PLC memory device type.</p>
+                      </div>
+                      <div>
+                        <Label>SLMP Frame Mode</Label>
+                        <FieldSelect value={formData.plcSlmpFrameMode} onChange={e => updateField("plcSlmpFrameMode", String(e.target.value || "AUTO").toUpperCase())} mono>
+                          <option value="AUTO">AUTO (ASCII then Binary)</option>
+                          <option value="ASCII">ASCII</option>
+                          <option value="BINARY">BINARY</option>
+                        </FieldSelect>
+                        <p style={{ fontSize: 10, color: T.textMuted, marginTop: 5 }}>Use ASCII if PLC Ethernet open setting is configured for ASCII MC/SLMP.</p>
+                      </div>
+                    </div>
                   )}
-                  <div className="p-4 bg-bg-dark/50 border border-border rounded-xl flex items-start gap-3">
-                    <Info size={16} className="text-text-muted mt-0.5 flex-shrink-0" />
-                    <p className="text-xs text-text-muted leading-relaxed">
-                      Modbus TCP default port is <span className="font-mono font-bold text-primary">502</span>.
-                      SLMP (Mitsubishi) uses <span className="font-mono font-bold text-primary">5006</span>.
-                      Generic TCP scanners typically use <span className="font-mono font-bold text-primary">9001</span>.
-                      Ensure the PLC firewall allows inbound connections on the selected port.
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                    <div>
+                      <Label required>PLC IP Address</Label>
+                      <FieldSelect value={formData.plcIp} onChange={e => { const newIp = e.target.value; updateField("plcIp", newIp); const matching = plcRanges.find(r => String(r.plcIp).trim() === newIp); if (matching && matching.plcPort) updateField("plcPort", String(matching.plcPort)); }} mono>
+                        <option value="">— Select IP Address —</option>
+                        {[...new Set(plcRanges.map(r => String(r.plcIp).trim()).filter(Boolean))].map(ip => <option key={ip} value={ip}>{ip}</option>)}
+                      </FieldSelect>
+                    </div>
+                    <div>
+                      <Label>Port</Label>
+                      <FieldInput type="number" value={formData.plcPort} onChange={e => updateField("plcPort", e.target.value)} placeholder="502" mono />
+                    </div>
+                  </div>
+
+                  {usesRange && (
+                    <div style={{ padding: 16, background: T.blueLight + "55", border: `1px solid ${T.blueBorder}`, borderRadius: 10 }}>
+                      <Label>PLC Register Block (Range)</Label>
+                      <FieldSelect value={formData.plcRangeId} onChange={e => updateField("plcRangeId", e.target.value)}>
+                        <option value="">— Select PLC Range —</option>
+                        {selectableRanges.map(r => <option key={r.id} value={r.id}>{r.rangeName || r.plcName} — R{r.rangeStart}–R{r.rangeEnd} ({r.plcIp})</option>)}
+                      </FieldSelect>
+                      {formData.plcRangeId && rangeById[formData.plcRangeId] && (
+                        <div style={{ marginTop: 10, padding: "10px 12px", background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: 8, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, fontSize: 12 }}>
+                          <div><span style={{ color: T.textMuted }}>Start: </span><span style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>R{rangeById[formData.plcRangeId].rangeStart}</span></div>
+                          <div><span style={{ color: T.textMuted }}>End: </span><span style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>R{rangeById[formData.plcRangeId].rangeEnd}</span></div>
+                          <div><span style={{ color: T.textMuted }}>IP: </span><span style={{ fontFamily: "ui-monospace,monospace", color: T.blue }}>{rangeById[formData.plcRangeId].plcIp}</span></div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div style={{ padding: "12px 14px", background: T.bgMuted, border: `1px solid ${T.border}`, borderRadius: 9, display: "flex", alignItems: "flex-start", gap: 10 }}>
+                    <Info size={14} color={T.textMuted} style={{ flexShrink: 0, marginTop: 1 }} />
+                    <p style={{ fontSize: 12, color: T.textSec, lineHeight: 1.6, margin: 0 }}>
+                      Modbus TCP default port: <code style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>502</code>. SLMP common ports: <code style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>5000 / 5006 / 1000</code>. Generic TCP scanners: <code style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>9001</code>.
                     </p>
                   </div>
                 </div>
               )}
 
-              {/* ── REGISTERS TAB ── */}
+              {/* ── REGISTERS ── */}
               {activeTab === "registers" && (
-                <div className="space-y-5">
+                <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
                   {!formData.plcRangeId ? (
-                    <div className="p-16 border border-dashed border-border rounded-2xl flex flex-col items-center text-center text-text-muted">
-                      <Network size={32} className="opacity-20 mb-3" />
-                      <p className="font-semibold text-sm">Select a network block first</p>
-                      <p className="text-xs mt-1 text-text-muted/60">Go to the Network tab and assign a register block to enable register mapping</p>
+                    <div style={{ padding: "60px 24px", border: `2px dashed ${T.border}`, borderRadius: 12, textAlign: "center", color: T.textMuted }}>
+                      <Network size={28} style={{ margin: "0 auto 12px", opacity: 0.25 }} />
+                      <p style={{ fontWeight: 600, fontSize: 13, marginBottom: 4, color: T.textSec }}>Select a PLC range first</p>
+                      <p style={{ fontSize: 12 }}>Go to the "Network & PLC" tab and assign a register block</p>
                     </div>
                   ) : (
                     <>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px,1fr))", gap: 12 }}>
                         {MACHINE_REGISTER_ROLE_FIELDS.map(field => {
                           const range = rangeById[formData.plcRangeId];
                           const start = range?.rangeStart || 0;
-                          const end = range?.rangeEnd || 0;
+                          const end   = range?.rangeEnd   || 0;
                           const usedRegisters = new Set();
                           machines.forEach(m => {
                             if (m.id === editingMachine?.id) return;
                             if (Number(m.plcRangeId) !== Number(formData.plcRangeId)) return;
                             const mc = m.plcConfig || {};
-                            MACHINE_REGISTER_ROLE_FIELDS.forEach(f => { if (mc[f.key]) usedRegisters.add(Number(mc[f.key])); });
+                            const peerProtocol = normalizeProtocol(m?.plcProtocol, "MODBUS_TCP");
+                            MACHINE_REGISTER_ROLE_FIELDS.forEach(f => {
+                              expandRegisterWindow(mc[f.key], f.key, peerProtocol).forEach((word) => usedRegisters.add(word));
+                            });
                           });
-                          MACHINE_REGISTER_ROLE_FIELDS.forEach(f => {
-                            if (f.key !== field.key && formData.plcConfig?.[f.key]) usedRegisters.add(Number(formData.plcConfig[f.key]));
-                          });
+                          const ownUsed = getConfigOccupiedRegisters(formData.plcConfig || {}, normalizedProtocol, field.key);
+                          ownUsed.forEach((word) => usedRegisters.add(word));
                           const options = [];
+                          const currentValue = toWholeNumberOrNull(formData.plcConfig?.[field.key]);
+                          const requiredWidth = getRegisterSpanWords(field.key, normalizedProtocol);
                           for (let r = start; r <= end; r++) {
-                            if (!usedRegisters.has(r) || Number(formData.plcConfig?.[field.key]) === r) options.push(r);
+                            const words = Array.from({ length: requiredWidth }, (_, index) => r + index);
+                            const inRange = words.every((w) => w >= start && w <= end);
+                            const blocked = words.some((w) => usedRegisters.has(w));
+                            if ((!blocked && inRange) || currentValue === r) options.push(r);
                           }
+                          const ioHelp = REGISTER_IO_HELP[field.key] || null;
                           return (
-                            <div key={field.key} className="bg-bg-dark/60 border border-border rounded-xl p-4">
-                              <p className="text-[10px] font-semibold text-text-muted uppercase tracking-widest mb-2">{field.label}</p>
-                              <select required value={formData.plcConfig?.[field.key] ?? ""} onChange={e => updateCfg(field.key, e.target.value)}
-                                className="w-full bg-bg-dark border-0 border-b border-primary/30 pb-1 text-sm text-primary font-mono font-bold outline-none focus:border-primary">
-                                <option value="">— Select R —</option>
+                            <div key={field.key} style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 10, padding: 14 }}>
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                                <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: T.textMuted, margin: 0 }}>{field.label}</p>
+                                {ioHelp && <ActionBadge action={ioHelp.action} />}
+                              </div>
+                              <FieldSelect required={Boolean(field.required)} value={formData.plcConfig?.[field.key] ?? ""} onChange={e => updateCfg(field.key, e.target.value)} mono>
+                                <option value="">— Select —</option>
                                 {options.map(o => <option key={o} value={o}>R{o}</option>)}
-                              </select>
-                              {range && <p className="text-[9px] text-text-muted/50 mt-1.5">Block: {range.rangeName}</p>}
+                              </FieldSelect>
+                              {ioHelp && <p style={{ fontSize: 10, color: T.textMuted, marginTop: 6, lineHeight: 1.4 }}>{ioHelp.flow} · {ioHelp.purpose}</p>}
+                              {isSlmp && getRegisterSpanWords(field.key, normalizedProtocol) > 1 && (
+                                <p style={{ fontSize: 9, color: T.textMuted, marginTop: 4 }}>Uses 2 words: Rn and Rn+1</p>
+                              )}
+                              {range && <p style={{ fontSize: 9, color: T.textMuted, opacity: 0.6, marginTop: 4 }}>Block: {range.rangeName}</p>}
                             </div>
                           );
                         })}
                       </div>
-                      <div className="p-4 bg-accent/5 border border-accent/20 rounded-xl flex items-start gap-3">
-                        <Activity size={16} className="text-accent mt-0.5 flex-shrink-0" />
-                        <p className="text-xs text-text-muted leading-relaxed">
-                          Registers already used by other machines on this block are automatically filtered out to prevent data collision.
-                        </p>
+
+                      {/* Summary table */}
+                      <div style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 10, overflow: "hidden" }}>
+                        <div style={{ padding: "10px 14px", background: T.bgMuted, borderBottom: `1px solid ${T.borderLight}` }}>
+                          <p style={{ fontSize: 11, fontWeight: 700, color: T.text, margin: 0, textTransform: "uppercase", letterSpacing: "0.07em" }}>Register Summary</p>
+                        </div>
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                            <thead>
+                              <tr style={{ background: T.bgMuted, borderBottom: `1px solid ${T.borderLight}` }}>
+                                {["Role","Action","Flow","Register","Required","Purpose"].map(h => (
+                                  <th key={h} style={{ padding: "8px 12px", textAlign: "left", fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.09em", color: T.textMuted }}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {MACHINE_REGISTER_ROLE_FIELDS.map((field, i) => {
+                                const ioHelp = REGISTER_IO_HELP[field.key] || {};
+                                const reg = formData.plcConfig?.[field.key];
+                                return (
+                                  <tr key={field.key} style={{ borderBottom: `1px solid ${T.borderLight}`, background: i % 2 === 1 ? T.bgMuted : T.bgCard }}>
+                                    <td style={{ padding: "9px 12px", fontWeight: 600, color: T.text }}>{field.label}</td>
+                                    <td style={{ padding: "9px 12px" }}>{ioHelp.action ? <ActionBadge action={ioHelp.action} /> : "—"}</td>
+                                    <td style={{ padding: "9px 12px", color: T.textSec }}>{ioHelp.flow || "—"}</td>
+                                    <td style={{ padding: "9px 12px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: reg ? T.blue : T.textMuted }}>{reg ? `R${reg}` : "—"}</td>
+                                    <td style={{ padding: "9px 12px" }}><Chip label={field.required ? "Must" : "Optional"} color={field.required ? "blue" : "gray"} /></td>
+                                    <td style={{ padding: "9px 12px", color: T.textSec, fontSize: 11 }}>{ioHelp.purpose || "—"}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
                       </div>
+
+                      <div style={{ padding: "10px 14px", background: T.greenLight, border: `1px solid ${T.greenBorder}`, borderRadius: 8, display: "flex", alignItems: "flex-start", gap: 10 }}>
+                        <Activity size={14} color={T.green} style={{ flexShrink: 0, marginTop: 1 }} />
+                        <p style={{ fontSize: 12, color: T.textSec, margin: 0, lineHeight: 1.5 }}>Registers already used by other machines on this block are filtered out to prevent collision.</p>
+                      </div>
+                      {registerConflicts.length > 0 && (
+                        <div style={{ padding: "10px 14px", background: T.redLight, border: `1px solid ${T.redBorder}`, borderRadius: 8, display: "flex", alignItems: "flex-start", gap: 10 }}>
+                          <AlertTriangle size={14} color={T.red} style={{ flexShrink: 0, marginTop: 1 }} />
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <p style={{ fontSize: 12, color: T.textSec, margin: 0, lineHeight: 1.5 }}>
+                              Resolve register conflicts before saving.
+                            </p>
+                            {registerConflicts.slice(0, 4).map((item) => (
+                              <p key={item} style={{ fontSize: 11, color: T.red, margin: 0, lineHeight: 1.4 }}>{item}</p>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
               )}
 
-              {/* ── TUNING TAB ── */}
+              {/* ── TUNING ── */}
               {activeTab === "tuning" && (
-                <div className="space-y-5">
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                    {MACHINE_MODBUS_TUNING_FIELD_CONFIG.map(field => (
-                      <InputField key={field.key} label={field.label}>
-                        <input type="number" value={formData.plcConfig?.[field.key] ?? ""}
-                          onChange={e => updateCfg(field.key, e.target.value)}
-                          className={`${inputCls} font-mono`} />
-                      </InputField>
-                    ))}
+                <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+                  {/* action bar */}
+                  <div style={{ padding: "12px 14px", background: T.blueLight + "55", border: `1px solid ${T.blueBorder}`, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                    <p style={{ fontSize: 12, color: T.textSec, margin: 0 }}>Define handshake values and share exact register meaning with PLC developer.</p>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      {[
+                        { label: "+ Add Handshake",        onClick: addHandshakeRow,                color: T.green,  border: T.greenBorder  },
+                        { label: "Reset From Registers",   onClick: syncHandshakeRowsFromRegisters, color: T.slate,  border: T.border       },
+                        { label: "Apply Standard 1/2/3/4", onClick: applyStandardTuning,           color: T.blue,   border: T.blueBorder   },
+                        { label: "Copy PLC Guide",         onClick: copyPlcGuide, icon: Copy,      color: T.navyMid,border: T.navyLight     },
+                      ].map(({ label, onClick, color, border }) => (
+                        <button key={label} type="button" onClick={onClick}
+                          style={{ padding: "6px 12px", fontSize: 11, fontWeight: 700, borderRadius: 7, border: `1px solid ${border}`, color, background: "transparent", cursor: "pointer", transition: "background .12s" }}
+                          onMouseEnter={e => e.currentTarget.style.background = color + "12"}
+                          onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="p-4 bg-danger/5 border border-danger/20 rounded-xl flex items-start gap-3">
-                    <AlertTriangle size={16} className="text-danger mt-0.5 flex-shrink-0" />
-                    <p className="text-xs text-text-muted leading-relaxed">
-                      Changing handshake signal values will immediately break the PLC communication unless the hardware program is updated to match. Coordinate with your PLC programmer before making changes.
-                    </p>
+
+                  {/* tuning value inputs */}
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px,1fr))", gap: 14 }}>
+                    {MACHINE_MODBUS_TUNING_FIELD_CONFIG.map(field => {
+                      const help = TUNING_VALUE_HELP[field.key];
+                      return (
+                        <div key={field.key} style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 10, padding: 14 }}>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                            <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: T.textMuted, margin: 0 }}>{field.label}</p>
+                            {help && <ActionBadge action={help.direction} />}
+                          </div>
+                          <FieldInput type="number" value={formData.plcConfig?.[field.key] ?? ""} onChange={e => updateCfg(field.key, e.target.value)} mono />
+                          {help && <p style={{ fontSize: 10, color: T.textMuted, marginTop: 6, lineHeight: 1.4 }}>{help.usage}</p>}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* handshake table */}
+                  <div style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 10, overflow: "hidden" }}>
+                    <div style={{ padding: "10px 14px", background: T.bgMuted, borderBottom: `1px solid ${T.borderLight}` }}>
+                      <p style={{ fontSize: 11, fontWeight: 700, color: T.text, margin: 0, textTransform: "uppercase", letterSpacing: "0.07em" }}>Handshake Signal Map</p>
+                    </div>
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                        <thead>
+                          <tr style={{ background: T.bgMuted, borderBottom: `1px solid ${T.borderLight}` }}>
+                            {["Signal","Direction","Register","Value","Meaning","Required",""].map(h => (
+                              <th key={h} style={{ padding: "8px 10px", textAlign: "left", fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.09em", color: T.textMuted, whiteSpace: "nowrap" }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {handshakeRows.map((row, index) => (
+                            <tr key={row.id || `${row.signal}-${index}`} style={{ borderBottom: `1px solid ${T.borderLight}` }}>
+                              <td style={{ padding: "8px 10px", minWidth: 150 }}>
+                                <FieldInput value={row.signal || ""} onChange={e => updateHandshakeRow(index, "signal", e.target.value)} placeholder="Signal name" />
+                              </td>
+                              <td style={{ padding: "8px 10px", minWidth: 130 }}>
+                                <FieldSelect value={row.direction || "READ"} onChange={e => updateHandshakeRow(index, "direction", e.target.value)}>
+                                  <option value="READ">READ</option>
+                                  <option value="WRITE">WRITE</option>
+                                  <option value="BOTH">BOTH</option>
+                                </FieldSelect>
+                              </td>
+                              <td style={{ padding: "8px 10px", minWidth: 110 }}>
+                                <FieldInput type="number" value={row.register ?? ""} onChange={e => updateHandshakeRow(index, "register", e.target.value)} placeholder="Register no." mono />
+                              </td>
+                              <td style={{ padding: "8px 10px", minWidth: 90 }}>
+                                <FieldInput type="number" value={row.value ?? ""} onChange={e => updateHandshakeRow(index, "value", e.target.value)} placeholder="Value" mono />
+                              </td>
+                              <td style={{ padding: "8px 10px", minWidth: 200 }}>
+                                <FieldInput value={row.meaning || ""} onChange={e => updateHandshakeRow(index, "meaning", e.target.value)} placeholder="Meaning / purpose" />
+                              </td>
+                              <td style={{ padding: "8px 10px" }}>
+                                <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: T.textSec, cursor: "pointer" }}>
+                                  <input type="checkbox" checked={row.required !== false} onChange={e => updateHandshakeRow(index, "required", e.target.checked)} style={{ accentColor: T.blue }} />
+                                  Must
+                                </label>
+                              </td>
+                              <td style={{ padding: "8px 10px" }}>
+                                <button type="button" onClick={() => removeHandshakeRow(index)}
+                                  style={{ width: 28, height: 28, border: `1px solid ${T.redBorder}`, borderRadius: 6, background: T.redLight, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.red }}>
+                                  <Trash2 size={12} />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div style={{ padding: "10px 14px", background: T.redLight, border: `1px solid ${T.redBorder}`, borderRadius: 8, display: "flex", alignItems: "flex-start", gap: 10 }}>
+                    <AlertTriangle size={14} color={T.red} style={{ flexShrink: 0, marginTop: 1 }} />
+                    <p style={{ fontSize: 12, color: T.textSec, margin: 0, lineHeight: 1.5 }}>Changing handshake values will break PLC communication unless the PLC program is updated. Coordinate with your PLC programmer.</p>
                   </div>
                 </div>
               )}
 
-              {/* ── LIVE DATA TAB ── */}
+              {/* ── LIVE REGISTERS ── */}
               {activeTab === "live" && (
-                <div className="space-y-6">
-                  <div className="p-4 bg-primary/5 border border-primary/20 rounded-xl">
-                    <div className="flex items-center gap-3 mb-4">
-                      <Eye size={16} className="text-primary" />
-                      <h3 className="text-sm font-bold text-text-main">Read PLC Values</h3>
-                    </div>
-                    <div className="grid grid-cols-1 gap-4">
+                <div>
+                  <div style={{ padding: 16, background: T.blueLight + "44", border: `1px solid ${T.blueBorder}`, borderRadius: 12, marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <Activity size={16} color={T.blue} />
                       <div>
-                        <FieldLabel label="Temperature register" hint="Modbus address (e.g., 40001)"/>
-                        <div className="flex gap-2">
-                          <input
-                            type="number"
-                            value={formData.readRegisters.temperature}
-                            onChange={e => updateReadReg("temperature", e.target.value)}
-                            placeholder="e.g., 40001"
-                            className={`${inputCls} flex-1`}
-                          />
-                          <button
-                            type="button"
-                            onClick={readTemperature}
-                            disabled={reading || !formData.readRegisters.temperature}
-                            className="px-4 py-2 bg-primary text-on-strong font-bold rounded-lg text-sm hover:brightness-110 transition-all disabled:opacity-50"
-                          >
-                            {reading ? "Reading..." : "Read"}
+                        <p style={{ fontWeight: 700, color: T.text, margin: 0, fontSize: 13 }}>Live Data Registers</p>
+                        <p style={{ fontSize: 11, color: T.textMuted, margin: "2px 0 0" }}>Define registers for live monitoring — Temperature, Pressure, Torque, etc.</p>
+                      </div>
+                    </div>
+                    <button type="button" onClick={addSignal}
+                      style={{ padding: "7px 14px", background: T.blue, color: "#fff", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+                      <Plus size={12} /> Add Register
+                    </button>
+                  </div>
+
+                  {(!formData.plcSignalMap || formData.plcSignalMap.length === 0) ? (
+                    <div style={{ padding: "40px 24px", textAlign: "center", border: `2px dashed ${T.border}`, borderRadius: 10, color: T.textMuted }}>
+                      <p style={{ fontWeight: 600, fontSize: 13 }}>No live registers defined.</p>
+                      <p style={{ fontSize: 12, marginTop: 4 }}>Click "Add Register" to define a live monitoring register.</p>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      {formData.plcSignalMap.map((sig, idx) => (
+                        <div key={idx} style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 10, padding: "12px 14px", display: "flex", alignItems: "flex-end", gap: 12 }}>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 80px 1fr", gap: 10, flex: 1 }}>
+                            {[
+                              { label: "Label",            field: "label",       type: "text",   placeholder: "Temperature" },
+                              { label: "Register Address", field: "register",    type: "number", placeholder: "40001", mono: true },
+                              { label: "Description/Unit", field: "description", type: "text",   placeholder: "Unit: °C" },
+                            ].map(({ label, field, type, placeholder, mono }) => (
+                              <div key={field}>
+                                <Label>{label}</Label>
+                                <FieldInput type={type} value={sig[field] || ""} onChange={e => updateSignal(idx, field, e.target.value)} placeholder={placeholder} mono={mono} />
+                              </div>
+                            ))}
+                            <div>
+                              <Label>Device</Label>
+                              <FieldInput value={sig.device || ""} onChange={e => updateSignal(idx, "device", String(e.target.value || "").toUpperCase())} placeholder={formData.plcProtocol === "SLMP" ? "D" : "Opt."} mono style={{ textTransform: "uppercase" }} />
+                            </div>
+                            <div>
+                              <Label>Direction</Label>
+                              <FieldSelect value={sig.direction || "PLC -> PC"} onChange={e => updateSignal(idx, "direction", e.target.value)}>
+                                <option value="PLC -> PC">Read (PLC → PC)</option>
+                                <option value="PC -> PLC">Write (PC → PLC)</option>
+                                <option value="BIDIRECTIONAL">Both</option>
+                              </FieldSelect>
+                            </div>
+                          </div>
+                          <button type="button" onClick={() => removeSignal(idx)}
+                            style={{ width: 32, height: 32, border: `1px solid ${T.redBorder}`, borderRadius: 7, background: T.redLight, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.red, flexShrink: 0 }}>
+                            <Trash2 size={13} />
                           </button>
                         </div>
-                        {liveValues.temperature !== null && (
-                          <div className="mt-3 p-3 bg-accent/10 border border-accent/20 rounded-lg flex items-center justify-between">
-                            <span className="text-sm font-semibold text-text-main">Current temperature:</span>
-                            <span className="text-lg font-bold text-accent">{liveValues.temperature} °C</span>
-                          </div>
-                        )}
-                      </div>
-                      {/* You can add more registers here */}
+                      ))}
                     </div>
-                    <p className="text-xs text-text-muted mt-4">
-                      Note: The PLC must be accessible and the register must be configured to hold the desired value.
-                    </p>
-                  </div>
+                  )}
                 </div>
               )}
             </form>
 
             {/* Modal footer */}
-            <div className="px-6 py-4 border-t border-border flex items-center justify-between bg-bg-dark/20">
-              <div className="flex items-center gap-2 text-xs text-text-muted">
+            <div style={{ padding: "14px 24px", borderTop: `1px solid ${T.borderLight}`, background: T.bgCard, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: T.textMuted }}>
                 <ChevronRight size={12} />
-                <span>Fill in Identity → Network → Registers in order</span>
+                <span>Fill Identity → Network → Registers in order</span>
               </div>
-              <div className="flex items-center gap-3">
-                <button type="button" onClick={closeModal} className="px-4 py-2 text-sm text-text-muted hover:text-text-main transition-colors font-semibold">Cancel</button>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <button type="button" onClick={downloadCurrentPlcSpec}
+                  style={{ padding: "8px 14px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: `1px solid ${T.border}`, background: T.bgCard, color: T.textSec, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+                  Download Excel
+                </button>
+                <button type="button" onClick={closeModal}
+                  style={{ padding: "8px 16px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: `1px solid ${T.border}`, background: T.bgCard, color: T.textSec, cursor: "pointer" }}>
+                  Cancel
+                </button>
                 <button type="submit" form="machine-form" disabled={saving}
-                  className="px-6 py-2 bg-primary text-on-strong font-bold rounded-xl text-sm hover:brightness-110 transition-all flex items-center gap-2 disabled:opacity-50">
-                  <Save size={14} /> {saving ? "Saving…" : editingMachine ? "Save changes" : "Deploy machine"}
+                  style={{ padding: "8px 20px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: "none", background: saving ? T.slateLight : T.navy, color: "#fff", cursor: saving ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 6, opacity: saving ? 0.6 : 1 }}>
+                  <Save size={13} />{saving ? "Saving…" : editingMachine ? "Save Changes" : "Add Machine"}
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ Bypass Modal ══ */}
+      {bypassModalMachine && (
+        <div style={modalOverlay}>
+          <div style={{ position: "absolute", inset: 0 }} onClick={closeBypassModal} />
+          <div style={{ position: "relative", width: "100%", maxWidth: 520, background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 16, overflow: "hidden", boxShadow: "0 24px 60px rgba(15,23,42,.22)" }}>
+            <div style={{ height: 3, background: `linear-gradient(90deg, ${T.navy}, ${T.blue})` }} />
+            <div style={{ padding: "18px 24px", borderBottom: `1px solid ${T.borderLight}`, background: T.bgCard, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ width: 38, height: 38, borderRadius: 10, background: T.blueLight, border: `1px solid ${T.blueBorder}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Zap size={16} color={T.blue} />
+                </div>
+                <div>
+                  <h2 style={{ fontWeight: 700, color: T.text, margin: 0, fontSize: 15 }}>Bypass Operation</h2>
+                  <p style={{ fontSize: 11, color: T.textMuted, margin: "2px 0 0" }}>{bypassModalMachine.machineName} · {bypassModalMachine.operationNo || "—"}</p>
+                </div>
+              </div>
+              <button onClick={closeBypassModal} style={{ width: 30, height: 30, border: `1px solid ${T.border}`, borderRadius: 7, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.textMuted }}>
+                <X size={14} />
+              </button>
+            </div>
+            <form onSubmit={submitBypass} style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16, background: T.bg }}>
+              <div>
+                <Label>Bypass Mode</Label>
+                <FieldSelect value={bypassEnabled ? "ON" : "OFF"} onChange={e => setBypassEnabled(e.target.value === "ON")}>
+                  <option value="ON">Enable — Skip machine interlock checks</option>
+                  <option value="OFF">Disable — Use normal checks</option>
+                </FieldSelect>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div>
+                  <Label>Station</Label>
+                  <FieldInput readOnly value={bypassModalMachine.operationNo || ""} mono />
+                </div>
+                <div>
+                  <Label>Machine ID</Label>
+                  <FieldInput readOnly value={String(bypassModalMachine.id || "")} mono />
+                </div>
+              </div>
+              <div>
+                <Label>Reason</Label>
+                <FieldInput value={bypassReason} onChange={e => setBypassReason(e.target.value)} placeholder="MANUAL_BYPASS_FROM_MACHINE_PAGE" />
+              </div>
+              <div style={{ padding: "10px 12px", background: T.bgMuted, border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 12, color: T.textSec }}>
+                Machine bypass is station-specific. Use only with supervisor approval.
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, paddingTop: 4 }}>
+                <button type="button" onClick={closeBypassModal}
+                  style={{ padding: "8px 16px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: `1px solid ${T.border}`, background: T.bgCard, color: T.textSec, cursor: "pointer" }}>
+                  Cancel
+                </button>
+                <button type="submit" disabled={bypassing}
+                  style={{ padding: "8px 18px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: "none", background: T.navy, color: "#fff", cursor: bypassing ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 6, opacity: bypassing ? 0.6 : 1 }}>
+                  <Zap size={13} />{bypassing ? "Saving…" : bypassEnabled ? "Enable Bypass" : "Disable Bypass"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -682,8 +1311,8 @@ const MachinePage = () => {
         isOpen={!!deleteConfirmId}
         onCancel={() => setDeleteConfirmId(null)}
         onConfirm={confirmDelete}
-        title="Remove machine?"
-        message="This will remove the machine from the registry. Historical production data is preserved but live tracing for this node will stop immediately."
+        title="Remove Machine?"
+        message="This will remove the machine from the registry. Historical data is preserved."
       />
     </div>
   );

@@ -147,32 +147,27 @@ const PackingManagement = () => {
       <GlobalPopup popup={popup} onClose={() => setPopup(null)} simple />
 
       {/* Header Section */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-             <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-             <span className="text-[10px] font-black text-primary uppercase tracking-widest">Master Orchestration</span>
+      {/* ── Header ── */}
+      <div className="db-header-card mb-6">
+        <div className="db-header-gradient-bar" />
+        <div className="db-header-inner">
+          <div className="db-header-title-group">
+            <div className="db-header-icon-box">
+              <Boxes size={22} />
+            </div>
+            <div>
+              <h1 className="db-header-title">Packing Management</h1>
+              <p className="db-header-subtitle">Configure automated distribution & container mapping protocols</p>
+            </div>
           </div>
-          <h1 className="text-3xl font-black text-text-main tracking-tight flex items-center gap-3">
-             <Settings2 className="text-primary" /> System Logic Hub
-          </h1>
-          <p className="text-text-muted text-sm font-medium mt-1">Configure automated distribution & container mapping protocols</p>
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={loadData}
-            className="h-11 px-4 rounded-xl border border-border bg-bg-card text-text-muted hover:text-primary transition-all flex items-center gap-2"
-          >
-            <RefreshCw size={18} className={loading ? "animate-spin" : ""} />
-            <span className="text-sm font-bold uppercase tracking-wider">Sync</span>
-          </button>
-          <button
-            onClick={saveSettings}
-            disabled={saving}
-            className="h-11 px-6 rounded-xl bg-primary text-on-strong font-black uppercase tracking-widest flex items-center gap-2 hover:brightness-110 shadow-lg shadow-primary/20 transition-all disabled:opacity-50"
-          >
-            <Save size={18} /> Push Configuration
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={loadData} disabled={loading} className="db-secondary-btn">
+              <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> Sync
+            </button>
+            <button onClick={saveSettings} disabled={saving} className="db-action-btn">
+              <Save size={14} /> Push Configuration
+            </button>
+          </div>
         </div>
       </div>
 
@@ -180,7 +175,7 @@ const PackingManagement = () => {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {[
           { label: "Active Pipeline", val: stats.total, icon: Database, color: "text-primary", bg: "bg-primary/5" },
-          { label: "Pending Fulfillment", val: stats.open, icon: Activity, color: "text-amber-400", bg: "bg-amber-400/5" },
+          { label: "Pending Fulfillment", val: stats.open, icon: Activity, color: "text-primary", bg: "bg-primary/5" },
           { label: "Validated Units", val: stats.closed, icon: PlusCircle, color: "text-emerald-400", bg: "bg-emerald-400/5" }
         ].map((s, i) => (
           <div key={i} className={`industrial-card p-6 flex items-center justify-between ${s.bg}`}>
@@ -193,7 +188,7 @@ const PackingManagement = () => {
         ))}
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
         {/* Settings Form */}
         <div className="xl:col-span-8 industrial-card p-0 overflow-hidden">
           <div className="px-6 py-5 border-b border-border bg-bg-dark/40 flex items-center gap-3">
@@ -231,7 +226,7 @@ const PackingManagement = () => {
         </div>
 
         {/* Live Preview Card */}
-        <div className="xl:col-span-4 industrial-card p-6 space-y-6 border-t-4 border-t-primary">
+        {/* <div className="xl:col-span-4 industrial-card p-6 space-y-6 border-t-4 border-t-primary">
           <div>
             <h2 className="text-xs font-black text-text-main uppercase tracking-widest mb-4 flex items-center gap-2">
                <QrCode size={16} className="text-primary" /> Generation Preview
@@ -250,7 +245,7 @@ const PackingManagement = () => {
             </button>
             <p className="mt-4 text-[10px] text-text-muted font-bold italic text-center">Force sequence advance will burn current ID.</p>
           </div>
-        </div>
+        </div> */}
       </div>
 
       {/* Box Registry Table */}
@@ -303,7 +298,7 @@ const PackingManagement = () => {
                      </div>
                   </td>
                   <td className="px-6 py-4">
-                    <span className={`px-2 py-1 rounded text-[9px] font-black uppercase border ${r.status?.toUpperCase() === 'CLOSED' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-amber-400/10 border-amber-400/20 text-amber-400'}`}>
+                    <span className={`px-2 py-1 rounded text-[9px] font-black uppercase border ${r.status?.toUpperCase() === 'CLOSED' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-primary/10 border-primary/20 text-primary'}`}>
                       {r.status || "OPEN"}
                     </span>
                   </td>
@@ -323,3 +318,4 @@ const PackingManagement = () => {
 };
 
 export default PackingManagement;
+

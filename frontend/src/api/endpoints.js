@@ -63,4 +63,9 @@ export const ENDPOINTS = {
     report: "/dashboard/report",
     exportReport: "/dashboard/report/export",
   },
+  alarms: {
+    base: "/alarms",
+    resolve: (id) => `/alarms/${encodeURIComponent(id)}/resolve`,
+    resolveAll: "/alarms/resolve-all",
+  },
 };

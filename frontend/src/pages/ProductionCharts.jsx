@@ -722,7 +722,7 @@ const ProductionCharts=()=>{
               {["daily","weekly","monthly"].map(k=>(
                 <button key={k} onClick={()=>{setTimeRange(k);setCustomDate({from:"",to:""}); }}
                   style={{height:32,padding:"0 11px",borderRadius:7,fontSize:11,fontWeight:700,
-                    cursor:"pointer",border:"none",transition:"all .12s",
+                    cursor:"pointer",transition:"all .12s",
                     background:timeRange===k&&!customDate.from?C.navy():"transparent",
                     border:`1px solid ${timeRange===k&&!customDate.from?C.navy(0.5):C.bdr()}`,
                     color:timeRange===k&&!customDate.from?C.linen():C.txt("muted")}}>
@@ -967,7 +967,7 @@ const ProductionCharts=()=>{
                 </div>
                 {[{k:"bar",label:"Bar"},{k:"line",label:"Line"},{k:"area",label:"Area"}].map(t=>(
                   <button key={t.k} onClick={()=>setChartType(t.k)}
-                    style={{height:28,padding:"0 10px",borderRadius:6,fontSize:11,cursor:"pointer",border:"none",
+                    style={{height:28,padding:"0 10px",borderRadius:6,fontSize:11,cursor:"pointer",
                       background:chartType===t.k?C.navy():"transparent",
                       border:`1px solid ${chartType===t.k?C.navy(0.5):C.bdr()}`,
                       color:chartType===t.k?C.linen():C.txt("muted"),fontWeight:700,transition:"all .12s"}}>
@@ -1305,3 +1305,5 @@ const ProductionCharts=()=>{
 };
 
 export default ProductionCharts;
+
+

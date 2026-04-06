@@ -109,6 +109,8 @@ function formatScanErrorMessage(payload={}) {
   const station=String(payload.stationNo||payload.station_no||"").trim().toUpperCase();
   const expected=String(payload.expectedStation||payload.expected_station||"").trim().toUpperCase();
   if (reason==="DUPLICATE_SCAN") return `Duplicate scan at ${station||"station"}. Reset required before re-scan.`;
+  if (reason==="RESET_REQUIRED_AFTER_PLC_COMM_ERROR") return `Previous PLC cycle timed out at ${station||"station"}. Use Reset Operation, then scan again.`;
+  if (reason.startsWith("PLC_TIMEOUT")) return "PLC response timeout. Use Reset Operation, then scan again.";
   if (reason==="PREVIOUS_STATION_NOT_COMPLETED") return expected?`Station sequence error. Complete ${expected} first.`:"Station sequence error. Previous station not completed.";
   if (reason==="INVALID_QR_FORMAT") return String(payload.message||"").trim()||"Invalid QR format. Scan correct component code.";
   if (reason==="QR_RULE_CONFIG_ERROR") return String(payload.message||"").trim()||"QR rule configuration is invalid. Contact supervisor.";
@@ -1003,3 +1005,4 @@ const OperatorView = () => {
 };
 
 export default OperatorView;
+

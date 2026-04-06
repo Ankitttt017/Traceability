@@ -1129,3 +1129,4 @@ const ComponentJourney = () => {
 };
 
 export default ComponentJourney;
+

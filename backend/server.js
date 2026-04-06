@@ -170,7 +170,9 @@ async function ensureDefaultShifts() {
 }
 
 const PORT = process.env.PORT || 4000;
-const syncAlter = process.env.DB_SYNC_ALTER !== "false";
+// Keep schema auto-alter OFF by default in dev runtime.
+// Repeated alter on some MySQL setups can create excessive keys/index attempts.
+const syncAlter = process.env.DB_SYNC_ALTER === "true";
 
 server.listen(PORT, async () => {
   try {

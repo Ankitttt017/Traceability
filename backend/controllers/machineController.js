@@ -3,7 +3,7 @@ const Machine = require("../models/Machine");
 const PlcRegisterRange = require("../models/PlcRegisterRange");
 const plcService = require("../services/plcCommunicationService");
 
-const { writeModbusRegister } = require("../services/plcIoService");
+const { writeModbusRegister, writeSlmpRegister, probeTcpEndpoint } = require("../services/plcIoService");
 const { clearMachineLock } = require("../services/machineLockService");
 
 const REGISTER_COLUMN_META = [
@@ -15,6 +15,7 @@ const REGISTER_COLUMN_META = [
   { column: "plc_heartbeat_register", label: "heartbeatRegister" },
 ];
 const PLC_SIGNAL_DIRECTION_VALUES = new Set(["PC -> PLC", "PLC -> PC", "BIDIRECTIONAL"]);
+const HANDSHAKE_DIRECTION_VALUES = new Set(["WRITE", "READ", "BOTH"]);
 
 function toInt(value) {
   if (value === undefined || value === null || value === "") {
@@ -30,6 +31,59 @@ function normalizeText(value) {
 
 function normalizeUpper(value) {
   return normalizeText(value).toUpperCase();
+}
+
+function normalizeSlmpFrameMode(value, fallback = null) {
+  const mode = normalizeUpper(value);
+  if (["ASCII", "BINARY", "AUTO"].includes(mode)) {
+    return mode;
+  }
+  return fallback;
+}
+
+function parsePlcRegistersSnapshot(rawPlcRegisters) {
+  if (!rawPlcRegisters) return null;
+  try {
+    const parsed = typeof rawPlcRegisters === "string" ? JSON.parse(rawPlcRegisters) : rawPlcRegisters;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function extractSlmpFrameMode(rawPlcRegisters) {
+  const parsed = parsePlcRegistersSnapshot(rawPlcRegisters);
+  if (!parsed) return null;
+  return normalizeSlmpFrameMode(parsed.slmpFrameMode ?? parsed.slmpFrame ?? parsed.frameMode, null);
+}
+
+function resolveSlmpFrameModeInput(body = {}, machinePayload = {}, existingMachine = null) {
+  const fromBody = normalizeSlmpFrameMode(
+    body.plcSlmpFrameMode ??
+      body.plc_slmp_frame_mode ??
+      body.plcSlmpFrame ??
+      body.plc_slmp_frame ??
+      body.slmpFrameMode ??
+      body.slmp_frame_mode,
+    null
+  );
+  if (fromBody) return fromBody;
+
+  const plcConfig = body.plcConfig && typeof body.plcConfig === "object" ? body.plcConfig : {};
+  const fromConfig = normalizeSlmpFrameMode(
+    plcConfig.slmpFrameMode ?? plcConfig.slmpFrame ?? plcConfig.frameMode,
+    null
+  );
+  if (fromConfig) return fromConfig;
+
+  const fromPayload = extractSlmpFrameMode(machinePayload.plc_registers);
+  if (fromPayload) return fromPayload;
+
+  const fromExisting = extractSlmpFrameMode(existingMachine?.plc_registers);
+  if (fromExisting) return fromExisting;
+
+  return normalizeSlmpFrameMode(process.env.PLC_SLMP_FRAME_MODE, "AUTO");
 }
 
 function toProtocol(value) {
@@ -139,6 +193,156 @@ function normalizeSignalDirection(value, fallback = "PLC -> PC") {
     return "BIDIRECTIONAL";
   }
   return PLC_SIGNAL_DIRECTION_VALUES.has(fallback) ? fallback : "PLC -> PC";
+}
+
+function normalizeHandshakeDirection(value, fallback = "READ") {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (["WRITE", "PC -> PLC", "PC_TO_PLC", "PC->PLC"].includes(normalized)) {
+    return "WRITE";
+  }
+  if (["READ", "PLC -> PC", "PLC_TO_PC", "PLC->PC"].includes(normalized)) {
+    return "READ";
+  }
+  if (["BOTH", "BIDIRECTIONAL", "PLC<->PC", "PLC <-> PC"].includes(normalized)) {
+    return "BOTH";
+  }
+  return HANDSHAKE_DIRECTION_VALUES.has(fallback) ? fallback : "READ";
+}
+
+function normalizePlcHandshakeMap(rawMap, fallback = null) {
+  if (rawMap === undefined) {
+    return Array.isArray(fallback) ? fallback : null;
+  }
+  if (rawMap === null || rawMap === "") {
+    return null;
+  }
+
+  let source = rawMap;
+  if (typeof rawMap === "string") {
+    const text = rawMap.trim();
+    if (!text) return null;
+    try {
+      source = JSON.parse(text);
+    } catch (_error) {
+      throw new Error("plcHandshakeMap must be a valid JSON array");
+    }
+  }
+  if (!Array.isArray(source)) {
+    throw new Error("plcHandshakeMap must be an array");
+  }
+
+  const normalized = [];
+  for (const row of source) {
+    const signal = normalizeText(row?.signal || row?.label || row?.name);
+    if (!signal) continue;
+    normalized.push({
+      id: normalizeText(row?.id || row?.key) || null,
+      signal,
+      direction: normalizeHandshakeDirection(row?.direction, "READ"),
+      register: toInt(row?.register ?? row?.registerNo ?? row?.address),
+      value: toInt(row?.value),
+      meaning: normalizeText(row?.meaning || row?.purpose || row?.description) || null,
+      required: row?.required === undefined ? true : Boolean(row.required),
+    });
+  }
+  return normalized.length > 0 ? normalized : null;
+}
+
+const STANDARD_HANDSHAKE_SIGNAL_META = {
+  START: {
+    signal: "Start",
+    direction: "WRITE",
+    registerKey: "startRegister",
+    valueKey: "startValue",
+    defaultMeaning: "Start machine cycle",
+  },
+  BLOCK_INTERLOCK: {
+    signal: "Block / Interlock",
+    direction: "WRITE",
+    registerKey: "startRegister",
+    valueKey: "blockValue",
+    defaultMeaning: "Block cycle on NG / duplicate / interlock",
+  },
+  RUNNING: {
+    signal: "Running",
+    direction: "READ",
+    registerKey: "statusRegister",
+    valueKey: "startedValue",
+    defaultMeaning: "Machine is running",
+  },
+  END_OK: {
+    signal: "End OK",
+    direction: "READ",
+    registerKey: "statusRegister",
+    valueKey: "endOkValue",
+    defaultMeaning: "Cycle completed OK",
+  },
+  END_NG: {
+    signal: "End NG",
+    direction: "READ",
+    registerKey: "statusRegister",
+    valueKey: "endNgValue",
+    defaultMeaning: "Cycle completed NG",
+  },
+  RESET: {
+    signal: "Reset",
+    direction: "WRITE",
+    registerKey: "resetRegister",
+    valueKey: "resetValue",
+    defaultMeaning: "Reset/clear machine state",
+  },
+};
+
+function normalizeSignalKeyForStandardHandshake(signal) {
+  const text = normalizeUpper(signal).replace(/[^A-Z0-9]+/g, "_");
+  if (text === "START") return "START";
+  if (["BLOCK", "BLOCK_INTERLOCK", "INTERLOCK", "BLOCK_INTERLOCK_SIGNAL"].includes(text)) return "BLOCK_INTERLOCK";
+  if (["RUNNING", "STARTED"].includes(text)) return "RUNNING";
+  if (["END_OK", "OK_END", "ENDED_OK"].includes(text)) return "END_OK";
+  if (["END_NG", "NG_END", "ENDED_NG"].includes(text)) return "END_NG";
+  if (text === "RESET") return "RESET";
+  return null;
+}
+
+function syncStandardHandshakeMapWithCore(handshakeMap, core = {}) {
+  const rows = Array.isArray(handshakeMap) ? [...handshakeMap] : [];
+  const indexByStandardKey = new Map();
+
+  for (let i = 0; i < rows.length; i += 1) {
+    const standardKey = normalizeSignalKeyForStandardHandshake(rows[i]?.signal);
+    if (standardKey && !indexByStandardKey.has(standardKey)) {
+      indexByStandardKey.set(standardKey, i);
+    }
+  }
+
+  for (const [standardKey, meta] of Object.entries(STANDARD_HANDSHAKE_SIGNAL_META)) {
+    const nextRow = {
+      id: null,
+      signal: meta.signal,
+      direction: meta.direction,
+      register: toInt(core?.[meta.registerKey]),
+      value: toInt(core?.[meta.valueKey]),
+      meaning: meta.defaultMeaning,
+      required: true,
+    };
+    if (indexByStandardKey.has(standardKey)) {
+      const idx = indexByStandardKey.get(standardKey);
+      const current = rows[idx] || {};
+      rows[idx] = {
+        ...current,
+        signal: meta.signal,
+        direction: meta.direction,
+        register: nextRow.register,
+        value: nextRow.value,
+        meaning: normalizeText(current.meaning) || meta.defaultMeaning,
+        required: current.required === undefined ? true : Boolean(current.required),
+      };
+    } else {
+      rows.push(nextRow);
+    }
+  }
+
+  return rows;
 }
 
 function normalizePlcSignalMap(rawMap, fallbackRaw = null) {
@@ -253,6 +457,8 @@ function getPlcConfigInput(body = {}) {
 }
 
 function serializePlcConfigSnapshot(config = {}) {
+  const slmpFrameMode = normalizeSlmpFrameMode(config.slmpFrameMode ?? config.slmpFrame ?? config.frameMode, null);
+  const handshakeMap = normalizePlcHandshakeMap(config.handshakeMap, null);
   const snapshot = {
     rangeId: toInt(config.rangeId),
     unitId: toInt(config.unitId),
@@ -271,7 +477,11 @@ function serializePlcConfigSnapshot(config = {}) {
     testRetryCount: toInt(config.testRetryCount),
     heartbeatRegister: toInt(config.heartbeatRegister),
     heartbeatStaleMs: toInt(config.heartbeatStaleMs),
+    cycleTimeSec: toInt(config.cycleTimeSec),
+    loadingTimeSec: toInt(config.loadingTimeSec),
+    handshakeMap: handshakeMap || null,
     slmpDevice: normalizeText(config.slmpDevice) ? normalizeText(config.slmpDevice).toUpperCase() : null,
+    slmpFrameMode,
   };
 
   const hasAnyValue = Object.values(snapshot).some((entry) => entry !== null && entry !== undefined);
@@ -311,6 +521,7 @@ function parseRangeDefaultRegisterMap(rawValue) {
 }
 
 function refreshPlcConfigSnapshot(payload) {
+  const existingSnapshot = parsePlcRegistersSnapshot(payload.plc_registers) || {};
   payload.plc_registers =
     serializePlcConfigSnapshot({
       rangeId: payload.plc_range_id,
@@ -330,7 +541,11 @@ function refreshPlcConfigSnapshot(payload) {
       testRetryCount: payload.plc_test_retry_count,
       heartbeatRegister: payload.plc_heartbeat_register,
       heartbeatStaleMs: payload.plc_heartbeat_stale_ms,
+      cycleTimeSec: toInt(existingSnapshot.cycleTimeSec),
+      loadingTimeSec: toInt(existingSnapshot.loadingTimeSec),
+      handshakeMap: existingSnapshot.handshakeMap ?? null,
       slmpDevice: payload.plc_slmp_device,
+      slmpFrameMode: payload.plc_slmp_frame_mode,
     }) || payload.plc_registers;
 }
 
@@ -422,6 +637,7 @@ function toMachinePayload(body = {}, existingMachine = null) {
 
   const protocol = toProtocol(body.plcProtocol ?? body.plc_protocol ?? existingMachine?.plc_protocol);
   const plcConfigInput = getPlcConfigInput(body);
+  const existingSnapshot = parsePlcRegistersSnapshot(existingMachine?.plc_registers) || {};
   const parsedRegisters = parsePlcRegisters(body.plcRegisters ?? body.plc_registers ?? existingMachine?.plc_registers);
   const plcSignalMap = normalizePlcSignalMap(
     body.plcSignalMap ?? body.plc_signal_map ?? plcConfigInput.signalMap,
@@ -494,8 +710,51 @@ function toMachinePayload(body = {}, existingMachine = null) {
   const plcSlmpDeviceRaw =
     normalizeText(body.plcSlmpDevice ?? body.plc_slmp_device ?? plcConfigInput.slmpDevice ?? existingMachine?.plc_slmp_device) || "";
   const plcSlmpDevice = plcSlmpDeviceRaw ? plcSlmpDeviceRaw.toUpperCase() : null;
+  const plcSlmpFrameMode =
+    normalizeSlmpFrameMode(
+      body.plcSlmpFrameMode ??
+        body.plc_slmp_frame_mode ??
+        plcConfigInput.slmpFrameMode ??
+        plcConfigInput.slmpFrame ??
+        extractSlmpFrameMode(existingMachine?.plc_registers),
+      "AUTO"
+    ) || "AUTO";
   const dailyTargetQty =
     toInt(body.dailyTargetQty ?? body.daily_target_qty ?? existingMachine?.daily_target_qty) ?? 0;
+  const cycleTimeSec =
+    toInt(
+      body.cycleTimeSec ??
+        body.cycle_time_sec ??
+        plcConfigInput.cycleTimeSec ??
+        plcConfigInput.cycle_time_sec ??
+        existingSnapshot.cycleTimeSec
+    ) ?? 0;
+  const loadingTimeSec =
+    toInt(
+      body.loadingTimeSec ??
+        body.loading_time_sec ??
+        plcConfigInput.loadingTimeSec ??
+        plcConfigInput.loading_time_sec ??
+        existingSnapshot.loadingTimeSec
+    ) ?? 0;
+  const parsedHandshakeMap = normalizePlcHandshakeMap(
+    body.plcHandshakeMap ??
+      body.plc_handshake_map ??
+      plcConfigInput.handshakeMap ??
+      plcConfigInput.plcHandshakeMap,
+    existingSnapshot.handshakeMap
+  );
+  const plcHandshakeMap = syncStandardHandshakeMapWithCore(parsedHandshakeMap, {
+    startRegister: plcStartRegister,
+    statusRegister: plcStatusRegister,
+    resetRegister: plcResetRegister,
+    startValue: plcStartValue,
+    startedValue: plcStartedValue,
+    endOkValue: plcEndOkValue,
+    endNgValue: plcEndNgValue,
+    blockValue: plcBlockValue,
+    resetValue: plcResetValue,
+  });
 
   const plcRegistersSnapshot =
     parsedRegisters.raw ||
@@ -517,7 +776,11 @@ function toMachinePayload(body = {}, existingMachine = null) {
       testRetryCount: plcTestRetryCount,
       heartbeatRegister: plcHeartbeatRegister,
       heartbeatStaleMs: plcHeartbeatStaleMs,
+      cycleTimeSec,
+      loadingTimeSec,
+      handshakeMap: plcHandshakeMap,
       slmpDevice: plcSlmpDevice,
+      slmpFrameMode: plcSlmpFrameMode,
     });
 
   const machineIp =
@@ -559,6 +822,7 @@ function toMachinePayload(body = {}, existingMachine = null) {
     plc_heartbeat_register: plcHeartbeatRegister,
     plc_heartbeat_stale_ms: plcHeartbeatStaleMs,
     plc_slmp_device: plcSlmpDevice,
+    plc_slmp_frame_mode: plcSlmpFrameMode,
     daily_target_qty: Math.max(dailyTargetQty, 0),
     status,
     is_active: isActive,
@@ -568,6 +832,9 @@ function toMachinePayload(body = {}, existingMachine = null) {
 function toMachineResponse(machine) {
   const status = machine.status || (machine.is_active ? "ACTIVE" : "INACTIVE");
   const plcRegisters = buildRegistersFallback(machine);
+  const snapshot = parsePlcRegistersSnapshot(machine.plc_registers) || {};
+  const cycleTimeSec = toInt(snapshot.cycleTimeSec) ?? 0;
+  const loadingTimeSec = toInt(snapshot.loadingTimeSec) ?? 0;
   const plcConfig = {
     rangeId: machine.plc_range_id,
     unitId: machine.plc_unit_id ?? 1,
@@ -586,7 +853,22 @@ function toMachineResponse(machine) {
     testRetryCount: machine.plc_test_retry_count ?? 2,
     heartbeatRegister: machine.plc_heartbeat_register ?? null,
     heartbeatStaleMs: machine.plc_heartbeat_stale_ms ?? 5000,
+    cycleTimeSec,
+    loadingTimeSec,
+    handshakeMap:
+      syncStandardHandshakeMapWithCore(normalizePlcHandshakeMap(snapshot.handshakeMap, null), {
+        startRegister: machine.plc_start_register,
+        statusRegister: machine.plc_status_register,
+        resetRegister: machine.plc_reset_register,
+        startValue: machine.plc_start_value ?? 1,
+        startedValue: machine.plc_started_value ?? 2,
+        endOkValue: machine.plc_end_ok_value ?? 3,
+        endNgValue: machine.plc_end_ng_value ?? 4,
+        blockValue: machine.plc_block_value ?? 2,
+        resetValue: machine.plc_reset_value ?? 9,
+      }) || [],
     slmpDevice: machine.plc_slmp_device ?? null,
+    slmpFrameMode: extractSlmpFrameMode(machine.plc_registers) || "AUTO",
   };
   const plcSignalMap = parsePlcSignalMap(machine.plc_signal_map);
   return {
@@ -626,7 +908,10 @@ function toMachineResponse(machine) {
     plcHeartbeatRegister: machine.plc_heartbeat_register,
     plcHeartbeatStaleMs: machine.plc_heartbeat_stale_ms,
     plcSlmpDevice: machine.plc_slmp_device,
+    plcSlmpFrameMode: extractSlmpFrameMode(machine.plc_registers) || "AUTO",
     dailyTargetQty: machine.daily_target_qty ?? 0,
+    cycleTimeSec,
+    loadingTimeSec,
     isRunning: Boolean(machine.is_running),
     runningPartId: machine.running_part_id || null,
     runningStationNo: machine.running_station_no || null,
@@ -771,17 +1056,32 @@ function resolveSlmpDeviceForSignal(signalKey, machine = {}) {
 
 function buildSlmpRegisterEntries(machine = {}) {
   return [
-    { key: "TRIGGER", label: "startRegister", register: toInt(machine.plc_start_register) },
-    { key: "STATUS", label: "statusRegister", register: toInt(machine.plc_status_register) },
-    { key: "RESET", label: "resetRegister", register: toInt(machine.plc_reset_register) },
-    { key: "PART_ID_HASH", label: "partRegister", register: toInt(machine.plc_part_register) },
-    { key: "STATION_HASH", label: "stationRegister", register: toInt(machine.plc_station_register) },
+    { key: "TRIGGER", label: "startRegister", register: toInt(machine.plc_start_register), spanWords: 1 },
+    { key: "STATUS", label: "statusRegister", register: toInt(machine.plc_status_register), spanWords: 1 },
+    { key: "RESET", label: "resetRegister", register: toInt(machine.plc_reset_register), spanWords: 1 },
+    // PART_ID_HASH and STATION_HASH are written as 32-bit payloads (2 words).
+    { key: "PART_ID_HASH", label: "partRegister", register: toInt(machine.plc_part_register), spanWords: 2 },
+    { key: "STATION_HASH", label: "stationRegister", register: toInt(machine.plc_station_register), spanWords: 2 },
   ]
     .filter((entry) => entry.register !== null)
     .map((entry) => ({
       ...entry,
       device: resolveSlmpDeviceForSignal(entry.key, machine),
     }));
+}
+
+function expandSlmpWordOccupancy(entries = []) {
+  const occupied = [];
+  for (const entry of entries) {
+    const width = Math.max(1, toInt(entry.spanWords) || 1);
+    for (let offset = 0; offset < width; offset += 1) {
+      occupied.push({
+        ...entry,
+        registerWord: entry.register + offset,
+      });
+    }
+  }
+  return occupied;
 }
 
 async function validateSlmpRegisterOverlap(payload, excludeMachineId = null) {
@@ -797,10 +1097,11 @@ async function validateSlmpRegisterOverlap(payload, excludeMachineId = null) {
 
   const currentEntries = buildSlmpRegisterEntries(payload);
   const seen = new Set();
-  for (const entry of currentEntries) {
-    const key = `${entry.device}:${entry.register}`;
+  const currentWords = expandSlmpWordOccupancy(currentEntries);
+  for (const entry of currentWords) {
+    const key = `${entry.device}:${entry.registerWord}`;
     if (seen.has(key)) {
-      throw new Error(`SLMP register ${entry.device}${entry.register} assigned multiple times in same machine`);
+      throw new Error(`SLMP register ${entry.device}${entry.registerWord} overlaps multiple mappings in same machine`);
     }
     seen.add(key);
   }
@@ -828,16 +1129,21 @@ async function validateSlmpRegisterOverlap(payload, excludeMachineId = null) {
 
   for (const peer of peers) {
     const peerEntries = buildSlmpRegisterEntries(peer);
-    for (const entry of currentEntries) {
-      if (!entry.device || entry.register === null) {
+    const peerWords = expandSlmpWordOccupancy(peerEntries);
+    for (const entry of currentWords) {
+      if (!entry.device || entry.registerWord === null) {
         continue;
       }
       const conflict = peerEntries.find(
         (row) => row.device === entry.device && row.register === entry.register
       );
-      if (conflict) {
+      const conflictWord = peerWords.find(
+        (row) => row.device === entry.device && row.registerWord === entry.registerWord
+      );
+      if (conflict || conflictWord) {
+        const conflictLabel = conflict?.label || conflictWord?.label || "mapped signal";
         throw new Error(
-          `SLMP register ${entry.device}${entry.register} already used by ${peer.machine_name} (${peer.operation_no}) as ${conflict.label}`
+          `SLMP register ${entry.device}${entry.registerWord} already used by ${peer.machine_name} (${peer.operation_no}) as ${conflictLabel}`
         );
       }
     }
@@ -893,7 +1199,9 @@ exports.createMachine = async (req, res) => {
     }
     await validateRangeAndRegisterUsage(payload);
     await validateSlmpRegisterOverlap(payload);
-    const machine = await Machine.create(payload);
+    const persistPayload = { ...payload };
+    delete persistPayload.plc_slmp_frame_mode;
+    const machine = await Machine.create(persistPayload);
     res.status(201).json(toMachineResponse(machine));
   } catch (error) {
     if (!String(error?.name || "").startsWith("Sequelize")) {
@@ -919,7 +1227,9 @@ exports.updateMachine = async (req, res) => {
     await validateRangeAndRegisterUsage(payload, machine.id);
     await validateSlmpRegisterOverlap(payload, machine.id);
 
-    await machine.update(payload);
+    const persistPayload = { ...payload };
+    delete persistPayload.plc_slmp_frame_mode;
+    await machine.update(persistPayload);
     res.json(toMachineResponse(machine));
   } catch (error) {
     if (!String(error?.name || "").startsWith("Sequelize")) {
@@ -957,6 +1267,7 @@ exports.testPlc = async (req, res) => {
       plcEndOkValue: req.body.plcEndOkValue ?? req.body.plc_end_ok_value,
       plcEndNgValue: req.body.plcEndNgValue ?? req.body.plc_end_ng_value,
       plcResetValue: req.body.plcResetValue ?? req.body.plc_reset_value,
+      plcSlmpDevice: req.body.plcSlmpDevice ?? req.body.plc_slmp_device,
       plcTestTimeoutMs: req.body.plcTestTimeoutMs ?? req.body.plc_test_timeout_ms,
       plcTestRetryCount: req.body.plcTestRetryCount ?? req.body.plc_test_retry_count,
       plcHeartbeatRegister: req.body.plcHeartbeatRegister ?? req.body.plc_heartbeat_register,
@@ -964,6 +1275,8 @@ exports.testPlc = async (req, res) => {
       status: "ACTIVE",
     }, existingMachine);
     await hydratePayloadFromRange(payload);
+    const slmpFrameMode = resolveSlmpFrameModeInput(req.body, payload, existingMachine);
+    payload.plc_slmp_frame_mode = slmpFrameMode;
     plcContext = {
       ip: payload.plc_ip,
       port: payload.plc_port,
@@ -978,7 +1291,7 @@ exports.testPlc = async (req, res) => {
       return res.status(400).json({ error: "plcConfig.statusRegister is required for MODBUS_TCP test" });
     }
 
-    const probe = await testPlcConnection({
+    const probe = await plcService.testPlcConnection({
       ip: payload.plc_ip,
       port: payload.plc_port,
       protocol: payload.plc_protocol,
@@ -987,10 +1300,34 @@ exports.testPlc = async (req, res) => {
 
     res.json({
       message: "PLC connection test successful",
+      request: {
+        machineId: machineId ?? null,
+        protocol: payload.plc_protocol,
+        ip: payload.plc_ip,
+        port: payload.plc_port,
+        statusRegister: payload.plc_status_register ?? null,
+        slmpDevice: payload.plc_slmp_device || null,
+        slmpFrameMode: payload.plc_slmp_frame_mode || "AUTO",
+        timeoutMs: payload.plc_test_timeout_ms ?? null,
+      },
       probe,
     });
   } catch (error) {
-    const message = withPlcConnectivityHint(error.message || "PLC connection test failed", {
+    let baseMessage = error.message || "PLC connection test failed";
+    const protocolForHint = String(plcContext.protocol ?? req.body.plcProtocol ?? req.body.plc_protocol ?? "").toUpperCase();
+    const ipForHint = plcContext.ip ?? req.body.plcIp ?? req.body.plc_ip ?? req.body.machineIp ?? req.body.machine_ip;
+    const portForHint = plcContext.port ?? req.body.plcPort ?? req.body.plc_port ?? req.body.machinePort ?? req.body.machine_port;
+
+    if (/PLC packet timeout/i.test(String(baseMessage || "")) && protocolForHint === "SLMP" && ipForHint && portForHint) {
+      try {
+        await probeTcpEndpoint({ ip: ipForHint, port: portForHint, timeoutMs: 1500 });
+        baseMessage = `${baseMessage}. TCP port is reachable, but SLMP frame got no response. Check PLC open setting and SLMP route params (networkNo/plcNo/ioNo/stationNo).`;
+      } catch (_probeError) {
+        // keep original message; withPlcConnectivityHint will append transport hint
+      }
+    }
+
+    const message = withPlcConnectivityHint(baseMessage, {
       ip: plcContext.ip ?? req.body.plcIp ?? req.body.plc_ip ?? req.body.machineIp ?? req.body.machine_ip,
       port: plcContext.port ?? req.body.plcPort ?? req.body.plc_port ?? req.body.machinePort ?? req.body.machine_port,
       protocol: plcContext.protocol ?? req.body.plcProtocol ?? req.body.plc_protocol,
@@ -1033,6 +1370,7 @@ exports.resetPlc = async (req, res) => {
       status: "ACTIVE",
     }, existingMachine);
     await hydratePayloadFromRange(payload);
+    payload.plc_slmp_frame_mode = resolveSlmpFrameModeInput(req.body, payload, existingMachine);
 
     if (!payload.plc_ip || !payload.plc_port) {
       return res.status(400).json({ error: "plcIp and plcPort are required for PLC reset" });
@@ -1103,6 +1441,7 @@ exports.sendPlcCommand = async (req, res) => {
       status: "ACTIVE",
     }, existingMachine);
     await hydratePayloadFromRange(payload);
+    payload.plc_slmp_frame_mode = resolveSlmpFrameModeInput(req.body, payload, existingMachine);
     plcContext = {
       ip: payload.plc_ip,
       port: payload.plc_port,
@@ -1113,11 +1452,9 @@ exports.sendPlcCommand = async (req, res) => {
       return res.status(400).json({ error: "plcIp and plcPort are required for PLC command" });
     }
 
-    const partId = req.body.partId ?? req.body.part_id ?? null;
+    const partIdRaw = req.body.partId ?? req.body.part_id ?? null;
+    const partId = String(partIdRaw ?? "").trim() || null;
     const stationNo = req.body.stationNo ?? req.body.station_no ?? payload.operation_no ?? null;
-    if (command === "START_OPERATION" && !partId) {
-      return res.status(400).json({ error: "partId is required for START_OPERATION" });
-    }
 
     const result = await plcService.sendPlcCommand({
       ip: payload.plc_ip,
@@ -1179,13 +1516,15 @@ exports.writePlcValue = async (req, res) => {
       status: "ACTIVE",
     }, existingMachine);
     await hydratePayloadFromRange(payload);
+    payload.plc_slmp_frame_mode = resolveSlmpFrameModeInput(req.body, payload, existingMachine);
 
     if (!payload.plc_ip || !payload.plc_port) {
       return res.status(400).json({ error: "plcIp and plcPort are required for PLC write" });
     }
 
-    if (String(payload.plc_protocol || "").toUpperCase() !== "MODBUS_TCP") {
-      return res.status(400).json({ error: "Write test value is supported for MODBUS_TCP machines only" });
+    const protocol = String(payload.plc_protocol || "").toUpperCase();
+    if (!["MODBUS_TCP", "SLMP"].includes(protocol)) {
+      return res.status(400).json({ error: "Write test value is supported for MODBUS_TCP or SLMP machines only" });
     }
 
     const signalKey = normalizeUpper(req.body.signalKey || req.body.signal || "");
@@ -1210,19 +1549,38 @@ exports.writePlcValue = async (req, res) => {
     }
 
     const timeoutMs = toInt(req.body.timeoutMs ?? payload.plc_test_timeout_ms) || 2000;
-    const write = await writeModbusRegister({
-      ip: payload.plc_ip,
-      port: payload.plc_port,
-      unitId: payload.plc_unit_id || 1,
-      register: registerNo,
-      value,
-      timeoutMs,
-    });
+    let write = null;
+    if (protocol === "SLMP") {
+      const slmpDevice =
+        normalizeUpper(req.body.device ?? req.body.plcSlmpDevice ?? resolveSlmpDeviceForSignal(signalKey || "TRIGGER", payload)) ||
+        "D";
+      write = await writeSlmpRegister({
+        ip: payload.plc_ip,
+        port: payload.plc_port,
+        register: registerNo,
+        value,
+        device: slmpDevice,
+        timeoutMs,
+        frameMode: payload.plc_slmp_frame_mode,
+      });
+    } else {
+      write = await writeModbusRegister({
+        ip: payload.plc_ip,
+        port: payload.plc_port,
+        unitId: payload.plc_unit_id || 1,
+        register: registerNo,
+        value,
+        timeoutMs,
+      });
+    }
 
     res.json({
       message: "PLC register write successful",
       write: {
-        protocol: "MODBUS_TCP",
+        protocol,
+        device: write.device || null,
+        frameMode: write.frameMode || payload.plc_slmp_frame_mode || null,
+        route: write.route || null,
         signalKey: signalKey || null,
         registerNo: write.register,
         value: write.value,

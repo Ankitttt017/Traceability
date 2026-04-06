@@ -111,9 +111,29 @@ export function useAlarmToasts() {
     // Scan Events (brief success/error flash)
     socket.on("scan_event", (data) => {
       if (!data) return;
-      const isOk = String(data.status || "").toUpperCase() === "OK";
-      // Only show NG scans as a toast to avoid noise; OK can be silent
-      if (!isOk) {
+      const decision = String(data.decision || "").trim().toUpperCase();
+      const type = String(data.type || "").trim().toUpperCase();
+      const reason = String(data.reason || "").trim().toUpperCase();
+      const isOk = decision === "ALLOW" || type === "INFO" || type === "SUCCESS";
+      if (isOk) return;
+
+      if (reason.includes("PLC_TIMEOUT") || reason.includes("PLC_COMM") || reason === "RESET_REQUIRED_AFTER_PLC_COMM_ERROR") {
+        toast(
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ fontWeight: 900, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.07em" }}>
+              PLC Communication Issue
+            </span>
+            <span style={{ fontSize: 12 }}>
+              {data.partId || "Unknown"} - {data.machineName || `M${data.machineId}`}
+            </span>
+          </div>,
+          { icon: "!", duration: 5000 }
+        );
+        return;
+      }
+
+      // Show NG/block scans only
+      if (decision === "BLOCK" || type === "ERROR" || type === "WARNING") {
         toast.error(
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <span style={{ fontWeight: 900, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.07em" }}>
