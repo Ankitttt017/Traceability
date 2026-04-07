@@ -75,31 +75,23 @@ const RoleAccess = () => {
       <GlobalPopup popup={popup} onClose={() => setPopup(null)} />
 
       {/* Header */}
-      <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
-        <div className="flex items-center gap-5">
-          <div className="w-14 h-14 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center shadow-lg shadow-primary/5">
-            <ShieldCheck className="text-primary" size={32} />
-          </div>
-          <div>
-            <h1 className="text-3xl font-black text-text-main tracking-tight uppercase">
-              Role Access
-            </h1>
-            <div className="flex items-center gap-3 mt-1">
-              <span className="badge badge-info uppercase">Security Matrix</span>
-              <p className="text-text-muted text-sm font-medium tracking-tight">
-                Define module permissions by user role
-              </p>
+      <div className="db-header-card mb-6">
+        <div className="db-header-gradient-bar" />
+        <div className="db-header-inner">
+          <div className="db-header-title-group">
+            <div className="db-header-icon-box">
+              <ShieldCheck size={22} />
+            </div>
+            <div>
+              <h1 className="db-header-title">Role Access</h1>
+              <p className="db-header-subtitle">Define module permissions by user role</p>
             </div>
           </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            onClick={saveSettings}
-            className="h-10 px-5 rounded-xl bg-primary text-on-strong font-black uppercase tracking-widest flex items-center gap-2 hover:brightness-110 shadow-lg shadow-primary/20 transition-all"
-          >
-            <Save size={16} /> Save Permissions
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={saveSettings} className="db-action-btn">
+              <Save size={14} /> Save Permissions
+            </button>
+          </div>
         </div>
       </div>
 

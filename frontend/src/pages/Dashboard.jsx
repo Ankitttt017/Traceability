@@ -20,7 +20,6 @@ import {
 } from "recharts";
 import { dashboardApi, machineApi } from "../api/services";
 import ChartTooltip from "../components/charts/ChartTooltip";
-import { useAlarms } from "../hooks/useAlarms";
 import axios from "axios";
 import { CHART_COLORS, chartAxisProps, chartGridProps } from "../constants/chartTheme";
 
@@ -158,46 +157,6 @@ const Badge = ({ variant="idle", label }) => {
 };
 
 // ── Alarm Banner ──────────────────────────────────────────────────────────
-const AlarmBanner = ({ alarms, onDismiss }) => {
-  if (!alarms.length) return null;
-  return (
-    <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
-      {alarms.map(alarm=>(
-        <div key={alarm._id} style={{
-          display:"flex",alignItems:"center",justifyContent:"space-between",
-          padding:"12px 16px",borderRadius:12,
-          background:C.ng(0.08),border:`1px solid ${C.ng(0.25)}`,
-          borderLeft:`3px solid ${C.ng()}`,
-          animation:"dbFadeIn 0.2s ease",
-        }}>
-          <div style={{display:"flex",alignItems:"center",gap:12}}>
-            <div style={{width:34,height:34,borderRadius:9,background:C.ng(0.12),
-              display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-              <BellRing size={16} color={C.ng()}/>
-            </div>
-            <div>
-              <p style={{fontSize:11,fontWeight:700,color:C.ng(),textTransform:"uppercase",
-                letterSpacing:"0.06em",marginBottom:2}}>Critical Alarm</p>
-              <p style={{fontSize:13,fontWeight:700,color:C.txt("pri")}}>
-                {alarm.machineName||`Machine ${alarm.machineId}`}: {alarm.type}
-              </p>
-              <p style={{fontSize:11,color:C.txt("muted"),marginTop:2,fontFamily:"'DM Mono',monospace"}}>
-                {new Date(alarm.receivedAt).toLocaleTimeString()}
-              </p>
-            </div>
-          </div>
-          <button onClick={()=>onDismiss(alarm._id)}
-            style={{width:28,height:28,borderRadius:6,background:"none",
-              border:`1px solid ${C.bdr()}`,cursor:"pointer",
-              display:"flex",alignItems:"center",justifyContent:"center",
-              color:C.txt("muted")}}>
-            <X size={13}/>
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-};
 
 // ── KPI Card ─────────────────────────────────────────────────────────────
 const KpiCard = ({ label, value, icon:Icon, accent, sub }) => (
@@ -347,7 +306,6 @@ const Dashboard = () => {
   const [filters,      setFilters]      = useState({
     dateFrom:"", dateTo:"", machineId:"", partId:"", status:"", shiftCode:"",
   });
-  const { alarms, dismiss: dismissAlarm } = useAlarms();
 
   const query = useMemo(()=>({
     dateFrom:   filters.dateFrom   || undefined,
@@ -424,7 +382,6 @@ const Dashboard = () => {
       animation:"dbFadeIn 0.3s ease"}}>
 
       {/* ── Alarms ── */}
-      <AlarmBanner alarms={alarms} onDismiss={dismissAlarm}/>
 
       {/* ── Page Header ─────────────────────────────────────────────── */}
       <div style={{
@@ -524,13 +481,10 @@ const Dashboard = () => {
             display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:10,
             animation:"dbFadeIn 0.2s ease",
           }}>
+            {/* Date filters */}
             {[
               { key:"dateFrom",  placeholder:"From date",     type:"date"   },
               { key:"dateTo",    placeholder:"To date",       type:"date"   },
-              { key:"machineId", placeholder:"Machine ID",    type:"text"   },
-              { key:"partId",    placeholder:"Part serial",   type:"text"   },
-              { key:"status",    placeholder:"Status",        type:"text"   },
-              { key:"shiftCode", placeholder:"Shift",         type:"text"   },
             ].map(f=>(
               <input key={f.key} type={f.type}
                 placeholder={f.placeholder}
@@ -546,6 +500,86 @@ const Dashboard = () => {
                 }}
               />
             ))}
+
+            {/* Machine dropdown */}
+            <select
+              value={filters.machineId}
+              onChange={e=>setFilters(prev=>({...prev,machineId:e.target.value}))}
+              style={{
+                height:36,padding:"0 12px",
+                background:C.bg("input"),
+                border:`1px solid ${C.bdr()}`,
+                borderRadius:8,fontSize:12,
+                color:C.txt("pri"),outline:"none",
+                fontFamily:"'DM Sans',sans-serif",
+                minWidth:140,cursor:"pointer",
+                appearance:"auto",
+              }}>
+              <option value="">All Machines</option>
+              {machines.map(m=>(
+                <option key={m.id} value={m.id}>{m.machineName}</option>
+              ))}
+            </select>
+
+            {/* Part serial */}
+            <input
+              type="text"
+              placeholder="Part serial"
+              value={filters.partId}
+              onChange={e=>setFilters(prev=>({...prev,partId:e.target.value}))}
+              style={{
+                height:36,padding:"0 12px",
+                background:C.bg("input"),
+                border:`1px solid ${C.bdr()}`,
+                borderRadius:8,fontSize:12,
+                color:C.txt("pri"),outline:"none",
+                fontFamily:"'DM Sans',sans-serif",
+              }}
+            />
+
+            {/* Status dropdown */}
+            <select
+              value={filters.status}
+              onChange={e=>setFilters(prev=>({...prev,status:e.target.value}))}
+              style={{
+                height:36,padding:"0 12px",
+                background:C.bg("input"),
+                border:`1px solid ${C.bdr()}`,
+                borderRadius:8,fontSize:12,
+                color:C.txt("pri"),outline:"none",
+                fontFamily:"'DM Sans',sans-serif",
+                minWidth:120,cursor:"pointer",
+                appearance:"auto",
+              }}>
+              <option value="">All Status</option>
+              <option value="OK">Pass (OK)</option>
+              <option value="NG">Fail (NG)</option>
+              <option value="WIP">In Progress</option>
+              <option value="INTERLOCKED">Interlocked</option>
+            </select>
+
+            {/* Shift dropdown */}
+            <select
+              value={filters.shiftCode}
+              onChange={e=>setFilters(prev=>({...prev,shiftCode:e.target.value}))}
+              style={{
+                height:36,padding:"0 12px",
+                background:C.bg("input"),
+                border:`1px solid ${C.bdr()}`,
+                borderRadius:8,fontSize:12,
+                color:C.txt("pri"),outline:"none",
+                fontFamily:"'DM Sans',sans-serif",
+                minWidth:120,cursor:"pointer",
+                appearance:"auto",
+              }}>
+              <option value="">All Shifts</option>
+              {(summary.availableShifts||["SHIFT_A","SHIFT_B","SHIFT_C"]).map(s=>(
+                <option key={typeof s === 'string' ? s : s.shiftCode} value={typeof s === 'string' ? s : s.shiftCode}>
+                  {typeof s === 'string' ? s.replace("_"," ") : (s.shiftName || s.shiftCode)}
+                </option>
+              ))}
+            </select>
+
             {hasFilters && (
               <button onClick={()=>setFilters({dateFrom:"",dateTo:"",machineId:"",partId:"",status:"",shiftCode:""})}
                 style={{height:36,padding:"0 14px",borderRadius:8,
@@ -952,3 +986,4 @@ const Dashboard = () => {
 };
 
 export default Dashboard;
+

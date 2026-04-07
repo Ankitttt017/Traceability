@@ -504,7 +504,7 @@ const GlobalPopup = ({
                 className="p-2.5 rounded-xl border border-white/5"
                 style={{ background: "#0f172a" }}
               >
-                <Layout className="text-blue-400" size={22} />
+                <Layout className="text-amber-400" size={22} />
               </div>
               <div>
                 <h2 className="text-white text-[17px] font-bold leading-tight">
@@ -519,7 +519,7 @@ const GlobalPopup = ({
             <div className="flex items-center gap-3">
               {partId && (
                 <div
-                  className="px-3 py-2 rounded-xl font-mono text-[12px] font-bold text-blue-400 border border-white/5 max-w-[220px] truncate"
+                  className="px-3 py-2 rounded-xl font-mono text-[12px] font-bold text-amber-400 border border-white/5 max-w-[220px] truncate"
                   style={{ background: "#0f172a" }}
                   title={partId}
                 >
@@ -725,5 +725,7 @@ const GlobalPopup = ({
 };
 
 export default GlobalPopup;
+
+
 
 

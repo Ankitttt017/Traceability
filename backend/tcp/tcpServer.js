@@ -822,14 +822,6 @@ const server = net.createServer((socket) => {
     if (error.code !== "ECONNRESET") {
       console.error(`[TCP] Socket error for ${scannerIp}:`, error.message);
     }
-    disconnectedHandled = true;
-  });
-
-  socket.on("end", () => {
-    disconnectedHandled = true;
-  });
-
-  socket.on("close", () => {
     clearFlushTimer();
     if (!disconnectedHandled) {
       disconnectedHandled = true;
@@ -837,8 +829,15 @@ const server = net.createServer((socket) => {
     }
   });
 
-  socket.on("error", (error) => {
-    console.error("Scanner socket error:", error.message);
+  socket.on("end", () => {
+    clearFlushTimer();
+    if (!disconnectedHandled) {
+      disconnectedHandled = true;
+      scannerService.markScannerDisconnected({ scannerIp });
+    }
+  });
+
+  socket.on("close", () => {
     clearFlushTimer();
     if (!disconnectedHandled) {
       disconnectedHandled = true;

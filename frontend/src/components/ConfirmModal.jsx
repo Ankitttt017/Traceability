@@ -18,13 +18,13 @@ export default function ConfirmModal({
   const iconColors = {
     danger: "text-red-500 bg-red-100 dark:bg-red-900/30",
     warning: "text-amber-500 bg-amber-100 dark:bg-amber-900/30",
-    info: "text-blue-500 bg-blue-100 dark:bg-blue-900/30",
+    info: "text-amber-500 bg-amber-100 dark:bg-amber-900/30",
   };
 
   const buttonColors = {
     danger: "bg-red-600 hover:bg-red-700 focus:ring-red-500 text-white",
     warning: "bg-amber-600 hover:bg-amber-700 focus:ring-amber-500 text-white",
-    info: "bg-blue-600 hover:bg-blue-700 focus:ring-blue-500 text-white",
+    info: "bg-amber-600 hover:bg-amber-700 focus:ring-amber-500 text-white",
   };
 
   return (
@@ -70,3 +70,5 @@ export default function ConfirmModal({
     </AnimatePresence>
   );
 }
+
+

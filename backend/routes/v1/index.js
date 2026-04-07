@@ -11,6 +11,7 @@ const stationSettingsRoutes = require("./stationSettingsRoutes");
 const plcConfigRoutes = require("./plcConfigRoutes");
 const roleAccessSettingsRoutes = require("./roleAccessSettingsRoutes");
 const partRoutes = require("./partRoutes"); // UPGRADE COMPLETE — Part Journey
+const alarmRoutes = require("./alarmRoutes");
 
 const router = express.Router();
 
@@ -24,6 +25,7 @@ router.use("/station-settings", stationSettingsRoutes);
 router.use("/role-access-settings", roleAccessSettingsRoutes);
 router.use("/plc-config", plcConfigRoutes);
 router.use("/parts", partRoutes); // GET /api/parts/:partId/journey
+router.use("/alarms", alarmRoutes);
 router.use(traceabilityRoutes);
 router.use(dashboardRoutes);
 

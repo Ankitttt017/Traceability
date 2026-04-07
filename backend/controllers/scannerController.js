@@ -3,6 +3,7 @@ const Scanner = require("../models/Scanner");
 const Machine = require("../models/Machine");
 const { normalizeIp } = require("../utils/networkAddress");
 const scannerService = require("../services/scannerConnectionService");
+const { getScannerHealthSnapshot } = require("../services/scannerHealthService");
 
 function toInt(value) {
   if (value === undefined || value === null || value === "") {
@@ -70,6 +71,20 @@ function toConnectionResponse(connection) {
   };
 }
 
+function mergeConnectionWithHealth(connection, health) {
+  const base = toConnectionResponse(connection);
+  const heartbeatConnected = Boolean(health?.connected);
+  const connected = Boolean(base.connected || heartbeatConnected);
+  const status = connected ? "CONNECTED" : "DISCONNECTED";
+  return {
+    ...base,
+    status,
+    connected,
+    lastDataAt: base.lastDataAt || health?.lastSeenAt || null,
+    source: base.source !== "NONE" ? base.source : health ? "HEARTBEAT" : base.source,
+  };
+}
+
 function handleError(error, res) {
   if (error.name === "SequelizeUniqueConstraintError") {
     return res.status(409).json({
@@ -111,9 +126,10 @@ exports.listScannerConnections = async (_req, res) => {
       scanners.map(async (scanner) => {
         const base = await toResponse(scanner);
         const connection = connectionMap.get(normalizeIp(scanner.scanner_ip)) || null;
+        const health = getScannerHealthSnapshot({ scannerIp: scanner.scanner_ip }) || null;
         return {
           ...base,
-          connection: toConnectionResponse(connection),
+          connection: mergeConnectionWithHealth(connection, health),
         };
       })
     );
@@ -149,16 +165,17 @@ exports.testScannerConnection = async (req, res) => {
       return res.status(404).json({ error: "Scanner not found" });
     }
 
+    const targetPort = toInt(scanner.scanner_port) || 9001;
     const result = await scannerService.probeScannerEndpoint({
       ip: scanner.scanner_ip,
-      port: scanner.scanner_port,
+      port: targetPort,
     });
 
     const reachable = Boolean(result?.reachable);
     res.json({
       scannerId: scanner.id,
       scannerIp: scanner.scanner_ip,
-      scannerPort: scanner.scanner_port,
+      scannerPort: targetPort,
       reachable,
       status: reachable ? "REACHABLE" : "UNREACHABLE",
       checkedAt: new Date().toISOString(),

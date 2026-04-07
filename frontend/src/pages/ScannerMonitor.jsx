@@ -342,6 +342,14 @@ const ScannerMonitor = () => {
     };
   }, [loadConnections]);
 
+  useEffect(() => {
+    // Fallback polling so status still refreshes even if websocket event is missed.
+    const intervalId = setInterval(() => {
+      loadConnections(false);
+    }, 10000);
+    return () => clearInterval(intervalId);
+  }, [loadConnections]);
+
   const summary = useMemo(() => {
     const total     = rows.length;
     const connected = rows.filter(r => Boolean(r?.connection?.connected)).length;
@@ -679,3 +687,4 @@ const ScannerMonitor = () => {
 };
 
 export default ScannerMonitor;
+

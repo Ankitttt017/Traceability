@@ -55,19 +55,25 @@ export const MACHINE_REGISTER_ROLE_FIELDS = [
     key: "partRegister",
     label: "Part ID Register",
     required: false,
-    description: "Optional register for PART_ID hash/value.",
+    description: "Optional register for PART_ID hash/value exchange.",
   },
   {
     key: "stationRegister",
-    label: "Complete Register",
-    required: true,
-    description: "Cycle completion register.",
+    label: "Station Register",
+    required: false,
+    description: "Optional register for STATION hash/value exchange.",
   },
   {
     key: "resetRegister",
     label: "Reset Register",
     required: true,
     description: "Reset command register.",
+  },
+  {
+    key: "heartbeatRegister",
+    label: "Heartbeat Register",
+    required: false,
+    description: "Optional heartbeat register for PLC link health.",
   },
 ];
 

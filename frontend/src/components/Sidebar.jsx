@@ -63,6 +63,7 @@ const Sidebar = ({ onClose }) => {
       { name: "Scanner Manager", path: APP_ROUTES.scanners, icon: ScanLine, moduleKey: "scanners" },
       { name: "Shift Manager", path: APP_ROUTES.shifts, icon: Clock3, moduleKey: "shifts" },
       { name: "QR Manager", path: APP_ROUTES.qrRules, icon: Regex, moduleKey: "qr_rules" },
+      { name: "Report Config", path: APP_ROUTES.masterReports, icon: FileText, moduleKey: "master_settings" },
       { name: "Packing Management", path: APP_ROUTES.packingManagement, icon: Boxes, moduleKey: "packing_management" },
       { name: "User Management", path: APP_ROUTES.users, icon: Users, moduleKey: "users" },
     ],
@@ -108,7 +109,7 @@ const Sidebar = ({ onClose }) => {
           `flex items-center ${collapsed ? "justify-center" : "gap-3"} px-3 py-2.5 rounded-xl transition-all duration-200
            ${nested && !collapsed ? "ml-3" : ""}
            ${isActive
-            ? "bg-primary/15 text-primary font-semibold border border-primary/20 shadow-sm shadow-primary/10"
+            ? "bg-[#1a3263] text-[#e8e2db] font-semibold border border-transparent shadow-[0_2px_8px_rgba(26,50,99,0.3)]"
             : "text-text-muted hover:bg-bg-hover/60 hover:text-text-main border border-transparent"
           }`
         }
@@ -190,7 +191,7 @@ const Sidebar = ({ onClose }) => {
               onClick={() => setMasterOpen((p) => !p)}
               className={`w-full flex items-center ${collapsed ? "justify-center" : "justify-between gap-3"} px-3 py-2.5 rounded-xl transition-all border border-transparent
                 ${isMasterActive
-                  ? "bg-primary/15 text-primary border-primary/20"
+                  ? "bg-[#1a3263] text-[#e8e2db] shadow-[0_2px_8px_rgba(26,50,99,0.3)]"
                   : "text-text-muted hover:bg-bg-hover/60 hover:text-text-main"
                 }`}
             >

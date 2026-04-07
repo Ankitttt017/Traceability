@@ -66,6 +66,7 @@ const C = {
 };
 const SH  = `0 2px 12px rgba(var(--io-navy),.08),0 1px 3px rgba(var(--io-navy),.05)`;
 const SHM = `0 8px 28px rgba(var(--io-navy),.2),0 3px 8px rgba(var(--io-navy),.1)`;
+const SNAPSHOT_POLL_INTERVAL_MS = 3000;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function normalizeIp(v)   { return String(v||"").replace("::ffff:","").trim(); }
@@ -73,6 +74,75 @@ function toIntOrNull(v)   { const n=Number(v); return Number.isFinite(n)?Math.tr
 function normalizeRole(v) { return String(v||"").trim().toLowerCase(); }
 function fmtTime(v)  { if(!v) return "—"; const d=new Date(v); return isNaN(d)?"—":d.toLocaleTimeString(); }
 function fmtDT(v)    { if(!v) return "—"; const d=new Date(v); return isNaN(d)?"—":d.toLocaleString(); }
+function parseSlmpRegisterInput(value, defaultDevice = "D") {
+  const raw = String(value || "").trim().toUpperCase();
+  if (!raw) return { register: null, device: String(defaultDevice || "D").toUpperCase() };
+  const match = raw.match(/^([A-Z]+)?\s*(\d+)$/);
+  if (!match) return { register: null, device: String(defaultDevice || "D").toUpperCase() };
+  const reg = Number(match[2]);
+  if (!Number.isFinite(reg)) return { register: null, device: String(defaultDevice || "D").toUpperCase() };
+  return {
+    register: Math.trunc(reg),
+    device: String(match[1] || defaultDevice || "D").toUpperCase(),
+  };
+}
+function normalizeDirectionShort(direction) {
+  const v = String(direction || "").trim().toUpperCase();
+  if (v === "PC -> PLC" || v === "PC_TO_PLC" || v === "PC->PLC" || v === "WRITE") return "WRITE";
+  if (v === "BIDIRECTIONAL" || v === "BOTH") return "BIDIRECTIONAL";
+  return "READ";
+}
+function buildIoLiveSpecText({ machine, snapshot, rows }) {
+  const m = machine || {};
+  const s = snapshot || {};
+  const protocol = String(s?.plc?.protocol || m?.plcProtocol || "TCP_TEXT").toUpperCase();
+  const ip = s?.plc?.ip || m?.plcIp || "-";
+  const port = s?.plc?.port || m?.plcPort || "-";
+  const slmpDevice = m?.plcSlmpDevice || m?.plcConfig?.slmpDevice || "D";
+  const slmpFrameMode = m?.plcSlmpFrameMode || m?.plcConfig?.slmpFrameMode || "AUTO";
+  const lines = [];
+  lines.push(`MACHINE: ${String(m?.machineName || "-")}`);
+  lines.push(`LINE: ${String(m?.lineName || "-")}`);
+  lines.push(`OPERATION: ${String(m?.operationNo || m?.stationNo || "-")}`);
+  lines.push(`GENERATED_AT: ${new Date().toISOString()}`);
+  lines.push("");
+  lines.push("PLC CONNECTION:");
+  lines.push(`  protocol=${protocol}`);
+  lines.push(`  ip=${ip}`);
+  lines.push(`  port=${port}`);
+  if (protocol === "SLMP") {
+    lines.push(`  slmpDevice=${slmpDevice}`);
+    lines.push(`  slmpFrameMode=${slmpFrameMode}`);
+  }
+  lines.push("");
+  lines.push("MAPPED REGISTERS (with current live values):");
+  if (!Array.isArray(rows) || rows.length === 0) {
+    lines.push("  (no rows)");
+  } else {
+    for (const row of rows) {
+      const reg = toIntOrNull(row?.register);
+      if (reg === null) continue;
+      const device = String(row?.device || slmpDevice || "D").toUpperCase();
+      const direction = normalizeDirectionShort(row?.direction);
+      const current = row?.currentValue === null || row?.currentValue === undefined ? "N/A" : String(row.currentValue);
+      const label = String(row?.signal || row?.signalKey || `REG_${reg}`).trim();
+      const status = String(row?.status || "-").trim();
+      const desc = String(row?.description || "").trim();
+      lines.push(
+        `  register=${reg} (${device}${reg})  label="${label}"  direction=${direction}  currentValue=${current}  status=${status}${desc ? `  purpose="${desc}"` : ""}`
+      );
+    }
+  }
+  lines.push("");
+  lines.push("CORE SETTINGS:");
+  lines.push(
+    `  startRegister=${m?.plcConfig?.startRegister ?? m?.plcStartRegister ?? "-"}  statusRegister=${m?.plcConfig?.statusRegister ?? m?.plcStatusRegister ?? "-"}  resetRegister=${m?.plcConfig?.resetRegister ?? m?.plcResetRegister ?? "-"}`
+  );
+  lines.push(
+    `  startValue=${m?.plcConfig?.startValue ?? m?.plcStartValue ?? 1}  startedValue=${m?.plcConfig?.startedValue ?? m?.plcStartedValue ?? 2}  endOkValue=${m?.plcConfig?.endOkValue ?? m?.plcEndOkValue ?? 3}  endNgValue=${m?.plcConfig?.endNgValue ?? m?.plcEndNgValue ?? 4}  blockValue=${m?.plcConfig?.blockValue ?? m?.plcBlockValue ?? 2}  resetValue=${m?.plcConfig?.resetValue ?? m?.plcResetValue ?? 9}`
+  );
+  return lines.join("\n");
+}
 function toErr(e,fb) {
   const st=Number(e?.response?.status||0);
   if (st===401||st===403) return "Access denied. Admin or Engineer role required.";
@@ -226,6 +296,9 @@ const SignalCard = ({ row, onWrite, canWrite, writing }) => {
               letterSpacing:"0.07em",color:sc.fg}}>
               {isHigh?"ON":val===0?"OFF":"—"}
             </span>
+            <span style={{fontSize:10,fontFamily:"'DM Mono',monospace",color:C.txt("muted")}}>
+              {row.status || "—"}
+            </span>
             {row.description&&(
               <span style={{fontSize:10,color:C.txt("muted"),maxWidth:120,lineHeight:1.3,
                 display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>
@@ -342,18 +415,72 @@ const PlcTestModal = ({ plc, onClose }) => {
   const runTest = async () => {
     setTesting(true); setResult(null);
     const t0 = Date.now();
+    let parsedWriteValue = null;
     try {
-      const res = await machineApi.testPlc({ machineId: plc.machineId });
+      parsedWriteValue = toIntOrNull(testVal);
+      if (parsedWriteValue === null) {
+        throw new Error("Enter a valid numeric test value");
+      }
+
+      const payload = { machineId: plc.machineId };
+      payload.plcTestTimeoutMs = 5000;
+      payload.plcTestRetryCount = 3;
+      payload.plcSlmpFrameMode = plc.slmpFrameMode || "AUTO";
+      let writeReq = null;
+      let writeRes = null;
+      if (isMitsu) {
+        const parsed = parseSlmpRegisterInput(register, plc.slmpDevice || "D");
+        if (parsed.register === null) {
+          throw new Error("Enter SLMP register like D100");
+        }
+        payload.plcStatusRegister = parsed.register;
+        payload.plcSlmpDevice = parsed.device;
+        writeReq = {
+          machineId: plc.machineId,
+          registerNo: parsed.register,
+          value: parsedWriteValue,
+          plcSlmpDevice: parsed.device,
+          plcSlmpFrameMode: plc.slmpFrameMode || "AUTO",
+          timeoutMs: 5000,
+        };
+      } else {
+        const regNo = toIntOrNull(register);
+        if (regNo === null) {
+          throw new Error("Enter numeric register address");
+        }
+        payload.plcStatusRegister = regNo;
+        writeReq = {
+          machineId: plc.machineId,
+          registerNo: regNo,
+          value: parsedWriteValue,
+          timeoutMs: 5000,
+        };
+      }
+      writeRes = await machineApi.writePlcValue(writeReq, { timeout: 30000 });
+      const res = await machineApi.testPlc(payload, { timeout: 30000 });
+      const readValue = res?.probe?.statusValue;
+      const readOk = Number.isFinite(Number(readValue)) ? Number(readValue) === parsedWriteValue : false;
       setResult({
-        success: true,
-        message: res?.message || "PLC connection test passed. Controller is responding correctly.",
+        success: readOk,
+        message: readOk
+          ? `Write+Read successful. Sent ${parsedWriteValue}, received ${readValue}.`
+          : `Write sent ${parsedWriteValue}, but read-back is ${readValue ?? "N/A"}.`,
         latency: Date.now()-t0,
+        request: { write: writeReq, read: payload },
+        probe: { write: writeRes?.write || null, read: res?.probe || null },
       });
     } catch(e) {
       setResult({
         success: false,
-        message: toErr(e, "Connection failed. Check IP, port, and ensure PLC is powered on."),
+        message: toErr(e, "Read/Write test failed. Check IP, port, SLMP route/device, and register."),
         latency: Date.now()-t0,
+        request: {
+          machineId: plc.machineId,
+          register,
+          testVal: parsedWriteValue ?? testVal,
+          protocol: plc.protocol || null,
+        },
+        error: e?.response?.data?.error || e?.message || null,
       });
     } finally { setTesting(false); }
   };
@@ -478,6 +605,21 @@ const PlcTestModal = ({ plc, onClose }) => {
                   fontFamily:"'DM Mono',monospace"}}>
                   Response time: {result.latency}ms
                 </p>
+                {result.request && (
+                  <p style={{fontSize:10,color:C.txt("muted"),marginTop:4,fontFamily:"'DM Mono',monospace",wordBreak:"break-all"}}>
+                    Sent: {JSON.stringify(result.request)}
+                  </p>
+                )}
+                {result.probe && (
+                  <p style={{fontSize:10,color:C.txt("muted"),marginTop:3,fontFamily:"'DM Mono',monospace",wordBreak:"break-all"}}>
+                    Received: {JSON.stringify(result.probe)}
+                  </p>
+                )}
+                {!result.success && result.error && (
+                  <p style={{fontSize:10,color:C.ng(0.9),marginTop:3,fontFamily:"'DM Mono',monospace",wordBreak:"break-all"}}>
+                    Error: {result.error}
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -519,6 +661,8 @@ const IoMonitor = () => {
   const [activeTab,         setActiveTab]         = useState("plc_list"); // start on PLC list
   const [focus,             setFocus]             = useState("");
   const [testPlcItem,       setTestPlcItem]       = useState(null);
+  const [actionLogs,        setActionLogs]        = useState([]);
+  const [mappedWriteDraft,  setMappedWriteDraft]  = useState({});
 
   const [acting,  setActing]   = useState({testing:false,resetting:false,writing:false,commanding:false});
   const [writeSignal,    setWriteSignal]     = useState("TRIGGER");
@@ -526,6 +670,11 @@ const IoMonitor = () => {
   const [customReg,      setCustomReg]       = useState("");
   const [commandStation, setCommandStation]  = useState("");
   const [plcCommand,     setPlcCommand]      = useState("START_OPERATION");
+
+  const pushActionLog = useCallback((entry)=>{
+    const row = { at: new Date().toISOString(), ...entry };
+    setActionLogs(prev=>[row,...prev].slice(0,40));
+  },[]);
 
   const inFlightRef = useRef(false);
 
@@ -554,13 +703,13 @@ const IoMonitor = () => {
       setSelectedMachineId(String(filteredMachines[0].id));
   },[filteredMachines,selectedMachineId]);
 
-  const loadSnapshot = useCallback(async({silent=false}={})=>{
+  const loadSnapshot = useCallback(async({silent=false, force=false}={})=>{
     const machineId=Number(selectedMachineId||0);
     if (!machineId||inFlightRef.current) return;
     inFlightRef.current=true;
     if (silent) setRefreshingSnap(true); else setLoadingSnap(true);
     try {
-      const data=await traceabilityApi.ioSnapshot({machineId,plcIp:selectedPlcIp||undefined});
+      const data=await traceabilityApi.ioSnapshot({machineId,plcIp:selectedPlcIp||undefined,force});
       setSnapshot(data||null); setErrorMsg("");
     } catch(e){ setSnapshot(null); setErrorMsg(e.response?.data?.error||"Unable to load signal data."); }
     finally {
@@ -572,7 +721,7 @@ const IoMonitor = () => {
   useEffect(()=>{
     if (!selectedMachineId) return;
     loadSnapshot({silent:false});
-    const t=setInterval(()=>loadSnapshot({silent:true}),1000);
+    const t=setInterval(()=>loadSnapshot({silent:true}),SNAPSHOT_POLL_INTERVAL_MS);
     return()=>clearInterval(t);
   },[selectedMachineId,selectedPlcIp,loadSnapshot]);
 
@@ -583,6 +732,22 @@ const IoMonitor = () => {
   },[selectedMachine]);
 
   const rows=useMemo(()=>Array.isArray(snapshot?.rows)?snapshot.rows:[],[snapshot?.rows]);
+
+  useEffect(()=>{
+    if (!Array.isArray(rows) || rows.length===0) return;
+    setMappedWriteDraft((prev)=>{
+      const next = { ...prev };
+      for (const r of rows) {
+        const key = String(r.register ?? "");
+        if (!key) continue;
+        if (next[key] === undefined || next[key] === "") {
+          const base = toIntOrNull(r.currentValue);
+          next[key] = String(base ?? 0);
+        }
+      }
+      return next;
+    });
+  },[rows]);
 
   const writableOpts=useMemo(()=>{
     const seen=new Set();const opts=[];
@@ -624,6 +789,8 @@ const IoMonitor = () => {
   // Build PLC list from machines
   const plcList = useMemo(()=>{
     const seen=new Set();const list=[];
+    const snapMachineId = Number(snapshot?.machine?.id || 0);
+    const snapConnected = snapshot?.plcConnection?.connected;
     for (const m of machines){
       const ip=normalizeIp(m.plcIp||m.machineIp);
       const port=m.plcPort||m.machinePort||502;
@@ -636,35 +803,65 @@ const IoMonitor = () => {
       const startReg=m.plcStartRegister||m.plcConfig?.startRegister||(isMitsu?"D100":"40001");
       const resetReg=m.plcResetRegister||m.plcConfig?.resetRegister||(isMitsu?"D102":"40003");
       const statusReg=m.plcStatusRegister||m.plcConfig?.statusRegister||(isMitsu?"D101":"40002");
+      const connectedFromLive =
+        snapMachineId && Number(m.id) === snapMachineId
+          ? (snapConnected === undefined ? null : Boolean(snapConnected))
+          : null;
       list.push({
         id:key, ip, port, protocol:proto, isMitsu,
         name:m.plcName||`PLC — ${ip}`,
         machineId:m.id, machineName:m.machineName,
         startReg, statusReg, resetReg,
+        slmpDevice:(m.plcSlmpDevice||m.plcConfig?.slmpDevice||"D"),
+        slmpFrameMode:(m.plcSlmpFrameMode||m.plcConfig?.slmpFrameMode||"AUTO"),
         linkedMachines:linked.map(x=>x.machineName||x.name).filter(Boolean),
-        connected:m.plcConnected!==undefined?Boolean(m.plcConnected):null,
+        connected:connectedFromLive !== null
+          ? connectedFromLive
+          : (m.plcConnected!==undefined?Boolean(m.plcConnected):null),
         testRegister:m.plcTestRegister,
       });
     }
     return list;
-  },[machines]);
+  },[machines,snapshot?.machine?.id,snapshot?.plcConnection?.connected]);
 
   // PLC actions
   const handleTest=async()=>{
     if (!selectedMachine) return;
     setActing(p=>({...p,testing:true}));
-    try { const res=await machineApi.testPlc({machineId:selectedMachine.id}); toast.success(res?.message||"PLC connection test passed."); }
-    catch(e){ toast.error(toErr(e,"PLC test failed")); }
+    const req = {
+      machineId:selectedMachine.id,
+      plcSlmpFrameMode:selectedMachine.plcSlmpFrameMode||selectedMachine.plcConfig?.slmpFrameMode||"AUTO",
+    };
+    try {
+      const res=await machineApi.testPlc(req);
+      toast.success(res?.message||"PLC connection test passed.");
+      pushActionLog({ action:"TEST", ok:true, request:req, response:res?.probe||res||null });
+    }
+    catch(e){
+      const msg = toErr(e,"PLC test failed");
+      toast.error(msg);
+      pushActionLog({ action:"TEST", ok:false, request:req, error:e?.response?.data?.error||msg });
+    }
     finally { setActing(p=>({...p,testing:false})); }
   };
   const handleReset=async()=>{
     if (!selectedMachine) return;
     setActing(p=>({...p,resetting:true}));
     try {
-      await machineApi.resetPlc({machineId:selectedMachine.id,stationNo:selectedMachine.operationNo||selectedMachine.stationNo});
+      const req = {
+        machineId:selectedMachine.id,
+        stationNo:selectedMachine.operationNo||selectedMachine.stationNo,
+        plcSlmpFrameMode:selectedMachine.plcSlmpFrameMode||selectedMachine.plcConfig?.slmpFrameMode||"AUTO",
+      };
+      const res = await machineApi.resetPlc(req);
       toast.success("PLC reset signal sent.");
+      pushActionLog({ action:"RESET", ok:true, request:req, response:res?.reset||res||null });
       await loadSnapshot({silent:false});
-    } catch(e){ toast.error(toErr(e,"PLC reset failed")); }
+    } catch(e){
+      const msg = toErr(e,"PLC reset failed");
+      toast.error(msg);
+      pushActionLog({ action:"RESET", ok:false, request:{machineId:selectedMachine.id}, error:e?.response?.data?.error||msg });
+    }
     finally { setActing(p=>({...p,resetting:false})); }
   };
   const handleCardWrite=async(row,val,onDone)=>{
@@ -673,13 +870,72 @@ const IoMonitor = () => {
     if (reg===null) return toast.error("Register address not found.");
     setActing(p=>({...p,writing:true}));
     try {
-      await machineApi.writePlcValue({machineId:selectedMachine.id,value:val,registerNo:reg,signalKey:String(row.signalKey||row.signal||"").toUpperCase()||undefined});
+      const req = {
+        machineId:selectedMachine.id,
+        value:val,
+        registerNo:reg,
+        signalKey:String(row.signalKey||row.signal||"").toUpperCase()||undefined,
+        plcSlmpDevice:selectedMachine.plcSlmpDevice||"D",
+        plcSlmpFrameMode:selectedMachine.plcSlmpFrameMode||selectedMachine.plcConfig?.slmpFrameMode||"AUTO",
+      };
+      const res = await machineApi.writePlcValue(req);
       toast.success(`${row.signal||"Register"} ${reg} → ${val}`);
+      pushActionLog({ action:"WRITE", ok:true, request:req, response:res?.write||res||null });
       onDone?.();
       await loadSnapshot({silent:false});
-    } catch(e){ toast.error(toErr(e,"Write failed")); }
+    } catch(e){
+      const msg = toErr(e,"Write failed");
+      toast.error(msg);
+      pushActionLog({ action:"WRITE", ok:false, request:{machineId:selectedMachine.id,registerNo:reg,value:val}, error:e?.response?.data?.error||msg });
+    }
     finally { setActing(p=>({...p,writing:false})); }
   };
+  const updateMappedDraft = useCallback((registerNo, value)=>{
+    const key = String(registerNo ?? "");
+    if (!key) return;
+    setMappedWriteDraft((prev)=>({ ...prev, [key]: String(value ?? "") }));
+  },[]);
+  const handleMappedRead = useCallback(async(row)=>{
+    if (!selectedMachine) return;
+    const reg = toIntOrNull(row?.register);
+    if (reg===null) return toast.error("Mapped register missing.");
+    try {
+      const snap = await traceabilityApi.ioSnapshot(
+        { machineId:selectedMachine.id, plcIp:selectedPlcIp||undefined, force:true },
+        { timeout: 30000 }
+      );
+      setSnapshot(snap||null);
+      const hit = Array.isArray(snap?.rows)
+        ? snap.rows.find((x)=>toIntOrNull(x.register)===reg && String(x.signalKey||"")===String(row.signalKey||""))
+        : null;
+      const val = hit?.currentValue ?? "N/A";
+      toast.success(`${row.device||selectedMachine?.plcSlmpDevice||"D"}${reg} = ${val}`);
+      pushActionLog({
+        action:"READ",
+        ok:true,
+        request:{ machineId:selectedMachine.id, registerNo:reg, signalKey:row.signalKey||null },
+        response:{ value: val, status: hit?.status || null, tone: hit?.tone || null },
+      });
+    } catch(e){
+      const msg = toErr(e,"Read failed");
+      toast.error(msg);
+      pushActionLog({
+        action:"READ",
+        ok:false,
+        request:{ machineId:selectedMachine.id, registerNo:reg, signalKey:row.signalKey||null },
+        error:e?.response?.data?.error||msg,
+      });
+    }
+  },[selectedMachine,selectedPlcIp,pushActionLog]);
+  const handleMappedWrite = useCallback(async(row)=>{
+    if (!selectedMachine) return;
+    const reg = toIntOrNull(row?.register);
+    if (reg===null) return toast.error("Mapped register missing.");
+    const draft = mappedWriteDraft[String(reg)];
+    const val = toIntOrNull(draft);
+    if (val===null) return toast.error("Enter valid value.");
+    await handleCardWrite(row,val);
+  },[selectedMachine,mappedWriteDraft,handleCardWrite]);
   const handleWrite=async()=>{
     if (!selectedMachine) return;
     const reg=writeSignal==="CUSTOM"?toIntOrNull(customReg):(writableOpts.find(e=>e.key===writeSignal)?.register??getMappedReg(selectedMachine,writeSignal));
@@ -687,32 +943,82 @@ const IoMonitor = () => {
     if (reg===null||val===null) return toast.error("Enter a valid register and value.");
     setActing(p=>({...p,writing:true}));
     try {
-      await machineApi.writePlcValue({machineId:selectedMachine.id,value:val,registerNo:reg,signalKey:writeSignal!=="CUSTOM"?writeSignal:undefined});
+      const req = {
+        machineId:selectedMachine.id,
+        value:val,
+        registerNo:reg,
+        signalKey:writeSignal!=="CUSTOM"?writeSignal:undefined,
+        plcSlmpDevice:selectedMachine.plcSlmpDevice||"D",
+        plcSlmpFrameMode:selectedMachine.plcSlmpFrameMode||selectedMachine.plcConfig?.slmpFrameMode||"AUTO",
+      };
+      const res = await machineApi.writePlcValue(req);
       toast.success(`Register ${reg} set to ${val}`);
+      pushActionLog({ action:"WRITE", ok:true, request:req, response:res?.write||res||null });
       await loadSnapshot({silent:false});
-    } catch(e){ toast.error(toErr(e,"Write failed")); }
+    } catch(e){
+      const msg = toErr(e,"Write failed");
+      toast.error(msg);
+      pushActionLog({ action:"WRITE", ok:false, request:{machineId:selectedMachine.id,registerNo:reg,value:val}, error:e?.response?.data?.error||msg });
+    }
     finally { setActing(p=>({...p,writing:false})); }
   };
   const handleCommand=async()=>{
     if (!selectedMachine) return;
     setActing(p=>({...p,commanding:true}));
     try {
-      await machineApi.sendPlcCommand({machineId:selectedMachine.id,command:plcCommand,stationNo:commandStation});
+      const req = {
+        machineId:selectedMachine.id,
+        command:plcCommand,
+        stationNo:commandStation,
+        plcSlmpFrameMode:selectedMachine.plcSlmpFrameMode||selectedMachine.plcConfig?.slmpFrameMode||"AUTO",
+      };
+      const res = await machineApi.sendPlcCommand(req);
       toast.success("PLC command sent.");
+      pushActionLog({ action:"COMMAND", ok:true, request:req, response:res?.result||res||null });
       await loadSnapshot({silent:false});
-    } catch(e){ toast.error(toErr(e,"Command failed")); }
+    } catch(e){
+      const msg = toErr(e,"Command failed");
+      toast.error(msg);
+      pushActionLog({ action:"COMMAND", ok:false, request:{machineId:selectedMachine.id,command:plcCommand,stationNo:commandStation}, error:e?.response?.data?.error||msg });
+    }
     finally { setActing(p=>({...p,commanding:false})); }
   };
+  const downloadIoLiveSpec = useCallback(()=>{
+    try {
+      const text = buildIoLiveSpecText({ machine:selectedMachine, snapshot, rows });
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const name = String(selectedMachine?.machineName || "machine").trim().replace(/[^\w\-]+/g, "_");
+      a.href = url;
+      a.download = `${name || "machine"}_io_live_register_spec.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success("I/O live register spec downloaded");
+    } catch {
+      toast.error("Unable to generate I/O live register spec");
+    }
+  },[selectedMachine,snapshot,rows]);
 
-  const plcConnected     = Boolean(snapshot?.plcConnection?.connected);
-  const scannerConnected = Boolean(snapshot?.scannerHealth?.connected);
+  const plcTransportConnected = Boolean(snapshot?.plcConnection?.transportConnected);
+  const plcReadConnected = Boolean(snapshot?.plcConnection?.readConnected);
+  const plcConnected     = Boolean(snapshot?.plcConnection?.connected ?? plcTransportConnected);
   const protocol         = (snapshot?.plc?.protocol||selectedMachine?.plcProtocol||"Modbus TCP").toUpperCase();
   const plcIp            = snapshot?.plc?.ip||selectedMachine?.plcIp||"—";
   const plcPort          = snapshot?.plc?.port||selectedMachine?.plcPort||"—";
+  const plcModeNote = plcReadConnected
+    ? "TCP + register read OK"
+    : plcTransportConnected
+      ? "TCP connected, register read pending/failed"
+      : "No TCP link";
+  const hasPlcError = Boolean(snapshot?.plcConnection?.error);
+  const plcErrorIsWarning = hasPlcError && plcTransportConnected;
 
   const TABS=[
     {key:"plc_list", label:"PLC Overview",    icon:List   },
-    {key:"signals",  label:"Signal Monitor",  icon:Signal },
+    {key:"signals",  label:"Mapped I/O",      icon:Signal },
     {key:"control",  label:"PLC Control",     icon:Settings},
     {key:"logs",     label:"Connection Log",  icon:History},
   ];
@@ -745,12 +1051,17 @@ const IoMonitor = () => {
                   <div style={{position:"absolute",inset:0,borderRadius:"50%",background:C.ok(),animation:"ioPing 1.6s ease-out infinite",opacity:0.6}}/>
                   <div style={{width:7,height:7,borderRadius:"50%",background:C.ok()}}/>
                 </div>
-                <p style={{fontSize:11,color:C.txt("muted")}}>Live polling every second</p>
+                <p style={{fontSize:11,color:C.txt("muted")}}>
+                  Live polling every {Math.round(SNAPSHOT_POLL_INTERVAL_MS / 1000)} seconds
+                </p>
               </div>
             </div>
           </div>
-          <Btn onClick={()=>loadSnapshot({silent:false})} loading={refreshingSnap||loadingSnap} variant="ghost">
+          <Btn onClick={()=>loadSnapshot({silent:false,force:true})} loading={refreshingSnap||loadingSnap} variant="ghost">
             <RefreshCw size={12}/> Refresh
+          </Btn>
+          <Btn onClick={downloadIoLiveSpec} variant="steel">
+            <Save size={12}/> Download Live Spec
           </Btn>
         </div>
       </div>
@@ -1010,11 +1321,7 @@ const IoMonitor = () => {
           {/* Connection status */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10}}>
             <ConnCard connected={plcConnected} label="PLC Controller"
-              sublabel={`${plcIp} : ${plcPort}`} protocol={protocol}/>
-            <ConnCard connected={scannerConnected} label="Barcode / QR Scanner"
-              sublabel={snapshot?.scannerHealth?.ip
-                ?`${snapshot.scannerHealth.ip} : ${snapshot.scannerHealth.port||5000}`
-                :"TCP Scanner Link"}/>
+              sublabel={`${plcIp} : ${plcPort} • ${plcModeNote}`} protocol={protocol}/>
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderLeft:`3px solid ${C.steel()}`,borderRadius:12,
               padding:"14px 16px",boxShadow:SH,display:"flex",alignItems:"center",gap:11}}>
@@ -1040,50 +1347,96 @@ const IoMonitor = () => {
             </div>
           )}
 
-          {/* Signal cards */}
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-            flexWrap:"wrap",gap:8}}>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <p style={{fontSize:12,fontWeight:700,color:C.txt("pri")}}>Live Signal Registers</p>
-              {rows.length>0&&(
+          {/* Mapped register table */}
+          <SCard noPad title="Mapped Registers" subtitle="Machine Add Mapping">
+            <div style={{padding:"10px 14px",borderBottom:`1px solid ${C.bdr()}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
+              <p style={{fontSize:12,fontWeight:700,color:C.txt("pri")}}>
+                {selectedMachine?.machineName || "Machine"} mapped I/O registers
+              </p>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
                 <span style={{fontSize:11,color:C.txt("muted"),
                   background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
                   padding:"2px 8px",borderRadius:5}}>
-                  {rows.length} registers
+                  {rows.length} mapped rows
                 </span>
-              )}
+                <Badge variant={plcConnected?"ok":"ng"}
+                  label={plcConnected?"PLC Online":"PLC Offline"} pulse={plcConnected}/>
+              </div>
             </div>
-            <Badge variant={plcConnected?"ok":"ng"}
-              label={plcConnected?"PLC Online":"PLC Offline"} pulse={plcConnected}/>
-          </div>
-
-          {loadingSnap?(
-            <div style={{padding:"48px 24px",textAlign:"center",
-              background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14}}>
-              <RefreshCw size={24} color={C.txt("muted")}
-                style={{margin:"0 auto 12px",animation:"ioSpin .9s linear infinite"}}/>
-              <p style={{fontSize:12,color:C.txt("muted")}}>Loading signal data…</p>
-            </div>
-          ):rows.length===0?(
-            <div style={{padding:"48px 24px",textAlign:"center",
-              background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14}}>
-              <Signal size={28} color={C.txt("muted")} style={{margin:"0 auto 12px"}}/>
-              <p style={{fontSize:13,fontWeight:600,color:C.txt("sec"),marginBottom:6}}>
-                No signals available
-              </p>
-              <p style={{fontSize:12,color:C.txt("muted")}}>
-                Select a machine and ensure the PLC is connected.
-              </p>
-            </div>
-          ):(
-            <div style={{display:"grid",
-              gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}}>
-              {rows.map((r,i)=>(
-                <SignalCard key={i} row={r} canWrite={canControl}
-                  writing={acting.writing} onWrite={handleCardWrite}/>
-              ))}
-            </div>
-          )}
+            {loadingSnap?(
+              <div style={{padding:"36px 20px",textAlign:"center"}}>
+                <RefreshCw size={22} color={C.txt("muted")} style={{margin:"0 auto 10px",animation:"ioSpin .9s linear infinite"}}/>
+                <p style={{fontSize:12,color:C.txt("muted")}}>Loading mapped register values…</p>
+              </div>
+            ):rows.length===0?(
+              <div style={{padding:"36px 20px",textAlign:"center"}}>
+                <Signal size={24} color={C.txt("muted")} style={{margin:"0 auto 10px"}}/>
+                <p style={{fontSize:12,color:C.txt("muted")}}>No mapped registers found for selected machine.</p>
+              </div>
+            ):(
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead>
+                    <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
+                      {["Signal","Device/Register","Direction","Purpose","Live Value","Status","Write Value","Actions"].map((h)=>(
+                        <th key={h} style={{padding:"9px 12px",textAlign:"left",fontSize:9,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.09em",color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r,i)=>{
+                      const regNo = toIntOrNull(r.register);
+                      const regKey = String(regNo ?? "");
+                      const device = String(r.device || selectedMachine?.plcSlmpDevice || "D").toUpperCase();
+                      const isWritable = Boolean(r.writable) && regNo!==null && canControl;
+                      return (
+                        <tr key={`${r.signalKey||r.signal||"row"}-${regKey}-${i}`} style={{borderBottom:`1px solid ${C.bdr()}`,background:i%2===1?C.bg("surf"):"transparent"}}>
+                          <td style={{padding:"9px 12px",fontWeight:700,color:C.txt("pri")}}>{r.signal||r.signalKey||"—"}</td>
+                          <td style={{padding:"9px 12px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.steel()}}>
+                            {regNo===null?"—":`${device}${regNo}`}
+                          </td>
+                          <td style={{padding:"9px 12px",fontSize:11,color:C.txt("muted")}}>{r.direction||"—"}</td>
+                          <td style={{padding:"9px 12px",fontSize:11,color:C.txt("muted"),maxWidth:220}}>
+                            <div style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                              {r.description || "—"}
+                            </div>
+                          </td>
+                          <td style={{padding:"9px 12px",fontFamily:"'DM Mono',monospace",fontWeight:800,color:C.txt("pri")}}>
+                            {r.currentValue===null||r.currentValue===undefined?"—":String(r.currentValue)}
+                          </td>
+                          <td style={{padding:"9px 12px"}}>
+                            <Badge
+                              variant={r.tone==="good"?"ok":r.tone==="error"?"ng":r.tone==="warn"?"wip":"idle"}
+                              label={r.status||"—"}
+                            />
+                          </td>
+                          <td style={{padding:"9px 12px",minWidth:120}}>
+                            <input
+                              value={mappedWriteDraft[regKey] ?? ""}
+                              onChange={(e)=>updateMappedDraft(regNo, e.target.value)}
+                              placeholder="0"
+                              disabled={!isWritable}
+                              style={{...inp(false),height:32,fontSize:11,fontFamily:"'DM Mono',monospace",opacity:isWritable?1:0.5}}
+                            />
+                          </td>
+                          <td style={{padding:"9px 12px"}}>
+                            <div style={{display:"flex",gap:6}}>
+                              <Btn size="sm" variant="steel" onClick={()=>handleMappedRead(r)}>
+                                <RefreshCw size={11}/> Read
+                              </Btn>
+                              <Btn size="sm" variant="ok" disabled={!isWritable||acting.writing} loading={isWritable&&acting.writing} onClick={()=>handleMappedWrite(r)}>
+                                <Save size={11}/> Write
+                              </Btn>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </SCard>
         </div>
       )}
 
@@ -1134,9 +1487,8 @@ const IoMonitor = () => {
                     style={inp(focus==="cmd")}
                     onFocus={()=>setFocus("cmd")} onBlur={()=>setFocus("")}>
                     <option value="START_OPERATION">Start Operation</option>
-                    <option value="STOP_OPERATION"> Stop Operation</option>
-                    <option value="RESET_STATION">  Reset Station</option>
-                    <option value="CLEAR_INTERLOCK">Clear Interlock</option>
+                    <option value="BLOCK_OPERATION">Block Operation</option>
+                    <option value="RESET_OPERATION">Reset Operation</option>
                   </select>
                 </div>
                 <div>
@@ -1242,17 +1594,23 @@ const IoMonitor = () => {
             </div>
           )}
           <SCard title="PLC Connection" subtitle="Network Status">
-            {snapshot?.plcConnection?.error?(
+            {hasPlcError?(
               <div style={{display:"flex",alignItems:"flex-start",gap:10,padding:"13px 15px",
-                borderRadius:9,background:C.ng(0.07),border:`1px solid ${C.ng(0.22)}`}}>
-                <Unplug size={16} color={C.ng()} style={{flexShrink:0,marginTop:1}}/>
+                borderRadius:9,
+                background:plcErrorIsWarning ? C.amber(0.08) : C.ng(0.07),
+                border:`1px solid ${plcErrorIsWarning ? C.amber(0.28) : C.ng(0.22)}`}}>
+                <Unplug size={16} color={plcErrorIsWarning ? C.amber() : C.ng()} style={{flexShrink:0,marginTop:1}}/>
                 <div>
-                  <p style={{fontSize:12,fontWeight:700,color:C.ng(),marginBottom:3}}>Connection Error</p>
-                  <p style={{fontSize:11,color:C.ng(0.8),lineHeight:1.5,fontFamily:"'DM Mono',monospace"}}>
+                  <p style={{fontSize:12,fontWeight:700,color:plcErrorIsWarning ? C.amber() : C.ng(),marginBottom:3}}>
+                    {plcErrorIsWarning ? "Read Warning" : "Connection Error"}
+                  </p>
+                  <p style={{fontSize:11,color:(plcErrorIsWarning ? C.amber(0.9) : C.ng(0.8)),lineHeight:1.5,fontFamily:"'DM Mono',monospace"}}>
                     {snapshot.plcConnection.error}
                   </p>
                   <p style={{fontSize:11,color:C.txt("muted"),marginTop:5}}>
-                    Check the PLC IP address, port, and network connectivity.
+                    {plcErrorIsWarning
+                      ? "PLC network is reachable. Verify register mapping/device/frame settings."
+                      : "Check the PLC IP address, port, and network connectivity."}
                   </p>
                 </div>
               </div>
@@ -1307,6 +1665,32 @@ const IoMonitor = () => {
               </div>
             </SCard>
           )}
+          {actionLogs.length>0&&(
+            <SCard title="Manual PLC Test Log" subtitle="Sent vs Received" noPad>
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead>
+                    <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
+                      {["Time","Action","Status","Request","Response / Error"].map(h=>(
+                        <th key={h} style={{padding:"9px 14px",textAlign:"left",fontSize:9,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.09em",color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {actionLogs.map((lg,i)=>(
+                      <tr key={i} style={{borderBottom:`1px solid ${C.bdr()}`,background:i%2===1?C.bg("surf"):"transparent"}}>
+                        <td style={{padding:"9px 14px",fontSize:11,fontFamily:"'DM Mono',monospace",color:C.txt("muted")}}>{fmtTime(lg.at)}</td>
+                        <td style={{padding:"9px 14px",fontSize:11,fontFamily:"'DM Mono',monospace",color:C.txt("pri")}}>{lg.action}</td>
+                        <td style={{padding:"9px 14px"}}><Badge variant={lg.ok?"ok":"ng"} label={lg.ok?"OK":"FAIL"}/></td>
+                        <td style={{padding:"9px 14px",fontSize:10,fontFamily:"'DM Mono',monospace",color:C.txt("sec"),maxWidth:260,wordBreak:"break-all"}}>{JSON.stringify(lg.request||{})}</td>
+                        <td style={{padding:"9px 14px",fontSize:10,fontFamily:"'DM Mono',monospace",color:lg.ok?C.ok(0.9):C.ng(0.9),maxWidth:360,wordBreak:"break-all"}}>{lg.ok?JSON.stringify(lg.response||{}):String(lg.error||"Failed")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </SCard>
+          )}
         </div>
       )}
     </div>
@@ -1314,3 +1698,5 @@ const IoMonitor = () => {
 };
 
 export default IoMonitor;
+
+

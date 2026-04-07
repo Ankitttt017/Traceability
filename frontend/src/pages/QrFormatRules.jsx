@@ -122,25 +122,26 @@ const QrFormatRules = () => {
   return (
     <div className="space-y-6 rise-in">
       {/* ── Header ── */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center text-primary">
-            <Regex size={22} />
+      <div className="db-header-card mb-6">
+        <div className="db-header-gradient-bar" />
+        <div className="db-header-inner">
+          <div className="db-header-title-group">
+            <div className="db-header-icon-box">
+              <Regex size={22} />
+            </div>
+            <div>
+              <h1 className="db-header-title">QR Validation Engine</h1>
+              <p className="db-header-subtitle">Define barcode formats &amp; regex patterns for each station</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-xl font-bold text-text-main tracking-tight">QR Validation Engine</h1>
-            <p className="text-text-muted text-xs mt-0.5">Define barcode formats &amp; regex patterns for each station</p>
+          <div className="flex items-center gap-2">
+            <button onClick={loadRules} disabled={loadingRules} className="db-secondary-btn">
+              <RefreshCw size={13} className={loadingRules ? "animate-spin" : ""} /> Refresh
+            </button>
+            <button onClick={() => { resetForm(); setShowModal(true); }} className="db-action-btn">
+              <Plus size={14} /> Add Rule
+            </button>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={loadRules} disabled={loadingRules}
-            className="h-9 px-4 rounded-xl border border-border bg-bg-card text-text-muted hover:text-text-main hover:border-primary/40 transition-all flex items-center gap-2 text-sm font-semibold w-fit">
-            <RefreshCw size={14} className={loadingRules ? "animate-spin" : ""} /> Refresh
-          </button>
-          <button onClick={() => { resetForm(); setShowModal(true); }}
-            className="h-9 px-5 rounded-xl bg-primary text-on-strong font-bold flex items-center gap-2 text-sm hover:brightness-110 transition-all shadow-lg shadow-primary/15">
-            <Plus size={16} /> Add Rule
-          </button>
         </div>
       </div>
 

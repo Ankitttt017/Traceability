@@ -33,20 +33,20 @@ export const machineApi = {
     const { data } = await apiClient.patch(ENDPOINTS.machineTarget(id), payload);
     return data;
   },
-  testPlc: async (payload) => {
-    const { data } = await apiClient.post(ENDPOINTS.machineTestPlc, payload);
+  testPlc: async (payload, config = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.machineTestPlc, payload, config);
     return data;
   },
-  resetPlc: async (payload) => {
-    const { data } = await apiClient.post(ENDPOINTS.machineResetPlc, payload);
+  resetPlc: async (payload, config = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.machineResetPlc, payload, config);
     return data;
   },
-  sendPlcCommand: async (payload) => {
-    const { data } = await apiClient.post(ENDPOINTS.machinePlcCommand, payload);
+  sendPlcCommand: async (payload, config = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.machinePlcCommand, payload, config);
     return data;
   },
-  writePlcValue: async (payload) => {
-    const { data } = await apiClient.post(ENDPOINTS.machineWritePlcValue, payload);
+  writePlcValue: async (payload, config = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.machineWritePlcValue, payload, config);
     return data;
   },
   remove: async (id) => {
@@ -185,7 +185,7 @@ export const traceabilityApi = {
     const { data } = await apiClient.get(ENDPOINTS.traceability.liveState, { params: { machineId } });
     return data;
   },
-  ioSnapshot: async ({ machineId, plcIp } = {}) => {
+  ioSnapshot: async ({ machineId, plcIp, force } = {}, config = {}) => {
     const params = {};
     if (machineId) {
       params.machineId = machineId;
@@ -193,7 +193,14 @@ export const traceabilityApi = {
     if (plcIp) {
       params.plcIp = plcIp;
     }
-    const { data } = await apiClient.get(ENDPOINTS.traceability.ioSnapshot, { params });
+    if (force) {
+      params.force = 1;
+    }
+    const { data } = await apiClient.get(ENDPOINTS.traceability.ioSnapshot, {
+      params,
+      timeout: 30000,
+      ...config,
+    });
     return data;
   },
   machineStats: async (machineId, params = {}) => {
@@ -368,5 +375,20 @@ export const packingApi = {
       const { data } = await apiClient.post(ENDPOINTS.packing.generateNextLegacy);
       return data;
     }
+  },
+};
+
+export const alarmApi = {
+  list: async () => {
+    const { data } = await apiClient.get(ENDPOINTS.alarms.base);
+    return data;
+  },
+  resolve: async (id) => {
+    const { data } = await apiClient.patch(ENDPOINTS.alarms.resolve(id));
+    return data;
+  },
+  resolveAll: async () => {
+    const { data } = await apiClient.post(ENDPOINTS.alarms.resolveAll);
+    return data;
   },
 };
