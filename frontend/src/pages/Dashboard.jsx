@@ -352,6 +352,17 @@ const Dashboard = () => {
     const t=(summary.quality?.ok||0)+(summary.quality?.ng||0);
     return t>0 ? Math.round((summary.quality.ok/t)*100) : 0;
   },[summary.quality]);
+  const lineContextLabel = useMemo(() => {
+    const selectedMachineId = Number(filters.machineId || 0);
+    if (selectedMachineId) {
+      const machine = machines.find((row) => Number(row.id) === selectedMachineId);
+      return machine?.lineName ? `Line: ${machine.lineName}` : "Line: -";
+    }
+    const lines = [...new Set((machines || []).map((row) => String(row.lineName || "").trim()).filter(Boolean))];
+    if (lines.length === 0) return "Line: All";
+    if (lines.length === 1) return `Line: ${lines[0]}`;
+    return `Line: All (${lines.length})`;
+  }, [filters.machineId, machines]);
 
   // Pie data
   const pieData = useMemo(()=>[
@@ -413,7 +424,7 @@ const Dashboard = () => {
                   <div style={{width:8,height:8,borderRadius:"50%",background:C.ok()}}/>
                 </div>
                 <p style={{fontSize:12,color:C.txt("muted")}}>
-                  Live — auto-refreshes every 15 seconds
+                  Live — auto-refreshes every 15 seconds · {lineContextLabel}
                 </p>
               </div>
             </div>

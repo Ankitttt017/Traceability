@@ -222,7 +222,7 @@ const Sidebar = ({ onClose }) => {
       {/* Version footer */}
       {!collapsed && (
         <div className="flex-shrink-0 px-4 py-3 border-t border-border/60">
-          <p className="text-[10px] text-text-muted/60 text-center">IndusTrace v2.0 - Production Ready</p>
+          <p className="text-[10px] text-text-muted/60 text-center">IndusTrace v2.0</p>
         </div>
       )}
     </aside>

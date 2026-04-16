@@ -113,26 +113,7 @@ io.on("connection", (socket) => {
   });
 });
 
-setInterval(async () => {
-  try {
-    const [machines, scanners] = await Promise.all([
-      Machine.findAll({ order: [["sequence_no", "ASC"]] }),
-      Scanner.findAll({ where: { is_active: true } }),
-    ]);
-    io.emit(
-      "machine_status",
-      machines.map((machine) => ({
-        ...machine.toJSON(),
-      }))
-    );
-    io.emit(
-      "scanner_status",
-      scanners.map((scanner) => scanner.toJSON())
-    );
-  } catch (error) {
-    console.error("Socket error:", error);
-  }
-}, 5000);
+// Moved to startServer after sync
 
 async function ensureDefaultAdminUser() {
   const defaultUsername = process.env.DEFAULT_ADMIN_USERNAME || "admin";
@@ -173,19 +154,101 @@ const PORT = process.env.PORT || 4000;
 // Keep schema auto-alter OFF by default in dev runtime.
 // Repeated alter on some MySQL setups can create excessive keys/index attempts.
 const syncAlter = process.env.DB_SYNC_ALTER === "true";
+const syncForce = process.env.DB_SYNC_FORCE === "true";
+const dbSetupMode = process.env.DB_SETUP_MODE === "true";
 
-server.listen(PORT, async () => {
+function collectSqlErrorMessages(error) {
+  const innerErrors = [
+    ...(error?.parent?.errors || []),
+    ...(error?.original?.errors || []),
+  ];
+
+  return [
+    error?.message,
+    error?.parent?.message,
+    error?.original?.message,
+    ...innerErrors.map((entry) => entry?.message),
+  ]
+    .filter(Boolean)
+    .map((message) => String(message));
+}
+
+function isSqlPermissionDenied(error) {
+  const combined = collectSqlErrorMessages(error).join(" | ").toLowerCase();
+  return combined.includes("permission was denied");
+}
+
+function isMssqlAlterUniqueSyntaxError(error) {
+  const combined = collectSqlErrorMessages(error).join(" | ").toLowerCase();
+  const sqlText = String(error?.sql || error?.parent?.sql || error?.original?.sql || "").toLowerCase();
+  return (
+    combined.includes("incorrect syntax near the keyword 'unique'") &&
+    sqlText.includes("alter table")
+  );
+}
+
+async function runStartupDbTask(label, taskFn) {
+  try {
+    await taskFn();
+  } catch (error) {
+    if (dbSetupMode && isSqlPermissionDenied(error)) {
+      console.warn(`[Startup][DB_SETUP_MODE] Skipping ${label}: permission denied.`);
+      return;
+    }
+    throw error;
+  }
+}
+
+async function startServer() {
   try {
     await sequelize.authenticate();
-    await sequelize.sync({ alter: syncAlter });
-    await resetAllMachineLocks();
-    await scannerService.resetAllScannerConnectionStates();
-    await ensureDefaultAdminUser();
-    await ensureDefaultShifts();
-    startPlcHealthMonitor();
-    startAlarmMonitor(); // UPGRADE 6 — start alarm monitor
-    console.log(`Server Running on ${PORT}`);
+    try {
+      await sequelize.sync({ alter: syncAlter, force: syncForce });
+    } catch (syncError) {
+      const isMssql = sequelize.getDialect && sequelize.getDialect() === "mssql";
+      if (isMssql && syncAlter && !syncForce && isMssqlAlterUniqueSyntaxError(syncError)) {
+        console.warn("[Startup] MSSQL alter sync hit UNIQUE syntax issue; retrying with alter=false.");
+        await sequelize.sync({ alter: false, force: false });
+      } else {
+        throw syncError;
+      }
+    }
+    await runStartupDbTask("resetAllMachineLocks", () => resetAllMachineLocks());
+    await runStartupDbTask("resetAllScannerConnectionStates", () => scannerService.resetAllScannerConnectionStates());
+    await runStartupDbTask("ensureDefaultAdminUser", () => ensureDefaultAdminUser());
+    await runStartupDbTask("ensureDefaultShifts", () => ensureDefaultShifts());
+
+    server.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+      startPlcHealthMonitor();
+      startAlarmMonitor();
+
+      // Start the status update interval after sync
+      setInterval(async () => {
+        try {
+          const [machines, scanners] = await Promise.all([
+            Machine.findAll({ order: [["sequence_no", "ASC"]] }),
+            Scanner.findAll({ where: { is_active: true } }),
+          ]);
+          io.emit(
+            "machine_status",
+            machines.map((machine) => ({
+              ...machine.toJSON(),
+            }))
+          );
+          io.emit(
+            "scanner_status",
+            scanners.map((scanner) => scanner.toJSON())
+          );
+        } catch (error) {
+          console.error("Socket error:", error);
+        }
+      }, 5000);
+    });
   } catch (error) {
-    console.error("Unable to connect to the database:", error);
+    console.error("Failed to start server:", error);
+    process.exit(1);
   }
-});
+}
+
+startServer();

@@ -2,6 +2,9 @@
 
 Last updated: 2026-04-04 (rev 2)
 
+Reference standard document:
+- `TRACEABILITY_STANDARD_MASTER_PROCESS.md` (authoritative SOP for OK/NG, Quality Check, confirmation, report, downtime behavior)
+
 This document defines the current end-to-end process used in this project, from machine/PLC setup to live I/O monitoring, scan processing, PLC handshake, completion, reset, and bypass.
 
 ## 1) Configuration Flow
@@ -106,6 +109,19 @@ Bypass behavior:
 - When machine-level bypass is ON, this machine skips part-level interlock/duplicate/sequence blocking in scan verification.
 - Existing part-level bypass is still supported if `partId` is provided in API.
 - Use only with supervisor approval and a clear reason.
+
+### 6.1 Advanced Station Logic (Dynamic, No Code Change)
+
+Station Control supports per-station advanced configuration:
+- `resultPolicy`: `AUTO_OK` or `REQUIRE_RESULT`
+- `rejectionSignalMode`: `SINGLE`, `DUAL_ANY`, `DUAL_BOTH`
+- `qualityPayloadEnabled`: enable SPC payload capture
+- `qualityPayloadKeys`: payload keys to store (example: `reasonCode,diameter,height,cameraNgCode`)
+
+Runtime behavior:
+- If `resultPolicy=REQUIRE_RESULT`, scan is blocked until explicit OK/NG is provided.
+- Dual rejection mode supports one-signal or two-signal confirmation logic.
+- If quality payload capture is enabled, configured SPC keys are stored with operation logs.
 
 ## 7) PLC Handover Sheet (Current Export Format)
 

@@ -14,6 +14,7 @@ import {
 import toast from "react-hot-toast";
 import { machineApi, traceabilityApi } from "../api/services";
 import { getUserRole } from "../utils/authStorage";
+import ConfirmModal from "../components/ConfirmModal";
 
 // ── Design tokens ──────────────────────────────────────────────────────────
 const DS = `
@@ -663,6 +664,7 @@ const IoMonitor = () => {
   const [testPlcItem,       setTestPlcItem]       = useState(null);
   const [actionLogs,        setActionLogs]        = useState([]);
   const [mappedWriteDraft,  setMappedWriteDraft]  = useState({});
+  const [showResetConfirm,  setShowResetConfirm]  = useState(false);
 
   const [acting,  setActing]   = useState({testing:false,resetting:false,writing:false,commanding:false});
   const [writeSignal,    setWriteSignal]     = useState("TRIGGER");
@@ -1471,7 +1473,7 @@ const IoMonitor = () => {
                 <p style={{fontSize:12,color:C.txt("muted"),lineHeight:1.6,marginBottom:14}}>
                   Send a reset signal to clear active faults and restore normal operation.
                 </p>
-                <Btn full onClick={handleReset} loading={acting.resetting} variant="danger">
+                <Btn full onClick={()=>setShowResetConfirm(true)} loading={acting.resetting} variant="danger">
                   <RotateCcw size={13}/> Reset PLC
                 </Btn>
               </SCard>
@@ -1693,6 +1695,24 @@ const IoMonitor = () => {
           )}
         </div>
       )}
+
+      <ConfirmModal
+        isOpen={showResetConfirm}
+        title="Confirm PLC Reset"
+        message={`Send reset signal to PLC for machine "${selectedMachine?.machineName || "-"}"?`}
+        confirmText={acting.resetting ? "Resetting..." : "Confirm Reset"}
+        cancelText="Cancel"
+        variant="danger"
+        onConfirm={async () => {
+          if (acting.resetting) return;
+          await handleReset();
+          setShowResetConfirm(false);
+        }}
+        onCancel={() => {
+          if (acting.resetting) return;
+          setShowResetConfirm(false);
+        }}
+      />
     </div>
   );
 };

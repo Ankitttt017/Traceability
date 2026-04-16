@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { machineApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
+import ConfirmModal from "../components/ConfirmModal";
 import { getMachineStage } from "../utils/machineFields";
 import { getStationFeatureSettings, getStationFeatures, saveStationFeatureSettings } from "../utils/stationSettings";
 
@@ -307,6 +308,7 @@ const OperatorView = () => {
   const [popup,            setPopup]            = useState(null);
   const [qrSignal,         setQrSignal]         = useState(null);
   const [qrFeed,           setQrFeed]           = useState([]);
+  const [resetConfirm,     setResetConfirm]     = useState(null);
   const [clockTick,        setClockTick]        = useState(Date.now());
 
   const selectedMachineIdRef = useRef("");
@@ -451,7 +453,6 @@ const OperatorView = () => {
   const handleResetOperation = useCallback(async(partId,stationNo,options={})=>{
     const pid=normalizePartId(partId), sno=String(stationNo||"").trim().toUpperCase();
     if (!pid||!sno) return false;
-    if (!options.confirmed){ const ok=window.confirm(`Reset operation for part ${pid} at ${sno}?`); if (!ok) return false; }
     const res=await traceabilityApi.resetOperation({partId:pid,stationNo:sno});
     const mk=selectedMachineIdRef.current;
     if (mk){ try{ const c=JSON.parse(localStorage.getItem(QR_STORAGE_KEY)||"{}"); delete c[mk]; localStorage.setItem(QR_STORAGE_KEY,JSON.stringify(c)); }catch{} }
@@ -459,6 +460,35 @@ const OperatorView = () => {
     mergePopupPayload({type:"INFO",partId:pid,stationNo:sno,qrResult:"WAIT",plcStatus:"WAIT",message:res?.message||"Operation reset successful"});
     scheduleLiveRefresh(); return true;
   },[mergePopupPayload,scheduleLiveRefresh]);
+
+  const openResetConfirm = useCallback((partId, stationNo) => {
+    const pid = normalizePartId(partId);
+    const sno = String(stationNo || "").trim().toUpperCase();
+    if (!pid || !sno) return;
+    setResetConfirm({ partId: pid, stationNo: sno });
+  }, []);
+
+  const confirmResetOperation = useCallback(async () => {
+    const pid = normalizePartId(resetConfirm?.partId);
+    const sno = String(resetConfirm?.stationNo || "").trim().toUpperCase();
+    if (!pid || !sno) {
+      setResetConfirm(null);
+      return;
+    }
+    try {
+      await handleResetOperation(pid, sno, { confirmed: true });
+    } catch (e) {
+      mergePopupPayload({
+        type: "ERROR",
+        title: "Reset Failed",
+        message: e.response?.data?.error || "Unable to reset",
+        partId: pid,
+        stationNo: sno,
+      });
+    } finally {
+      setResetConfirm(null);
+    }
+  }, [handleResetOperation, mergePopupPayload, resetConfirm]);
 
   useEffect(()=>{ loadMachines(); },[loadMachines]);
   useEffect(()=>{ if (!selectedMachineId) return; loadMachineTelemetry(selectedMachineId,true); },[selectedMachineId,loadMachineTelemetry]);
@@ -689,7 +719,7 @@ const OperatorView = () => {
                   accent
                 />
                 {canQuickReset&&(
-                  <button onClick={()=>handleResetOperation(currentContext.partId,selectedStation).catch(e=>mergePopupPayload({type:"ERROR",title:"Reset Failed",message:e.response?.data?.error||"Unable to reset",partId:currentContext.partId,stationNo:selectedStation}))}
+                  <button onClick={()=>openResetConfirm(currentContext.partId,selectedStation)}
                     style={{
                       width:"100%",marginTop:12,height:38,
                       background:C.ng(),color:"white",
@@ -1000,6 +1030,17 @@ const OperatorView = () => {
           </div>
         </>
       )}
+
+      <ConfirmModal
+        isOpen={Boolean(resetConfirm)}
+        title="Confirm Reset Operation"
+        message={`Reset operation for part "${resetConfirm?.partId || ""}" at station "${resetConfirm?.stationNo || ""}"?`}
+        confirmText="Confirm Reset"
+        cancelText="Cancel"
+        variant="danger"
+        onConfirm={confirmResetOperation}
+        onCancel={() => setResetConfirm(null)}
+      />
     </div>
   );
 };

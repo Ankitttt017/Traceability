@@ -8,7 +8,13 @@ const ReworkLog = require("../models/ReworkLog");
 const Shift = require("../models/Shift");
 const { saveScan } = require("../services/scanService");
 const { executePlcHandshake, getPlcCircuitSnapshot } = require("../services/plcCommunicationService");
-const { readModbusRegisters, readSlmpRegisters, probeTcpEndpoint } = require("../services/plcIoService");
+const {
+  readModbusRegisters,
+  readSlmpRegisters,
+  writeModbusRegister,
+  writeSlmpRegister,
+  probeTcpEndpoint,
+} = require("../services/plcIoService");
 const { getPlcHealthSnapshot } = require("../services/plcHealthService");
 const { getScannerHealthSnapshot } = require("../services/scannerHealthService");
 const { getScannerConnectionSnapshot } = require("../services/scannerConnectionService");
@@ -381,6 +387,9 @@ function toJourneyRow(log) {
     plcStartTime: log.plc_start_time || log.plc_start_at,
     plcEndTime: log.plc_end_time || log.plc_end_at,
     result: log.result,
+    resultSource: log.result_source || null,
+    resultInput: log.result_input || null,
+    qualityPayload: null,
     interlockReason: log.interlock_reason,
     machineId: log.machine_id,
     isBypassed: Boolean(log.is_bypassed),
@@ -558,6 +567,219 @@ function hasRejectionBinConfirmation(payload = {}) {
     .trim()
     .toUpperCase();
   return ["1", "TRUE", "YES", "NG", "FAIL", "CONFIRMED", "DETECTED"].includes(normalized);
+}
+
+function hasSecondaryRejectionSignal(payload = {}) {
+  const raw =
+    payload.rejectionSecondaryConfirmed ??
+    payload.rejection_secondary_confirmed ??
+    payload.rejectionSecondarySignal ??
+    payload.rejection_secondary_signal ??
+    payload.ngSignal2 ??
+    payload.ng_signal_2 ??
+    payload.stationResetSignal ??
+    payload.station_reset_signal ??
+    null;
+
+  if (typeof raw === "boolean") {
+    return raw;
+  }
+  const normalized = String(raw || "").trim().toUpperCase();
+  return ["1", "TRUE", "YES", "NG", "FAIL", "CONFIRMED", "DETECTED"].includes(normalized);
+}
+
+function parseMachineSnapshot(machine) {
+  if (!machine?.plc_registers) {
+    return {};
+  }
+  try {
+    const parsed =
+      typeof machine.plc_registers === "string" ? JSON.parse(machine.plc_registers) : machine.plc_registers;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function getMachineSpcConfig(machine) {
+  const snapshot = parseMachineSnapshot(machine);
+  const source = snapshot?.spcConfig && typeof snapshot.spcConfig === "object" ? snapshot.spcConfig : {};
+  const mode = toUpper(source.mode || source.resultMode || "IP_PUSH");
+  const qualityPayloadKeys = Array.isArray(source.qualityPayloadKeys)
+    ? source.qualityPayloadKeys.map((entry) => String(entry || "").trim()).filter(Boolean).slice(0, 40)
+    : [];
+  const payloadResultNgValues = Array.isArray(source.payloadResultNgValues)
+    ? source.payloadResultNgValues
+        .map((entry) => String(entry || "").trim().toUpperCase())
+        .filter(Boolean)
+        .slice(0, 20)
+    : ["NG", "FAIL", "0"];
+  const plcResultOkValues = Array.isArray(source.plcResultOkValues)
+    ? source.plcResultOkValues
+        .map((entry) => String(entry || "").trim().toUpperCase())
+        .filter(Boolean)
+        .slice(0, 20)
+    : ["1", "3", "OK", "PASS"];
+  const plcResultNgValues = Array.isArray(source.plcResultNgValues)
+    ? source.plcResultNgValues
+        .map((entry) => String(entry || "").trim().toUpperCase())
+        .filter(Boolean)
+        .slice(0, 20)
+    : ["0", "2", "NG", "FAIL"];
+  return {
+    enabled: source.enabled === true,
+    mode: ["IP_PUSH", "PLC_REGISTER"].includes(mode) ? mode : "IP_PUSH",
+    appliesTo: "ALL",
+    sourceIp: normalizeIp(source.sourceIp || source.systemIp || source.ip || ""),
+    sourcePort: toIntegerOrNull(source.sourcePort || source.systemPort || source.port),
+    payloadResultKey: String(source.payloadResultKey || source.resultKey || "RESULT").trim() || "RESULT",
+    payloadResultNgValues,
+    qualityPayloadKeys,
+    plcResultRegister: toIntegerOrNull(source.plcResultRegister ?? source.resultRegister ?? source.register),
+    plcResultDevice: String(source.plcResultDevice || source.resultDevice || "D").trim().toUpperCase() || "D",
+    plcResultOkValues,
+    plcResultNgValues,
+    plcAckEnabled: source.plcAckEnabled === true,
+    plcAckRegister: toIntegerOrNull(source.plcAckRegister ?? source.ackRegister),
+    plcAckDevice: String(source.plcAckDevice || source.ackDevice || "D").trim().toUpperCase() || "D",
+    plcAckOkValue: toIntegerOrNull(source.plcAckOkValue ?? source.ackOkValue) ?? 101,
+    plcAckNgValue: toIntegerOrNull(source.plcAckNgValue ?? source.ackNgValue) ?? 102,
+    plcAckErrorValue: toIntegerOrNull(source.plcAckErrorValue ?? source.ackErrorValue) ?? 199,
+  };
+}
+
+function findPayloadValueCaseInsensitive(payload = {}, key = "") {
+  if (!payload || typeof payload !== "object") return undefined;
+  if (Object.prototype.hasOwnProperty.call(payload, key)) return payload[key];
+  const target = String(key || "").trim().toUpperCase();
+  if (!target) return undefined;
+  for (const [k, v] of Object.entries(payload)) {
+    if (String(k || "").trim().toUpperCase() === target) {
+      return v;
+    }
+  }
+  return undefined;
+}
+
+function extractQualityPayload(payload = {}, machine = null) {
+  const spcConfig = getMachineSpcConfig(machine);
+  if (!spcConfig.enabled || !payload || typeof payload !== "object") {
+    return null;
+  }
+  const keys = spcConfig.qualityPayloadKeys;
+  const output = {};
+  for (const key of keys) {
+    const direct = findPayloadValueCaseInsensitive(payload, key);
+    if (direct !== undefined) {
+      output[key] = direct;
+    }
+  }
+  return Object.keys(output).length > 0 ? output : null;
+}
+
+function normalizeQualityToken(value) {
+  if (value === undefined || value === null) return "";
+  return String(value).trim().toUpperCase();
+}
+
+async function readQualityCheckResultFromPlc(machine, spcConfig) {
+  if (!machine || !spcConfig?.enabled || spcConfig.mode !== "PLC_REGISTER") {
+    return null;
+  }
+  const registerNo = toIntegerOrNull(spcConfig.plcResultRegister);
+  if (registerNo === null) {
+    return null;
+  }
+  const protocol = toUpper(machine.plc_protocol || "TCP_TEXT");
+  const ip = machine.plc_ip || machine.machine_ip;
+  const port = toIntegerOrNull(machine.plc_port || machine.machine_port);
+  if (!ip || !port) {
+    throw new Error("PLC endpoint not configured for Quality Check register mode");
+  }
+  let rawValue = null;
+  if (protocol === "MODBUS_TCP") {
+    const response = await readModbusRegisters({
+      ip,
+      port,
+      unitId: toIntegerOrNull(machine.plc_unit_id) ?? 1,
+      registers: [registerNo],
+      timeoutMs: toIntegerOrNull(machine.plc_test_timeout_ms) ?? 2000,
+    });
+    rawValue = response?.values?.[registerNo];
+  } else if (protocol === "SLMP") {
+    const response = await readSlmpRegisters({
+      ip,
+      port,
+      registers: [{ register: registerNo, device: spcConfig.plcResultDevice || machine.plc_slmp_device || "D" }],
+      defaultDevice: spcConfig.plcResultDevice || machine.plc_slmp_device || "D",
+      timeoutMs: toIntegerOrNull(machine.plc_test_timeout_ms) ?? 2000,
+      frameMode: parseMachineSnapshot(machine)?.slmpFrameMode || "AUTO",
+    });
+    rawValue = response?.values?.[registerNo];
+  }
+  if (rawValue === undefined || rawValue === null) {
+    return null;
+  }
+  const token = normalizeQualityToken(rawValue);
+  let result = null;
+  if (spcConfig.plcResultNgValues.includes(token)) {
+    result = "NG";
+  } else if (spcConfig.plcResultOkValues.includes(token)) {
+    result = "OK";
+  }
+  return {
+    token,
+    result,
+    rawValue,
+    registerNo,
+  };
+}
+
+async function sendQualityCheckAckToPlc(machine, spcConfig, finalResult) {
+  if (!machine || !spcConfig?.enabled || spcConfig.plcAckEnabled !== true) {
+    return { skipped: true, reason: "ACK_DISABLED" };
+  }
+  const registerNo = toIntegerOrNull(spcConfig.plcAckRegister);
+  if (registerNo === null) {
+    return { skipped: true, reason: "ACK_REGISTER_NOT_SET" };
+  }
+  const protocol = toUpper(machine.plc_protocol || "TCP_TEXT");
+  const ip = machine.plc_ip || machine.machine_ip;
+  const port = toIntegerOrNull(machine.plc_port || machine.machine_port);
+  if (!ip || !port) {
+    return { skipped: true, reason: "PLC_ENDPOINT_MISSING" };
+  }
+  const ackValue =
+    finalResult === "NG"
+      ? spcConfig.plcAckNgValue
+      : finalResult === "OK"
+      ? spcConfig.plcAckOkValue
+      : spcConfig.plcAckErrorValue;
+  if (protocol === "MODBUS_TCP") {
+    await writeModbusRegister({
+      ip,
+      port,
+      unitId: toIntegerOrNull(machine.plc_unit_id) ?? 1,
+      register: registerNo,
+      value: ackValue,
+      timeoutMs: toIntegerOrNull(machine.plc_test_timeout_ms) ?? 2000,
+    });
+    return { ok: true, protocol, register: registerNo, value: ackValue };
+  }
+  if (protocol === "SLMP") {
+    const routeSnapshot = parseMachineSnapshot(machine);
+    await writeSlmpRegister({
+      ip,
+      port,
+      register: registerNo,
+      value: ackValue,
+      device: spcConfig.plcAckDevice || machine.plc_slmp_device || "D",
+      timeoutMs: toIntegerOrNull(machine.plc_test_timeout_ms) ?? 2000,
+      frameMode: routeSnapshot?.slmpFrameMode || "AUTO",
+    });
+    return { ok: true, protocol, register: registerNo, value: ackValue };
+  }
+  return { skipped: true, reason: `ACK_NOT_SUPPORTED_${protocol}` };
 }
 
 async function rollbackPendingOperation({ partId, operationLogId }) {
@@ -1504,6 +1726,9 @@ exports.getPartJourney = async (req, res) => {
         id: row.id,
         plcStatus: row.plcStatus,
         result: row.result,
+        resultSource: row.resultSource,
+        resultInput: row.resultInput,
+        qualityPayload: row.qualityPayload || null,
         interlockReason: row.interlockReason,
         isBypassed: row.isBypassed,
         bypassReason: row.bypassReason,
@@ -1796,19 +2021,66 @@ exports.processScan = async (req, res) => {
     }
 
     const stationFeatures = await getStationFeatureConfig(normalizedStation);
+    const spcConfig = getMachineSpcConfig(machine);
     const rejectionBinConfirmed = stationFeatures.rejectionBin && hasRejectionBinConfirmation(req.body);
     const manualResultEnabled = stationFeatures.manualResult === true;
     const resultInput = String(result ?? req.body.finalResult ?? "").trim().toUpperCase();
+    const spcResultRaw = findPayloadValueCaseInsensitive(req.body, spcConfig.payloadResultKey);
+    const spcResultInput = normalizeQualityToken(spcResultRaw);
+    let plcQualityResult = null;
+    if (spcConfig.enabled && spcConfig.mode === "PLC_REGISTER") {
+      plcQualityResult = await readQualityCheckResultFromPlc(machine, spcConfig).catch((error) => {
+        console.warn(
+          `[QUALITY_CHECK] PLC register read failed machineId=${machine.id} partId=${normalizedPartId} station=${normalizedStation} error=${error.message}`
+        );
+        return null;
+      });
+    }
+    const hasSpcResultInput = Boolean(
+      spcConfig.enabled &&
+        (spcConfig.mode === "PLC_REGISTER" ? plcQualityResult?.result : spcResultInput)
+    );
     const hasManualResultInput = Boolean(resultInput);
-    if (manualResultEnabled && !rejectionBinConfirmed && !hasManualResultInput) {
+    const qualityPayload = extractQualityPayload(req.body, machine);
+    const sourceIpConfigured =
+      spcConfig.enabled && spcConfig.mode === "IP_PUSH" && spcConfig.sourceIp;
+    const requestSourceIp =
+      normalizeIp(req.body.scannerIp || req.body.systemIp || req.body.sourceIp || req.ip || req.socket?.remoteAddress || "");
+    if (sourceIpConfigured && requestSourceIp && !sameIp(sourceIpConfigured, requestSourceIp)) {
+      return res.status(400).json({
+        error: `SPC source IP mismatch. Expected ${spcConfig.sourceIp}, got ${requestSourceIp}`,
+      });
+    }
+
+    if (manualResultEnabled && !rejectionBinConfirmed && !hasManualResultInput && !hasSpcResultInput) {
       return res.status(400).json({
         error: `Manual OK/NG result is required for station ${normalizedStation}`,
       });
     }
-    const finalResult = rejectionBinConfirmed ? "NG" : hasManualResultInput ? resultInput : "OK";
+    const spcResultIsNg = spcConfig.mode === "PLC_REGISTER"
+      ? plcQualityResult?.result === "NG"
+      : spcConfig.payloadResultNgValues.includes(spcResultInput);
+    const spcResolvedResult = spcConfig.mode === "PLC_REGISTER"
+      ? plcQualityResult?.result || null
+      : hasSpcResultInput
+      ? spcResultIsNg
+        ? "NG"
+        : "OK"
+      : null;
+    const finalResult = rejectionBinConfirmed
+      ? "NG"
+      : spcResolvedResult
+      ? spcResolvedResult
+      : hasManualResultInput
+      ? resultInput
+      : "OK";
     const ngReason = rejectionBinConfirmed ? "REJECTION_BIN_CONFIRMED" : undefined;
     const resultSource = rejectionBinConfirmed
       ? "PLC_REJECTION_BIN"
+      : spcResolvedResult
+      ? spcConfig.mode === "PLC_REGISTER"
+        ? "QUALITY_CHECK_PLC_REGISTER"
+        : "QUALITY_CHECK_IP_PAYLOAD"
       : manualResultEnabled
       ? "MANUAL_OK_NG"
       : hasManualResultInput
@@ -1819,13 +2091,26 @@ exports.processScan = async (req, res) => {
     const response = await saveScan(normalizedPartId, normalizedStation, finalResult, machine.id, req.user?.id, {
       ...(ngReason ? { ngReason } : {}),
       resultSource,
-      resultInput: hasManualResultInput ? resultInput : finalResult,
+      resultInput: spcConfig.mode === "PLC_REGISTER"
+        ? normalizeQualityToken(plcQualityResult?.token || plcQualityResult?.rawValue || finalResult)
+        : hasSpcResultInput
+        ? spcResultInput
+        : hasManualResultInput
+        ? resultInput
+        : finalResult,
+      qualityPayload,
       skipInterlockValidation: machineBypassEnabled,
       skipDuplicateValidation: machineBypassEnabled,
       skipSequenceValidation: machineBypassEnabled,
     });
+    const qualityAck = await sendQualityCheckAckToPlc(machine, spcConfig, finalResult).catch((error) => ({
+      ok: false,
+      error: error.message,
+    }));
 
-    const plcConfirmationRequired = await isPlcConfirmationEnabled(normalizedStation);
+    const plcConfirmationRequired = machineBypassEnabled
+      ? false
+      : await isPlcConfirmationEnabled(normalizedStation);
     const requiredPlcPartCount = plcConfirmationRequired
       ? normalizePlcPartCount(stationFeatures.plcPartCount)
       : 1;
@@ -1864,8 +2149,17 @@ exports.processScan = async (req, res) => {
     response.plcPartCountRequired = requiredPlcPartCount;
     response.resultSource = resultSource;
     response.manualResultEnabled = manualResultEnabled;
+    response.isSpcStation = spcConfig.enabled;
     response.machineBypassEnabled = machineBypassEnabled;
     response.machineBypassReason = bypassState?.reason || null;
+    response.qualityCheck = {
+      mode: spcConfig.mode,
+      appliesTo: "ALL",
+      plcResultRegister: spcConfig.plcResultRegister,
+      plcResultRaw: plcQualityResult?.rawValue ?? null,
+      plcResultToken: plcQualityResult?.token ?? null,
+      ack: qualityAck,
+    };
 
     res.json({
       ...response,
@@ -1896,19 +2190,56 @@ exports.verifyScanForOperator = async (req, res) => {
 
     const stationNo = getMachineOperationStage(machine);
     const stationFeatures = await getStationFeatureConfig(stationNo);
+    const spcConfig = getMachineSpcConfig(machine);
     const rejectionBinConfirmed = stationFeatures.rejectionBin && hasRejectionBinConfirmation(req.body);
     const manualResultEnabled = stationFeatures.manualResult === true;
     const resultInput = String(result ?? req.body.finalResult ?? "").trim().toUpperCase();
+    const spcResultRaw = findPayloadValueCaseInsensitive(req.body, spcConfig.payloadResultKey);
+    const spcResultInput = normalizeQualityToken(spcResultRaw);
+    let plcQualityResult = null;
+    if (spcConfig.enabled && spcConfig.mode === "PLC_REGISTER") {
+      plcQualityResult = await readQualityCheckResultFromPlc(machine, spcConfig).catch((error) => {
+        console.warn(
+          `[QUALITY_CHECK] PLC register read failed machineId=${machine.id} partId=${normalizedPartId} station=${stationNo} error=${error.message}`
+        );
+        return null;
+      });
+    }
+    const hasSpcResultInput = Boolean(
+      spcConfig.enabled &&
+        (spcConfig.mode === "PLC_REGISTER" ? plcQualityResult?.result : spcResultInput)
+    );
     const hasManualResultInput = Boolean(resultInput);
-    if (manualResultEnabled && !rejectionBinConfirmed && !hasManualResultInput) {
+    const qualityPayload = extractQualityPayload(req.body, machine);
+    if (manualResultEnabled && !rejectionBinConfirmed && !hasManualResultInput && !hasSpcResultInput) {
       return res.status(400).json({
         error: `Manual OK/NG result is required for station ${stationNo}`,
       });
     }
-    const finalResult = rejectionBinConfirmed ? "NG" : hasManualResultInput ? resultInput : "OK";
+    const spcResultIsNg = spcConfig.mode === "PLC_REGISTER"
+      ? plcQualityResult?.result === "NG"
+      : spcConfig.payloadResultNgValues.includes(spcResultInput);
+    const spcResolvedResult = spcConfig.mode === "PLC_REGISTER"
+      ? plcQualityResult?.result || null
+      : hasSpcResultInput
+      ? spcResultIsNg
+        ? "NG"
+        : "OK"
+      : null;
+    const finalResult = rejectionBinConfirmed
+      ? "NG"
+      : spcResolvedResult
+      ? spcResolvedResult
+      : hasManualResultInput
+      ? resultInput
+      : "OK";
     const ngReason = rejectionBinConfirmed ? "REJECTION_BIN_CONFIRMED" : undefined;
     const resultSource = rejectionBinConfirmed
       ? "PLC_REJECTION_BIN"
+      : spcResolvedResult
+      ? spcConfig.mode === "PLC_REGISTER"
+        ? "QUALITY_CHECK_PLC_REGISTER"
+        : "QUALITY_CHECK_IP_PAYLOAD"
       : manualResultEnabled
       ? "MANUAL_OK_NG"
       : hasManualResultInput
@@ -1919,12 +2250,25 @@ exports.verifyScanForOperator = async (req, res) => {
     const response = await saveScan(normalizedPartId, stationNo, finalResult, machine.id, req.user?.id, {
       ...(ngReason ? { ngReason } : {}),
       resultSource,
-      resultInput: hasManualResultInput ? resultInput : finalResult,
+      resultInput: spcConfig.mode === "PLC_REGISTER"
+        ? normalizeQualityToken(plcQualityResult?.token || plcQualityResult?.rawValue || finalResult)
+        : hasSpcResultInput
+        ? spcResultInput
+        : hasManualResultInput
+        ? resultInput
+        : finalResult,
+      qualityPayload,
       skipInterlockValidation: machineBypassEnabled,
       skipDuplicateValidation: machineBypassEnabled,
       skipSequenceValidation: machineBypassEnabled,
     });
-    const plcConfirmationRequired = await isPlcConfirmationEnabled(stationNo);
+    const qualityAck = await sendQualityCheckAckToPlc(machine, spcConfig, finalResult).catch((error) => ({
+      ok: false,
+      error: error.message,
+    }));
+    const plcConfirmationRequired = machineBypassEnabled
+      ? false
+      : await isPlcConfirmationEnabled(stationNo);
     const requiredPlcPartCount = plcConfirmationRequired
       ? normalizePlcPartCount(stationFeatures.plcPartCount)
       : 1;
@@ -1963,8 +2307,17 @@ exports.verifyScanForOperator = async (req, res) => {
     response.plcPartCountRequired = requiredPlcPartCount;
     response.resultSource = resultSource;
     response.manualResultEnabled = manualResultEnabled;
+    response.isSpcStation = spcConfig.enabled;
     response.machineBypassEnabled = machineBypassEnabled;
     response.machineBypassReason = bypassState?.reason || null;
+    response.qualityCheck = {
+      mode: spcConfig.mode,
+      appliesTo: "ALL",
+      plcResultRegister: spcConfig.plcResultRegister,
+      plcResultRaw: plcQualityResult?.rawValue ?? null,
+      plcResultToken: plcQualityResult?.token ?? null,
+      ack: qualityAck,
+    };
 
     res.json({
       status: response.decision === "ALLOW" ? "OK" : "NG",

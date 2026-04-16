@@ -91,6 +91,13 @@ const FEATURE_COLS = [
     type: "toggle",
   },
   {
+    key: "manualResult",
+    label: "Result",
+    desc: "Result input required for station",
+    color: "emerald",
+    type: "toggle",
+  },
+  {
     key: "plcPartCount",
     label: "Pcs / Cycle",
     desc: "Parts per PLC trigger",
@@ -134,10 +141,12 @@ const StationControl = () => {
           lineNames: new Set(),
           sequenceNo: Number(machine.sequenceNo || 9999),
           machines: [],
+          hasSpc: false,
         });
       }
       const row = grouped.get(stationNo);
       row.lineNames.add(String(machine.lineName || "-").trim() || "-");
+      row.hasSpc = row.hasSpc || machine?.spcConfig?.enabled === true;
       row.machines.push({
         id: machine.id,
         machineName: machine.machineName || `Machine ${machine.id}`,
@@ -271,6 +280,11 @@ const StationControl = () => {
                       Station
                     </span>
                   </th>
+                  <th style={{ padding: "12px 10px", width: 110, textAlign: "center" }}>
+                    <span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.1em", color: "rgba(15,23,42,0.75)" }}>
+                      Quality
+                    </span>
+                  </th>
 
                   {/* Feature cols */}
                   {FEATURE_COLS.map((col) => (
@@ -316,6 +330,27 @@ const StationControl = () => {
                           SEQ {String(row.sequenceNo).padStart(2, "0")}
                           {row.lineNames[0] && row.lineNames[0] !== "-" ? ` · ${row.lineNames[0]}` : ""}
                         </p>
+                      </td>
+                      <td style={{ padding: "14px 10px", textAlign: "center" }}>
+                        <span
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            minWidth: 62,
+                            height: 24,
+                            borderRadius: 999,
+                            fontSize: 10,
+                            fontWeight: 800,
+                            letterSpacing: "0.06em",
+                            textTransform: "uppercase",
+                            color: row.hasSpc ? "#065f46" : "rgba(51,65,85,0.9)",
+                            background: row.hasSpc ? "rgba(16,185,129,0.14)" : "rgba(148,163,184,0.15)",
+                            border: row.hasSpc ? "1px solid rgba(16,185,129,0.34)" : "1px solid rgba(148,163,184,0.30)",
+                          }}
+                        >
+                          {row.hasSpc ? "Enabled" : "No"}
+                        </span>
                       </td>
 
                       {/* Feature cells */}
@@ -363,7 +398,7 @@ const StationControl = () => {
 
                 {stationRows.length === 0 && (
                   <tr>
-                    <td colSpan={FEATURE_COLS.length + 1} style={{ padding: "60px 24px", textAlign: "center", color: "rgba(51,65,85,0.85)", fontSize: 13, fontWeight: 600 }}>
+                    <td colSpan={FEATURE_COLS.length + 2} style={{ padding: "60px 24px", textAlign: "center", color: "rgba(51,65,85,0.85)", fontSize: 13, fontWeight: 600 }}>
                       No stations configured. Add machines with operation codes first.
                     </td>
                   </tr>
@@ -388,6 +423,7 @@ const StationControl = () => {
               </div>
             ))}
           </div>
+
         </div>
       )}
     </div>

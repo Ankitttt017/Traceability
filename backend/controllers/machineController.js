@@ -33,6 +33,69 @@ function normalizeUpper(value) {
   return normalizeText(value).toUpperCase();
 }
 
+function toBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (value === undefined || value === null || value === "") return fallback;
+  const normalized = String(value).trim().toUpperCase();
+  if (["1", "TRUE", "YES", "ON", "ENABLE", "ENABLED"].includes(normalized)) return true;
+  if (["0", "FALSE", "NO", "OFF", "DISABLE", "DISABLED"].includes(normalized)) return false;
+  return fallback;
+}
+
+function normalizeSpcConfig(rawValue = {}) {
+  const source = rawValue && typeof rawValue === "object" ? rawValue : {};
+  const mode = normalizeUpper(source.mode || source.resultMode || "IP_PUSH");
+  const payloadResultKey = normalizeText(source.payloadResultKey || source.resultKey || "RESULT");
+  const payloadResultNgValues = Array.isArray(source.payloadResultNgValues)
+    ? source.payloadResultNgValues
+    : String(source.payloadResultNgValues || source.resultNgValues || "")
+        .split(/[,\n;|]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+  const qualityPayloadKeys = Array.isArray(source.qualityPayloadKeys)
+    ? source.qualityPayloadKeys
+    : String(source.qualityPayloadKeys || "")
+        .split(/[,\n;|]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+  const plcResultOkValues = Array.isArray(source.plcResultOkValues)
+    ? source.plcResultOkValues
+    : String(source.plcResultOkValues || "1,3,OK,PASS")
+        .split(/[,\n;|]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+  const plcResultNgValues = Array.isArray(source.plcResultNgValues)
+    ? source.plcResultNgValues
+    : String(source.plcResultNgValues || "0,2,NG,FAIL")
+        .split(/[,\n;|]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+
+  return {
+    enabled: toBoolean(source.enabled ?? source.isSpcStation ?? source.isQualityCheckStation, false),
+    mode: ["IP_PUSH", "PLC_REGISTER"].includes(mode) ? mode : "IP_PUSH",
+    appliesTo: "ALL",
+    sourceIp: normalizeText(source.sourceIp || source.systemIp || source.ip) || null,
+    sourcePort: toInt(source.sourcePort || source.systemPort || source.port),
+    payloadResultKey: payloadResultKey || "RESULT",
+    payloadResultNgValues: [...new Set(payloadResultNgValues.map((entry) => normalizeUpper(entry)).filter(Boolean))].slice(
+      0,
+      20
+    ),
+    qualityPayloadKeys: [...new Set(qualityPayloadKeys.map((entry) => String(entry).trim()).filter(Boolean))].slice(0, 40),
+    plcResultRegister: toInt(source.plcResultRegister ?? source.resultRegister ?? source.register),
+    plcResultDevice: normalizeUpper(source.plcResultDevice || source.resultDevice || "D") || "D",
+    plcResultOkValues: [...new Set(plcResultOkValues.map((entry) => normalizeUpper(entry)).filter(Boolean))].slice(0, 20),
+    plcResultNgValues: [...new Set(plcResultNgValues.map((entry) => normalizeUpper(entry)).filter(Boolean))].slice(0, 20),
+    plcAckEnabled: toBoolean(source.plcAckEnabled, false),
+    plcAckRegister: toInt(source.plcAckRegister ?? source.ackRegister),
+    plcAckDevice: normalizeUpper(source.plcAckDevice || source.ackDevice || "D") || "D",
+    plcAckOkValue: toInt(source.plcAckOkValue ?? source.ackOkValue) ?? 101,
+    plcAckNgValue: toInt(source.plcAckNgValue ?? source.ackNgValue) ?? 102,
+    plcAckErrorValue: toInt(source.plcAckErrorValue ?? source.ackErrorValue) ?? 199,
+  };
+}
+
 function normalizeSlmpFrameMode(value, fallback = null) {
   const mode = normalizeUpper(value);
   if (["ASCII", "BINARY", "AUTO"].includes(mode)) {
@@ -459,6 +522,7 @@ function getPlcConfigInput(body = {}) {
 function serializePlcConfigSnapshot(config = {}) {
   const slmpFrameMode = normalizeSlmpFrameMode(config.slmpFrameMode ?? config.slmpFrame ?? config.frameMode, null);
   const handshakeMap = normalizePlcHandshakeMap(config.handshakeMap, null);
+  const spcConfig = normalizeSpcConfig(config.spcConfig || {});
   const snapshot = {
     rangeId: toInt(config.rangeId),
     unitId: toInt(config.unitId),
@@ -482,6 +546,7 @@ function serializePlcConfigSnapshot(config = {}) {
     handshakeMap: handshakeMap || null,
     slmpDevice: normalizeText(config.slmpDevice) ? normalizeText(config.slmpDevice).toUpperCase() : null,
     slmpFrameMode,
+    spcConfig,
   };
 
   const hasAnyValue = Object.values(snapshot).some((entry) => entry !== null && entry !== undefined);
@@ -546,6 +611,7 @@ function refreshPlcConfigSnapshot(payload) {
       handshakeMap: existingSnapshot.handshakeMap ?? null,
       slmpDevice: payload.plc_slmp_device,
       slmpFrameMode: payload.plc_slmp_frame_mode,
+      spcConfig: normalizeSpcConfig(payload.spc_config ?? existingSnapshot.spcConfig ?? {}),
     }) || payload.plc_registers;
 }
 
@@ -755,6 +821,14 @@ function toMachinePayload(body = {}, existingMachine = null) {
     blockValue: plcBlockValue,
     resetValue: plcResetValue,
   });
+  const spcConfigInput =
+    body.spcConfig ??
+    body.spc_config ??
+    plcConfigInput.spcConfig ??
+    plcConfigInput.spc_config ??
+    existingSnapshot.spcConfig ??
+    {};
+  const spcConfig = normalizeSpcConfig(spcConfigInput);
 
   const plcRegistersSnapshot =
     parsedRegisters.raw ||
@@ -781,6 +855,7 @@ function toMachinePayload(body = {}, existingMachine = null) {
       handshakeMap: plcHandshakeMap,
       slmpDevice: plcSlmpDevice,
       slmpFrameMode: plcSlmpFrameMode,
+      spcConfig,
     });
 
   const machineIp =
@@ -823,6 +898,7 @@ function toMachinePayload(body = {}, existingMachine = null) {
     plc_heartbeat_stale_ms: plcHeartbeatStaleMs,
     plc_slmp_device: plcSlmpDevice,
     plc_slmp_frame_mode: plcSlmpFrameMode,
+    spc_config: spcConfig,
     daily_target_qty: Math.max(dailyTargetQty, 0),
     status,
     is_active: isActive,
@@ -869,6 +945,7 @@ function toMachineResponse(machine) {
       }) || [],
     slmpDevice: machine.plc_slmp_device ?? null,
     slmpFrameMode: extractSlmpFrameMode(machine.plc_registers) || "AUTO",
+    spcConfig: normalizeSpcConfig(snapshot.spcConfig || {}),
   };
   const plcSignalMap = parsePlcSignalMap(machine.plc_signal_map);
   return {
@@ -884,6 +961,7 @@ function toMachineResponse(machine) {
     plcRegisters,
     plcSignalMap,
     plcConfig,
+    spcConfig: normalizeSpcConfig(snapshot.spcConfig || {}),
     status,
     isActive: machine.is_active,
     machineNumber: machine.machine_number,
@@ -1201,6 +1279,7 @@ exports.createMachine = async (req, res) => {
     await validateSlmpRegisterOverlap(payload);
     const persistPayload = { ...payload };
     delete persistPayload.plc_slmp_frame_mode;
+    delete persistPayload.spc_config;
     const machine = await Machine.create(persistPayload);
     res.status(201).json(toMachineResponse(machine));
   } catch (error) {
@@ -1229,6 +1308,7 @@ exports.updateMachine = async (req, res) => {
 
     const persistPayload = { ...payload };
     delete persistPayload.plc_slmp_frame_mode;
+    delete persistPayload.spc_config;
     await machine.update(persistPayload);
     res.json(toMachineResponse(machine));
   } catch (error) {
