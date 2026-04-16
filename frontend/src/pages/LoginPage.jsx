@@ -408,33 +408,7 @@ const LoginPage = () => {
           </div>
         </div>
 
-        {/* ── Live stats strip ── */}
-        <div style={{
-          display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,
-          marginBottom:20,
-        }}>
-          {[
-            { label:"Machines",  value:stats.machines, color:C.steel()  },
-            { label:"Online",    value:stats.online,   color:C.ok()     },
-            { label:"Parts Today",value:stats.parts,   color:C.linen()  },
-            { label:"Efficiency",value:`${stats.efficiency}%`,color:C.amber()},
-          ].map((s,i)=>(
-            <div key={i} style={{
-              background:C.bg("card"),
-              border:`1px solid ${C.bdr()}`,
-              borderRadius:10,padding:"9px 8px",
-              textAlign:"center",
-              boxShadow:`0 2px 8px ${C.navy(0.12)}`,
-            }}>
-              <p style={{fontSize:16,fontWeight:800,color:s.color,
-                fontFamily:"'DM Mono',monospace",lineHeight:1,marginBottom:3}}>
-                {s.value}
-              </p>
-              <p style={{fontSize:9,fontWeight:700,color:C.txt("m"),
-                textTransform:"uppercase",letterSpacing:"0.07em"}}>{s.label}</p>
-            </div>
-          ))}
-        </div>
+      
 
         {/* ── Login card ── */}
         <div style={{
@@ -609,14 +583,7 @@ const LoginPage = () => {
           ))}
         </div>
 
-        {/* Footer */}
-        <p style={{
-          textAlign:"center",fontSize:10,
-          color:C.txt("m"),marginTop:20,opacity:0.6,
-          letterSpacing:"0.06em",
-        }}>
-          © 2026 IndusTrace — v3.2.0
-        </p>
+        
       </div>
     </div>
   );

@@ -283,12 +283,12 @@ const Scanners = () => {
                       </div>
                     </td>
                     <td className="px-5 py-4 text-right">
-                      <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex items-center justify-end gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                         <button onClick={() => handleEdit(scanner)}
                           className="p-2 text-text-muted hover:text-primary hover:bg-primary/10 rounded-lg transition-all">
                           <Pencil size={13} />
                         </button>
-                        <button onClick={() => setDeleteTarget(scanner)}
+                        <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(scanner); }}
                           className="p-2 text-text-muted hover:text-danger hover:bg-danger/10 rounded-lg transition-all">
                           <Trash2 size={13} />
                         </button>
@@ -306,6 +306,9 @@ const Scanners = () => {
         isOpen={!!deleteTarget}
         title="Remove scanner?"
         message={`Remove "${deleteTarget?.scannerName}"? This disconnects it from its production node. Historical scan data is preserved.`}
+        confirmText="Remove Scanner"
+        cancelText="Cancel"
+        variant="danger"
         onConfirm={handleDeleteConfirm}
         onCancel={() => setDeleteTarget(null)}
       />

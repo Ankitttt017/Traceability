@@ -237,13 +237,60 @@ function getConfigOccupiedRegisters(cfg = {}, protocol = "MODBUS_TCP", excludeKe
   }
   return occupied;
 }
+function normalizeSpcConfigForForm(raw = {}) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const plcOkValues = Array.isArray(source.plcResultOkValues)
+    ? source.plcResultOkValues
+    : String(source.plcResultOkValues || "")
+        .split(/[,\n;|]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+  const plcNgValues = Array.isArray(source.plcResultNgValues)
+    ? source.plcResultNgValues
+    : String(source.plcResultNgValues || "")
+        .split(/[,\n;|]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+  const qualityKeys = Array.isArray(source.qualityPayloadKeys)
+    ? source.qualityPayloadKeys
+    : String(source.qualityPayloadKeys || "")
+        .split(/[,\n;|]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+  const ngValues = Array.isArray(source.payloadResultNgValues)
+    ? source.payloadResultNgValues
+    : String(source.payloadResultNgValues || "")
+        .split(/[,\n;|]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+  return {
+    enabled: source.enabled === true,
+    mode: String(source.mode || source.resultMode || "IP_PUSH").toUpperCase() === "PLC_REGISTER" ? "PLC_REGISTER" : "IP_PUSH",
+    sourceIp: String(source.sourceIp || ""),
+    sourcePort: toFormValue(source.sourcePort, ""),
+    payloadResultKey: String(source.payloadResultKey || "RESULT"),
+    payloadResultNgValues: ngValues.join(", "),
+    qualityPayloadKeys: qualityKeys.join(", "),
+    plcResultRegister: toFormValue(source.plcResultRegister ?? source.resultRegister, ""),
+    plcResultDevice: String(source.plcResultDevice || source.resultDevice || "D").toUpperCase(),
+    plcResultOkValues: plcOkValues.join(", "),
+    plcResultNgValues: plcNgValues.join(", "),
+    plcAckEnabled: source.plcAckEnabled === true,
+    plcAckRegister: toFormValue(source.plcAckRegister ?? source.ackRegister, ""),
+    plcAckDevice: String(source.plcAckDevice || source.ackDevice || "D").toUpperCase(),
+    plcAckOkValue: toFormValue(source.plcAckOkValue ?? source.ackOkValue ?? "101", "101"),
+    plcAckNgValue: toFormValue(source.plcAckNgValue ?? source.ackNgValue ?? "102", "102"),
+    plcAckErrorValue: toFormValue(source.plcAckErrorValue ?? source.ackErrorValue ?? "199", "199"),
+  };
+}
 function createEmptyForm() {
   const plcConfig = { rangeId: "", startRegister: "", statusRegister: "", partRegister: "", stationRegister: "", resetRegister: "", heartbeatRegister: "", startValue: "1", startedValue: "2", endOkValue: "3", endNgValue: "4", blockValue: "2", resetValue: "9" };
-  return { machineName: "", lineName: "", sequenceNo: "", operationNo: "", cycleTimeSec: "0", loadingTimeSec: "0", dailyTargetQty: "0", plcIp: "", plcPort: "", plcProtocol: "TCP_TEXT", plcRangeId: "", plcSlmpDevice: "D", plcSlmpFrameMode: "AUTO", status: "ACTIVE", plcConfig: { ...plcConfig, handshakeMap: buildDefaultHandshakeRows(plcConfig) }, plcSignalMap: [] };
+  return { machineName: "", lineName: "", sequenceNo: "", operationNo: "", cycleTimeSec: "0", loadingTimeSec: "0", dailyTargetQty: "0", plcIp: "", plcPort: "", plcProtocol: "TCP_TEXT", plcRangeId: "", plcSlmpDevice: "D", plcSlmpFrameMode: "AUTO", status: "ACTIVE", plcConfig: { ...plcConfig, handshakeMap: buildDefaultHandshakeRows(plcConfig) }, plcSignalMap: [], spcConfig: normalizeSpcConfigForForm({}) };
 }
 function buildFormFromMachine(m) {
   const cfg = m.plcConfig || {};
   const plcRangeId = cfg.rangeId ?? m.plcRangeId ?? "";
+  const spcConfig = normalizeSpcConfigForForm(m.spcConfig || m.plcConfig?.spcConfig || {});
   return {
     machineName: m.machineName || "", lineName: m.lineName || "", sequenceNo: toFormValue(m.sequenceNo, ""), operationNo: m.operationNo || "", cycleTimeSec: toFormValue(m.cycleTimeSec, "0"), loadingTimeSec: toFormValue(m.loadingTimeSec, "0"), dailyTargetQty: toFormValue(m.dailyTargetQty, "0"), plcIp: m.plcIp || "", plcPort: toFormValue(m.plcPort, ""), plcProtocol: m.plcProtocol || "TCP_TEXT", plcRangeId: toFormValue(plcRangeId, ""), plcSlmpDevice: m.plcSlmpDevice || "D", plcSlmpFrameMode: m.plcSlmpFrameMode || m.plcConfig?.slmpFrameMode || "AUTO", status: m.status || "ACTIVE",
     plcConfig: {
@@ -251,6 +298,7 @@ function buildFormFromMachine(m) {
       handshakeMap: normalizeHandshakeRows(cfg.handshakeMap, { startRegister: cfg.startRegister ?? m.plcStartRegister, statusRegister: cfg.statusRegister ?? m.plcStatusRegister, resetRegister: cfg.resetRegister ?? m.plcResetRegister, startValue: cfg.startValue ?? m.plcStartValue, startedValue: cfg.startedValue ?? m.plcStartedValue, endOkValue: cfg.endOkValue ?? m.plcEndOkValue, endNgValue: cfg.endNgValue ?? m.plcEndNgValue, blockValue: cfg.blockValue ?? m.plcBlockValue, resetValue: cfg.resetValue ?? m.plcResetValue }),
     },
     plcSignalMap: m.plcSignalMap || [],
+    spcConfig,
   };
 }
 function toSubmitPayload(f) {
@@ -259,7 +307,46 @@ function toSubmitPayload(f) {
   const plcRangeId = toNullableNumber(f.plcRangeId);
   const cfg = f.plcConfig || {};
   const plcConfig = { rangeId: plcRangeId, startRegister: toNullableNumber(cfg.startRegister), statusRegister: toNullableNumber(cfg.statusRegister), partRegister: toNullableNumber(cfg.partRegister), stationRegister: toNullableNumber(cfg.stationRegister), resetRegister: toNullableNumber(cfg.resetRegister), heartbeatRegister: toNullableNumber(cfg.heartbeatRegister), startValue: toNumberWithDefault(cfg.startValue, 1), startedValue: toNumberWithDefault(cfg.startedValue, 2), endOkValue: toNumberWithDefault(cfg.endOkValue, 3), endNgValue: toNumberWithDefault(cfg.endNgValue, 4), blockValue: toNumberWithDefault(cfg.blockValue, 2), resetValue: toNumberWithDefault(cfg.resetValue, 9), handshakeMap: normalizeHandshakeRows(cfg.handshakeMap, cfg).map((row) => ({ id: row.id || null, signal: String(row.signal || "").trim(), direction: String(row.direction || "READ").trim().toUpperCase(), register: toNullableNumber(row.register), value: toNullableNumber(row.value), meaning: String(row.meaning || "").trim(), required: row.required !== false })).filter((row) => row.signal || row.register !== null), slmpFrameMode: String(f.plcSlmpFrameMode || "AUTO").trim().toUpperCase() };
-  return { machineName: String(f.machineName || "").trim(), lineName: String(f.lineName || "").trim(), sequenceNo: toNullableNumber(f.sequenceNo), operationNo: String(f.operationNo || "").trim().toUpperCase(), cycleTimeSec: Math.max(toNullableNumber(f.cycleTimeSec) ?? 0, 0), loadingTimeSec: Math.max(toNullableNumber(f.loadingTimeSec) ?? 0, 0), dailyTargetQty: Math.max(toNullableNumber(f.dailyTargetQty) ?? 0, 0), plcIp, plcPort, plcProtocol: f.plcProtocol, plcRangeId, plcConfig, plcBlockValue: plcConfig.blockValue, plcSlmpDevice: String(f.plcSlmpDevice || "").trim().toUpperCase() || null, plcSlmpFrameMode: plcConfig.slmpFrameMode, status: f.status || "ACTIVE", machineIp: plcIp, machinePort: plcPort, plcSignalMap: f.plcSignalMap || [] };
+  const rawSpc = f.spcConfig || {};
+  const payloadResultNgValues = String(rawSpc.payloadResultNgValues || "")
+    .split(/[,\n;|]/)
+    .map((entry) => entry.trim().toUpperCase())
+    .filter(Boolean)
+    .slice(0, 20);
+  const qualityPayloadKeys = String(rawSpc.qualityPayloadKeys || "")
+    .split(/[,\n;|]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .slice(0, 40);
+  const spcConfig = {
+    enabled: rawSpc.enabled === true,
+    mode: String(rawSpc.mode || "IP_PUSH").trim().toUpperCase() === "PLC_REGISTER" ? "PLC_REGISTER" : "IP_PUSH",
+    appliesTo: "ALL",
+    sourceIp: String(rawSpc.sourceIp || "").trim() || null,
+    sourcePort: toNullableNumber(rawSpc.sourcePort),
+    payloadResultKey: String(rawSpc.payloadResultKey || "RESULT").trim() || "RESULT",
+    payloadResultNgValues,
+    qualityPayloadKeys,
+    plcResultRegister: toNullableNumber(rawSpc.plcResultRegister),
+    plcResultDevice: String(rawSpc.plcResultDevice || "D").trim().toUpperCase() || "D",
+    plcResultOkValues: String(rawSpc.plcResultOkValues || "")
+      .split(/[,\n;|]/)
+      .map((entry) => entry.trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 20),
+    plcResultNgValues: String(rawSpc.plcResultNgValues || "")
+      .split(/[,\n;|]/)
+      .map((entry) => entry.trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 20),
+    plcAckEnabled: rawSpc.plcAckEnabled === true,
+    plcAckRegister: toNullableNumber(rawSpc.plcAckRegister),
+    plcAckDevice: String(rawSpc.plcAckDevice || "D").trim().toUpperCase() || "D",
+    plcAckOkValue: toNumberWithDefault(rawSpc.plcAckOkValue, 101),
+    plcAckNgValue: toNumberWithDefault(rawSpc.plcAckNgValue, 102),
+    plcAckErrorValue: toNumberWithDefault(rawSpc.plcAckErrorValue, 199),
+  };
+  return { machineName: String(f.machineName || "").trim(), lineName: String(f.lineName || "").trim(), sequenceNo: toNullableNumber(f.sequenceNo), operationNo: String(f.operationNo || "").trim().toUpperCase(), cycleTimeSec: Math.max(toNullableNumber(f.cycleTimeSec) ?? 0, 0), loadingTimeSec: Math.max(toNullableNumber(f.loadingTimeSec) ?? 0, 0), dailyTargetQty: Math.max(toNullableNumber(f.dailyTargetQty) ?? 0, 0), plcIp, plcPort, plcProtocol: f.plcProtocol, plcRangeId, plcConfig, plcBlockValue: plcConfig.blockValue, plcSlmpDevice: String(f.plcSlmpDevice || "").trim().toUpperCase() || null, plcSlmpFrameMode: plcConfig.slmpFrameMode, status: f.status || "ACTIVE", machineIp: plcIp, machinePort: plcPort, plcSignalMap: f.plcSignalMap || [], spcConfig };
 }
 
 const FORM_TABS = [
@@ -1163,6 +1250,223 @@ const MachinePage = () => {
               {/* ── LIVE REGISTERS ── */}
               {activeTab === "live" && (
                 <div>
+                  <div style={{ padding: 16, background: T.bgMuted, border: `1px solid ${T.borderLight}`, borderRadius: 12, marginBottom: 16 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+                      <div>
+                        <p style={{ fontWeight: 700, color: T.text, margin: 0, fontSize: 13 }}>Quality Check Station Source</p>
+                        <p style={{ fontSize: 11, color: T.textMuted, margin: "2px 0 0" }}>
+                          Configure result source for quality check: system IP push or PLC register polling.
+                        </p>
+                      </div>
+                      <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: T.textSec, fontWeight: 700 }}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(formData?.spcConfig?.enabled)}
+                          onChange={(e) =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              spcConfig: { ...(prev.spcConfig || {}), enabled: e.target.checked },
+                            }))
+                          }
+                          style={{ accentColor: T.blue }}
+                        />
+                        This is Quality Check Station
+                      </label>
+                    </div>
+                    {Boolean(formData?.spcConfig?.enabled) && (
+                      <>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px,1fr))", gap: 10 }}>
+                          <div>
+                            <Label>Quality Result Mode</Label>
+                            <FieldSelect
+                              value={formData?.spcConfig?.mode || "IP_PUSH"}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  spcConfig: { ...(prev.spcConfig || {}), mode: e.target.value },
+                                }))
+                              }
+                            >
+                              <option value="IP_PUSH">IP Push (from Quality software)</option>
+                              <option value="PLC_REGISTER">PLC Register Poll</option>
+                            </FieldSelect>
+                          </div>
+                        </div>
+                        {(formData?.spcConfig?.mode || "IP_PUSH") === "IP_PUSH" ? (
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px,1fr))", gap: 10, marginTop: 10 }}>
+                          <div>
+                            <Label>Quality System IP</Label>
+                            <FieldInput
+                              value={formData?.spcConfig?.sourceIp || ""}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  spcConfig: { ...(prev.spcConfig || {}), sourceIp: e.target.value },
+                                }))
+                              }
+                              placeholder="192.168.3.200"
+                              mono
+                            />
+                          </div>
+                          <div>
+                            <Label>Quality Port (optional)</Label>
+                            <FieldInput
+                              type="number"
+                              value={formData?.spcConfig?.sourcePort || ""}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  spcConfig: { ...(prev.spcConfig || {}), sourcePort: e.target.value },
+                                }))
+                              }
+                              placeholder="5000"
+                              mono
+                            />
+                          </div>
+                          <div>
+                            <Label>Result Key In Payload</Label>
+                            <FieldInput
+                              value={formData?.spcConfig?.payloadResultKey || "RESULT"}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  spcConfig: { ...(prev.spcConfig || {}), payloadResultKey: e.target.value.toUpperCase() },
+                                }))
+                              }
+                              placeholder="RESULT"
+                              mono
+                            />
+                          </div>
+                          <div>
+                            <Label>NG Values (comma separated)</Label>
+                            <FieldInput
+                              value={formData?.spcConfig?.payloadResultNgValues || ""}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  spcConfig: { ...(prev.spcConfig || {}), payloadResultNgValues: e.target.value },
+                                }))
+                              }
+                              placeholder="NG, FAIL, 0"
+                            />
+                          </div>
+                        </div>
+                        ) : (
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px,1fr))", gap: 10, marginTop: 10 }}>
+                          <div>
+                            <Label>Result Register</Label>
+                            <FieldInput
+                              type="number"
+                              value={formData?.spcConfig?.plcResultRegister || ""}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  spcConfig: { ...(prev.spcConfig || {}), plcResultRegister: e.target.value },
+                                }))
+                              }
+                              placeholder="103"
+                              mono
+                            />
+                          </div>
+                          <div>
+                            <Label>Result Device (SLMP)</Label>
+                            <FieldInput
+                              value={formData?.spcConfig?.plcResultDevice || "D"}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  spcConfig: { ...(prev.spcConfig || {}), plcResultDevice: e.target.value.toUpperCase() },
+                                }))
+                              }
+                              placeholder="D"
+                              mono
+                            />
+                          </div>
+                          <div>
+                            <Label>OK Values</Label>
+                            <FieldInput
+                              value={formData?.spcConfig?.plcResultOkValues || ""}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  spcConfig: { ...(prev.spcConfig || {}), plcResultOkValues: e.target.value },
+                                }))
+                              }
+                              placeholder="1, 3, OK, PASS"
+                            />
+                          </div>
+                          <div>
+                            <Label>NG Values</Label>
+                            <FieldInput
+                              value={formData?.spcConfig?.plcResultNgValues || ""}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  spcConfig: { ...(prev.spcConfig || {}), plcResultNgValues: e.target.value },
+                                }))
+                              }
+                              placeholder="0, 2, NG, FAIL"
+                            />
+                          </div>
+                        </div>
+                        )}
+                        <div style={{ marginTop: 10 }}>
+                          <Label>Quality Payload Keys (comma separated)</Label>
+                          <FieldInput
+                            value={formData?.spcConfig?.qualityPayloadKeys || ""}
+                            onChange={(e) =>
+                              setFormData((prev) => ({
+                                ...prev,
+                                spcConfig: { ...(prev.spcConfig || {}), qualityPayloadKeys: e.target.value },
+                              }))
+                            }
+                            placeholder="diameter, reasonCode, height, cameraNgCode"
+                          />
+                        </div>
+                        <div style={{ marginTop: 12, padding: 12, borderRadius: 10, border: `1px solid ${T.borderLight}`, background: T.bgCard }}>
+                          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: T.textSec, fontWeight: 700 }}>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(formData?.spcConfig?.plcAckEnabled)}
+                              onChange={(e) =>
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  spcConfig: { ...(prev.spcConfig || {}), plcAckEnabled: e.target.checked },
+                                }))
+                              }
+                              style={{ accentColor: T.blue }}
+                            />
+                            Send PLC confirmation when quality result is received
+                          </label>
+                          {Boolean(formData?.spcConfig?.plcAckEnabled) && (
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px,1fr))", gap: 10, marginTop: 10 }}>
+                              <div>
+                                <Label>ACK Register</Label>
+                                <FieldInput type="number" value={formData?.spcConfig?.plcAckRegister || ""} onChange={(e) => setFormData((prev) => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), plcAckRegister: e.target.value } }))} placeholder="105" mono />
+                              </div>
+                              <div>
+                                <Label>ACK Device</Label>
+                                <FieldInput value={formData?.spcConfig?.plcAckDevice || "D"} onChange={(e) => setFormData((prev) => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), plcAckDevice: e.target.value.toUpperCase() } }))} placeholder="D" mono />
+                              </div>
+                              <div>
+                                <Label>ACK OK Value</Label>
+                                <FieldInput type="number" value={formData?.spcConfig?.plcAckOkValue || "101"} onChange={(e) => setFormData((prev) => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), plcAckOkValue: e.target.value } }))} placeholder="101" mono />
+                              </div>
+                              <div>
+                                <Label>ACK NG Value</Label>
+                                <FieldInput type="number" value={formData?.spcConfig?.plcAckNgValue || "102"} onChange={(e) => setFormData((prev) => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), plcAckNgValue: e.target.value } }))} placeholder="102" mono />
+                              </div>
+                              <div>
+                                <Label>ACK Error Value</Label>
+                                <FieldInput type="number" value={formData?.spcConfig?.plcAckErrorValue || "199"} onChange={(e) => setFormData((prev) => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), plcAckErrorValue: e.target.value } }))} placeholder="199" mono />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+
                   <div style={{ padding: 16, background: T.blueLight + "44", border: `1px solid ${T.blueBorder}`, borderRadius: 12, marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <Activity size={16} color={T.blue} />

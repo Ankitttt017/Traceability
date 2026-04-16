@@ -26,6 +26,28 @@ function normalizeResultInput(value) {
   return normalized || null;
 }
 
+function normalizeQualityPayload(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const out = {};
+  for (const [key, raw] of Object.entries(value)) {
+    const normalizedKey = String(key || "").trim();
+    if (!normalizedKey) continue;
+    if (raw === undefined) continue;
+    out[normalizedKey] = raw;
+  }
+  if (Object.keys(out).length === 0) {
+    return null;
+  }
+  try {
+    const serialized = JSON.stringify(out);
+    return serialized.length > 4000 ? serialized.slice(0, 4000) : serialized;
+  } catch (_error) {
+    return null;
+  }
+}
+
 function getMachineOperationStage(machine) {
   return normalizeStation(machine?.operation_no);
 }
@@ -129,6 +151,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
   const normalizedResult = normalizeResult(result);
   const resultSource = normalizeResultSource(options?.resultSource);
   const resultInput = normalizeResultInput(options?.resultInput ?? result);
+  const qualityPayload = normalizeQualityPayload(options?.qualityPayload);
   const forcedNgReason = String(options?.ngReason || "SCAN_RESULT_NG")
     .trim()
     .toUpperCase();

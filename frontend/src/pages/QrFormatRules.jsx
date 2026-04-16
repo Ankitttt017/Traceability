@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { qrFormatApi } from "../api/services";
+import ConfirmModal from "../components/ConfirmModal";
 
 /* ─── constants ────────────────────────────────────────────── */
 const emptyForm = {
@@ -31,6 +32,7 @@ const QrFormatRules = () => {
   const [loadingRules, setLoadingRules] = useState(true);
   const [testResult, setTestResult] = useState(null);
   const [showModal, setShowModal] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState(null);
 
   const loadRules = async () => {
     setLoadingRules(true);
@@ -79,7 +81,6 @@ const QrFormatRules = () => {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm("Delete this validation rule? This will affect live scanning logic.")) return;
     try {
       await qrFormatApi.remove(id);
       toast.success("Rule deleted");
@@ -212,7 +213,7 @@ const QrFormatRules = () => {
                           className="p-2 text-text-muted hover:text-primary hover:bg-primary/10 rounded-lg transition-all">
                           <Edit2 size={13} />
                         </button>
-                        <button onClick={() => handleDelete(rule.id)}
+                        <button onClick={() => setDeleteTargetId(rule.id)}
                           className="p-2 text-text-muted hover:text-danger hover:bg-danger/10 rounded-lg transition-all">
                           <Trash2 size={13} />
                         </button>
@@ -356,6 +357,21 @@ const QrFormatRules = () => {
           </div>
         </div>
       )}
+
+      <ConfirmModal
+        isOpen={Boolean(deleteTargetId)}
+        title="Delete Validation Rule?"
+        message="Delete this validation rule? This will affect live scanning logic."
+        confirmText="Delete Rule"
+        cancelText="Cancel"
+        variant="danger"
+        onConfirm={async () => {
+          const id = deleteTargetId;
+          setDeleteTargetId(null);
+          if (id) await handleDelete(id);
+        }}
+        onCancel={() => setDeleteTargetId(null)}
+      />
     </div>
   );
 };

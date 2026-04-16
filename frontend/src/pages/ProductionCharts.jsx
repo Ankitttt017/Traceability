@@ -591,6 +591,12 @@ const ProductionCharts=()=>{
   useEffect(()=>{loadData();},[loadData]);
 
   const machineMap=useMemo(()=>new Map(machines.map(m=>[Number(m.id),m.machineName])),[machines]);
+  const lineContextLabel = useMemo(() => {
+    const lineSet = new Set((machines || []).map((m) => String(m.lineName || "").trim()).filter(Boolean));
+    if (lineSet.size === 0) return "Line: All";
+    if (lineSet.size === 1) return `Line: ${Array.from(lineSet)[0]}`;
+    return `Line: All (${lineSet.size})`;
+  }, [machines]);
   const totalOk   =Number(summary.quality?.ok||0);
   const totalNg   =Number(summary.quality?.ng||0);
   const totalUnits=totalOk+totalNg;
@@ -712,7 +718,7 @@ const ProductionCharts=()=>{
                     border:`1px solid ${C.amber(0.3)}`}}>LIVE</span>
                 </div>
                 <p style={{fontSize:11,color:C.txt("muted"),marginTop:3}}>
-                  {timeLabel} · {fmtNow()}
+                  {timeLabel} · {fmtNow()} · {lineContextLabel}
                 </p>
               </div>
             </div>
