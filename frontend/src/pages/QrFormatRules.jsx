@@ -257,9 +257,9 @@ const QrFormatRules = () => {
                     placeholder="e.g. Engine head QR" className={inputCls} />
                 </div>
                 <div>
-                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Model code</label>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Model Name</label>
                   <input value={form.modelCode} onChange={e => setForm({ ...form, modelCode: e.target.value.toUpperCase() })}
-                    placeholder="MDL-001" className={`${inputCls} font-mono`} />
+                    placeholder="Model Name.." className={`${inputCls} font-mono`} />
                 </div>
               </div>
 
@@ -273,24 +273,24 @@ const QrFormatRules = () => {
               </div>
 
               {/* Regex pattern — visually distinct */}
-              <div className="p-4 bg-primary/5 border border-primary/20 rounded-xl space-y-3">
+              <div className="p-4 bg-gray/5 border border-gray-600 rounded-xl space-y-3">
                 <div className="flex items-center justify-between">
-                  <label className="text-[11px] font-bold text-primary uppercase tracking-widest flex items-center gap-1.5">
+                  <label className="text-[11px] font-bold text-gray-600 uppercase tracking-widest flex items-center gap-1.5">
                     <Terminal size={12} /> Regex pattern *
                   </label>
                   <details className="relative">
-                    <summary className="text-[10px] text-text-muted hover:text-primary flex items-center gap-1 transition-colors font-semibold cursor-pointer">
+                    <summary className="text-[10px] text-text-muted hover:text-black flex items-center gap-1 transition-colors font-semibold cursor-pointer">
                       <HelpCircle size={11} /> Examples
                     </summary>
                     <div className="absolute right-0 top-6 z-10 w-72 bg-bg-card border border-border rounded-lg shadow-xl p-2 space-y-1">
                       {PATTERN_EXAMPLES.map(ex => (
                         <button key={ex.pattern} type="button" onClick={() => applyExample(ex.pattern)}
-                          className="w-full flex items-center justify-between px-3 py-2 bg-bg-dark/60 border border-border rounded-lg hover:border-primary/40 hover:bg-primary/5 transition-all text-left group">
+                          className="w-full flex items-center justify-between px-3 py-2 bg-bg-dark/60 border border-border rounded-lg hover:border-gray/40 hover:bg-gray/5 transition-all text-left group">
                           <div>
-                            <span className="text-[11px] font-semibold text-text-main group-hover:text-primary transition-colors">{ex.label}</span>
+                            <span className="text-[11px] font-semibold text-text-main group-hover:text-black transition-colors">{ex.label}</span>
                             <span className="text-[10px] text-text-muted ml-2">{ex.desc}</span>
                           </div>
-                          <code className="text-[10px] font-mono text-primary/70 bg-bg-dark px-2 py-0.5 rounded ml-2 flex-shrink-0">{ex.pattern}</code>
+                          <code className="text-[10px] font-mono text-black/70 bg-bg-dark px-2 py-0.5 rounded ml-2 flex-shrink-0">{ex.pattern}</code>
                         </button>
                       ))}
                     </div>
@@ -299,7 +299,7 @@ const QrFormatRules = () => {
                 <input required value={form.regexPattern}
                   onChange={e => { setForm({ ...form, regexPattern: e.target.value }); setTestResult(null); }}
                   placeholder="^[A-Z]{3}\d{6}$"
-                  className="w-full bg-transparent border-0 border-b border-primary/40 pb-2 text-primary text-base font-mono font-bold outline-none focus:border-primary placeholder:text-primary/30 placeholder:font-normal" />
+                  className="w-full bg-transparent border-0 border-b border-black/40 pb-2 text-black text-base font-mono font-bold outline-none focus:border-gray-600 placeholder:text-gray/30 placeholder:font-normal" />
                 <p className="text-[10px] text-text-muted/60 italic">PCRE syntax. Use <span className="font-mono">.*</span> to bypass validation.</p>
               </div>
 

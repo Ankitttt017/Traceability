@@ -11,8 +11,9 @@ import {
   MACHINE_MODBUS_TUNING_FIELD_CONFIG,
   MACHINE_REGISTER_ROLE_FIELDS,
 } from "../utils/machineFields";
+import { loadReportConfig } from "../utils/reportConfig";
 
-/* ─── helpers ─────────────────────────────────────────────── */
+/* --- helpers ----------------------------------------------- */
 function toFormValue(v, fallback = "") {
   if (v === null || v === undefined) return fallback;
   return String(v);
@@ -98,7 +99,7 @@ function syncStandardHandshakeRows(rows, cfg = {}) {
     return { ...row, direction: meta.direction, register: toFormValue(cfg?.[meta.registerKey], ""), value: toFormValue(cfg?.[meta.valueKey], ""), meaning: row.meaning || meta.defaultMeaning };
   });
 }
-function buildMachinePlcSpecCsv(formData) {
+function buildMachinePlcSpecCsv(formData, reportConfig = null) {
   const cfg = formData?.plcConfig || {};
   const protocol = normalizeProtocol(formData?.plcProtocol, "TCP_TEXT");
   const machineName = escapeLine(formData?.machineName || "Machine");
@@ -124,6 +125,15 @@ function buildMachinePlcSpecCsv(formData) {
       op,
     ]);
   };
+
+  const reportMeta = reportConfig || loadReportConfig();
+  pushRow({ section: "REPORT_HEADER", field: "headerLine1", registerNo: escapeLine(reportMeta.headerLine1 || reportMeta.companyName || "Traceability Report") });
+  pushRow({ section: "REPORT_HEADER", field: "headerLine2", registerNo: escapeLine(reportMeta.headerLine2 || reportMeta.projectTitle || "") });
+  pushRow({ section: "REPORT_HEADER", field: "reportTitle", registerNo: escapeLine(reportMeta.reportTitle || "PLC Register Specification") });
+  pushRow({ section: "REPORT_HEADER", field: "plant", registerNo: escapeLine(reportMeta.plantName || "-") });
+  pushRow({ section: "REPORT_HEADER", field: "department", registerNo: escapeLine(reportMeta.department || "-") });
+  pushRow({ section: "REPORT_HEADER", field: "location", registerNo: escapeLine(reportMeta.location || "-") });
+  pushRow({ section: "REPORT_HEADER", field: "generatedAt", registerNo: new Date().toLocaleString("en-IN") });
 
   pushRow({ section: "META", field: "protocol", registerNo: protocol });
   pushRow({ section: "META", field: "ip", registerNo: ip });
@@ -235,6 +245,52 @@ function getConfigOccupiedRegisters(cfg = {}, protocol = "MODBUS_TCP", excludeKe
     const words = expandRegisterWindow(cfg?.[field.key], field.key, protocol);
     words.forEach((w) => occupied.add(w));
   }
+  return occupied;
+}
+function getAuxiliaryRegisterEntries(source = {}) {
+  const entries = [];
+  const signalRows = Array.isArray(source?.plcSignalMap) ? source.plcSignalMap : [];
+  signalRows.forEach((row, index) => {
+    const register = toWholeNumberOrNull(row?.register);
+    if (register === null) return;
+    const label = String(row?.label || row?.key || `Live Register ${index + 1}`).trim();
+    entries.push({ register, label: label || `Live Register ${index + 1}` });
+  });
+
+  const spc = source?.spcConfig || {};
+  const isSpcPlcMode = Boolean(spc?.enabled) && String(spc?.mode || "").toUpperCase() === "PLC_REGISTER";
+  if (isSpcPlcMode) {
+    const resultRegister = toWholeNumberOrNull(spc?.plcResultRegister);
+    if (resultRegister !== null) {
+      entries.push({ register: resultRegister, label: "SPC Result Register" });
+    }
+    if (spc?.plcAckEnabled) {
+      const ackRegister = toWholeNumberOrNull(spc?.plcAckRegister);
+      if (ackRegister !== null) {
+        entries.push({ register: ackRegister, label: "SPC ACK Register" });
+      }
+    }
+  }
+  return entries;
+}
+function getMachineOccupiedRegisterWords(machine = {}, protocol = "MODBUS_TCP") {
+  const occupied = new Map();
+  const cfg = machine?.plcConfig || {};
+  for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
+    const words = expandRegisterWindow(cfg?.[field.key], field.key, protocol);
+    words.forEach((word) => {
+      if (!occupied.has(word)) {
+        occupied.set(word, field.label);
+      }
+    });
+  }
+  getAuxiliaryRegisterEntries(machine).forEach((entry) => {
+    expandRegisterWindow(entry.register, null, protocol).forEach((word) => {
+      if (!occupied.has(word)) {
+        occupied.set(word, entry.label);
+      }
+    });
+  });
   return occupied;
 }
 function normalizeSpcConfigForForm(raw = {}) {
@@ -358,12 +414,12 @@ const FORM_TABS = [
 ];
 
 const REGISTER_IO_HELP = {
-  startRegister:     { action: "WRITE", flow: "PC → PLC", purpose: "Start/trigger command sent to PLC" },
-  statusRegister:    { action: "READ",  flow: "PLC → PC", purpose: "Interlock/status feedback from PLC" },
-  partRegister:      { action: "WRITE", flow: "PC → PLC", purpose: "Optional part/hash payload register" },
-  stationRegister:   { action: "WRITE", flow: "PC → PLC", purpose: "Optional station/hash payload register" },
-  resetRegister:     { action: "WRITE", flow: "PC → PLC", purpose: "Reset/fault clear command register" },
-  heartbeatRegister: { action: "BOTH",  flow: "PLC ↔ PC", purpose: "Heartbeat communication check (optional)" },
+  startRegister:     { action: "WRITE", flow: "PC -> PLC", purpose: "Start/trigger command sent to PLC" },
+  statusRegister:    { action: "READ",  flow: "PLC -> PC", purpose: "Interlock/status feedback from PLC" },
+  partRegister:      { action: "WRITE", flow: "PC -> PLC", purpose: "Optional part/hash payload register" },
+  stationRegister:   { action: "WRITE", flow: "PC -> PLC", purpose: "Optional station/hash payload register" },
+  resetRegister:     { action: "WRITE", flow: "PC -> PLC", purpose: "Reset/fault clear command register" },
+  heartbeatRegister: { action: "BOTH",  flow: "PLC <-> PC", purpose: "Heartbeat communication check (optional)" },
 };
 
 const TUNING_VALUE_HELP = {
@@ -375,9 +431,9 @@ const TUNING_VALUE_HELP = {
   resetValue:   { label: "Reset Value",   direction: "WRITE", usage: "Written to Reset Register to clear fault or reset state",    registerKey: "resetRegister"  },
 };
 
-/* ── Design tokens ─────────────────────────────────────────── */
+/* -- Design tokens ------------------------------------------- */
 const T = {
-  // Neutral professional palette — dark navy base
+  // Neutral professional palette - dark navy base
   navy:       "#0f172a",
   navyMid:    "#1e293b",
   navyLight:  "#334155",
@@ -388,10 +444,10 @@ const T = {
   bg:         "#f8fafc",
   bgCard:     "#ffffff",
   bgMuted:    "#f1f5f9",
-  text:       "#0f172a",   // very dark — primary text
+  text:       "#0f172a",   // very dark - primary text
   textSec:    "#334155",   // secondary text
   textMuted:  "#64748b",   // muted
-  // Accents — no orange
+  // Accents - no orange
   blue:       "#1d4ed8",
   blueMid:    "#2563eb",
   blueLight:  "#dbeafe",
@@ -407,7 +463,7 @@ const T = {
   tealBorder: "#99f6e4",
 };
 
-/* ── Shared input / select styles ──────────────────────────── */
+/* -- Shared input / select styles ---------------------------- */
 const inp = {
   width: "100%", boxSizing: "border-box",
   height: 38, padding: "0 12px",
@@ -419,7 +475,7 @@ const inp = {
   transition: "border-color .15s, box-shadow .15s",
 };
 
-/* ── Tiny reusable atoms ───────────────────────────────────── */
+/* -- Tiny reusable atoms ------------------------------------- */
 const Label = ({ children, required }) => (
   <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: T.textMuted, marginBottom: 6, display: "flex", alignItems: "center", gap: 3 }}>
     {children}{required && <span style={{ color: T.red }}>*</span>}
@@ -498,7 +554,7 @@ const SectionCard = ({ title, icon: Icon, accent, children, action }) => (
   </div>
 );
 
-/* ─── main component ───────────────────────────────────────── */
+/* --- main component ----------------------------------------- */
 const MachinePage = () => {
   const [machines, setMachines] = useState([]);
   const [plcRanges, setPlcRanges] = useState([]);
@@ -564,6 +620,7 @@ const MachinePage = () => {
   const registerConflicts = useMemo(() => {
     if (!usesRange) return [];
     const cfg = formData?.plcConfig || {};
+    const auxiliaryEntries = getAuxiliaryRegisterEntries(formData);
     const conflicts = [];
     const range = rangeById[formData?.plcRangeId];
     const selfOccupancy = new Map();
@@ -574,45 +631,119 @@ const MachinePage = () => {
       const words = expandRegisterWindow(base, field.key, normalizedProtocol);
       for (const word of words) {
         if (range && (word < Number(range.rangeStart) || word > Number(range.rangeEnd))) {
-          conflicts.push(`${field.label} uses R${word}, outside selected range R${range.rangeStart}–R${range.rangeEnd}.`);
+          conflicts.push(`${field.label} uses R${word}, outside selected range R${range.rangeStart}-R${range.rangeEnd}.`);
           continue;
         }
-        if (selfOccupancy.has(word) && selfOccupancy.get(word) !== field.key) {
+        if (selfOccupancy.has(word) && selfOccupancy.get(word) !== field.label) {
           const otherKey = selfOccupancy.get(word);
           const otherField = MACHINE_REGISTER_ROLE_FIELDS.find((f) => f.key === otherKey);
           conflicts.push(`R${word} overlaps between ${otherField?.label || otherKey} and ${field.label}.`);
         } else {
-          selfOccupancy.set(word, field.key);
+          selfOccupancy.set(word, field.label);
+        }
+      }
+    }
+
+    for (const entry of auxiliaryEntries) {
+      const words = expandRegisterWindow(entry.register, null, normalizedProtocol);
+      for (const word of words) {
+        if (range && (word < Number(range.rangeStart) || word > Number(range.rangeEnd))) {
+          conflicts.push(`${entry.label} uses R${word}, outside selected range R${range.rangeStart}-${range.rangeEnd}.`);
+          continue;
+        }
+        if (selfOccupancy.has(word) && selfOccupancy.get(word) !== entry.label) {
+          conflicts.push(`R${word} overlaps between ${selfOccupancy.get(word)} and ${entry.label}.`);
+        } else {
+          selfOccupancy.set(word, entry.label);
         }
       }
     }
 
     if (!formData?.plcRangeId) return [...new Set(conflicts)];
     const currentMachineId = Number(editingMachine?.id || 0);
-    const selfConfig = formData?.plcConfig || {};
     const peerOccupied = new Map();
     for (const machine of machines) {
       if (Number(machine?.id || 0) === currentMachineId) continue;
       if (Number(machine?.plcRangeId || machine?.plcConfig?.rangeId || 0) !== Number(formData.plcRangeId)) continue;
       const peerProtocol = normalizeProtocol(machine?.plcProtocol, "MODBUS_TCP");
-      const peerCfg = machine?.plcConfig || {};
-      for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
-        const words = expandRegisterWindow(peerCfg[field.key], field.key, peerProtocol);
-        words.forEach((word) => peerOccupied.set(word, `${machine.machineName || "Machine"} (${machine.operationNo || "-"})`));
-      }
+      const occupied = getMachineOccupiedRegisterWords(machine, peerProtocol);
+      occupied.forEach((label, registerNo) => {
+        peerOccupied.set(registerNo, `${machine.machineName || "Machine"} (${machine.operationNo || "-"}) - ${label}`);
+      });
     }
 
-    for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
-      const words = expandRegisterWindow(selfConfig[field.key], field.key, normalizedProtocol);
-      for (const word of words) {
-        if (peerOccupied.has(word)) {
-          conflicts.push(`R${word} for ${field.label} conflicts with ${peerOccupied.get(word)}.`);
-        }
+    selfOccupancy.forEach((_label, word) => {
+      if (peerOccupied.has(word)) {
+        conflicts.push(`R${word} conflicts with ${peerOccupied.get(word)}.`);
       }
-    }
+    });
 
     return [...new Set(conflicts)];
-  }, [usesRange, formData?.plcConfig, formData?.plcRangeId, rangeById, normalizedProtocol, machines, editingMachine?.id]);
+  }, [
+    usesRange,
+    formData?.plcConfig,
+    formData?.plcSignalMap,
+    formData?.spcConfig,
+    formData?.plcRangeId,
+    rangeById,
+    normalizedProtocol,
+    machines,
+    editingMachine?.id,
+  ]);
+
+  const activeTabIndex = useMemo(
+    () => Math.max(FORM_TABS.findIndex((tab) => tab.id === activeTab), 0),
+    [activeTab]
+  );
+  const isLastTab = activeTabIndex >= FORM_TABS.length - 1;
+  const goToTabByIndex = (nextIndex) => {
+    if (nextIndex < 0 || nextIndex >= FORM_TABS.length) return;
+    setActiveTab(FORM_TABS[nextIndex].id);
+  };
+  const validateCurrentTab = (tabId = activeTab) => {
+    if (tabId === "general") {
+      if (!String(formData.machineName || "").trim()) return "Machine name is required.";
+      if (!String(formData.operationNo || "").trim()) return "Operation code is required.";
+      if (!String(formData.sequenceNo || "").trim()) return "Sequence number is required.";
+    }
+    if (tabId === "network") {
+      if (!String(formData.plcIp || "").trim()) return "PLC IP address is required.";
+      if (usesRange && !String(formData.plcRangeId || "").trim()) return "Select a PLC range before continuing.";
+    }
+    if (tabId === "registers") {
+      if (!String(formData?.plcConfig?.startRegister || "").trim()) return "Start register is required.";
+      if (!String(formData?.plcConfig?.statusRegister || "").trim()) return "Status register is required.";
+      if (registerConflicts.length > 0) return registerConflicts[0];
+    }
+    return null;
+  };
+  const saveAndNext = () => {
+    const validationError = validateCurrentTab(activeTab);
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
+    if (!isLastTab) {
+      goToTabByIndex(activeTabIndex + 1);
+      toast.success(`Step saved. Continue with ${FORM_TABS[activeTabIndex + 1].label}.`);
+    }
+  };
+  const goPrevious = () => goToTabByIndex(activeTabIndex - 1);
+
+  const getVisibleTuningFields = useMemo(() => {
+    const fieldsByKey = new Map(MACHINE_MODBUS_TUNING_FIELD_CONFIG.map((field) => [field.key, field]));
+    const fallbackKeys = Object.keys(TUNING_VALUE_HELP);
+    fallbackKeys.forEach((key) => {
+      if (fieldsByKey.has(key)) return;
+      fieldsByKey.set(key, {
+        key,
+        label: TUNING_VALUE_HELP[key]?.label || key,
+        type: "number",
+        required: true,
+      });
+    });
+    return Array.from(fieldsByKey.values());
+  }, []);
 
   const updateField = (key, value) => {
     if (key === "plcProtocol") {
@@ -669,7 +800,8 @@ const MachinePage = () => {
 
   const downloadCurrentPlcSpec = () => {
     try {
-      const csv = buildMachinePlcSpecCsv(formData);
+      const reportConfig = loadReportConfig();
+      const csv = buildMachinePlcSpecCsv(formData, reportConfig);
       const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -687,7 +819,17 @@ const MachinePage = () => {
   const closeBypassModal = () => { setBypassModalMachine(null); setBypassEnabled(true); setBypassReason(""); };
 
   const handleSubmit = async (e) => {
-    e.preventDefault(); setSaving(true);
+    e.preventDefault();
+    const validationError = validateCurrentTab(activeTab);
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
+    if (!isLastTab) {
+      saveAndNext();
+      return;
+    }
+    setSaving(true);
     try {
       if (registerConflicts.length > 0) {
         toast.error(registerConflicts[0]);
@@ -721,7 +863,7 @@ const MachinePage = () => {
     finally { setBypassing(false); }
   };
 
-  /* ── STAT CARDS ── */
+  /* -- STAT CARDS -- */
   const statCards = [
     { label: "Total Machines",  value: stats.total,      color: T.text,  border: T.borderLight },
     { label: "Active",          value: stats.active,     color: T.green, border: T.greenBorder },
@@ -729,12 +871,12 @@ const MachinePage = () => {
     { label: "Offline",         value: stats.inactive,   color: T.red,   border: T.redBorder   },
   ];
 
-  /* ── MODAL SHARED STYLE ── */
+  /* -- MODAL SHARED STYLE -- */
   const modalOverlay = { position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(15,23,42,0.65)", backdropFilter: "blur(4px)" };
 
   return (
     <div className="space-y-6 rise-in">
-      {/* ── Header ── */}
+      {/* -- Header -- */}
       <div className="db-header-card mb-6">
         <div className="db-header-gradient-bar" />
         <div className="db-header-inner">
@@ -752,7 +894,7 @@ const MachinePage = () => {
         </div>
       </div>
 
-      {/* ── Stats ── */}
+      {/* -- Stats -- */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 12 }}>
         {statCards.map((s) => (
           <div key={s.label} style={{ background: T.bgCard, border: `1px solid ${s.border}`, borderRadius: 12, padding: "16px 18px", borderLeft: `3px solid ${s.color}` }}>
@@ -762,13 +904,13 @@ const MachinePage = () => {
         ))}
       </div>
 
-      {/* ── Filters ── */}
+      {/* -- Filters -- */}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <div style={{ position: "relative", flex: 1, minWidth: 220 }}>
           <Search size={14} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: T.textMuted }} />
           <input
             value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
-            placeholder="Search by name, line, IP or operation…"
+            placeholder="Search by name, line, IP or operation..."
             style={{ ...inp, height: 38, paddingLeft: 36, width: "100%", boxSizing: "border-box" }}
           />
         </div>
@@ -783,7 +925,7 @@ const MachinePage = () => {
         </FieldSelect>
       </div>
 
-      {/* ── Table ── */}
+      {/* -- Table -- */}
       <div style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 14, overflow: "hidden" }}>
         <div style={{ padding: "14px 20px", borderBottom: `1px solid ${T.borderLight}`, background: T.bgMuted, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -823,20 +965,20 @@ const MachinePage = () => {
                       <td style={{ padding: "12px 16px" }}>
                         <p style={{ fontWeight: 700, color: T.text, margin: 0 }}>{m.machineName}</p>
                       </td>
-                      <td style={{ padding: "12px 16px", color: T.textSec }}>{m.lineName || "—"}</td>
+                      <td style={{ padding: "12px 16px", color: T.textSec }}>{m.lineName || "-"}</td>
                       <td style={{ padding: "12px 16px" }}>
-                        <span style={{ fontFamily: "ui-monospace,monospace", color: T.blue, fontWeight: 700 }}>{m.operationNo || "—"}</span>
+                        <span style={{ fontFamily: "ui-monospace,monospace", color: T.blue, fontWeight: 700 }}>{m.operationNo || "-"}</span>
                       </td>
                       <td style={{ padding: "12px 16px" }}>
                         <p style={{ fontFamily: "ui-monospace,monospace", fontSize: 12, color: T.blue, margin: 0 }}>{m.plcIp || "Not set"}{m.plcPort ? `:${m.plcPort}` : ""}</p>
-                        <p style={{ fontSize: 10, color: T.textMuted, margin: "2px 0 0", textTransform: "uppercase" }}>{m.plcProtocol || "—"}</p>
+                        <p style={{ fontSize: 10, color: T.textMuted, margin: "2px 0 0", textTransform: "uppercase" }}>{m.plcProtocol || "-"}</p>
                       </td>
                       <td style={{ padding: "12px 16px" }}>
                         {range ? (
                           <span style={{ padding: "2px 8px", background: T.blueLight, border: `1px solid ${T.blueBorder}`, borderRadius: 4, fontSize: 11, fontFamily: "ui-monospace,monospace", color: T.blue, fontWeight: 600 }}>
-                            {range.rangeName} [R{range.rangeStart}–R{range.rangeEnd}]
+                            {range.rangeName} [R{range.rangeStart}-R{range.rangeEnd}]
                           </span>
-                        ) : <span style={{ color: T.textMuted, fontSize: 12 }}>—</span>}
+                        ) : <span style={{ color: T.textMuted, fontSize: 12 }}>-</span>}
                       </td>
                       <td style={{ padding: "12px 16px" }}>
                         <p style={{ fontWeight: 700, color: T.text, margin: 0 }}>{m.dailyTargetQty || 0}</p>
@@ -876,7 +1018,7 @@ const MachinePage = () => {
         )}
       </div>
 
-      {/* ══ Add / Edit Modal ══ */}
+      {/* -- Add / Edit Modal -- */}
       {showModal && (
         <div style={modalOverlay}>
           <div style={{ position: "absolute", inset: 0 }} onClick={closeModal} />
@@ -919,7 +1061,7 @@ const MachinePage = () => {
             {/* Form body */}
             <form id="machine-form" onSubmit={handleSubmit} style={{ flex: 1, overflowY: "auto", padding: 24, background: T.bg }}>
 
-              {/* ── GENERAL ── */}
+              {/* -- GENERAL -- */}
               {activeTab === "general" && (
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                   <div style={{ gridColumn: "1 / -1" }}>
@@ -960,7 +1102,7 @@ const MachinePage = () => {
                 </div>
               )}
 
-              {/* ── NETWORK & PLC ── */}
+              {/* -- NETWORK & PLC -- */}
               {activeTab === "network" && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
                   <div>
@@ -968,7 +1110,7 @@ const MachinePage = () => {
                     <FieldSelect value={formData.plcProtocol} onChange={e => updateField("plcProtocol", e.target.value)}>
                       <option value="TCP_TEXT">Generic TCP Text</option>
                       <option value="MODBUS_TCP">Modbus TCP</option>
-                      <option value="SLMP">SLMP — Mitsubishi</option>
+                      <option value="SLMP">SLMP - Mitsubishi</option>
                     </FieldSelect>
                   </div>
 
@@ -977,7 +1119,7 @@ const MachinePage = () => {
                       <div>
                         <Label>SLMP Device Family</Label>
                         <FieldInput value={formData.plcSlmpDevice} onChange={e => updateField("plcSlmpDevice", String(e.target.value || "").toUpperCase())} placeholder="D" mono />
-                        <p style={{ fontSize: 10, color: T.textMuted, marginTop: 5 }}>Example: D, W, R — must match PLC memory device type.</p>
+                        <p style={{ fontSize: 10, color: T.textMuted, marginTop: 5 }}>Example: D, W, R - must match PLC memory device type.</p>
                       </div>
                       <div>
                         <Label>SLMP Frame Mode</Label>
@@ -995,7 +1137,7 @@ const MachinePage = () => {
                     <div>
                       <Label required>PLC IP Address</Label>
                       <FieldSelect value={formData.plcIp} onChange={e => { const newIp = e.target.value; updateField("plcIp", newIp); const matching = plcRanges.find(r => String(r.plcIp).trim() === newIp); if (matching && matching.plcPort) updateField("plcPort", String(matching.plcPort)); }} mono>
-                        <option value="">— Select IP Address —</option>
+                        <option value="">- Select IP Address -</option>
                         {[...new Set(plcRanges.map(r => String(r.plcIp).trim()).filter(Boolean))].map(ip => <option key={ip} value={ip}>{ip}</option>)}
                       </FieldSelect>
                     </div>
@@ -1009,8 +1151,8 @@ const MachinePage = () => {
                     <div style={{ padding: 16, background: T.blueLight + "55", border: `1px solid ${T.blueBorder}`, borderRadius: 10 }}>
                       <Label>PLC Register Block (Range)</Label>
                       <FieldSelect value={formData.plcRangeId} onChange={e => updateField("plcRangeId", e.target.value)}>
-                        <option value="">— Select PLC Range —</option>
-                        {selectableRanges.map(r => <option key={r.id} value={r.id}>{r.rangeName || r.plcName} — R{r.rangeStart}–R{r.rangeEnd} ({r.plcIp})</option>)}
+                        <option value="">- Select PLC Range -</option>
+                        {selectableRanges.map(r => <option key={r.id} value={r.id}>{r.rangeName || r.plcName} - R{r.rangeStart}-R{r.rangeEnd} ({r.plcIp})</option>)}
                       </FieldSelect>
                       {formData.plcRangeId && rangeById[formData.plcRangeId] && (
                         <div style={{ marginTop: 10, padding: "10px 12px", background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: 8, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, fontSize: 12 }}>
@@ -1031,7 +1173,7 @@ const MachinePage = () => {
                 </div>
               )}
 
-              {/* ── REGISTERS ── */}
+              {/* -- REGISTERS -- */}
               {activeTab === "registers" && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
                   {!formData.plcRangeId ? (
@@ -1051,14 +1193,14 @@ const MachinePage = () => {
                           machines.forEach(m => {
                             if (m.id === editingMachine?.id) return;
                             if (Number(m.plcRangeId) !== Number(formData.plcRangeId)) return;
-                            const mc = m.plcConfig || {};
                             const peerProtocol = normalizeProtocol(m?.plcProtocol, "MODBUS_TCP");
-                            MACHINE_REGISTER_ROLE_FIELDS.forEach(f => {
-                              expandRegisterWindow(mc[f.key], f.key, peerProtocol).forEach((word) => usedRegisters.add(word));
-                            });
+                            getMachineOccupiedRegisterWords(m, peerProtocol).forEach((_label, word) => usedRegisters.add(word));
                           });
                           const ownUsed = getConfigOccupiedRegisters(formData.plcConfig || {}, normalizedProtocol, field.key);
                           ownUsed.forEach((word) => usedRegisters.add(word));
+                          getAuxiliaryRegisterEntries(formData).forEach((entry) => {
+                            expandRegisterWindow(entry.register, null, normalizedProtocol).forEach((word) => usedRegisters.add(word));
+                          });
                           const options = [];
                           const currentValue = toWholeNumberOrNull(formData.plcConfig?.[field.key]);
                           const requiredWidth = getRegisterSpanWords(field.key, normalizedProtocol);
@@ -1076,10 +1218,10 @@ const MachinePage = () => {
                                 {ioHelp && <ActionBadge action={ioHelp.action} />}
                               </div>
                               <FieldSelect required={Boolean(field.required)} value={formData.plcConfig?.[field.key] ?? ""} onChange={e => updateCfg(field.key, e.target.value)} mono>
-                                <option value="">— Select —</option>
+                                <option value="">- Select -</option>
                                 {options.map(o => <option key={o} value={o}>R{o}</option>)}
                               </FieldSelect>
-                              {ioHelp && <p style={{ fontSize: 10, color: T.textMuted, marginTop: 6, lineHeight: 1.4 }}>{ioHelp.flow} · {ioHelp.purpose}</p>}
+                              {ioHelp && <p style={{ fontSize: 10, color: T.textMuted, marginTop: 6, lineHeight: 1.4 }}>{ioHelp.flow}  |  {ioHelp.purpose}</p>}
                               {isSlmp && getRegisterSpanWords(field.key, normalizedProtocol) > 1 && (
                                 <p style={{ fontSize: 9, color: T.textMuted, marginTop: 4 }}>Uses 2 words: Rn and Rn+1</p>
                               )}
@@ -1110,11 +1252,11 @@ const MachinePage = () => {
                                 return (
                                   <tr key={field.key} style={{ borderBottom: `1px solid ${T.borderLight}`, background: i % 2 === 1 ? T.bgMuted : T.bgCard }}>
                                     <td style={{ padding: "9px 12px", fontWeight: 600, color: T.text }}>{field.label}</td>
-                                    <td style={{ padding: "9px 12px" }}>{ioHelp.action ? <ActionBadge action={ioHelp.action} /> : "—"}</td>
-                                    <td style={{ padding: "9px 12px", color: T.textSec }}>{ioHelp.flow || "—"}</td>
-                                    <td style={{ padding: "9px 12px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: reg ? T.blue : T.textMuted }}>{reg ? `R${reg}` : "—"}</td>
+                                    <td style={{ padding: "9px 12px" }}>{ioHelp.action ? <ActionBadge action={ioHelp.action} /> : "-"}</td>
+                                    <td style={{ padding: "9px 12px", color: T.textSec }}>{ioHelp.flow || "-"}</td>
+                                    <td style={{ padding: "9px 12px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: reg ? T.blue : T.textMuted }}>{reg ? `R${reg}` : "-"}</td>
                                     <td style={{ padding: "9px 12px" }}><Chip label={field.required ? "Must" : "Optional"} color={field.required ? "blue" : "gray"} /></td>
-                                    <td style={{ padding: "9px 12px", color: T.textSec, fontSize: 11 }}>{ioHelp.purpose || "—"}</td>
+                                    <td style={{ padding: "9px 12px", color: T.textSec, fontSize: 11 }}>{ioHelp.purpose || "-"}</td>
                                   </tr>
                                 );
                               })}
@@ -1145,7 +1287,7 @@ const MachinePage = () => {
                 </div>
               )}
 
-              {/* ── TUNING ── */}
+              {/* -- TUNING -- */}
               {activeTab === "tuning" && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
                   {/* action bar */}
@@ -1170,7 +1312,7 @@ const MachinePage = () => {
 
                   {/* tuning value inputs */}
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px,1fr))", gap: 14 }}>
-                    {MACHINE_MODBUS_TUNING_FIELD_CONFIG.map(field => {
+                    {getVisibleTuningFields.map(field => {
                       const help = TUNING_VALUE_HELP[field.key];
                       return (
                         <div key={field.key} style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 10, padding: 14 }}>
@@ -1247,7 +1389,7 @@ const MachinePage = () => {
                 </div>
               )}
 
-              {/* ── LIVE REGISTERS ── */}
+              {/* -- LIVE REGISTERS -- */}
               {activeTab === "live" && (
                 <div>
                   <div style={{ padding: 16, background: T.bgMuted, border: `1px solid ${T.borderLight}`, borderRadius: 12, marginBottom: 16 }}>
@@ -1472,7 +1614,7 @@ const MachinePage = () => {
                       <Activity size={16} color={T.blue} />
                       <div>
                         <p style={{ fontWeight: 700, color: T.text, margin: 0, fontSize: 13 }}>Live Data Registers</p>
-                        <p style={{ fontSize: 11, color: T.textMuted, margin: "2px 0 0" }}>Define registers for live monitoring — Temperature, Pressure, Torque, etc.</p>
+                        <p style={{ fontSize: 11, color: T.textMuted, margin: "2px 0 0" }}>Define registers for live monitoring - Temperature, Pressure, Torque, etc.</p>
                       </div>
                     </div>
                     <button type="button" onClick={addSignal}
@@ -1494,7 +1636,7 @@ const MachinePage = () => {
                             {[
                               { label: "Label",            field: "label",       type: "text",   placeholder: "Temperature" },
                               { label: "Register Address", field: "register",    type: "number", placeholder: "40001", mono: true },
-                              { label: "Description/Unit", field: "description", type: "text",   placeholder: "Unit: °C" },
+                              { label: "Description/Unit", field: "description", type: "text",   placeholder: "Unit: deg C" },
                             ].map(({ label, field, type, placeholder, mono }) => (
                               <div key={field}>
                                 <Label>{label}</Label>
@@ -1508,8 +1650,8 @@ const MachinePage = () => {
                             <div>
                               <Label>Direction</Label>
                               <FieldSelect value={sig.direction || "PLC -> PC"} onChange={e => updateSignal(idx, "direction", e.target.value)}>
-                                <option value="PLC -> PC">Read (PLC → PC)</option>
-                                <option value="PC -> PLC">Write (PC → PLC)</option>
+                                <option value="PLC -> PC">Read (PLC to PC)</option>
+                                <option value="PC -> PLC">Write (PC to PLC)</option>
                                 <option value="BIDIRECTIONAL">Both</option>
                               </FieldSelect>
                             </div>
@@ -1530,28 +1672,41 @@ const MachinePage = () => {
             <div style={{ padding: "14px 24px", borderTop: `1px solid ${T.borderLight}`, background: T.bgCard, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: T.textMuted }}>
                 <ChevronRight size={12} />
-                <span>Fill Identity → Network → Registers in order</span>
+                <span>Step {activeTabIndex + 1} of {FORM_TABS.length} - {FORM_TABS[activeTabIndex]?.label}</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <button type="button" onClick={downloadCurrentPlcSpec}
                   style={{ padding: "8px 14px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: `1px solid ${T.border}`, background: T.bgCard, color: T.textSec, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
                   Download Excel
                 </button>
+                {activeTabIndex > 0 && (
+                  <button type="button" onClick={goPrevious}
+                    style={{ padding: "8px 16px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: `1px solid ${T.border}`, background: T.bgCard, color: T.textSec, cursor: "pointer" }}>
+                    Previous
+                  </button>
+                )}
                 <button type="button" onClick={closeModal}
                   style={{ padding: "8px 16px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: `1px solid ${T.border}`, background: T.bgCard, color: T.textSec, cursor: "pointer" }}>
                   Cancel
                 </button>
-                <button type="submit" form="machine-form" disabled={saving}
-                  style={{ padding: "8px 20px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: "none", background: saving ? T.slateLight : T.navy, color: "#fff", cursor: saving ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 6, opacity: saving ? 0.6 : 1 }}>
-                  <Save size={13} />{saving ? "Saving…" : editingMachine ? "Save Changes" : "Add Machine"}
-                </button>
+                {!isLastTab ? (
+                  <button type="button" onClick={saveAndNext}
+                    style={{ padding: "8px 18px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: "none", background: T.navy, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+                    <ChevronRight size={13} /> Save & Next
+                  </button>
+                ) : (
+                  <button type="submit" form="machine-form" disabled={saving}
+                    style={{ padding: "8px 20px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: "none", background: saving ? T.slateLight : T.navy, color: "#fff", cursor: saving ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 6, opacity: saving ? 0.6 : 1 }}>
+                    <Save size={13} />{saving ? "Saving..." : editingMachine ? "Final Submit Changes" : "Final Submit"}
+                  </button>
+                )}
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* ══ Bypass Modal ══ */}
+      {/* -- Bypass Modal -- */}
       {bypassModalMachine && (
         <div style={modalOverlay}>
           <div style={{ position: "absolute", inset: 0 }} onClick={closeBypassModal} />
@@ -1564,7 +1719,7 @@ const MachinePage = () => {
                 </div>
                 <div>
                   <h2 style={{ fontWeight: 700, color: T.text, margin: 0, fontSize: 15 }}>Bypass Operation</h2>
-                  <p style={{ fontSize: 11, color: T.textMuted, margin: "2px 0 0" }}>{bypassModalMachine.machineName} · {bypassModalMachine.operationNo || "—"}</p>
+                  <p style={{ fontSize: 11, color: T.textMuted, margin: "2px 0 0" }}>{bypassModalMachine.machineName}  |  {bypassModalMachine.operationNo || "-"}</p>
                 </div>
               </div>
               <button onClick={closeBypassModal} style={{ width: 30, height: 30, border: `1px solid ${T.border}`, borderRadius: 7, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.textMuted }}>
@@ -1575,8 +1730,8 @@ const MachinePage = () => {
               <div>
                 <Label>Bypass Mode</Label>
                 <FieldSelect value={bypassEnabled ? "ON" : "OFF"} onChange={e => setBypassEnabled(e.target.value === "ON")}>
-                  <option value="ON">Enable — Skip machine interlock checks</option>
-                  <option value="OFF">Disable — Use normal checks</option>
+                  <option value="ON">Enable - Skip machine interlock checks</option>
+                  <option value="OFF">Disable - Use normal checks</option>
                 </FieldSelect>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -1603,7 +1758,7 @@ const MachinePage = () => {
                 </button>
                 <button type="submit" disabled={bypassing}
                   style={{ padding: "8px 18px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: "none", background: T.navy, color: "#fff", cursor: bypassing ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 6, opacity: bypassing ? 0.6 : 1 }}>
-                  <Zap size={13} />{bypassing ? "Saving…" : bypassEnabled ? "Enable Bypass" : "Disable Bypass"}
+                  <Zap size={13} />{bypassing ? "Saving..." : bypassEnabled ? "Enable Bypass" : "Disable Bypass"}
                 </button>
               </div>
             </form>

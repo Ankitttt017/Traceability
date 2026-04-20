@@ -8,9 +8,10 @@ import {
   getStationFeatureSettings,
   mergeStationFeatureSettings,
   normalizeStationKey,
+  saveStationFeatureSettings,
 } from "../utils/stationSettings";
 
-/* ── Toggle component ─────────────────────────────────────── */
+/* -- Toggle component --------------------------------------- */
 const Toggle = ({ checked, onChange, color = "blue" }) => {
   const colorMap = {
     blue:   { on: "#3b82f6", glow: "rgba(59,130,246,0.25)" },
@@ -60,7 +61,7 @@ const Toggle = ({ checked, onChange, color = "blue" }) => {
   );
 };
 
-/* ── Feature column config ────────────────────────────────── */
+/* -- Feature column config ---------------------------------- */
 const FEATURE_COLS = [
   {
     key: "qr",
@@ -74,6 +75,13 @@ const FEATURE_COLS = [
     label: "OP Validation",
     desc: "Operation sequence check",
     color: "violet",
+    type: "toggle",
+  },
+  {
+    key: "bypass",
+    label: "Bypass",
+    desc: "Supervisor bypass control",
+    color: "rose",
     type: "toggle",
   },
   {
@@ -113,7 +121,7 @@ const FEATURE_COLS = [
   },
 ];
 
-/* ── Color dot for column header ──────────────────────────── */
+/* -- Color dot for column header ---------------------------- */
 const DOT_COLORS = {
   blue:    "#3b82f6",
   violet:  "#8b5cf6",
@@ -123,7 +131,7 @@ const DOT_COLORS = {
   emerald: "#10b981",
 };
 
-/* ── Main component ───────────────────────────────────────── */
+/* -- Main component ----------------------------------------- */
 const StationControl = () => {
   const [machines, setMachines] = useState([]);
   const [stationSettings, setStationSettings] = useState(() => getStationFeatureSettings());
@@ -178,7 +186,25 @@ const StationControl = () => {
         stationSettingsApi.list().catch(() => null),
       ]);
       setMachines(m || []);
-      if (s) setStationSettings(s);
+      const localSettings = getStationFeatureSettings();
+      if (s && typeof s === "object") {
+        const merged = Object.entries(s).reduce((acc, [stationNo, serverCfg]) => {
+          const localCfg = localSettings?.[stationNo] || {};
+          acc[stationNo] = {
+            ...(serverCfg || {}),
+            bypass: localCfg.bypass === true,
+          };
+          return acc;
+        }, {});
+        Object.entries(localSettings || {}).forEach(([stationNo, localCfg]) => {
+          if (!merged[stationNo]) {
+            merged[stationNo] = { ...(localCfg || {}) };
+          }
+        });
+        setStationSettings(merged);
+      } else {
+        setStationSettings(localSettings);
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -187,6 +213,7 @@ const StationControl = () => {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { saveStationFeatureSettings(stationSettings); }, [stationSettings]);
 
   const updateField = (stationNo, key, value) => {
     setStationSettings((prev) => ({
@@ -220,7 +247,7 @@ const StationControl = () => {
     <div className="space-y-6 rise-in text-slate-900">
       <GlobalPopup popup={popup} onClose={() => setPopup(null)} />
 
-      {/* ── Header ── */}
+      {/* -- Header -- */}
       <div className="db-header-card mb-6">
         <div className="db-header-gradient-bar" />
         <div className="db-header-inner">
@@ -253,7 +280,7 @@ const StationControl = () => {
         </div>
       </div>
 
-      {/* ── Table ── */}
+      {/* -- Table -- */}
       {loading ? (
         <div className="industrial-card p-20 flex flex-col items-center justify-center text-slate-700/80">
           <RefreshCw size={48} className="animate-spin mb-4" />
@@ -328,7 +355,13 @@ const StationControl = () => {
                         </p>
                         <p style={{ fontSize: 9, color: "rgba(51,65,85,0.8)", margin: "2px 0 0", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>
                           SEQ {String(row.sequenceNo).padStart(2, "0")}
-                          {row.lineNames[0] && row.lineNames[0] !== "-" ? ` · ${row.lineNames[0]}` : ""}
+                          {row.lineNames[0] && row.lineNames[0] !== "-" ? `  |  ${row.lineNames[0]}` : ""}
+                        </p>
+                        <p
+                          style={{ fontSize: 9, color: "rgba(51,65,85,0.72)", margin: "4px 0 0", fontWeight: 600 }}
+                          title={row.machines.map((machine) => machine.machineName).join(", ")}
+                        >
+                          {row.machines.length} machine{row.machines.length !== 1 ? "s" : ""} mapped
                         </p>
                       </td>
                       <td style={{ padding: "14px 10px", textAlign: "center" }}>
@@ -407,7 +440,7 @@ const StationControl = () => {
             </table>
           </div>
 
-          {/* ── Legend ── */}
+          {/* -- Legend -- */}
           <div style={{
             padding: "12px 20px",
             borderTop: "1px solid rgba(15,23,42,0.10)",
@@ -418,7 +451,7 @@ const StationControl = () => {
               <div key={col.key} style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: DOT_COLORS[col.color], flexShrink: 0 }} />
                 <span style={{ fontSize: 10, color: "rgba(51,65,85,0.9)", fontWeight: 600 }}>
-                  {col.label} — {col.desc}
+                  {col.label} - {col.desc}
                 </span>
               </div>
             ))}
@@ -431,3 +464,5 @@ const StationControl = () => {
 };
 
 export default StationControl;
+
+

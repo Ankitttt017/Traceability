@@ -62,7 +62,7 @@ const Header = ({ onMenuClick }) => {
 
       {/* Right actions */}
       <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
-        <ThemeToggleButton showLabel className="hidden sm:inline-flex" />
+        <ThemeToggleButton  className="hidden sm:inline-flex" />
         <ThemeToggleButton className="sm:hidden" />
 
         {/* Notifications */}
