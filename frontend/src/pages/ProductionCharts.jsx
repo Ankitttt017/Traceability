@@ -23,6 +23,7 @@ import {
 } from "recharts";
 import { dashboardApi, machineApi } from "../api/services";
 import { CHART_COLORS, STATUS_COLORS } from "../constants/chartTheme";
+import { loadReportConfig, prependCsvReportHeader } from "../utils/reportConfig";
 
 // ── Design tokens ──────────────────────────────────────────────────────────
 const DS = `
@@ -130,7 +131,7 @@ function drawDonut(ctx,cx,cy,r,ok,total){
 }
 
 // ── PDF Generator ─────────────────────────────────────────────────────────
-async function generatePDF({summary,report,machineMap,efficiency,totalUnits,timeLabel,generatedAt,partsList}){
+async function generatePDF({summary,report,machineMap,efficiency,totalUnits,timeLabel,generatedAt,partsList,reportConfig}){
   // Draw canvas charts
   const W=900,H=480;
   const cv=document.createElement("canvas");cv.width=W;cv.height=H;
@@ -211,8 +212,17 @@ async function generatePDF({summary,report,machineMap,efficiency,totalUnits,time
       <td>${bar}</td></tr>`;
   }).join("");
 
+  const cfg = reportConfig || loadReportConfig();
+  const titleTop = cfg.headerLine1 || cfg.companyName || "Traceability Report";
+  const titleSub = cfg.headerLine2 || cfg.projectTitle || "Production traceability analytics";
+  const titleMain = cfg.reportTitle || "Production Report";
+  const confidentialityLine = cfg.footerText || "CONFIDENTIAL — INTERNAL USE";
+  const reportLocation = cfg.location || "-";
+  const reportDepartment = cfg.department || "-";
+  const reportPlant = cfg.plantName || "INDUSTRACE MES";
+
   const html=`<!DOCTYPE html><html><head>
-<meta charset="UTF-8"/><title>IndusTrace Production Report — ${timeLabel}</title>
+<meta charset="UTF-8"/><title>${titleMain} — ${timeLabel}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',Arial,sans-serif;color:#0f172a;background:#fff;font-size:11px}
@@ -271,15 +281,16 @@ tbody td{padding:5px 10px;border-bottom:1px solid #f1f5f9;color:#1e293b;vertical
 
 <div class="hdr">
   <div>
-    <h1>Production Quality Report</h1>
-    <p>IndusTrace Manufacturing Execution System · Quality Traceability Analytics</p>
-    <span class="badge">INDUSTRACE MES</span>
+    <h1>${titleMain}</h1>
+    <p>${titleTop} · ${titleSub}</p>
+    <span class="badge">${reportPlant}</span>
   </div>
   <div class="hdr-r">
     <strong>Period: ${timeLabel}</strong>
     <p>Generated: ${generatedAt}</p>
+    <p>Department: ${reportDepartment} · ${reportLocation}</p>
     <p style="margin-top:4px">Machines: <strong>${summary.machines?.total||0}</strong> total · <strong>${summary.machines?.active||0}</strong> active</p>
-    <p style="margin-top:2px"><span class="conf">CONFIDENTIAL — INTERNAL USE</span></p>
+    <p style="margin-top:2px"><span class="conf">${confidentialityLine}</span></p>
   </div>
 </div>
 
@@ -356,7 +367,7 @@ ${partsList.length>500?`<p style="font-size:8px;color:#94a3b8;margin-top:6px">No
 `:""}
 
 <div class="footer">
-  <span>IndusTrace MES — Confidential Production Quality Report</span>
+  <span>${confidentialityLine}</span>
   <span>Period: ${timeLabel}</span>
   <span>© ${new Date().getFullYear()} IndusTrace Logic Systems · ${generatedAt}</span>
 </div>
@@ -371,15 +382,21 @@ ${partsList.length>500?`<p style="font-size:8px;color:#94a3b8;margin-top:6px">No
 }
 
 // ── CSV Exports ────────────────────────────────────────────────────────────
-function buildFullCSV({summary,report,machineMap,timeLabel,partsList}){
+function buildFullCSV({summary,report,machineMap,timeLabel,partsList,reportConfig}){
   const q=s=>`"${String(s||"").replace(/"/g,'""')}"`;
   const nl="\n",L=[];
   const tot=(Number(summary.quality?.ok||0))+(Number(summary.quality?.ng||0));
   const eff=tot>0?Math.round(Number(summary.quality?.ok||0)/tot*100):0;
+  const cfg = reportConfig || loadReportConfig();
 
-  L.push("INDUSTRACE PRODUCTION QUALITY REPORT");
-  L.push(`Period,${timeLabel}`);
-  L.push(`Generated,${fmtNow()}`);
+  L.push(cfg.headerLine1 || cfg.companyName || "Traceability Report");
+  L.push(cfg.headerLine2 || cfg.projectTitle || "");
+  L.push(cfg.reportTitle || "Production Report");
+  L.push(`Plant,${q(cfg.plantName || "-")}`);
+  L.push(`Department,${q(cfg.department || "-")}`);
+  L.push(`Location,${q(cfg.location || "-")}`);
+  L.push(`Period,${q(timeLabel)}`);
+  L.push(`Generated,${q(fmtNow())}`);
   L.push("");
   L.push("SUMMARY");
   L.push("Metric,Value");
@@ -651,20 +668,23 @@ const ProductionCharts=()=>{
   const handlePDF=async()=>{
     setPdfLoading(true);
     try{
+      const reportConfig = loadReportConfig();
       await generatePDF({
         summary,report,machineMap,efficiency,totalUnits,
-        timeLabel,generatedAt:fmtNow(),partsList,
+        timeLabel,generatedAt:fmtNow(),partsList,reportConfig,
       });
     }finally{setPdfLoading(false);}
   };
 
   // CSV handlers
   const handleFullCSV=()=>{
-    const csv=buildFullCSV({summary,report,machineMap,timeLabel,partsList});
-    downloadBlob(new Blob([csv],{type:"text/csv"}),`IndusTrace_Report_${dateStr()}.csv`);
+    const reportConfig = loadReportConfig();
+    const csv=buildFullCSV({summary,report,machineMap,timeLabel,partsList,reportConfig});
+    downloadBlob(new Blob([csv],{type:"text/csv"}),`Production_Report_${dateStr()}.csv`);
   };
   const handlePartsCSV=()=>{
     if(!filteredParts.length)return;
+    const reportConfig = loadReportConfig();
     const q=s=>`"${String(s||"").replace(/"/g,'""')}"`;
     const rows=filteredParts.map((p,i)=>{
       const res=String(p.result||p.status||"").toUpperCase();
@@ -672,11 +692,28 @@ const ProductionCharts=()=>{
       const isNg=["NG","FAIL","FAILED","ENDED_NG","INTERLOCKED"].includes(res);
       return`${i+1},${q(p.partId||"")},${q(p.batchNo||p.batch||"")},${q(p.machineName||machineMap.get(Number(p.machineId))||"")},${q(p.stationNo||p.operationNo||"")},${isOk?"Pass":isNg?"Fail":res||"—"},${q(p.interlockReason||p.reason||"")},${q(p.createdAt?new Date(p.createdAt).toLocaleString():"")}`;
     });
-    const csv=["#,Part Serial No.,Batch,Machine,Station,Result,Reason,Date & Time",...rows].join("\n");
+    const csvBody=["#,Part Serial No.,Batch,Machine,Station,Result,Reason,Date & Time",...rows].join("\n");
+    const csv = prependCsvReportHeader(csvBody, {
+      config: reportConfig,
+      periodLabel: timeLabel,
+      generatedAt: fmtNow(),
+      reportTitle: `${reportConfig.reportTitle || "Production Report"} - Parts List`,
+    });
     downloadBlob(new Blob([csv],{type:"text/csv"}),`Parts_List_${dateStr()}.csv`);
   };
   const handleAPIExport=async()=>{
-    try{const b=await dashboardApi.exportReport(query);downloadBlob(b,`IndusTrace_Audit_${dateStr()}.csv`);}
+    try{
+      const b=await dashboardApi.exportReport(query);
+      const reportConfig = loadReportConfig();
+      const csvBody = await b.text();
+      const csv = prependCsvReportHeader(csvBody, {
+        config: reportConfig,
+        periodLabel: timeLabel,
+        generatedAt: fmtNow(),
+        reportTitle: `${reportConfig.reportTitle || "Production Report"} - Audit`,
+      });
+      downloadBlob(new Blob([csv],{type:"text/csv;charset=utf-8"}),`Audit_Report_${dateStr()}.csv`);
+    }
     catch{setError("Audit export failed.");}
   };
 

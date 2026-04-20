@@ -4,6 +4,7 @@ const LEGACY_STORAGE_KEYS = ["traceability-station-feature-settings"];
 export const DEFAULT_STATION_FEATURES = {
   qr: true,
   operation: true,
+  bypass: false,
   rejectionBin: true,
   plcConfirmation: true,
   manualResult: false,
@@ -43,6 +44,7 @@ function normalizeFeatureMap(rawMap) {
     acc[stationKey] = {
       qr: rawValue.qr !== false,
       operation: rawValue.operation !== false,
+      bypass: rawValue.bypass === true || rawValue.bypassEnabled === true,
       rejectionBin: rawValue.rejectionBin !== false,
       plcConfirmation: rawValue.plcConfirmation !== false,
       manualResult: rawValue.manualResult === true,
@@ -122,6 +124,7 @@ export function getStationFeatures(stationNo, settings = {}) {
   return {
     qr: stationSettings.qr !== false,
     operation: stationSettings.operation !== false,
+    bypass: stationSettings.bypass === true || stationSettings.bypassEnabled === true,
     rejectionBin: stationSettings.rejectionBin !== false,
     plcConfirmation: stationSettings.plcConfirmation !== false,
     manualResult: stationSettings.manualResult === true,
@@ -153,6 +156,7 @@ export function getStationFeatureCoverage(settings = {}, stations = []) {
       total: 0,
       qrEnabled: 0,
       operationEnabled: 0,
+      bypassEnabled: 0,
       rejectionBinEnabled: 0,
       plcConfirmationEnabled: 0,
       manualResultEnabled: 0,
@@ -165,6 +169,7 @@ export function getStationFeatureCoverage(settings = {}, stations = []) {
       total,
       qrEnabled: acc.qrEnabled + (entry.qr ? 1 : 0),
       operationEnabled: acc.operationEnabled + (entry.operation ? 1 : 0),
+      bypassEnabled: acc.bypassEnabled + (entry.bypass ? 1 : 0),
       rejectionBinEnabled: acc.rejectionBinEnabled + (entry.rejectionBin ? 1 : 0),
       plcConfirmationEnabled: acc.plcConfirmationEnabled + (entry.plcConfirmation ? 1 : 0),
       manualResultEnabled: acc.manualResultEnabled + (entry.manualResult ? 1 : 0),
@@ -174,6 +179,7 @@ export function getStationFeatureCoverage(settings = {}, stations = []) {
       total,
       qrEnabled: 0,
       operationEnabled: 0,
+      bypassEnabled: 0,
       rejectionBinEnabled: 0,
       plcConfirmationEnabled: 0,
       manualResultEnabled: 0,

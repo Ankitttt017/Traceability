@@ -1,57 +1,18 @@
-// ReportConfiguration.jsx — Define report heading, branding & layout settings
-import { useCallback, useEffect, useState } from "react";
-import {
-  FileText, Save, RefreshCw, Plus, Trash2, Edit2, X,
-  Download, Settings, Image, Type, MapPin, Building2
-} from "lucide-react";
+// ReportConfiguration.jsx - Define report heading, branding & layout settings
+import { useState } from "react";
+import { FileText, Save, RefreshCw, Download, Settings, Type, Building2 } from "lucide-react";
 import toast from "react-hot-toast";
+import {
+  DEFAULT_REPORT_CONFIG,
+  loadReportConfig,
+  saveReportConfig,
+} from "../utils/reportConfig";
 
-const STORAGE_KEY = "traceability-report-config-v1";
-
-const DEFAULT_CONFIG = {
-  companyName: "BMW Group",
-  plantName: "Gen-6 Bawal Plant",
-  projectTitle: "Traceability System",
-  reportTitle: "Production Report",
-  logoUrl: "",
-  headerLine1: "BMW India Private Limited",
-  headerLine2: "Quality & Production Traceability",
-  footerText: "Confidential — Internal Use Only",
-  location: "Bawal, Haryana, India",
-  preparedBy: "",
-  approvedBy: "",
-  department: "Quality Engineering",
-  showLogo: true,
-  showDate: true,
-  showShift: true,
-  showMachine: true,
-  columns: [
-    { id: "partId", label: "Part Serial No", enabled: true },
-    { id: "machineName", label: "Machine Name", enabled: true },
-    { id: "stationNo", label: "Station", enabled: true },
-    { id: "status", label: "Result (OK/NG)", enabled: true },
-    { id: "shiftCode", label: "Shift", enabled: true },
-    { id: "createdAt", label: "Timestamp", enabled: true },
-    { id: "operationNo", label: "Operation No", enabled: false },
-    { id: "lineName", label: "Line", enabled: false },
-  ],
-};
-
-function loadConfig() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
-  } catch { /* ignore */ }
-  return { ...DEFAULT_CONFIG };
-}
-function saveConfig(config) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-}
 
 const inputCls = "w-full bg-bg-dark border border-border rounded-lg px-3 py-2.5 text-sm text-text-main outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/20 transition-all placeholder:text-text-muted/40";
 
 const ReportConfiguration = () => {
-  const [config, setConfig] = useState(() => loadConfig());
+  const [config, setConfig] = useState(() => loadReportConfig());
   const [saving, setSaving] = useState(false);
   const [activeSection, setActiveSection] = useState("branding");
 
@@ -67,7 +28,7 @@ const ReportConfiguration = () => {
   const handleSave = () => {
     setSaving(true);
     try {
-      saveConfig(config);
+      saveReportConfig(config);
       toast.success("Report configuration saved successfully");
     } catch {
       toast.error("Failed to save configuration");
@@ -77,7 +38,7 @@ const ReportConfiguration = () => {
   };
 
   const handleReset = () => {
-    setConfig({ ...DEFAULT_CONFIG });
+    setConfig({ ...DEFAULT_REPORT_CONFIG });
     toast.success("Configuration reset to defaults");
   };
 
@@ -109,7 +70,7 @@ const ReportConfiguration = () => {
               <RefreshCw size={13} /> Reset
             </button>
             <button onClick={handleSave} disabled={saving} className="db-action-btn">
-              <Save size={14} /> {saving ? "Saving…" : "Save Config"}
+              <Save size={14} /> {saving ? "Saving..." : "Save Config"}
             </button>
           </div>
         </div>
@@ -209,7 +170,7 @@ const ReportConfiguration = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               <div className="md:col-span-2">
                 <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Footer Text</label>
-                <input value={config.footerText} onChange={e => updateField("footerText", e.target.value)} placeholder="Confidential — Internal Use Only" className={inputCls} />
+                <input value={config.footerText} onChange={e => updateField("footerText", e.target.value)} placeholder="Confidential - Internal Use Only" className={inputCls} />
               </div>
               <div>
                 <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Prepared By</label>
@@ -234,7 +195,7 @@ const ReportConfiguration = () => {
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-bold">{col.label}</span>
                       <div className={`w-5 h-5 rounded-full flex items-center justify-center ${col.enabled ? "bg-primary text-on-strong" : "bg-border"}`}>
-                        {col.enabled && <span className="text-[10px]">✓</span>}
+                        {col.enabled && <span className="text-[10px]">OK</span>}
                       </div>
                     </div>
                     <p className="text-[10px] mt-1 font-mono opacity-60">{col.id}</p>
@@ -263,7 +224,7 @@ const ReportConfiguration = () => {
                   </div>
                 </div>
                 <h3 className="text-center text-base font-bold mb-1">{config.reportTitle}</h3>
-                <p className="text-center text-xs text-gray-500 mb-4">{config.plantName} — {config.department}</p>
+                <p className="text-center text-xs text-gray-500 mb-4">{config.plantName} - {config.department}</p>
                 
                 <table className="w-full text-xs border-collapse mb-4">
                   <thead>
@@ -299,3 +260,4 @@ const ReportConfiguration = () => {
 };
 
 export default ReportConfiguration;
+

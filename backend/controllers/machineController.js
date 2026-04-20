@@ -1072,23 +1072,37 @@ async function validateRangeAndRegisterUsage(payload, excludeMachineId = null) {
   }
 
   const selectedRegisterMap = new Map();
+  const addSelectedRegister = (registerWord, label) => {
+    if (registerWord < range.range_start || registerWord > range.range_end) {
+      throw new Error(`${label} (${registerWord}) is outside selected range ${range.range_start}-${range.range_end}`);
+    }
+    const existingRole = selectedRegisterMap.get(registerWord);
+    if (existingRole && existingRole !== label) {
+      throw new Error(`Register ${registerWord} is assigned twice (${existingRole} and ${label})`);
+    }
+    selectedRegisterMap.set(registerWord, label);
+  };
+
   for (const entry of REGISTER_COLUMN_META) {
     const registerNo = toInt(payload[entry.column]);
     if (registerNo === null) {
       continue;
     }
-
-    if (registerNo < range.range_start || registerNo > range.range_end) {
-      throw new Error(
-        `${entry.label} (${registerNo}) is outside selected range ${range.range_start}-${range.range_end}`
-      );
+    const spanWords =
+      protocol === "SLMP" && ["plc_part_register", "plc_station_register"].includes(entry.column) ? 2 : 1;
+    for (let offset = 0; offset < spanWords; offset += 1) {
+      addSelectedRegister(registerNo + offset, entry.label);
     }
+  }
 
-    const existingRole = selectedRegisterMap.get(registerNo);
-    if (existingRole && existingRole !== entry.label) {
-      throw new Error(`Register ${registerNo} is assigned twice (${existingRole} and ${entry.label})`);
+  const incomingAuxEntries = buildAuxRegisterEntries(payload);
+  for (const entry of incomingAuxEntries) {
+    const registerNo = toInt(entry.register);
+    if (registerNo === null) continue;
+    const spanWords = Math.max(1, toInt(entry.spanWords) || 1);
+    for (let offset = 0; offset < spanWords; offset += 1) {
+      addSelectedRegister(registerNo + offset, entry.label || "signalRegister");
     }
-    selectedRegisterMap.set(registerNo, entry.label);
   }
 
   if (selectedRegisterMap.size === 0) {
@@ -1100,20 +1114,48 @@ async function validateRangeAndRegisterUsage(payload, excludeMachineId = null) {
       plc_range_id: rangeId,
       ...(excludeMachineId ? { id: { [Op.ne]: excludeMachineId } } : {}),
     },
-    attributes: ["id", "machine_name", "operation_no", ...REGISTER_COLUMN_META.map((entry) => entry.column)],
+    attributes: [
+      "id",
+      "machine_name",
+      "operation_no",
+      "plc_protocol",
+      "plc_signal_map",
+      "plc_registers",
+      "plc_slmp_device",
+      ...REGISTER_COLUMN_META.map((entry) => entry.column),
+    ],
   });
 
   for (const machine of peerMachines) {
+    const peerProtocol = String(machine.plc_protocol || protocol).toUpperCase();
     for (const entry of REGISTER_COLUMN_META) {
       const registerNo = toInt(machine[entry.column]);
-      if (registerNo === null || !selectedRegisterMap.has(registerNo)) {
-        continue;
+      if (registerNo === null) continue;
+      const spanWords =
+        peerProtocol === "SLMP" && ["plc_part_register", "plc_station_register"].includes(entry.column) ? 2 : 1;
+      for (let offset = 0; offset < spanWords; offset += 1) {
+        const registerWord = registerNo + offset;
+        if (!selectedRegisterMap.has(registerWord)) continue;
+        const incomingRole = selectedRegisterMap.get(registerWord);
+        throw new Error(
+          `Register ${registerWord} already used by ${machine.machine_name} (${machine.operation_no}) as ${entry.label}. Conflicts with ${incomingRole}.`
+        );
       }
+    }
 
-      const incomingRole = selectedRegisterMap.get(registerNo);
-      throw new Error(
-        `Register ${registerNo} already used by ${machine.machine_name} (${machine.operation_no}) as ${entry.label}. Conflicts with ${incomingRole}.`
-      );
+    const peerAuxEntries = buildAuxRegisterEntries(machine);
+    for (const entry of peerAuxEntries) {
+      const registerNo = toInt(entry.register);
+      if (registerNo === null) continue;
+      const spanWords = Math.max(1, toInt(entry.spanWords) || 1);
+      for (let offset = 0; offset < spanWords; offset += 1) {
+        const registerWord = registerNo + offset;
+        if (!selectedRegisterMap.has(registerWord)) continue;
+        const incomingRole = selectedRegisterMap.get(registerWord);
+        throw new Error(
+          `Register ${registerWord} already used by ${machine.machine_name} (${machine.operation_no}) as ${entry.label}. Conflicts with ${incomingRole}.`
+        );
+      }
     }
   }
 }
@@ -1137,6 +1179,7 @@ function buildSlmpRegisterEntries(machine = {}) {
     { key: "TRIGGER", label: "startRegister", register: toInt(machine.plc_start_register), spanWords: 1 },
     { key: "STATUS", label: "statusRegister", register: toInt(machine.plc_status_register), spanWords: 1 },
     { key: "RESET", label: "resetRegister", register: toInt(machine.plc_reset_register), spanWords: 1 },
+    { key: "HEARTBEAT", label: "heartbeatRegister", register: toInt(machine.plc_heartbeat_register), spanWords: 1 },
     // PART_ID_HASH and STATION_HASH are written as 32-bit payloads (2 words).
     { key: "PART_ID_HASH", label: "partRegister", register: toInt(machine.plc_part_register), spanWords: 2 },
     { key: "STATION_HASH", label: "stationRegister", register: toInt(machine.plc_station_register), spanWords: 2 },
@@ -1146,6 +1189,53 @@ function buildSlmpRegisterEntries(machine = {}) {
       ...entry,
       device: resolveSlmpDeviceForSignal(entry.key, machine),
     }));
+}
+
+function buildAuxRegisterEntries(machine = {}) {
+  const entries = [];
+  const signalMap = parsePlcSignalMap(machine.plc_signal_map) || [];
+  for (const row of signalMap) {
+    const register = toInt(row?.register);
+    if (register === null) continue;
+    const key = normalizeUpper(row?.key || row?.label || "SIGNAL");
+    const device = normalizeUpper(row?.device) || resolveSlmpDeviceForSignal(key, machine);
+    entries.push({
+      key,
+      label: normalizeText(row?.label || row?.key || "signalRegister") || "signalRegister",
+      register,
+      spanWords: 1,
+      device: device || SLMP_DEFAULT_DEVICE,
+    });
+  }
+
+  const snapshot = parsePlcRegistersSnapshot(machine.plc_registers) || {};
+  const spcConfig = normalizeSpcConfig(snapshot.spcConfig || machine.spcConfig || {});
+  if (spcConfig.enabled && spcConfig.mode === "PLC_REGISTER") {
+    const resultRegister = toInt(spcConfig.plcResultRegister);
+    if (resultRegister !== null) {
+      entries.push({
+        key: "SPC_RESULT",
+        label: "spcResultRegister",
+        register: resultRegister,
+        spanWords: 1,
+        device: normalizeUpper(spcConfig.plcResultDevice) || resolveSlmpDeviceForSignal("SPC_RESULT", machine),
+      });
+    }
+  }
+  if (spcConfig.enabled && spcConfig.plcAckEnabled) {
+    const ackRegister = toInt(spcConfig.plcAckRegister);
+    if (ackRegister !== null) {
+      entries.push({
+        key: "SPC_ACK",
+        label: "spcAckRegister",
+        register: ackRegister,
+        spanWords: 1,
+        device: normalizeUpper(spcConfig.plcAckDevice) || resolveSlmpDeviceForSignal("SPC_ACK", machine),
+      });
+    }
+  }
+
+  return entries;
 }
 
 function expandSlmpWordOccupancy(entries = []) {
@@ -1173,7 +1263,7 @@ async function validateSlmpRegisterOverlap(payload, excludeMachineId = null) {
     return;
   }
 
-  const currentEntries = buildSlmpRegisterEntries(payload);
+  const currentEntries = [...buildSlmpRegisterEntries(payload), ...buildAuxRegisterEntries(payload)];
   const seen = new Set();
   const currentWords = expandSlmpWordOccupancy(currentEntries);
   for (const entry of currentWords) {
@@ -1197,16 +1287,18 @@ async function validateSlmpRegisterOverlap(payload, excludeMachineId = null) {
       "operation_no",
       "plc_slmp_device",
       "plc_signal_map",
+      "plc_registers",
       "plc_start_register",
       "plc_status_register",
       "plc_reset_register",
+      "plc_heartbeat_register",
       "plc_part_register",
       "plc_station_register",
     ],
   });
 
   for (const peer of peers) {
-    const peerEntries = buildSlmpRegisterEntries(peer);
+    const peerEntries = [...buildSlmpRegisterEntries(peer), ...buildAuxRegisterEntries(peer)];
     const peerWords = expandSlmpWordOccupancy(peerEntries);
     for (const entry of currentWords) {
       if (!entry.device || entry.registerWord === null) {

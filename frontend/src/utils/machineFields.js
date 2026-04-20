@@ -113,6 +113,13 @@ export const MACHINE_MODBUS_TUNING_FIELD_CONFIG = [
     required: true,
     placeholder: "4",
   },
+  {
+    key: "resetValue",
+    label: "Reset Value",
+    type: "number",
+    required: true,
+    placeholder: "9",
+  },
 ];
 
 export const MACHINE_TABLE_COLUMNS = [

@@ -821,7 +821,6 @@ const OperatorView = () => {
                   <FeatureRow label="Operation Rule"     enabled={stationFeatureConfig.operation}/>
                   <FeatureRow label="Rejection Bin"      enabled={stationFeatureConfig.rejectionBin}/>
                   <FeatureRow label="PLC Confirmation"   enabled={stationFeatureConfig.plcConfirmation}/>
-                  <FeatureRow label="Manual OK / NG"     enabled={stationFeatureConfig.manualResult}/>
                   <FeatureRow label="Final Pack Station" enabled={stationFeatureConfig.finalPacking}/>
                 </div>
               </Card>

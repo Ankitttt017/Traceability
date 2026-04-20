@@ -22,6 +22,7 @@ import { dashboardApi, machineApi } from "../api/services";
 import ChartTooltip from "../components/charts/ChartTooltip";
 import axios from "axios";
 import { CHART_COLORS, chartAxisProps, chartGridProps } from "../constants/chartTheme";
+import { loadReportConfig, prependCsvReportHeader } from "../utils/reportConfig";
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
 const API_BASE   = import.meta.env.VITE_API_URL    || "http://localhost:4000/api";
@@ -379,6 +380,31 @@ const Dashboard = () => {
   ,[report.shiftProduction]);
 
   const hasFilters = Object.values(filters).some(Boolean);
+  const exportPeriodLabel = useMemo(() => {
+    if (filters.dateFrom || filters.dateTo) {
+      return `${filters.dateFrom || "Start"} to ${filters.dateTo || "Now"}`;
+    }
+    return "Current dashboard filter";
+  }, [filters.dateFrom, filters.dateTo]);
+  const handleExportReport = useCallback(async () => {
+    try {
+      const rawBlob = await dashboardApi.exportReport(query);
+      const csvBody = await rawBlob.text();
+      const reportConfig = loadReportConfig();
+      const csv = prependCsvReportHeader(csvBody, {
+        config: reportConfig,
+        periodLabel: exportPeriodLabel,
+        generatedAt: new Date().toLocaleString("en-IN"),
+        reportTitle: `${reportConfig.reportTitle || "Production Report"} - Dashboard Export`,
+      });
+      downloadBlob(
+        new Blob([csv], { type: "text/csv;charset=utf-8" }),
+        `Dashboard_Report_${new Date().toISOString().slice(0, 10)}.csv`
+      );
+    } catch (e) {
+      console.error("Dashboard export error", e);
+    }
+  }, [query, exportPeriodLabel]);
 
   // ── Tabs config ──
   const TABS = [
@@ -467,7 +493,7 @@ const Dashboard = () => {
             </button>
 
             <button
-              onClick={()=>downloadBlob(new Blob(["..."]),`report-${Date.now()}.csv`)}
+              onClick={handleExportReport}
               style={{
                 display:"inline-flex",alignItems:"center",gap:7,
                 height:38,padding:"0 16px",borderRadius:9,
