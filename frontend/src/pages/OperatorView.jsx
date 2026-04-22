@@ -310,6 +310,9 @@ const OperatorView = () => {
   const [qrFeed,           setQrFeed]           = useState([]);
   const [resetConfirm,     setResetConfirm]     = useState(null);
   const [clockTick,        setClockTick]        = useState(Date.now());
+  const [viewportWidth,    setViewportWidth]    = useState(() =>
+    typeof window === "undefined" ? 1280 : window.innerWidth
+  );
 
   const selectedMachineIdRef = useRef("");
   const selectedStationRef   = useRef("");
@@ -323,6 +326,12 @@ const OperatorView = () => {
 
   useEffect(()=>{ selectedMachineIdRef.current=String(selectedMachineId||""); },[selectedMachineId]);
   useEffect(()=>{ selectedStationRef.current=String(selectedStation||"").toUpperCase(); },[selectedStation]);
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const stationFeatureConfig = useMemo(()=>getStationFeatures(selectedStation,stationSettings),[selectedStation,stationSettings]);
 
@@ -364,6 +373,12 @@ const OperatorView = () => {
   },[stationStats?.recentParts]);
 
   const trendRows = useMemo(()=>[...(stationStats?.trend||[])].slice(-6),[stationStats?.trend]);
+  const isCompact = viewportWidth < 900;
+  const isTablet = viewportWidth >= 900 && viewportWidth < 1280;
+  const rowOneColumns = isCompact ? "1fr" : isTablet ? "1fr 1fr" : "280px 1fr 260px";
+  const statsGridColumns = viewportWidth < 640 ? "repeat(2,1fr)" : "repeat(4,1fr)";
+  const infoGridColumns = viewportWidth < 640 ? "1fr" : "1fr 1fr";
+  const rowTwoColumns = viewportWidth < 1100 ? "1fr" : "1fr 1fr";
 
   // ── Data fetching (unchanged logic) ──────────────────────────────────
   const loadMachines = useCallback(async()=>{
@@ -641,7 +656,7 @@ const OperatorView = () => {
       {!loadingStats&&!loadingMachines&&(
         <>
           {/* ── Row 1: Status + Gauge + Station Rules ─────────────── */}
-          <div style={{display:"grid",gridTemplateColumns:"280px 1fr 260px",gap:16,alignItems:"start"}}>
+          <div style={{display:"grid",gridTemplateColumns:rowOneColumns,gap:16,alignItems:"start"}}>
 
             {/* ── Left: Station Status ─────────────────────────────── */}
             <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -782,7 +797,7 @@ const OperatorView = () => {
               </div>
 
               {/* OK / NG counters */}
-              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}}>
+              <div style={{display:"grid",gridTemplateColumns:statsGridColumns,gap:10,marginBottom:16}}>
                 {[
                   {label:"Pass (OK)",    value:qualitySummary.okCount||0,          color:C.ok(),   bg:C.ok(0.08),   bd:C.ok(0.2)  },
                   {label:"Fail (NG)",    value:qualitySummary.ngCount||0,           color:C.ng(),   bg:C.ng(0.08),   bd:C.ng(0.2)  },
@@ -804,7 +819,7 @@ const OperatorView = () => {
               {/* Operator + station info */}
               <div style={{background:C.bg("surf"),borderRadius:10,
                 border:`1px solid ${C.bdr()}`,padding:"10px 14px"}}>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:0}}>
+                <div style={{display:"grid",gridTemplateColumns:infoGridColumns,gap:0}}>
                   <InfoRow label="Operator" value={user.username||"Operator"}/>
                   <InfoRow label="Status" value={currentContext?.plcStatus||"WAITING"}/>
                   <InfoRow label="Last Part" value={currentContext?.partId} mono/>
@@ -866,7 +881,7 @@ const OperatorView = () => {
           </div>
 
           {/* ── Row 2: Hourly Trend + Recent Events ───────────────── */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+          <div style={{display:"grid",gridTemplateColumns:rowTwoColumns,gap:16}}>
 
             {/* Hourly trend */}
             <Card title="Hourly Production Trend" icon={BarChart2} accent={C.steel()}>
@@ -1045,4 +1060,3 @@ const OperatorView = () => {
 };
 
 export default OperatorView;
-

@@ -3,6 +3,7 @@ const { Op, fn, col, literal } = require("sequelize");
 const Machine      = require("../models/Machine");
 const ProductionLog = require("../models/ProductionLog");
 const Shift        = require("../models/Shift");
+const { parseTimeParts, toMinutes, isMinuteWithinShift } = require("../utils/time");
 
 /**
  * GET /api/dashboard/oee
@@ -17,24 +18,30 @@ const Shift        = require("../models/Shift");
 async function getOeeMetrics(req, res) {
   try {
     const now  = new Date();
-    const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:00`;
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
     // Find the active shift for current time
     const shifts = await Shift.findAll({ where: { is_active: true }, raw: true });
     let currentShift = null;
     for (const s of shifts) {
-      if (s.start_time <= s.end_time) {
-        if (hhmm >= s.start_time && hhmm <= s.end_time) { currentShift = s; break; }
-      } else {
-        if (hhmm >= s.start_time || hhmm <= s.end_time) { currentShift = s; break; }
+      const start = toMinutes(s.start_time);
+      const end = toMinutes(s.end_time);
+      if (isMinuteWithinShift(currentMinutes, start, end, { inclusiveEnd: true })) {
+        currentShift = s;
+        break;
       }
     }
 
     // Determine shift start/end as Date objects
     let shiftStartDate, shiftEndDate, shiftDurationMs;
     if (currentShift) {
-      const [sh, sm] = currentShift.start_time.split(":").map(Number);
-      const [eh, em] = currentShift.end_time.split(":").map(Number);
+      const startParts = parseTimeParts(currentShift.start_time);
+      const endParts = parseTimeParts(currentShift.end_time);
+      if (!startParts || !endParts) {
+        throw new Error("Invalid shift time format");
+      }
+      const { hours: sh, minutes: sm } = startParts;
+      const { hours: eh, minutes: em } = endParts;
       shiftStartDate = new Date(now);
       shiftStartDate.setHours(sh, sm, 0, 0);
       shiftEndDate = new Date(now);

@@ -41,15 +41,33 @@ export const MACHINE_FORM_FIELD_CONFIG = [
 export const MACHINE_REGISTER_ROLE_FIELDS = [
   {
     key: "startRegister",
-    label: "Trigger Register",
+    label: "Start Register",
     required: true,
-    description: "Handshake trigger command register.",
+    description: "Register for START command signal.",
   },
   {
-    key: "statusRegister",
-    label: "Interlock Register",
+    key: "blockRegister",
+    label: "Block Register",
     required: true,
-    description: "Interlock/feedback status register.",
+    description: "Register for BLOCK/INTERLOCK signal.",
+  },
+  {
+    key: "runningRegister",
+    label: "Running Register",
+    required: true,
+    description: "Register for RUNNING status feedback signal.",
+  },
+  {
+    key: "endOkRegister",
+    label: "End OK Register",
+    required: true,
+    description: "Register for END_OK completion signal.",
+  },
+  {
+    key: "endNgRegister",
+    label: "End NG Register",
+    required: true,
+    description: "Register for END_NG error signal.",
   },
   {
     key: "partRegister",
@@ -67,7 +85,7 @@ export const MACHINE_REGISTER_ROLE_FIELDS = [
     key: "resetRegister",
     label: "Reset Register",
     required: true,
-    description: "Reset command register.",
+    description: "Register for RESET command signal.",
   },
   {
     key: "heartbeatRegister",

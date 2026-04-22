@@ -181,7 +181,7 @@ const QrFormatRules = () => {
               </thead>
               <tbody className="divide-y divide-border/40">
                 {rules.map(rule => (
-                  <tr key={rule.id} className="group hover:bg-bg-dark/20 transition-colors">
+                  <tr key={rule.id} className="hover:bg-bg-dark/20 transition-colors">
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-2.5">
                         <div className={`w-2 h-2 rounded-full flex-shrink-0 ${rule.isActive ? "bg-accent" : "bg-text-muted/30"}`} />
@@ -192,7 +192,7 @@ const QrFormatRules = () => {
                       </div>
                     </td>
                     <td className="px-5 py-4">
-                      <div className="px-2.5 py-1 bg-bg-dark border border-border rounded font-mono text-xs text-primary max-w-[180px] truncate" title={rule.regexPattern}>
+                      <div className="px-2.5 py-1 bg-bg-dark border border-border rounded font-mono text-xs text-black max-w-[180px] truncate" title={rule.regexPattern}>
                         {rule.regexPattern}
                       </div>
                     </td>
@@ -208,7 +208,7 @@ const QrFormatRules = () => {
                       )}
                     </td>
                     <td className="px-5 py-4 text-right">
-                      <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex items-center justify-end gap-1">
                         <button onClick={() => handleEdit(rule)}
                           className="p-2 text-text-muted hover:text-primary hover:bg-primary/10 rounded-lg transition-all">
                           <Edit2 size={13} />
@@ -257,7 +257,7 @@ const QrFormatRules = () => {
                     placeholder="e.g. Engine head QR" className={inputCls} />
                 </div>
                 <div>
-                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Model Name</label>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Model Code</label>
                   <input value={form.modelCode} onChange={e => setForm({ ...form, modelCode: e.target.value.toUpperCase() })}
                     placeholder="Model Name.." className={`${inputCls} font-mono`} />
                 </div>

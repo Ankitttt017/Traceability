@@ -78,13 +78,6 @@ const FEATURE_COLS = [
     type: "toggle",
   },
   {
-    key: "bypass",
-    label: "Bypass",
-    desc: "Supervisor bypass control",
-    color: "rose",
-    type: "toggle",
-  },
-  {
     key: "plcConfirmation",
     label: "PLC Handshake",
     desc: "SLMP read/write cycle",
@@ -189,11 +182,7 @@ const StationControl = () => {
       const localSettings = getStationFeatureSettings();
       if (s && typeof s === "object") {
         const merged = Object.entries(s).reduce((acc, [stationNo, serverCfg]) => {
-          const localCfg = localSettings?.[stationNo] || {};
-          acc[stationNo] = {
-            ...(serverCfg || {}),
-            bypass: localCfg.bypass === true,
-          };
+          acc[stationNo] = { ...(serverCfg || {}) };
           return acc;
         }, {});
         Object.entries(localSettings || {}).forEach(([stationNo, localCfg]) => {
@@ -464,5 +453,4 @@ const StationControl = () => {
 };
 
 export default StationControl;
-
 

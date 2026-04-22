@@ -2,6 +2,7 @@
 const { Op, fn, col, literal } = require("sequelize");
 const { emitRealtime } = require("./realtimeService");
 const Alarm = require("../models/Alarm");
+const { toMinutes, isMinuteWithinShift } = require("../utils/time");
 
 const toNumber = (value, fallback) => {
   const parsed = Number(value);
@@ -94,15 +95,13 @@ async function checkSilentMachineAlarms() {
 
     // Check if we are currently in any active shift
     const now = new Date();
-    const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:00`;
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
     const shifts = await Shift.findAll({ where: { is_active: true }, raw: true });
 
     const inActiveShift = shifts.some((s) => {
-      if (s.start_time <= s.end_time) {
-        return hhmm >= s.start_time && hhmm <= s.end_time;
-      }
-      // Overnight shift
-      return hhmm >= s.start_time || hhmm <= s.end_time;
+      const start = toMinutes(s.start_time);
+      const end = toMinutes(s.end_time);
+      return isMinuteWithinShift(currentMinutes, start, end, { inclusiveEnd: true });
     });
 
     if (!inActiveShift) return; // Not in a shift, no silent alarm needed
