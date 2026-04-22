@@ -2,6 +2,7 @@ const { Sequelize, Op } = require("sequelize");
 const Machine = require("../models/Machine");
 const PlcRegisterRange = require("../models/PlcRegisterRange");
 const plcService = require("../services/plcCommunicationService");
+const { getMachineBypass } = require("../services/machineBypassService");
 
 const { writeModbusRegister, writeSlmpRegister, probeTcpEndpoint } = require("../services/plcIoService");
 const { clearMachineLock } = require("../services/machineLockService");
@@ -322,28 +323,28 @@ const STANDARD_HANDSHAKE_SIGNAL_META = {
   BLOCK_INTERLOCK: {
     signal: "Block / Interlock",
     direction: "WRITE",
-    registerKey: "startRegister",
+    registerKey: "blockRegister",
     valueKey: "blockValue",
     defaultMeaning: "Block cycle on NG / duplicate / interlock",
   },
   RUNNING: {
     signal: "Running",
     direction: "READ",
-    registerKey: "statusRegister",
+    registerKey: "runningRegister",
     valueKey: "startedValue",
     defaultMeaning: "Machine is running",
   },
   END_OK: {
     signal: "End OK",
     direction: "READ",
-    registerKey: "statusRegister",
+    registerKey: "endOkRegister",
     valueKey: "endOkValue",
     defaultMeaning: "Cycle completed OK",
   },
   END_NG: {
     signal: "End NG",
     direction: "READ",
-    registerKey: "statusRegister",
+    registerKey: "endNgRegister",
     valueKey: "endNgValue",
     defaultMeaning: "Cycle completed NG",
   },
@@ -353,6 +354,14 @@ const STANDARD_HANDSHAKE_SIGNAL_META = {
     registerKey: "resetRegister",
     valueKey: "resetValue",
     defaultMeaning: "Reset/clear machine state",
+  },
+  CONFIRMATION: {
+    signal: "Confirmation",
+    direction: "BOTH",
+    registerKey: "heartbeatRegister",
+    valueKey: null,
+    defaultValue: 1,
+    defaultMeaning: "Confirmation",
   },
 };
 
@@ -364,6 +373,7 @@ function normalizeSignalKeyForStandardHandshake(signal) {
   if (["END_OK", "OK_END", "ENDED_OK"].includes(text)) return "END_OK";
   if (["END_NG", "NG_END", "ENDED_NG"].includes(text)) return "END_NG";
   if (text === "RESET") return "RESET";
+  if (["CONFIRMATION", "CONFIRM", "ACK", "ACKNOWLEDGE", "ACKNOWLEDGEMENT"].includes(text)) return "CONFIRMATION";
   return null;
 }
 
@@ -379,12 +389,17 @@ function syncStandardHandshakeMapWithCore(handshakeMap, core = {}) {
   }
 
   for (const [standardKey, meta] of Object.entries(STANDARD_HANDSHAKE_SIGNAL_META)) {
+    const defaultValue = meta.valueKey ? toInt(core?.[meta.valueKey]) : toInt(meta.defaultValue);
+    const registerNo =
+      meta.registerKey === "runningRegister"
+        ? toInt(core?.runningRegister ?? core?.statusRegister)
+        : toInt(core?.[meta.registerKey]);
     const nextRow = {
       id: null,
       signal: meta.signal,
       direction: meta.direction,
-      register: toInt(core?.[meta.registerKey]),
-      value: toInt(core?.[meta.valueKey]),
+      register: registerNo,
+      value: defaultValue,
       meaning: meta.defaultMeaning,
       required: true,
     };
@@ -396,7 +411,7 @@ function syncStandardHandshakeMapWithCore(handshakeMap, core = {}) {
         signal: meta.signal,
         direction: meta.direction,
         register: nextRow.register,
-        value: nextRow.value,
+        value: meta.valueKey ? nextRow.value : toInt(current.value) ?? nextRow.value,
         meaning: normalizeText(current.meaning) || meta.defaultMeaning,
         required: current.required === undefined ? true : Boolean(current.required),
       };
@@ -406,6 +421,71 @@ function syncStandardHandshakeMapWithCore(handshakeMap, core = {}) {
   }
 
   return rows;
+}
+
+function deriveCoreFromHandshakeMap(handshakeMap, core = {}) {
+  const next = {
+    startRegister: toInt(core.startRegister),
+    blockRegister: toInt(core.blockRegister),
+    runningRegister: toInt(core.runningRegister),
+    statusRegister: toInt(core.statusRegister ?? core.runningRegister),
+    endOkRegister: toInt(core.endOkRegister),
+    endNgRegister: toInt(core.endNgRegister),
+    resetRegister: toInt(core.resetRegister),
+    heartbeatRegister: toInt(core.heartbeatRegister),
+    startValue: toInt(core.startValue),
+    blockValue: toInt(core.blockValue),
+    startedValue: toInt(core.startedValue),
+    endOkValue: toInt(core.endOkValue),
+    endNgValue: toInt(core.endNgValue),
+    resetValue: toInt(core.resetValue),
+  };
+
+  const rows = Array.isArray(handshakeMap) ? handshakeMap : [];
+  for (const row of rows) {
+    const key = normalizeSignalKeyForStandardHandshake(row?.signal);
+    if (!key) continue;
+    const registerNo = toInt(row?.register);
+    const valueNo = toInt(row?.value);
+    if (key === "START") {
+      if (registerNo !== null) next.startRegister = registerNo;
+      if (valueNo !== null) next.startValue = valueNo;
+      continue;
+    }
+    if (key === "BLOCK_INTERLOCK") {
+      if (registerNo !== null) next.blockRegister = registerNo;
+      if (valueNo !== null) next.blockValue = valueNo;
+      continue;
+    }
+    if (key === "RUNNING") {
+      if (registerNo !== null) {
+        next.runningRegister = registerNo;
+        next.statusRegister = registerNo;
+      }
+      if (valueNo !== null) next.startedValue = valueNo;
+      continue;
+    }
+    if (key === "END_OK") {
+      if (registerNo !== null) next.endOkRegister = registerNo;
+      if (valueNo !== null) next.endOkValue = valueNo;
+      continue;
+    }
+    if (key === "END_NG") {
+      if (registerNo !== null) next.endNgRegister = registerNo;
+      if (valueNo !== null) next.endNgValue = valueNo;
+      continue;
+    }
+    if (key === "RESET") {
+      if (registerNo !== null) next.resetRegister = registerNo;
+      if (valueNo !== null) next.resetValue = valueNo;
+      continue;
+    }
+    if (key === "CONFIRMATION") {
+      if (registerNo !== null) next.heartbeatRegister = registerNo;
+    }
+  }
+
+  return next;
 }
 
 function normalizePlcSignalMap(rawMap, fallbackRaw = null) {
@@ -527,7 +607,11 @@ function serializePlcConfigSnapshot(config = {}) {
     rangeId: toInt(config.rangeId),
     unitId: toInt(config.unitId),
     startRegister: toInt(config.startRegister),
-    statusRegister: toInt(config.statusRegister),
+    statusRegister: toInt(config.statusRegister ?? config.runningRegister),
+    blockRegister: toInt(config.blockRegister),
+    runningRegister: toInt(config.runningRegister ?? config.statusRegister),
+    endOkRegister: toInt(config.endOkRegister),
+    endNgRegister: toInt(config.endNgRegister),
     partRegister: toInt(config.partRegister),
     stationRegister: toInt(config.stationRegister),
     resetRegister: toInt(config.resetRegister),
@@ -587,24 +671,52 @@ function parseRangeDefaultRegisterMap(rawValue) {
 
 function refreshPlcConfigSnapshot(payload) {
   const existingSnapshot = parsePlcRegistersSnapshot(payload.plc_registers) || {};
+  const preservedCore = deriveCoreFromHandshakeMap(existingSnapshot.handshakeMap, {
+    startRegister: toInt(payload.plc_start_register ?? existingSnapshot.startRegister),
+    blockRegister: toInt(existingSnapshot.blockRegister),
+    runningRegister: toInt(
+      existingSnapshot.runningRegister ??
+        existingSnapshot.statusRegister ??
+        payload.plc_status_register
+    ),
+    statusRegister: toInt(
+      payload.plc_status_register ??
+        existingSnapshot.statusRegister ??
+        existingSnapshot.runningRegister
+    ),
+    endOkRegister: toInt(existingSnapshot.endOkRegister),
+    endNgRegister: toInt(existingSnapshot.endNgRegister),
+    resetRegister: toInt(payload.plc_reset_register ?? existingSnapshot.resetRegister),
+    heartbeatRegister: toInt(payload.plc_heartbeat_register ?? existingSnapshot.heartbeatRegister),
+    startValue: toInt(payload.plc_start_value ?? existingSnapshot.startValue),
+    blockValue: toInt(payload.plc_block_value ?? existingSnapshot.blockValue),
+    startedValue: toInt(payload.plc_started_value ?? existingSnapshot.startedValue),
+    endOkValue: toInt(payload.plc_end_ok_value ?? existingSnapshot.endOkValue),
+    endNgValue: toInt(payload.plc_end_ng_value ?? existingSnapshot.endNgValue),
+    resetValue: toInt(payload.plc_reset_value ?? existingSnapshot.resetValue),
+  });
   payload.plc_registers =
     serializePlcConfigSnapshot({
       rangeId: payload.plc_range_id,
       unitId: payload.plc_unit_id,
-      startRegister: payload.plc_start_register,
-      statusRegister: payload.plc_status_register,
+      startRegister: preservedCore.startRegister,
+      statusRegister: preservedCore.statusRegister ?? preservedCore.runningRegister,
+      blockRegister: preservedCore.blockRegister,
+      runningRegister: preservedCore.runningRegister ?? preservedCore.statusRegister,
+      endOkRegister: preservedCore.endOkRegister,
+      endNgRegister: preservedCore.endNgRegister,
       partRegister: payload.plc_part_register,
       stationRegister: payload.plc_station_register,
-      resetRegister: payload.plc_reset_register,
-      startValue: payload.plc_start_value,
-      startedValue: payload.plc_started_value,
-      endOkValue: payload.plc_end_ok_value,
-      endNgValue: payload.plc_end_ng_value,
-      blockValue: payload.plc_block_value,
-      resetValue: payload.plc_reset_value,
+      resetRegister: preservedCore.resetRegister,
+      startValue: preservedCore.startValue,
+      startedValue: preservedCore.startedValue,
+      endOkValue: preservedCore.endOkValue,
+      endNgValue: preservedCore.endNgValue,
+      blockValue: preservedCore.blockValue,
+      resetValue: preservedCore.resetValue,
       testTimeoutMs: payload.plc_test_timeout_ms,
       testRetryCount: payload.plc_test_retry_count,
-      heartbeatRegister: payload.plc_heartbeat_register,
+      heartbeatRegister: preservedCore.heartbeatRegister,
       heartbeatStaleMs: payload.plc_heartbeat_stale_ms,
       cycleTimeSec: toInt(existingSnapshot.cycleTimeSec),
       loadingTimeSec: toInt(existingSnapshot.loadingTimeSec),
@@ -704,7 +816,16 @@ function toMachinePayload(body = {}, existingMachine = null) {
   const protocol = toProtocol(body.plcProtocol ?? body.plc_protocol ?? existingMachine?.plc_protocol);
   const plcConfigInput = getPlcConfigInput(body);
   const existingSnapshot = parsePlcRegistersSnapshot(existingMachine?.plc_registers) || {};
-  const parsedRegisters = parsePlcRegisters(body.plcRegisters ?? body.plc_registers ?? existingMachine?.plc_registers);
+  const hasIncomingPlcRegisters =
+    Object.prototype.hasOwnProperty.call(body, "plcRegisters") ||
+    Object.prototype.hasOwnProperty.call(body, "plc_registers");
+  const incomingRegistersSnapshot = hasIncomingPlcRegisters
+    ? parsePlcRegistersSnapshot(body.plcRegisters ?? body.plc_registers) || {}
+    : null;
+  const snapshotFallback = incomingRegistersSnapshot || existingSnapshot;
+  const parsedRegisters = parsePlcRegisters(
+    hasIncomingPlcRegisters ? body.plcRegisters ?? body.plc_registers : existingMachine?.plc_registers
+  );
   const plcSignalMap = normalizePlcSignalMap(
     body.plcSignalMap ?? body.plc_signal_map ?? plcConfigInput.signalMap,
     existingMachine?.plc_signal_map
@@ -723,10 +844,24 @@ function toMachinePayload(body = {}, existingMachine = null) {
     toInt(body.plcStartRegister ?? body.plc_start_register ?? plcConfigInput.startRegister) ??
     parsedRegisters.parsed.start ??
     toInt(existingMachine?.plc_start_register);
+  const plcBlockRegister =
+    toInt(body.plcBlockRegister ?? body.plc_block_register ?? plcConfigInput.blockRegister) ??
+    toInt(existingMachine?.plc_block_register);
+  const plcRunningRegister =
+    toInt(body.plcRunningRegister ?? body.plc_running_register ?? plcConfigInput.runningRegister) ??
+    toInt(existingMachine?.plc_running_register);
+  const plcEndOkRegister =
+    toInt(body.plcEndOkRegister ?? body.plc_end_ok_register ?? plcConfigInput.endOkRegister) ??
+    toInt(existingMachine?.plc_end_ok_register);
+  const plcEndNgRegister =
+    toInt(body.plcEndNgRegister ?? body.plc_end_ng_register ?? plcConfigInput.endNgRegister) ??
+    toInt(existingMachine?.plc_end_ng_register);
   const plcStatusRegister =
     toInt(body.plcStatusRegister ?? body.plc_status_register ?? plcConfigInput.statusRegister) ??
+    toInt(plcConfigInput.runningRegister) ??
     parsedRegisters.parsed.status ??
-    toInt(existingMachine?.plc_status_register);
+    toInt(existingMachine?.plc_status_register) ??
+    plcRunningRegister;
   const plcPartRegister =
     toInt(body.plcPartRegister ?? body.plc_part_register ?? plcConfigInput.partRegister) ??
     parsedRegisters.parsed.part ??
@@ -793,7 +928,7 @@ function toMachinePayload(body = {}, existingMachine = null) {
         body.cycle_time_sec ??
         plcConfigInput.cycleTimeSec ??
         plcConfigInput.cycle_time_sec ??
-        existingSnapshot.cycleTimeSec
+        snapshotFallback.cycleTimeSec
     ) ?? 0;
   const loadingTimeSec =
     toInt(
@@ -801,62 +936,95 @@ function toMachinePayload(body = {}, existingMachine = null) {
         body.loading_time_sec ??
         plcConfigInput.loadingTimeSec ??
         plcConfigInput.loading_time_sec ??
-        existingSnapshot.loadingTimeSec
+        snapshotFallback.loadingTimeSec
     ) ?? 0;
-  const parsedHandshakeMap = normalizePlcHandshakeMap(
+  const incomingHandshakeSource =
     body.plcHandshakeMap ??
-      body.plc_handshake_map ??
-      plcConfigInput.handshakeMap ??
-      plcConfigInput.plcHandshakeMap,
-    existingSnapshot.handshakeMap
+    body.plc_handshake_map ??
+    plcConfigInput.handshakeMap ??
+    plcConfigInput.plcHandshakeMap;
+  const hasIncomingHandshakeMap = incomingHandshakeSource !== undefined;
+  const parsedHandshakeMap = normalizePlcHandshakeMap(
+    incomingHandshakeSource,
+    snapshotFallback.handshakeMap
   );
-  const plcHandshakeMap = syncStandardHandshakeMapWithCore(parsedHandshakeMap, {
+  const baseCore = {
     startRegister: plcStartRegister,
+    blockRegister: plcBlockRegister,
+    runningRegister: plcRunningRegister,
     statusRegister: plcStatusRegister,
+    endOkRegister: plcEndOkRegister,
+    endNgRegister: plcEndNgRegister,
     resetRegister: plcResetRegister,
+    heartbeatRegister: plcHeartbeatRegister,
     startValue: plcStartValue,
+    blockValue: plcBlockValue,
     startedValue: plcStartedValue,
     endOkValue: plcEndOkValue,
     endNgValue: plcEndNgValue,
-    blockValue: plcBlockValue,
     resetValue: plcResetValue,
-  });
+  };
+  const resolvedCore = hasIncomingHandshakeMap
+    ? deriveCoreFromHandshakeMap(parsedHandshakeMap, baseCore)
+    : baseCore;
+  const plcHandshakeMap =
+    Array.isArray(parsedHandshakeMap) && parsedHandshakeMap.length > 0
+      ? syncStandardHandshakeMapWithCore(parsedHandshakeMap, resolvedCore)
+      : syncStandardHandshakeMapWithCore(null, {
+          startRegister: resolvedCore.startRegister,
+          blockRegister: resolvedCore.blockRegister,
+          runningRegister: resolvedCore.runningRegister,
+          statusRegister: resolvedCore.statusRegister,
+          endOkRegister: resolvedCore.endOkRegister,
+          endNgRegister: resolvedCore.endNgRegister,
+          resetRegister: resolvedCore.resetRegister,
+          heartbeatRegister: resolvedCore.heartbeatRegister,
+          startValue: resolvedCore.startValue,
+          startedValue: resolvedCore.startedValue,
+          endOkValue: resolvedCore.endOkValue,
+          endNgValue: resolvedCore.endNgValue,
+          blockValue: resolvedCore.blockValue,
+          resetValue: resolvedCore.resetValue,
+        });
   const spcConfigInput =
     body.spcConfig ??
     body.spc_config ??
     plcConfigInput.spcConfig ??
     plcConfigInput.spc_config ??
-    existingSnapshot.spcConfig ??
+    snapshotFallback.spcConfig ??
     {};
   const spcConfig = normalizeSpcConfig(spcConfigInput);
 
-  const plcRegistersSnapshot =
-    parsedRegisters.raw ||
-    serializePlcConfigSnapshot({
-      rangeId: plcRangeId,
-      unitId: plcUnitId,
-      startRegister: plcStartRegister,
-      statusRegister: plcStatusRegister,
-      partRegister: plcPartRegister,
-      stationRegister: plcStationRegister,
-      resetRegister: plcResetRegister,
-      startValue: plcStartValue,
-      startedValue: plcStartedValue,
-      endOkValue: plcEndOkValue,
-      endNgValue: plcEndNgValue,
-      blockValue: plcBlockValue,
-      resetValue: plcResetValue,
-      testTimeoutMs: plcTestTimeoutMs,
-      testRetryCount: plcTestRetryCount,
-      heartbeatRegister: plcHeartbeatRegister,
-      heartbeatStaleMs: plcHeartbeatStaleMs,
-      cycleTimeSec,
-      loadingTimeSec,
-      handshakeMap: plcHandshakeMap,
-      slmpDevice: plcSlmpDevice,
-      slmpFrameMode: plcSlmpFrameMode,
-      spcConfig,
-    });
+  const serializedSnapshot = serializePlcConfigSnapshot({
+    rangeId: plcRangeId,
+    unitId: plcUnitId,
+    startRegister: resolvedCore.startRegister,
+    statusRegister: resolvedCore.statusRegister ?? resolvedCore.runningRegister,
+    blockRegister: resolvedCore.blockRegister,
+    runningRegister: resolvedCore.runningRegister,
+    endOkRegister: resolvedCore.endOkRegister,
+    endNgRegister: resolvedCore.endNgRegister,
+    partRegister: plcPartRegister,
+    stationRegister: plcStationRegister,
+    resetRegister: resolvedCore.resetRegister,
+    startValue: resolvedCore.startValue,
+    startedValue: resolvedCore.startedValue,
+    endOkValue: resolvedCore.endOkValue,
+    endNgValue: resolvedCore.endNgValue,
+    blockValue: resolvedCore.blockValue,
+    resetValue: resolvedCore.resetValue,
+    testTimeoutMs: plcTestTimeoutMs,
+    testRetryCount: plcTestRetryCount,
+    heartbeatRegister: resolvedCore.heartbeatRegister,
+    heartbeatStaleMs: plcHeartbeatStaleMs,
+    cycleTimeSec,
+    loadingTimeSec,
+    handshakeMap: plcHandshakeMap,
+    slmpDevice: plcSlmpDevice,
+    slmpFrameMode: plcSlmpFrameMode,
+    spcConfig,
+  });
+  const plcRegistersSnapshot = serializedSnapshot || parsedRegisters.raw || existingMachine?.plc_registers || null;
 
   const machineIp =
     normalizeText(body.machineIp ?? body.machine_ip) || plcIp || normalizeText(existingMachine?.machine_ip) || null;
@@ -881,20 +1049,20 @@ function toMachinePayload(body = {}, existingMachine = null) {
     plc_registers: plcRegistersSnapshot,
     plc_signal_map: plcSignalMap,
     plc_unit_id: plcUnitId,
-    plc_start_register: plcStartRegister,
-    plc_status_register: plcStatusRegister,
+    plc_start_register: resolvedCore.startRegister,
+    plc_status_register: resolvedCore.statusRegister ?? resolvedCore.runningRegister,
     plc_part_register: plcPartRegister,
     plc_station_register: plcStationRegister,
-    plc_reset_register: plcResetRegister,
-    plc_start_value: plcStartValue,
-    plc_started_value: plcStartedValue,
-    plc_end_ok_value: plcEndOkValue,
-    plc_end_ng_value: plcEndNgValue,
-    plc_block_value: plcBlockValue,
-    plc_reset_value: plcResetValue,
+    plc_reset_register: resolvedCore.resetRegister,
+    plc_start_value: resolvedCore.startValue,
+    plc_started_value: resolvedCore.startedValue,
+    plc_end_ok_value: resolvedCore.endOkValue,
+    plc_end_ng_value: resolvedCore.endNgValue,
+    plc_block_value: resolvedCore.blockValue,
+    plc_reset_value: resolvedCore.resetValue,
     plc_test_timeout_ms: plcTestTimeoutMs,
     plc_test_retry_count: plcTestRetryCount,
-    plc_heartbeat_register: plcHeartbeatRegister,
+    plc_heartbeat_register: resolvedCore.heartbeatRegister,
     plc_heartbeat_stale_ms: plcHeartbeatStaleMs,
     plc_slmp_device: plcSlmpDevice,
     plc_slmp_frame_mode: plcSlmpFrameMode,
@@ -906,16 +1074,26 @@ function toMachinePayload(body = {}, existingMachine = null) {
 }
 
 function toMachineResponse(machine) {
+  const bypassState = getMachineBypass(machine.id);
   const status = machine.status || (machine.is_active ? "ACTIVE" : "INACTIVE");
   const plcRegisters = buildRegistersFallback(machine);
   const snapshot = parsePlcRegistersSnapshot(machine.plc_registers) || {};
   const cycleTimeSec = toInt(snapshot.cycleTimeSec) ?? 0;
   const loadingTimeSec = toInt(snapshot.loadingTimeSec) ?? 0;
+  const savedHandshakeMap = normalizePlcHandshakeMap(snapshot.handshakeMap, null);
   const plcConfig = {
     rangeId: machine.plc_range_id,
     unitId: machine.plc_unit_id ?? 1,
     startRegister: machine.plc_start_register,
-    statusRegister: machine.plc_status_register,
+    statusRegister:
+      machine.plc_status_register ??
+      toInt(snapshot.statusRegister ?? snapshot.runningRegister),
+    blockRegister: toInt(snapshot.blockRegister),
+    runningRegister:
+      toInt(snapshot.runningRegister ?? snapshot.statusRegister) ??
+      machine.plc_status_register,
+    endOkRegister: toInt(snapshot.endOkRegister),
+    endNgRegister: toInt(snapshot.endNgRegister),
     partRegister: machine.plc_part_register,
     stationRegister: machine.plc_station_register,
     resetRegister: machine.plc_reset_register,
@@ -932,17 +1110,20 @@ function toMachineResponse(machine) {
     cycleTimeSec,
     loadingTimeSec,
     handshakeMap:
-      syncStandardHandshakeMapWithCore(normalizePlcHandshakeMap(snapshot.handshakeMap, null), {
-        startRegister: machine.plc_start_register,
-        statusRegister: machine.plc_status_register,
-        resetRegister: machine.plc_reset_register,
-        startValue: machine.plc_start_value ?? 1,
-        startedValue: machine.plc_started_value ?? 2,
-        endOkValue: machine.plc_end_ok_value ?? 3,
-        endNgValue: machine.plc_end_ng_value ?? 4,
-        blockValue: machine.plc_block_value ?? 2,
-        resetValue: machine.plc_reset_value ?? 9,
-      }) || [],
+      (Array.isArray(savedHandshakeMap) && savedHandshakeMap.length > 0
+        ? savedHandshakeMap
+        : syncStandardHandshakeMapWithCore(null, {
+            startRegister: machine.plc_start_register,
+            runningRegister: machine.plc_status_register,
+            statusRegister: machine.plc_status_register,
+            resetRegister: machine.plc_reset_register,
+            startValue: machine.plc_start_value ?? 1,
+            startedValue: machine.plc_started_value ?? 2,
+            endOkValue: machine.plc_end_ok_value ?? 3,
+            endNgValue: machine.plc_end_ng_value ?? 4,
+            blockValue: machine.plc_block_value ?? 2,
+            resetValue: machine.plc_reset_value ?? 9,
+          })) || [],
     slmpDevice: machine.plc_slmp_device ?? null,
     slmpFrameMode: extractSlmpFrameMode(machine.plc_registers) || "AUTO",
     spcConfig: normalizeSpcConfig(snapshot.spcConfig || {}),
@@ -972,6 +1153,12 @@ function toMachineResponse(machine) {
     plcUnitId: machine.plc_unit_id,
     plcStartRegister: machine.plc_start_register,
     plcStatusRegister: machine.plc_status_register,
+    plcBlockRegister: toInt(snapshot.blockRegister),
+    plcRunningRegister:
+      toInt(snapshot.runningRegister ?? snapshot.statusRegister) ??
+      machine.plc_status_register,
+    plcEndOkRegister: toInt(snapshot.endOkRegister),
+    plcEndNgRegister: toInt(snapshot.endNgRegister),
     plcPartRegister: machine.plc_part_register,
     plcStationRegister: machine.plc_station_register,
     plcResetRegister: machine.plc_reset_register,
@@ -994,6 +1181,10 @@ function toMachineResponse(machine) {
     runningPartId: machine.running_part_id || null,
     runningStationNo: machine.running_station_no || null,
     runningStartedAt: machine.running_started_at || null,
+    machineBypassEnabled: Boolean(bypassState?.enabled),
+    machineBypassReason: bypassState?.reason || null,
+    machineBypassUpdatedAt: bypassState?.updatedAt || null,
+    machineBypassUpdatedBy: bypassState?.updatedBy || null,
     createdAt: machine.createdAt,
     updatedAt: machine.updatedAt,
   };
@@ -1072,15 +1263,26 @@ async function validateRangeAndRegisterUsage(payload, excludeMachineId = null) {
   }
 
   const selectedRegisterMap = new Map();
-  const addSelectedRegister = (registerWord, label) => {
+  const coreRoleTokenByLabel = {
+    startRegister: "handshake:START_GROUP",
+    statusRegister: "handshake:STATUS_GROUP",
+    resetRegister: "handshake:RESET_GROUP",
+    heartbeatRegister: "handshake:CONFIRMATION_GROUP",
+    partRegister: "core:partRegister",
+    stationRegister: "core:stationRegister",
+  };
+  const addSelectedRegister = (registerWord, roleToken, displayLabel) => {
     if (registerWord < range.range_start || registerWord > range.range_end) {
-      throw new Error(`${label} (${registerWord}) is outside selected range ${range.range_start}-${range.range_end}`);
+      throw new Error(`${displayLabel} (${registerWord}) is outside selected range ${range.range_start}-${range.range_end}`);
     }
     const existingRole = selectedRegisterMap.get(registerWord);
-    if (existingRole && existingRole !== label) {
-      throw new Error(`Register ${registerWord} is assigned twice (${existingRole} and ${label})`);
+    if (existingRole && existingRole.roleToken !== roleToken) {
+      throw new Error(`Register ${registerWord} is assigned twice (${existingRole.displayLabel} and ${displayLabel})`);
     }
-    selectedRegisterMap.set(registerWord, label);
+    selectedRegisterMap.set(registerWord, {
+      roleToken,
+      displayLabel,
+    });
   };
 
   for (const entry of REGISTER_COLUMN_META) {
@@ -1091,7 +1293,8 @@ async function validateRangeAndRegisterUsage(payload, excludeMachineId = null) {
     const spanWords =
       protocol === "SLMP" && ["plc_part_register", "plc_station_register"].includes(entry.column) ? 2 : 1;
     for (let offset = 0; offset < spanWords; offset += 1) {
-      addSelectedRegister(registerNo + offset, entry.label);
+      const roleToken = coreRoleTokenByLabel[entry.label] || `core:${entry.label}`;
+      addSelectedRegister(registerNo + offset, roleToken, entry.label);
     }
   }
 
@@ -1101,7 +1304,34 @@ async function validateRangeAndRegisterUsage(payload, excludeMachineId = null) {
     if (registerNo === null) continue;
     const spanWords = Math.max(1, toInt(entry.spanWords) || 1);
     for (let offset = 0; offset < spanWords; offset += 1) {
-      addSelectedRegister(registerNo + offset, entry.label || "signalRegister");
+      const displayLabel = entry.label || "signalRegister";
+      addSelectedRegister(registerNo + offset, `aux:${displayLabel}`, displayLabel);
+    }
+  }
+
+  const incomingHandshakeEntries = buildHandshakeRegisterEntries(payload);
+  const handshakeRegisterOwner = new Map();
+  for (const entry of incomingHandshakeEntries) {
+    const registerNo = toInt(entry.register);
+    if (registerNo === null) continue;
+    const spanWords = Math.max(1, toInt(entry.spanWords) || 1);
+    for (let offset = 0; offset < spanWords; offset += 1) {
+      const registerWord = registerNo + offset;
+      const existingOwner = handshakeRegisterOwner.get(registerWord);
+      if (existingOwner && existingOwner.groupKey !== entry.groupKey) {
+        throw new Error(
+          `Handshake register ${registerWord} is duplicated across groups (${existingOwner.label} and ${entry.label}).`
+        );
+      }
+      handshakeRegisterOwner.set(registerWord, { label: entry.label, groupKey: entry.groupKey });
+    }
+  }
+  for (const entry of incomingHandshakeEntries) {
+    const registerNo = toInt(entry.register);
+    if (registerNo === null) continue;
+    const spanWords = Math.max(1, toInt(entry.spanWords) || 1);
+    for (let offset = 0; offset < spanWords; offset += 1) {
+      addSelectedRegister(registerNo + offset, `handshake:${entry.groupKey}`, entry.label);
     }
   }
 
@@ -1136,7 +1366,7 @@ async function validateRangeAndRegisterUsage(payload, excludeMachineId = null) {
       for (let offset = 0; offset < spanWords; offset += 1) {
         const registerWord = registerNo + offset;
         if (!selectedRegisterMap.has(registerWord)) continue;
-        const incomingRole = selectedRegisterMap.get(registerWord);
+        const incomingRole = selectedRegisterMap.get(registerWord)?.displayLabel || "incoming register";
         throw new Error(
           `Register ${registerWord} already used by ${machine.machine_name} (${machine.operation_no}) as ${entry.label}. Conflicts with ${incomingRole}.`
         );
@@ -1151,7 +1381,22 @@ async function validateRangeAndRegisterUsage(payload, excludeMachineId = null) {
       for (let offset = 0; offset < spanWords; offset += 1) {
         const registerWord = registerNo + offset;
         if (!selectedRegisterMap.has(registerWord)) continue;
-        const incomingRole = selectedRegisterMap.get(registerWord);
+        const incomingRole = selectedRegisterMap.get(registerWord)?.displayLabel || "incoming register";
+        throw new Error(
+          `Register ${registerWord} already used by ${machine.machine_name} (${machine.operation_no}) as ${entry.label}. Conflicts with ${incomingRole}.`
+        );
+      }
+    }
+
+    const peerHandshakeEntries = buildHandshakeRegisterEntries(machine);
+    for (const entry of peerHandshakeEntries) {
+      const registerNo = toInt(entry.register);
+      if (registerNo === null) continue;
+      const spanWords = Math.max(1, toInt(entry.spanWords) || 1);
+      for (let offset = 0; offset < spanWords; offset += 1) {
+        const registerWord = registerNo + offset;
+        if (!selectedRegisterMap.has(registerWord)) continue;
+        const incomingRole = selectedRegisterMap.get(registerWord)?.displayLabel || "incoming register";
         throw new Error(
           `Register ${registerWord} already used by ${machine.machine_name} (${machine.operation_no}) as ${entry.label}. Conflicts with ${incomingRole}.`
         );
@@ -1233,6 +1478,40 @@ function buildAuxRegisterEntries(machine = {}) {
         device: normalizeUpper(spcConfig.plcAckDevice) || resolveSlmpDeviceForSignal("SPC_ACK", machine),
       });
     }
+  }
+
+  return entries;
+}
+
+function getHandshakeSignalGroup(signal) {
+  const normalized = normalizeUpper(signal).replace(/[^A-Z0-9]+/g, "_");
+  if (normalized === "START" || normalized === "BLOCK_INTERLOCK") return "START_GROUP";
+  if (normalized === "RUNNING" || normalized === "END_OK" || normalized === "END_NG") return "STATUS_GROUP";
+  if (normalized === "RESET") return "RESET_GROUP";
+  if (["CONFIRMATION", "CONFIRM", "ACK", "ACKNOWLEDGE", "ACKNOWLEDGEMENT"].includes(normalized)) {
+    return "CONFIRMATION_GROUP";
+  }
+  return `CUSTOM_${normalized || "UNNAMED"}`;
+}
+
+function buildHandshakeRegisterEntries(machine = {}) {
+  const snapshot = parsePlcRegistersSnapshot(machine.plc_registers) || {};
+  const handshakeMap = normalizePlcHandshakeMap(snapshot.handshakeMap, null) || [];
+  const entries = [];
+
+  for (let index = 0; index < handshakeMap.length; index += 1) {
+    const row = handshakeMap[index];
+    const register = toInt(row?.register);
+    if (register === null) continue;
+    const signal = normalizeText(row?.signal || row?.label || `Handshake ${index + 1}`) || `Handshake ${index + 1}`;
+    const groupKey = getHandshakeSignalGroup(signal);
+    entries.push({
+      register,
+      spanWords: 1,
+      signal,
+      groupKey,
+      label: `Handshake ${signal}`,
+    });
   }
 
   return entries;
@@ -1706,6 +1985,24 @@ exports.writePlcValue = async (req, res) => {
       COMPLETE: toInt(payload.plc_station_register),
       RESET: toInt(payload.plc_reset_register),
     };
+    const configuredSignals = parsePlcSignalMap(payload.plc_signal_map) || [];
+    for (const row of configuredSignals) {
+      const key = normalizeUpper(row?.key || row?.label || "");
+      const registerNo = toInt(row?.register);
+      if (!key || registerNo === null) continue;
+      if (!Object.prototype.hasOwnProperty.call(signalRegisterMap, key)) {
+        signalRegisterMap[key] = registerNo;
+      }
+    }
+    const handshakeEntries = buildHandshakeRegisterEntries(payload);
+    for (const row of handshakeEntries) {
+      const key = normalizeUpper(String(row?.signal || "").replace(/[^A-Z0-9]+/g, "_"));
+      const registerNo = toInt(row?.register);
+      if (!key || registerNo === null) continue;
+      if (!Object.prototype.hasOwnProperty.call(signalRegisterMap, key)) {
+        signalRegisterMap[key] = registerNo;
+      }
+    }
 
     let registerNo = toInt(req.body.registerNo ?? req.body.register ?? req.body.address);
     if (registerNo === null && signalKey) {

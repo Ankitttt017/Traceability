@@ -1160,6 +1160,16 @@ const server = net.createServer((socket) => {
   });
 });
 
+server.on("error", (error) => {
+  if (error?.code === "EADDRINUSE") {
+    console.warn(
+      `[TCP] Port ${tcpPort} is already in use. TCP scanner listener is disabled for this process.`
+    );
+    return;
+  }
+  console.error("[TCP] Server failed:", error.message);
+});
+
 server.listen(tcpPort, () => {
   console.log(`TCP Server Running on Port ${tcpPort}`);
 });

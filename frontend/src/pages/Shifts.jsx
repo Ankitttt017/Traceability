@@ -17,6 +17,60 @@ const Label = ({ children, required }) => (
 
 const SHIFT_COLORS = ["bg-primary/10 text-primary border-primary/20", "bg-accent/10 text-accent border-accent/20", "bg-warning/10 text-warning border-warning/20", "bg-secondary/10 text-secondary border-secondary/20"];
 
+const parseTimeParts = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return { hour: value.getUTCHours(), minute: value.getUTCMinutes() };
+  }
+
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const directMatch = raw.match(/^(\d{1,2}):(\d{2})/);
+  if (directMatch) {
+    const hour = Number(directMatch[1]);
+    const minute = Number(directMatch[2]);
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      return { hour, minute };
+    }
+  }
+
+  const isoMatch = raw.match(/T(\d{2}):(\d{2})/i);
+  if (isoMatch) {
+    const hour = Number(isoMatch[1]);
+    const minute = Number(isoMatch[2]);
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      return { hour, minute };
+    }
+  }
+
+  const parsedDate = new Date(raw);
+  if (Number.isFinite(parsedDate.getTime())) {
+    return { hour: parsedDate.getUTCHours(), minute: parsedDate.getUTCMinutes() };
+  }
+
+  return null;
+};
+
+const formatHHmm = (value) => {
+  const parts = parseTimeParts(value);
+  if (!parts) return "--:--";
+  return `${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}`;
+};
+
+const formatTimeInputValue = (value) => {
+  const parts = parseTimeParts(value);
+  if (!parts) return "";
+  return `${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}`;
+};
+
+const toMinutes = (value) => {
+  const parts = parseTimeParts(value);
+  if (!parts) return null;
+  return parts.hour * 60 + parts.minute;
+};
+
 const Shifts = () => {
   const [shifts, setShifts] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -49,8 +103,8 @@ const Shifts = () => {
     setForm({
       shiftName: shift.shiftName || "",
       shiftCode: shift.shiftCode || "",
-      startTime: String(shift.startTime || "").slice(0, 5),
-      endTime: String(shift.endTime || "").slice(0, 5),
+      startTime: formatTimeInputValue(shift.startTime),
+      endTime: formatTimeInputValue(shift.endTime),
       isActive: Boolean(shift.isActive),
     });
     setShowForm(true);
@@ -92,9 +146,10 @@ const Shifts = () => {
 
   const formatDuration = (start, end) => {
     if (!start || !end) return "-";
-    const [sh, sm] = start.split(":").map(Number);
-    const [eh, em] = end.split(":").map(Number);
-    let mins = (eh * 60 + em) - (sh * 60 + sm);
+    const startMins = toMinutes(start);
+    const endMins = toMinutes(end);
+    if (startMins === null || endMins === null) return "-";
+    let mins = endMins - startMins;
     if (mins < 0) mins += 1440;
     const h = Math.floor(mins / 60), m = mins % 60;
     return `${h}h${m > 0 ? ` ${m}m` : ""}`;
@@ -138,10 +193,10 @@ const Shifts = () => {
               </div>
               <p className="font-bold text-text-main mt-2">{shift.shiftName}</p>
               <p className="text-sm text-text-muted font-mono mt-1">
-                {String(shift.startTime || "").slice(0, 5)} → {String(shift.endTime || "").slice(0, 5)}
+                {formatHHmm(shift.startTime)} {" -> "} {formatHHmm(shift.endTime)}
               </p>
               <p className="text-xs text-text-muted mt-1">
-                Duration: <span className="text-text-main font-semibold">{formatDuration(String(shift.startTime || "").slice(0, 5), String(shift.endTime || "").slice(0, 5))}</span>
+                Duration: <span className="text-text-main font-semibold">{formatDuration(shift.startTime, shift.endTime)}</span>
               </p>
             </div>
           ))}
@@ -182,7 +237,7 @@ const Shifts = () => {
               <button type="button" onClick={resetForm} className="flex-1 px-4 py-2.5 border border-border rounded-xl text-text-muted hover:bg-bg-dark text-sm transition-colors">Cancel</button>
               <button type="submit" disabled={loading} className="flex-1 px-4 py-2.5 bg-primary text-on-strong font-semibold rounded-xl text-sm inline-flex items-center justify-center gap-2 hover:brightness-110 disabled:opacity-50">
                 {loading ? <RefreshCw size={14} className="animate-spin" /> : editingId ? <Save size={14} /> : <Plus size={14} />}
-                {loading ? "Saving…" : editingId ? "Update" : "Create"}
+                {loading ? "Saving..." : editingId ? "Update" : "Create"}
               </button>
             </div>
           </form>
@@ -209,9 +264,9 @@ const Shifts = () => {
                 <tr key={shift.id} className="hover:bg-bg-dark/30 transition-colors">
                   <td className="px-5 py-4 font-medium text-text-main">{shift.shiftName}</td>
                   <td className="px-5 py-4"><span className={`text-xs font-bold px-2.5 py-1 rounded-lg border ${SHIFT_COLORS[i % SHIFT_COLORS.length]}`}>{shift.shiftCode}</span></td>
-                  <td className="px-5 py-4 text-sm font-mono text-text-main">{String(shift.startTime || "").slice(0, 5)}</td>
-                  <td className="px-5 py-4 text-sm font-mono text-text-main">{String(shift.endTime || "").slice(0, 5)}</td>
-                  <td className="px-5 py-4 text-sm text-text-muted">{formatDuration(String(shift.startTime || "").slice(0, 5), String(shift.endTime || "").slice(0, 5))}</td>
+                  <td className="px-5 py-4 text-sm font-mono text-text-main">{formatHHmm(shift.startTime)}</td>
+                  <td className="px-5 py-4 text-sm font-mono text-text-main">{formatHHmm(shift.endTime)}</td>
+                  <td className="px-5 py-4 text-sm text-text-muted">{formatDuration(shift.startTime, shift.endTime)}</td>
                   <td className="px-5 py-4">
                     <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold ${shift.isActive ? "bg-accent/10 text-accent border border-accent/20" : "bg-bg-dark text-text-muted border border-border"}`}>
                       {shift.isActive ? "Active" : "Inactive"}

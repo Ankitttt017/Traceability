@@ -1,5 +1,6 @@
 const { Sequelize } = require("sequelize");
 const Shift = require("../models/Shift");
+const { normalizeTimeValue } = require("../utils/time");
 
 function toPayload(body = {}) {
   return {
@@ -7,8 +8,8 @@ function toPayload(body = {}) {
     shift_code: String(body.shiftCode ?? body.shift_code ?? "")
       .trim()
       .toUpperCase(),
-    start_time: String(body.startTime ?? body.start_time ?? "").trim(),
-    end_time: String(body.endTime ?? body.end_time ?? "").trim(),
+    start_time: normalizeTimeValue(body.startTime ?? body.start_time, { includeSeconds: true }),
+    end_time: normalizeTimeValue(body.endTime ?? body.end_time, { includeSeconds: true }),
     is_active:
       body.isActive === undefined && body.is_active === undefined
         ? true
@@ -21,8 +22,8 @@ function toResponse(shift) {
     id: shift.id,
     shiftName: shift.shift_name,
     shiftCode: shift.shift_code,
-    startTime: shift.start_time,
-    endTime: shift.end_time,
+    startTime: normalizeTimeValue(shift.start_time, { includeSeconds: true }),
+    endTime: normalizeTimeValue(shift.end_time, { includeSeconds: true }),
     isActive: shift.is_active,
     createdAt: shift.createdAt,
     updatedAt: shift.updatedAt,

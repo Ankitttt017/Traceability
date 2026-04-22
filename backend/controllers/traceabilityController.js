@@ -31,6 +31,7 @@ const {
   isMachineBypassEnabled,
 } = require("../services/machineBypassService");
 const { normalizeIp, sameIp } = require("../utils/networkAddress");
+const { normalizeTimeValue, toMinutes: toShiftMinutes } = require("../utils/time");
 
 const IO_SNAPSHOT_MIN_INTERVAL_MS = Math.max(Number(process.env.IO_SNAPSHOT_MIN_INTERVAL_MS || 2500), 1000);
 const IO_SNAPSHOT_CACHE_MAX_AGE_MS = Math.max(
@@ -195,6 +196,31 @@ function normalizeSignalDirection(value, fallback = "PLC -> PC") {
   return fallback;
 }
 
+function normalizeHandshakeDirectionToSignalDirection(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (["WRITE", "PC -> PLC", "PC_TO_PLC", "PC->PLC"].includes(normalized)) return "PC -> PLC";
+  if (["BOTH", "BIDIRECTIONAL", "PLC<->PC", "PLC <-> PC"].includes(normalized)) return "BIDIRECTIONAL";
+  return "PLC -> PC";
+}
+
+function parseMachineHandshakeMap(machine) {
+  if (!machine?.plc_registers) return [];
+  try {
+    const snapshot = typeof machine.plc_registers === "string" ? JSON.parse(machine.plc_registers) : machine.plc_registers;
+    const rows = Array.isArray(snapshot?.handshakeMap) ? snapshot.handshakeMap : [];
+    return rows
+      .map((row) => ({
+        signal: String(row?.signal || row?.label || "").trim(),
+        register: toIntegerOrNull(row?.register ?? row?.registerNo ?? row?.address),
+        direction: normalizeHandshakeDirectionToSignalDirection(row?.direction),
+        meaning: String(row?.meaning || row?.purpose || row?.description || "").trim() || null,
+      }))
+      .filter((row) => row.signal && row.register !== null);
+  } catch (_error) {
+    return [];
+  }
+}
+
 function getDefaultIoSignals(machine) {
   return [
     {
@@ -232,10 +258,51 @@ function getDefaultIoSignals(machine) {
   ];
 }
 
+function appendCustomHandshakeSignals(machine, rows = []) {
+  const output = Array.isArray(rows) ? [...rows] : [];
+  const existingKeys = new Set(output.map((row) => toUpper(row?.key)));
+  const handshakeRows = parseMachineHandshakeMap(machine);
+  const standardHandshakeSignals = new Set([
+    "START",
+    "BLOCK",
+    "BLOCK_INTERLOCK",
+    "INTERLOCK",
+    "RUNNING",
+    "STARTED",
+    "END_OK",
+    "END_NG",
+    "RESET",
+    "CONFIRM",
+    "CONFIRMATION",
+    "ACK",
+    "ACKNOWLEDGE",
+    "ACKNOWLEDGEMENT",
+  ]);
+  for (const row of handshakeRows) {
+    const signalToken = toUpper(row.signal).replace(/[^A-Z0-9]+/g, "_");
+    if (!signalToken || standardHandshakeSignals.has(signalToken)) {
+      continue;
+    }
+    const key = `HS_${signalToken}`;
+    if (existingKeys.has(key)) continue;
+    existingKeys.add(key);
+    output.push({
+      key,
+      label: row.signal,
+      register: row.register,
+      device: null,
+      direction: row.direction,
+      writable: row.direction !== "PLC -> PC",
+      description: row.meaning || "Configured handshake signal",
+    });
+  }
+  return output;
+}
+
 function parseMachineSignalMap(machine) {
   const raw = machine?.plc_signal_map;
   if (!raw) {
-    return getDefaultIoSignals(machine);
+    return appendCustomHandshakeSignals(machine, getDefaultIoSignals(machine));
   }
 
   let parsed = raw;
@@ -243,7 +310,7 @@ function parseMachineSignalMap(machine) {
     try {
       parsed = JSON.parse(raw);
     } catch (_error) {
-      return getDefaultIoSignals(machine);
+      return appendCustomHandshakeSignals(machine, getDefaultIoSignals(machine));
     }
   }
 
@@ -253,7 +320,7 @@ function parseMachineSignalMap(machine) {
     ? Object.entries(parsed).map(([key, value]) => ({ key, ...(value || {}) }))
     : [];
   if (source.length === 0) {
-    return getDefaultIoSignals(machine);
+    return appendCustomHandshakeSignals(machine, getDefaultIoSignals(machine));
   }
 
   const normalized = [];
@@ -281,7 +348,7 @@ function parseMachineSignalMap(machine) {
   }
 
   if (normalized.length === 0) {
-    return getDefaultIoSignals(machine);
+    return appendCustomHandshakeSignals(machine, getDefaultIoSignals(machine));
   }
 
   // Ensure core handshake signals always exist even if custom map omitted them.
@@ -291,8 +358,7 @@ function parseMachineSignalMap(machine) {
       normalized.push(def);
     }
   }
-
-  return normalized;
+  return appendCustomHandshakeSignals(machine, normalized);
 }
 
 function buildIoSignalRows(machine, registerValues, latestPlcStatus) {
@@ -2885,16 +2951,7 @@ function getDateRangeFromQuery(query) {
 }
 
 function toMinutes(timeValue) {
-  if (!timeValue) {
-    return null;
-  }
-  const [hh, mm] = String(timeValue).split(":");
-  const hour = Number(hh);
-  const minute = Number(mm);
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
-    return null;
-  }
-  return hour * 60 + minute;
+  return toShiftMinutes(timeValue);
 }
 
 function getMinutesForDate(dateValue) {
@@ -3034,8 +3091,8 @@ exports.getDashboardSummary = async (req, res) => {
       availableShifts: shifts.map((shift) => ({
         shiftCode: shift.shift_code,
         shiftName: shift.shift_name,
-        startTime: shift.start_time,
-        endTime: shift.end_time,
+        startTime: normalizeTimeValue(shift.start_time, { includeSeconds: true }),
+        endTime: normalizeTimeValue(shift.end_time, { includeSeconds: true }),
       })),
       recentScans: filteredRecentRows,
     });
@@ -3332,8 +3389,8 @@ exports.getDashboardReport = async (req, res) => {
       availableShifts: shifts.map((shift) => ({
         shiftCode: shift.shift_code,
         shiftName: shift.shift_name,
-        startTime: shift.start_time,
-        endTime: shift.end_time,
+        startTime: normalizeTimeValue(shift.start_time, { includeSeconds: true }),
+        endTime: normalizeTimeValue(shift.end_time, { includeSeconds: true }),
       })),
     });
   } catch (error) {
