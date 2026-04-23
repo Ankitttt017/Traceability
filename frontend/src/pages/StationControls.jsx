@@ -130,6 +130,7 @@ const StationControl = () => {
   const [stationSettings, setStationSettings] = useState(() => getStationFeatureSettings());
   const [loading, setLoading] = useState(true);
   const [popup, setPopup] = useState(null);
+  const [lastSyncAt, setLastSyncAt] = useState(null);
 
   const stationRows = useMemo(() => {
     const grouped = new Map();
@@ -143,16 +144,20 @@ const StationControl = () => {
           sequenceNo: Number(machine.sequenceNo || 9999),
           machines: [],
           hasSpc: false,
+          bypassedCount: 0,
         });
       }
       const row = grouped.get(stationNo);
       row.lineNames.add(String(machine.lineName || "-").trim() || "-");
       row.hasSpc = row.hasSpc || machine?.spcConfig?.enabled === true;
+      row.bypassedCount += machine?.machineBypassEnabled ? 1 : 0;
       row.machines.push({
         id: machine.id,
         machineName: machine.machineName || `Machine ${machine.id}`,
         sequenceNo: Number(machine.sequenceNo || 9999),
         operationNo: getMachineStage(machine),
+        machineBypassEnabled: Boolean(machine?.machineBypassEnabled),
+        machineBypassReason: machine?.machineBypassReason || null,
       });
       row.sequenceNo = Math.min(row.sequenceNo, Number(machine.sequenceNo || 9999));
     }
@@ -171,37 +176,44 @@ const StationControl = () => {
     [stationKeys, stationSettings]
   );
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const loadData = useCallback(async ({ silent = false, refreshSettings = true } = {}) => {
+    if (!silent) setLoading(true);
     try {
       const [m, s] = await Promise.all([
         machineApi.list(),
-        stationSettingsApi.list().catch(() => null),
+        refreshSettings ? stationSettingsApi.list().catch(() => null) : Promise.resolve(null),
       ]);
       setMachines(m || []);
-      const localSettings = getStationFeatureSettings();
-      if (s && typeof s === "object") {
-        const merged = Object.entries(s).reduce((acc, [stationNo, serverCfg]) => {
-          acc[stationNo] = { ...(serverCfg || {}) };
-          return acc;
-        }, {});
-        Object.entries(localSettings || {}).forEach(([stationNo, localCfg]) => {
-          if (!merged[stationNo]) {
-            merged[stationNo] = { ...(localCfg || {}) };
-          }
-        });
-        setStationSettings(merged);
-      } else {
-        setStationSettings(localSettings);
+      if (refreshSettings) {
+        const localSettings = getStationFeatureSettings();
+        if (s && typeof s === "object") {
+          const merged = Object.entries(s).reduce((acc, [stationNo, serverCfg]) => {
+            acc[stationNo] = { ...(serverCfg || {}) };
+            return acc;
+          }, {});
+          Object.entries(localSettings || {}).forEach(([stationNo, localCfg]) => {
+            if (!merged[stationNo]) {
+              merged[stationNo] = { ...(localCfg || {}) };
+            }
+          });
+          setStationSettings(merged);
+        } else {
+          setStationSettings(localSettings);
+        }
       }
+      setLastSyncAt(new Date());
     } catch (err) {
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => {
+    const timer = setInterval(() => loadData({ silent: true, refreshSettings: false }), 10000);
+    return () => clearInterval(timer);
+  }, [loadData]);
   useEffect(() => { saveStationFeatureSettings(stationSettings); }, [stationSettings]);
 
   const updateField = (stationNo, key, value) => {
@@ -250,6 +262,9 @@ const StationControl = () => {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            <button onClick={() => loadData({ silent: false })} className="db-action-btn">
+              <RefreshCw size={14} /> Refresh
+            </button>
             {/* live summary pill */}
             <div style={{
               display: "flex", alignItems: "center", gap: 6,
@@ -261,6 +276,16 @@ const StationControl = () => {
             }}>
               <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#3b82f6", animation: "pulse 2s infinite" }} />
               {activeCount} active
+            </div>
+            <div style={{
+              display: "flex", alignItems: "center", gap: 6,
+              padding: "5px 10px", borderRadius: 999,
+              background: "rgba(15,23,42,0.04)",
+              border: "1px solid rgba(15,23,42,0.12)",
+              fontSize: 10, fontWeight: 700, color: "rgba(15,23,42,0.8)",
+              letterSpacing: "0.04em",
+            }}>
+              Last Sync: {lastSyncAt ? lastSyncAt.toLocaleTimeString() : "--:--:--"}
             </div>
             <button onClick={saveSettings} className="db-action-btn">
               <Save size={14} /> Save Settings
@@ -299,6 +324,11 @@ const StationControl = () => {
                   <th style={{ padding: "12px 10px", width: 110, textAlign: "center" }}>
                     <span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.1em", color: "rgba(15,23,42,0.75)" }}>
                       Quality
+                    </span>
+                  </th>
+                  <th style={{ padding: "12px 10px", width: 130, textAlign: "center" }}>
+                    <span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.1em", color: "rgba(15,23,42,0.75)" }}>
+                      Bypass
                     </span>
                   </th>
 
@@ -374,6 +404,55 @@ const StationControl = () => {
                           {row.hasSpc ? "Enabled" : "No"}
                         </span>
                       </td>
+                      <td style={{ padding: "14px 10px", textAlign: "center" }}>
+                        {row.bypassedCount > 0 ? (
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              minWidth: 94,
+                              height: 24,
+                              borderRadius: 999,
+                              fontSize: 10,
+                              fontWeight: 800,
+                              letterSpacing: "0.06em",
+                              textTransform: "uppercase",
+                              color: "#b45309",
+                              background: "rgba(245,158,11,0.16)",
+                              border: "1px solid rgba(245,158,11,0.35)",
+                            }}
+                            title={row.machines
+                              .filter((machine) => machine.machineBypassEnabled)
+                              .map((machine) => `${machine.machineName}${machine.machineBypassReason ? ` (${machine.machineBypassReason})` : ""}`)
+                              .join(", ")}
+                          >
+                            {row.bypassedCount === row.machines.length
+                              ? "Bypassed"
+                              : `${row.bypassedCount}/${row.machines.length}`}
+                          </span>
+                        ) : (
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              minWidth: 94,
+                              height: 24,
+                              borderRadius: 999,
+                              fontSize: 10,
+                              fontWeight: 800,
+                              letterSpacing: "0.06em",
+                              textTransform: "uppercase",
+                              color: "rgba(51,65,85,0.9)",
+                              background: "rgba(148,163,184,0.15)",
+                              border: "1px solid rgba(148,163,184,0.30)",
+                            }}
+                          >
+                            Normal
+                          </span>
+                        )}
+                      </td>
 
                       {/* Feature cells */}
                       {FEATURE_COLS.map((col) => (
@@ -420,7 +499,7 @@ const StationControl = () => {
 
                 {stationRows.length === 0 && (
                   <tr>
-                    <td colSpan={FEATURE_COLS.length + 2} style={{ padding: "60px 24px", textAlign: "center", color: "rgba(51,65,85,0.85)", fontSize: 13, fontWeight: 600 }}>
+                    <td colSpan={FEATURE_COLS.length + 3} style={{ padding: "60px 24px", textAlign: "center", color: "rgba(51,65,85,0.85)", fontSize: 13, fontWeight: 600 }}>
                       No stations configured. Add machines with operation codes first.
                     </td>
                   </tr>
@@ -453,4 +532,3 @@ const StationControl = () => {
 };
 
 export default StationControl;
-

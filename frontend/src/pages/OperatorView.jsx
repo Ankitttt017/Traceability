@@ -381,14 +381,21 @@ const OperatorView = () => {
   const rowTwoColumns = viewportWidth < 1100 ? "1fr" : "1fr 1fr";
 
   // ── Data fetching (unchanged logic) ──────────────────────────────────
-  const loadMachines = useCallback(async()=>{
-    setLoadingMachines(true);
+  const loadMachines = useCallback(async({ silent = false } = {})=>{
+    if (!silent) setLoadingMachines(true);
     try {
-      const rows=await machineApi.list(); setMachines(rows||[]);
-      if ((rows||[]).length>0) setSelectedMachineId(c=>c||String(rows[0].id));
-      else setSelectedMachineId("");
-    } catch(e){ setPopup({type:"ERROR",title:"Machine Load Failed",message:e.response?.data?.error||"Unable to load machines"}); }
-    finally { setLoadingMachines(false); }
+      const rows=await machineApi.list();
+      const list = rows || [];
+      setMachines(list);
+      setSelectedMachineId((current) => {
+        if (list.length === 0) return "";
+        if (current && list.some((item) => String(item.id) === String(current))) return String(current);
+        return String(list[0].id);
+      });
+    } catch(e){
+      if (!silent) setPopup({type:"ERROR",title:"Machine Load Failed",message:e.response?.data?.error||"Unable to load machines"});
+    }
+    finally { if (!silent) setLoadingMachines(false); }
   },[]);
 
   const loadMachineTelemetry = useCallback(async(machineId,showLoader=true)=>{
@@ -506,6 +513,10 @@ const OperatorView = () => {
   }, [handleResetOperation, mergePopupPayload, resetConfirm]);
 
   useEffect(()=>{ loadMachines(); },[loadMachines]);
+  useEffect(()=>{
+    const timer = setInterval(() => loadMachines({ silent: true }), 10000);
+    return () => clearInterval(timer);
+  },[loadMachines]);
   useEffect(()=>{ if (!selectedMachineId) return; loadMachineTelemetry(selectedMachineId,true); },[selectedMachineId,loadMachineTelemetry]);
   useEffect(()=>{ const t=setInterval(()=>{ if (selectedMachineIdRef.current) loadMachineTelemetry(selectedMachineIdRef.current,false); },15000); return()=>clearInterval(t); },[loadMachineTelemetry]);
   useEffect(()=>{ const t=setInterval(()=>setClockTick(Date.now()),1000); return()=>clearInterval(t); },[]);
@@ -593,6 +604,20 @@ const OperatorView = () => {
               <p style={{fontSize:12,color:C.txt("muted"),marginTop:3}}>
                 {selectedMachine?.lineName||"—"}
                 {selectedStation&&<> · Station <span style={{color:C.amber(),fontWeight:700}}>{selectedStation}</span></>}
+                {selectedMachine && (
+                  <>
+                    {" · "}
+                    <span
+                      style={{
+                        color: selectedMachine.machineBypassEnabled ? C.amber() : C.ok(),
+                        fontWeight: 700,
+                      }}
+                      title={selectedMachine.machineBypassReason || ""}
+                    >
+                      {selectedMachine.machineBypassEnabled ? "Bypass ON" : "Bypass OFF"}
+                    </span>
+                  </>
+                )}
                 {" · "}
                 <span style={{color:machineMode==="Running"?C.ok():machineMode==="Idle"?C.amber():C.idle()}}>
                   {machineMode}
@@ -837,7 +862,13 @@ const OperatorView = () => {
                   <FeatureRow label="Rejection Bin"      enabled={stationFeatureConfig.rejectionBin}/>
                   <FeatureRow label="PLC Confirmation"   enabled={stationFeatureConfig.plcConfirmation}/>
                   <FeatureRow label="Final Pack Station" enabled={stationFeatureConfig.finalPacking}/>
+                  <FeatureRow label="Machine Bypass"     enabled={Boolean(selectedMachine?.machineBypassEnabled)}/>
                 </div>
+                {selectedMachine?.machineBypassEnabled && selectedMachine?.machineBypassReason && (
+                  <p style={{fontSize:11,color:C.amber(),marginTop:8}}>
+                    Reason: {selectedMachine.machineBypassReason}
+                  </p>
+                )}
               </Card>
 
               {/* Rejection summary */}

@@ -680,16 +680,25 @@ const IoMonitor = () => {
 
   const inFlightRef = useRef(false);
 
-  const loadMachines = useCallback(async()=>{
+  const loadMachines = useCallback(async({ silent = false } = {})=>{
     try {
-      setLoadingMachines(true);
+      if (!silent) setLoadingMachines(true);
       const rows = await machineApi.list();
       setMachines((rows||[]).filter(r=>String(r.status||"ACTIVE").toUpperCase()==="ACTIVE"));
-    } catch(e){ setMachines([]); setErrorMsg(e.response?.data?.error||"Unable to load machines."); }
-    finally { setLoadingMachines(false); }
+    } catch(e){
+      if (!silent) {
+        setMachines([]);
+        setErrorMsg(e.response?.data?.error||"Unable to load machines.");
+      }
+    }
+    finally { if (!silent) setLoadingMachines(false); }
   },[]);
 
   useEffect(()=>{ loadMachines(); },[loadMachines]);
+  useEffect(()=>{
+    const timer = setInterval(() => loadMachines({ silent: true }), 10000);
+    return () => clearInterval(timer);
+  },[loadMachines]);
 
   const plcOptions = useMemo(()=>
     Array.from(new Set(machines.map(m=>normalizeIp(m.plcIp||m.machineIp)).filter(Boolean))).sort()
@@ -1311,7 +1320,7 @@ const IoMonitor = () => {
                       ? <option>No machines available</option>
                       : filteredMachines.map(m=>(
                         <option key={m.id} value={m.id}>
-                          {m.machineName} — {m.operationNo||m.stationNo||"—"}
+                          {m.machineName} — {m.operationNo||m.stationNo||"—"}{m.machineBypassEnabled ? " [BYPASS]" : ""}
                         </option>
                       ))}
                   </select>
@@ -1361,6 +1370,10 @@ const IoMonitor = () => {
                   padding:"2px 8px",borderRadius:5}}>
                   {rows.length} mapped rows
                 </span>
+                <Badge
+                  variant={selectedMachine?.machineBypassEnabled ? "wip" : "ok"}
+                  label={selectedMachine?.machineBypassEnabled ? "Bypass ON" : "Bypass OFF"}
+                />
                 <Badge variant={plcConnected?"ok":"ng"}
                   label={plcConnected?"PLC Online":"PLC Offline"} pulse={plcConnected}/>
               </div>

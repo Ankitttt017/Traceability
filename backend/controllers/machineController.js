@@ -377,24 +377,15 @@ function normalizeSignalKeyForStandardHandshake(signal) {
   return null;
 }
 
-function syncStandardHandshakeMapWithCore(handshakeMap, core = {}) {
-  const rows = Array.isArray(handshakeMap) ? [...handshakeMap] : [];
-  const indexByStandardKey = new Map();
-
-  for (let i = 0; i < rows.length; i += 1) {
-    const standardKey = normalizeSignalKeyForStandardHandshake(rows[i]?.signal);
-    if (standardKey && !indexByStandardKey.has(standardKey)) {
-      indexByStandardKey.set(standardKey, i);
-    }
-  }
-
-  for (const [standardKey, meta] of Object.entries(STANDARD_HANDSHAKE_SIGNAL_META)) {
-    const defaultValue = meta.valueKey ? toInt(core?.[meta.valueKey]) : toInt(meta.defaultValue);
+function buildDefaultStandardHandshakeMap(core = {}) {
+  const rows = [];
+  for (const meta of Object.values(STANDARD_HANDSHAKE_SIGNAL_META)) {
     const registerNo =
       meta.registerKey === "runningRegister"
         ? toInt(core?.runningRegister ?? core?.statusRegister)
         : toInt(core?.[meta.registerKey]);
-    const nextRow = {
+    const defaultValue = meta.valueKey ? toInt(core?.[meta.valueKey]) : toInt(meta.defaultValue);
+    rows.push({
       id: null,
       signal: meta.signal,
       direction: meta.direction,
@@ -402,25 +393,34 @@ function syncStandardHandshakeMapWithCore(handshakeMap, core = {}) {
       value: defaultValue,
       meaning: meta.defaultMeaning,
       required: true,
-    };
-    if (indexByStandardKey.has(standardKey)) {
-      const idx = indexByStandardKey.get(standardKey);
-      const current = rows[idx] || {};
-      rows[idx] = {
-        ...current,
-        signal: meta.signal,
-        direction: meta.direction,
-        register: nextRow.register,
-        value: meta.valueKey ? nextRow.value : toInt(current.value) ?? nextRow.value,
-        meaning: normalizeText(current.meaning) || meta.defaultMeaning,
-        required: current.required === undefined ? true : Boolean(current.required),
-      };
-    } else {
-      rows.push(nextRow);
-    }
+    });
   }
-
   return rows;
+}
+
+function syncStandardHandshakeMapWithCore(handshakeMap, core = {}) {
+  const rows = Array.isArray(handshakeMap) ? [...handshakeMap] : [];
+  return rows.map((row) => {
+    const standardKey = normalizeSignalKeyForStandardHandshake(row?.signal);
+    if (!standardKey) {
+      return row;
+    }
+    const meta = STANDARD_HANDSHAKE_SIGNAL_META[standardKey];
+    if (!meta) {
+      return row;
+    }
+    const next = { ...row };
+    const registerNo =
+      meta.registerKey === "runningRegister"
+        ? toInt(core?.runningRegister ?? core?.statusRegister)
+        : toInt(core?.[meta.registerKey]);
+    next.register = registerNo;
+    if (meta.valueKey) {
+      next.value = toInt(core?.[meta.valueKey]);
+    }
+    next.required = row?.required === undefined ? true : Boolean(row.required);
+    return next;
+  });
 }
 
 function deriveCoreFromHandshakeMap(handshakeMap, core = {}) {
@@ -967,10 +967,14 @@ function toMachinePayload(body = {}, existingMachine = null) {
   const resolvedCore = hasIncomingHandshakeMap
     ? deriveCoreFromHandshakeMap(parsedHandshakeMap, baseCore)
     : baseCore;
-  const plcHandshakeMap =
-    Array.isArray(parsedHandshakeMap) && parsedHandshakeMap.length > 0
+  const plcHandshakeMap = hasIncomingHandshakeMap
+    ? syncStandardHandshakeMapWithCore(
+        Array.isArray(parsedHandshakeMap) ? parsedHandshakeMap : [],
+        resolvedCore
+      )
+    : Array.isArray(parsedHandshakeMap) && parsedHandshakeMap.length > 0
       ? syncStandardHandshakeMapWithCore(parsedHandshakeMap, resolvedCore)
-      : syncStandardHandshakeMapWithCore(null, {
+      : buildDefaultStandardHandshakeMap({
           startRegister: resolvedCore.startRegister,
           blockRegister: resolvedCore.blockRegister,
           runningRegister: resolvedCore.runningRegister,
@@ -1081,6 +1085,7 @@ function toMachineResponse(machine) {
   const cycleTimeSec = toInt(snapshot.cycleTimeSec) ?? 0;
   const loadingTimeSec = toInt(snapshot.loadingTimeSec) ?? 0;
   const savedHandshakeMap = normalizePlcHandshakeMap(snapshot.handshakeMap, null);
+  const hasStoredHandshakeMap = Object.prototype.hasOwnProperty.call(snapshot, "handshakeMap");
   const plcConfig = {
     rangeId: machine.plc_range_id,
     unitId: machine.plc_unit_id ?? 1,
@@ -1110,20 +1115,22 @@ function toMachineResponse(machine) {
     cycleTimeSec,
     loadingTimeSec,
     handshakeMap:
-      (Array.isArray(savedHandshakeMap) && savedHandshakeMap.length > 0
+      (Array.isArray(savedHandshakeMap)
         ? savedHandshakeMap
-        : syncStandardHandshakeMapWithCore(null, {
-            startRegister: machine.plc_start_register,
-            runningRegister: machine.plc_status_register,
-            statusRegister: machine.plc_status_register,
-            resetRegister: machine.plc_reset_register,
-            startValue: machine.plc_start_value ?? 1,
-            startedValue: machine.plc_started_value ?? 2,
-            endOkValue: machine.plc_end_ok_value ?? 3,
-            endNgValue: machine.plc_end_ng_value ?? 4,
-            blockValue: machine.plc_block_value ?? 2,
-            resetValue: machine.plc_reset_value ?? 9,
-          })) || [],
+        : hasStoredHandshakeMap
+          ? []
+          : buildDefaultStandardHandshakeMap({
+              startRegister: machine.plc_start_register,
+              runningRegister: machine.plc_status_register,
+              statusRegister: machine.plc_status_register,
+              resetRegister: machine.plc_reset_register,
+              startValue: machine.plc_start_value ?? 1,
+              startedValue: machine.plc_started_value ?? 2,
+              endOkValue: machine.plc_end_ok_value ?? 3,
+              endNgValue: machine.plc_end_ng_value ?? 4,
+              blockValue: machine.plc_block_value ?? 2,
+              resetValue: machine.plc_reset_value ?? 9,
+            })) || [],
     slmpDevice: machine.plc_slmp_device ?? null,
     slmpFrameMode: extractSlmpFrameMode(machine.plc_registers) || "AUTO",
     spcConfig: normalizeSpcConfig(snapshot.spcConfig || {}),

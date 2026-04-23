@@ -262,25 +262,9 @@ function appendCustomHandshakeSignals(machine, rows = []) {
   const output = Array.isArray(rows) ? [...rows] : [];
   const existingKeys = new Set(output.map((row) => toUpper(row?.key)));
   const handshakeRows = parseMachineHandshakeMap(machine);
-  const standardHandshakeSignals = new Set([
-    "START",
-    "BLOCK",
-    "BLOCK_INTERLOCK",
-    "INTERLOCK",
-    "RUNNING",
-    "STARTED",
-    "END_OK",
-    "END_NG",
-    "RESET",
-    "CONFIRM",
-    "CONFIRMATION",
-    "ACK",
-    "ACKNOWLEDGE",
-    "ACKNOWLEDGEMENT",
-  ]);
   for (const row of handshakeRows) {
     const signalToken = toUpper(row.signal).replace(/[^A-Z0-9]+/g, "_");
-    if (!signalToken || standardHandshakeSignals.has(signalToken)) {
+    if (!signalToken) {
       continue;
     }
     const key = `HS_${signalToken}`;

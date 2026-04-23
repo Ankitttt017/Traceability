@@ -48,7 +48,7 @@ export const MACHINE_REGISTER_ROLE_FIELDS = [
   {
     key: "blockRegister",
     label: "Block Register",
-    required: true,
+    required: false,
     description: "Register for BLOCK/INTERLOCK signal.",
   },
   {
@@ -60,13 +60,13 @@ export const MACHINE_REGISTER_ROLE_FIELDS = [
   {
     key: "endOkRegister",
     label: "End OK Register",
-    required: true,
+    required: false,
     description: "Register for END_OK completion signal.",
   },
   {
     key: "endNgRegister",
     label: "End NG Register",
-    required: true,
+    required: false,
     description: "Register for END_NG error signal.",
   },
   {
@@ -84,7 +84,7 @@ export const MACHINE_REGISTER_ROLE_FIELDS = [
   {
     key: "resetRegister",
     label: "Reset Register",
-    required: true,
+    required: false,
     description: "Register for RESET command signal.",
   },
   {

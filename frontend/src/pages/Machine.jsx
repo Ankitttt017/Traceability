@@ -75,7 +75,8 @@ function buildDefaultHandshakeRows(cfg = {}) {
   ];
 }
 function normalizeHandshakeRows(rows, cfg = {}) {
-  if (!Array.isArray(rows) || rows.length === 0) return buildDefaultHandshakeRows(cfg);
+  if (!Array.isArray(rows)) return buildDefaultHandshakeRows(cfg);
+  if (rows.length === 0) return [];
   return rows.map((row) => createHandshakeRow({
     id: row?.id || row?.key || undefined,
     signal: toFormValue(row?.signal ?? row?.label, ""),
@@ -119,42 +120,20 @@ const STANDARD_HANDSHAKE_SIGNAL_META = {
 };
 function syncStandardHandshakeRowsWithCore(rows, cfg = {}) {
   const nextRows = normalizeHandshakeRows(rows, cfg);
-  const indexByKey = new Map();
-  for (let i = 0; i < nextRows.length; i += 1) {
-    const key = normalizeStandardHandshakeSignalKey(nextRows[i]?.signal);
-    if (key && !indexByKey.has(key)) {
-      indexByKey.set(key, i);
+  return nextRows.map((row) => {
+    const key = normalizeStandardHandshakeSignalKey(row?.signal);
+    if (!key) return row;
+    const meta = STANDARD_HANDSHAKE_SIGNAL_META[key];
+    if (!meta) return row;
+    const synced = { ...row };
+    if (meta.registerKey) {
+      synced.register = toFormValue(cfg?.[meta.registerKey], row?.register ?? "");
     }
-  }
-  for (const [standardKey, meta] of Object.entries(STANDARD_HANDSHAKE_SIGNAL_META)) {
-    const registerText = toFormValue(cfg?.[meta.registerKey], "");
-    const valueText = meta.valueKey
-      ? toFormValue(cfg?.[meta.valueKey], meta.defaultValue)
-      : toFormValue(meta.defaultValue, "1");
-    const rowDefaults = {
-      signal: meta.signal,
-      direction: meta.direction,
-      register: registerText,
-      value: valueText,
-      meaning: meta.defaultMeaning,
-      required: true,
-    };
-    if (indexByKey.has(standardKey)) {
-      const idx = indexByKey.get(standardKey);
-      const current = nextRows[idx] || {};
-      const resolvedRegister = registerText === "" ? toFormValue(current.register, "") : registerText;
-      nextRows[idx] = createHandshakeRow({
-        ...current,
-        ...rowDefaults,
-        register: resolvedRegister,
-        meaning: toFormValue(current.meaning, "") || meta.defaultMeaning,
-        required: current.required === undefined ? true : Boolean(current.required),
-      });
-    } else {
-      nextRows.push(createHandshakeRow(rowDefaults));
+    if (meta.valueKey) {
+      synced.value = toFormValue(cfg?.[meta.valueKey], row?.value ?? meta.defaultValue ?? "");
     }
-  }
-  return nextRows;
+    return createHandshakeRow(synced);
+  });
 }
 function applyStandardHandshakeRowToCoreCfg(cfg = {}, row = {}) {
   const key = normalizeStandardHandshakeSignalKey(row?.signal);
@@ -165,9 +144,6 @@ function applyStandardHandshakeRowToCoreCfg(cfg = {}, row = {}) {
   if (meta.registerKey) nextCfg[meta.registerKey] = toFormValue(row?.register, nextCfg?.[meta.registerKey] ?? "");
   if (meta.valueKey) nextCfg[meta.valueKey] = toFormValue(row?.value, nextCfg?.[meta.valueKey] ?? meta.defaultValue ?? "");
   return nextCfg;
-}
-function isStandardHandshakeSignal(signal) {
-  return Boolean(normalizeStandardHandshakeSignalKey(signal));
 }
 function getHandshakeRegisterEntries(cfg = {}) {
   return normalizeHandshakeRows(cfg?.handshakeMap, cfg).map((row, index) => ({
@@ -666,7 +642,7 @@ const MachinePage = () => {
   }), [machines]);
 
   const handshakeRows = useMemo(
-    () => syncStandardHandshakeRowsWithCore(formData?.plcConfig?.handshakeMap, formData?.plcConfig||{}),
+    () => normalizeHandshakeRows(formData?.plcConfig?.handshakeMap, formData?.plcConfig||{}),
     [formData?.plcConfig]
   );
 
@@ -840,11 +816,11 @@ const MachinePage = () => {
       if (usesRange&&!String(formData.plcRangeId||"").trim()) return "Select a PLC range before continuing.";
     }
     if (tabId==="tuning") {
-      if (!String(formData?.plcConfig?.startRegister||"").trim()) return "Start register is required.";
-      if (!String(formData?.plcConfig?.blockRegister||"").trim()) return "Block register is required.";
-      if (!String(formData?.plcConfig?.runningRegister||"").trim()) return "Running register is required.";
-      if (!String(formData?.plcConfig?.endOkRegister||"").trim()) return "End OK register is required.";
-      if (!String(formData?.plcConfig?.endNgRegister||"").trim()) return "End NG register is required.";
+      const cfg = formData?.plcConfig || {};
+      for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
+        if (!field.required) continue;
+        if (!String(cfg?.[field.key] || "").trim()) return `${field.label} is required.`;
+      }
       if (handshakeInputIssues.size>0) return Array.from(handshakeInputIssues.values())[0];
       if (registerConflicts.length>0) return registerConflicts[0];
     }
@@ -1108,7 +1084,7 @@ const MachinePage = () => {
     const syncedRows = syncStandardHandshakeRowsWithCore(rows, nextCfg);
     return { ...p, plcConfig:{ ...nextCfg, handshakeMap:syncedRows } };
   });
-  const removeHandshakeRow = (index) => setFormData((p)=>{ const rows=[...normalizeHandshakeRows(p?.plcConfig?.handshakeMap,p.plcConfig)]; rows.splice(index,1); return { ...p,plcConfig:{ ...(p.plcConfig||{}),handshakeMap:rows.length>0?rows:buildDefaultHandshakeRows(p.plcConfig||{}) } }; });
+  const removeHandshakeRow = (index) => setFormData((p)=>{ const rows=[...normalizeHandshakeRows(p?.plcConfig?.handshakeMap,p.plcConfig)]; rows.splice(index,1); return { ...p,plcConfig:{ ...(p.plcConfig||{}),handshakeMap:rows } }; });
   const syncHandshakeRowsFromRegisters = () => setFormData((p)=> {
     const currentCfg = { ...(p.plcConfig||{}) };
     const rows = syncStandardHandshakeRowsWithCore(normalizeHandshakeRows(currentCfg.handshakeMap,currentCfg), currentCfg);
@@ -1625,7 +1601,7 @@ const MachinePage = () => {
                 <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
                   {/* Action bar */}
                   <div style={{ padding:"12px 14px", background:T.blueLight+"55", border:`1px solid ${T.blueBorder}`, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:8 }}>
-                    <p style={{ fontSize:12, color:T.textSec, margin:0 }}>Configure handshake mapping. Standard rows stay linked with Registers tab so PLC read/write always matches runtime mapping.</p>
+                    <p style={{ fontSize:12, color:T.textSec, margin:0 }}>Configure handshake mapping. All rows are editable and removable; standard signal names still sync register/value with core fields.</p>
                     <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
                       {[
                         { label:"+ Add Signal Row",        onClick:addHandshakeRow,                color:T.green,   border:T.greenBorder  },
@@ -1659,7 +1635,6 @@ const MachinePage = () => {
                       {handshakeRows.map((row, index) => {
                         const isWrite = row.direction==="WRITE";
                         const isBoth  = row.direction==="BOTH";
-                        const isStandardRow = isStandardHandshakeSignal(row.signal);
                         const accentColor = isWrite?T.blue:isBoth?T.teal:T.green;
                         const accentBg    = isWrite?T.blueLight:isBoth?T.tealLight:T.greenLight;
                         const accentBorder= isWrite?T.blueBorder:isBoth?T.tealBorder:T.greenBorder;
@@ -1675,11 +1650,6 @@ const MachinePage = () => {
                               <div style={{ display:"flex", alignItems:"center", gap:8, flex:1, flexWrap:"wrap" }}>
                                 <Hash size={12} color={T.textMuted} />
                                 <span style={{ fontSize:11, fontWeight:700, color:T.text }}>{row.signal||`Signal ${index+1}`}</span>
-                                {isStandardRow && (
-                                  <span style={{ display:"inline-flex", alignItems:"center", fontSize:9, fontWeight:700, padding:"2px 7px", borderRadius:4, background:T.bgMuted, color:T.textMuted, border:`1px solid ${T.border}` }}>
-                                    Linked
-                                  </span>
-                                )}
                                 <span style={{ display:"inline-flex", alignItems:"center", gap:3, fontSize:9, fontWeight:700, padding:"2px 7px", borderRadius:4, background:accentBg, color:accentColor, border:`1px solid ${accentBorder}` }}>
                                   <DirectionIcon direction={row.direction} size={9} />
                                   {row.direction}
@@ -1709,9 +1679,8 @@ const MachinePage = () => {
                                   Auto
                                 </button>
                                 <button type="button" onClick={()=>removeHandshakeRow(index)}
-                                  disabled={isStandardRow}
-                                  title={isStandardRow ? "Standard signal cannot be removed" : "Remove signal"}
-                                  style={{ width:26, height:26, border:`1px solid ${T.redBorder}`, borderRadius:6, background:isStandardRow?T.bgMuted:T.redLight, display:"flex", alignItems:"center", justifyContent:"center", cursor:isStandardRow?"not-allowed":"pointer", color:isStandardRow?T.textMuted:T.red, opacity:isStandardRow?0.7:1 }}>
+                                  title="Remove signal"
+                                  style={{ width:26, height:26, border:`1px solid ${T.redBorder}`, borderRadius:6, background:T.redLight, display:"flex", alignItems:"center", justifyContent:"center", cursor:"pointer", color:T.red }}>
                                   <Trash2 size={11} />
                                 </button>
                               </div>
@@ -1721,11 +1690,11 @@ const MachinePage = () => {
                             <div style={{ display:"grid", gridTemplateColumns:"1fr 100px 120px 90px 1fr", gap:10, padding:"12px 14px", alignItems:"end" }}>
                               <div>
                                 <Label>Signal Name</Label>
-                                <FieldInput value={row.signal||""} onChange={e=>updateHandshakeRow(index,"signal",e.target.value)} placeholder="e.g. Start, End OK" readOnly={isStandardRow} style={isStandardRow ? { background:T.bgMuted, color:T.textMuted, cursor:"not-allowed" } : {}} />
+                                <FieldInput value={row.signal||""} onChange={e=>updateHandshakeRow(index,"signal",e.target.value)} placeholder="e.g. Start, End OK" />
                               </div>
                               <div>
                                 <Label>Direction</Label>
-                                <FieldSelect value={row.direction||"READ"} onChange={e=>updateHandshakeRow(index,"direction",e.target.value)} disabled={isStandardRow} style={isStandardRow ? { background:T.bgMuted, color:T.textMuted, cursor:"not-allowed" } : {}}>
+                                <FieldSelect value={row.direction||"READ"} onChange={e=>updateHandshakeRow(index,"direction",e.target.value)}>
                                   <option value="READ">READ</option>
                                   <option value="WRITE">WRITE</option>
                                   <option value="BOTH">BOTH</option>
