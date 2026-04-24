@@ -1,16 +1,11 @@
-// ============================================================
-//  OperatorView.jsx — IndusTrace Premium Redesign
-//  Color Theme: Navy / Steel / Amber / Linen
-//  Clean professional layout — operator-friendly
-//  No override/jargon — simple readable labels
-// ============================================================
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import {
   AlertTriangle, CheckCircle2, Clock3, Factory,
   Gauge, RefreshCw, ShieldCheck, Wrench,
   Wifi, WifiOff, Activity, TrendingUp,
-  BarChart2, Target, Cpu, Radio,
+  BarChart2, Target, Cpu, Radio, Maximize2,
+  ChevronDown, ChevronUp, Menu, X
 } from "lucide-react";
 import { machineApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
@@ -24,17 +19,24 @@ const QR_EVENT_DEDUPE_MS     = 3000;
 const POPUP_EVENT_DEDUPE_MS  = 1800;
 const QR_STORAGE_KEY         = "operator-last-qr-signal";
 
-// ── Design tokens ─────────────────────────────────────────────────────────
+// ── Design tokens & responsive breakpoints ───────────────────────────────
 const DS = `
   @keyframes ovSpin   { to{transform:rotate(360deg)} }
   @keyframes ovFadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
   @keyframes ovPulse  { 0%,100%{opacity:1} 50%{opacity:.4} }
   @keyframes ovPing   { 0%{transform:scale(1);opacity:.7} 100%{transform:scale(2.2);opacity:0} }
+  @keyframes ovSlideIn { from{opacity:0;transform:translateX(-12px)} to{opacity:1;transform:translateX(0)} }
+  
   :root{
     --ov-navy:  26,50,99;   --ov-steel: 84,119,146;
     --ov-amber: 250,185,91; --ov-linen: 232,226,219;
     --ov-ok:    34,197,94;  --ov-ng:    239,68,68;
     --ov-wip:   249,115,22; --ov-idle:  148,163,184;
+    --ov-breakpoint-sm: 640px;
+    --ov-breakpoint-md: 768px;
+    --ov-breakpoint-lg: 1024px;
+    --ov-breakpoint-xl: 1280px;
+    --ov-breakpoint-2xl: 1536px;
   }
   [data-theme="light"]{
     --ov-bg-card:   255,255,255; --ov-bg-surf:  240,236,230;
@@ -49,6 +51,20 @@ const DS = `
     --ov-txt-pri:   232,226,219; --ov-txt-sec: 120,160,190;
     --ov-txt-muted: 84,119,146;
     --ov-bdr: 84,119,146; --ov-bop: 0.18;
+  }
+  
+  /* Responsive base */
+  * {
+    box-sizing: border-box;
+  }
+  
+  @media (max-width: 640px) {
+    .ov-hide-sm { display: none !important; }
+    .ov-stack-sm { flex-direction: column !important; align-items: stretch !important; }
+  }
+  
+  @media (min-width: 641px) and (max-width: 1023px) {
+    .ov-hide-md { display: none !important; }
   }
 `;
 let _ovDS = false;
@@ -76,7 +92,7 @@ const C = {
 const SH  = `0 2px 12px rgba(var(--ov-navy),.08),0 1px 3px rgba(var(--ov-navy),.05)`;
 const SHM = `0 4px 20px rgba(var(--ov-navy),.14),0 2px 6px rgba(var(--ov-navy),.07)`;
 
-// ── Unchanged utility functions ────────────────────────────────────────────
+// ── Utility functions ────────────────────────────────────────────────────
 function normalizePartId(v) { return String(v||"").trim(); }
 function extractQrDecision(payload={}) {
   const p=String(payload.qrResult||payload.decision||payload.outcome||payload.scanOutcome||payload.qrDecision||payload.qrStatus||"").trim().toUpperCase();
@@ -172,7 +188,7 @@ function formatElapsed(timestamp,now) {
   return `${m}m ${String(sec).padStart(2,"0")}s`;
 }
 
-// ── Atoms ──────────────────────────────────────────────────────────────────
+// ── Responsive Atoms ─────────────────────────────────────────────────────
 const STATUS_MAP = {
   ok:   {fg:C.ok(),   bg:C.ok(0.1),   bd:C.ok(0.28)  },
   ng:   {fg:C.ng(),   bg:C.ng(0.1),   bd:C.ng(0.28)  },
@@ -200,7 +216,6 @@ const Badge = ({ variant="idle", label, pulse, size="sm" }) => {
   );
 };
 
-// Connection dot with ping
 const ConnDot = ({ connected }) => (
   <div style={{position:"relative",width:10,height:10,flexShrink:0}}>
     {connected&&(
@@ -212,44 +227,58 @@ const ConnDot = ({ connected }) => (
   </div>
 );
 
-// Info row in sidebar cards
 const InfoRow = ({ label, value, mono, valueColor }) => (
-  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-    gap:8,padding:"5px 0",borderBottom:`1px solid ${C.bdr()}`}}>
+  <div style={{
+    display:"flex",alignItems:"center",justifyContent:"space-between",
+    gap:8,padding:"5px 0",borderBottom:`1px solid ${C.bdr()}`,
+    flexWrap:"wrap",minWidth:0,
+  }}>
     <span style={{fontSize:11,color:C.txt("muted"),fontWeight:600,flexShrink:0}}>{label}</span>
     <span style={{
       fontSize:11,fontWeight:700,
       color:valueColor||C.txt("pri"),
       fontFamily:mono?"'DM Mono',monospace":"inherit",
       textAlign:"right",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",
-      maxWidth:160,
+      maxWidth:"min(160px, 100%)",
     }}>{value||"—"}</span>
   </div>
 );
 
-// Section card shell
-const Card = ({ title, icon:Icon, accent, children, right, noPad }) => (
-  <div style={{
-    background:C.bg("card"),border:`1px solid ${C.bdr()}`,
-    borderRadius:14,overflow:"hidden",boxShadow:SH,
-    borderLeft:accent?`3px solid ${accent}`:"none",
-  }}>
-    {(title||right)&&(
-      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.bdr()}`,
-        background:C.bg("surf"),display:"flex",alignItems:"center",
-        justifyContent:"space-between",gap:8}}>
-        <div style={{display:"flex",alignItems:"center",gap:7}}>
-          {Icon&&<Icon size={14} color={C.steel()}/>}
-          <p style={{fontSize:13,fontWeight:700,color:C.txt("pri")}}>{title}</p>
+const Card = ({ title, icon:Icon, accent, children, right, noPad, collapsible, defaultCollapsed=false }) => {
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  const isCollapsible = !!collapsible;
+  
+  return (
+    <div style={{
+      background:C.bg("card"),border:`1px solid ${C.bdr()}`,
+      borderRadius:14,overflow:"hidden",boxShadow:SH,
+      borderLeft:accent?`3px solid ${accent}`:"none",
+      height:collapsed && isCollapsible ? "auto" : "auto",
+    }}>
+      {(title||right)&&(
+        <div style={{
+          padding:"12px 16px",borderBottom:!collapsed || !isCollapsible ? `1px solid ${C.bdr()}` : "none",
+          background:C.bg("surf"),display:"flex",alignItems:"center",
+          justifyContent:"space-between",gap:8,
+          cursor:isCollapsible ? "pointer" : "default",
+        }} onClick={() => isCollapsible && setCollapsed(!collapsed)}>
+          <div style={{display:"flex",alignItems:"center",gap:7}}>
+            {Icon&&<Icon size={14} color={C.steel()}/>}
+            <p style={{fontSize:13,fontWeight:700,color:C.txt("pri")}}>{title}</p>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            {right}
+            {isCollapsible && (collapsed ? <ChevronDown size={14} color={C.steel()}/> : <ChevronUp size={14} color={C.steel()}/>)}
+          </div>
         </div>
-        {right}
-      </div>
-    )}
-    <div style={noPad?{}:{padding:16}}>{children}</div>
-  </div>
-);
+      )}
+      {(!collapsed || !isCollapsible) && (
+        <div style={noPad?{}:{padding:16}}>{children}</div>
+      )}
+    </div>
+  );
+};
 
-// Feature toggle row
 const FeatureRow = ({ label, enabled }) => (
   <div style={{
     display:"flex",alignItems:"center",justifyContent:"space-between",
@@ -270,21 +299,72 @@ const FeatureRow = ({ label, enabled }) => (
   </div>
 );
 
-// Large decision display
-const DecisionDisplay = ({ label, variant, sub1, sub2, accent }) => {
+const DecisionDisplay = ({ label, variant, sub1, sub2, accent, compact=false }) => {
   const s=STATUS_MAP[variant]||STATUS_MAP.idle;
   return (
     <div style={{
-      borderRadius:12,padding:"14px 16px",
+      borderRadius:12,padding:compact?"10px 12px":"14px 16px",
       background:s.bg,border:`1px solid ${s.bd}`,
       borderLeft:accent?`3px solid ${s.fg}`:"none",
     }}>
       <p style={{fontSize:10,fontWeight:800,textTransform:"uppercase",
         letterSpacing:"0.1em",color:C.txt("muted"),marginBottom:6}}>{label}</p>
-      <p style={{fontSize:24,fontWeight:900,color:s.fg,lineHeight:1,
-        fontFamily:"'DM Mono',monospace",marginBottom:6}}>{variant==="ok"?"✓ PASS":variant==="ng"?"✗ FAIL":variant==="wip"?"● RUNNING":"○ WAITING"}</p>
+      <p style={{fontSize:compact?18:24,fontWeight:900,color:s.fg,lineHeight:1,
+        fontFamily:"'DM Mono',monospace",marginBottom:6}}>
+        {variant==="ok"?"✓ PASS":variant==="ng"?"✗ FAIL":variant==="wip"?"● RUNNING":"○ WAITING"}
+      </p>
       {sub1&&<p style={{fontSize:11,color:C.txt("muted"),fontFamily:"'DM Mono',monospace",marginBottom:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sub1}</p>}
       {sub2&&<p style={{fontSize:10,color:C.txt("muted"),overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sub2}</p>}
+    </div>
+  );
+};
+
+// Responsive Gauge Component
+const ResponsiveGauge = ({ progressPct, qualityPct, producedCount, expectedCount, compact }) => {
+  const size = compact ? 120 : 160;
+  const strokeWidth = compact ? 10 : 12;
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference * (1 - progressPct / 100);
+  
+  return (
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:compact?"4px 0 8px":"8px 0 16px"}}>
+      <div style={{position:"relative",width:size,height:size}}>
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+          <circle cx={size/2} cy={size/2} r={radius} fill="none"
+            stroke={C.bdr(0.3)} strokeWidth={strokeWidth}/>
+          <circle cx={size/2} cy={size/2} r={radius} fill="none"
+            stroke={qualityPct>=85?C.ok():qualityPct>=60?C.amber():C.ng()}
+            strokeWidth={strokeWidth} strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={offset}
+            transform={`rotate(-90 ${size/2} ${size/2})`}
+            style={{transition:"stroke-dashoffset .8s ease"}}/>
+        </svg>
+        <div style={{position:"absolute",inset:0,display:"flex",
+          flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
+          <p style={{fontSize:compact?28:36,fontWeight:900,color:C.txt("pri"),
+            fontFamily:"'DM Mono',monospace",lineHeight:1}}>{progressPct}%</p>
+          <p style={{fontSize:compact?8:10,color:C.txt("muted"),marginTop:2,
+            textTransform:"uppercase",letterSpacing:"0.08em"}}>Progress</p>
+          <p style={{fontSize:compact?10:12,fontWeight:700,color:C.steel(),marginTop:2}}>
+            Quality {qualityPct}%
+          </p>
+        </div>
+      </div>
+      <div style={{width:"100%",maxWidth:compact?280:360,marginTop:compact?8:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",
+          fontSize:compact?9:11,color:C.txt("muted"),marginBottom:4}}>
+          <span>Produced: {producedCount}</span>
+          <span>Expected: {expectedCount}</span>
+        </div>
+        <div style={{height:compact?6:8,borderRadius:99,
+          background:C.bdr(0.2),overflow:"hidden"}}>
+          <div style={{height:"100%",borderRadius:99,
+            background:`linear-gradient(90deg,${C.ok()},${C.steel()})`,
+            width:`${progressPct}%`,transition:"width .5s ease"}}/>
+        </div>
+      </div>
     </div>
   );
 };
@@ -295,7 +375,7 @@ const DecisionDisplay = ({ label, variant, sub1, sub2, accent }) => {
 const OperatorView = () => {
   injectDS();
 
-  const user = useMemo(()=>{ try{return JSON.parse(localStorage.getItem("user")||"{}");} catch{return{};} },[]);
+  const user = useMemo(()=>{ try{ return JSON.parse(localStorage.getItem("user")||"{}");} catch{ return{};} },[]);
 
   const [machines,         setMachines]         = useState([]);
   const [selectedMachineId,setSelectedMachineId]= useState("");
@@ -310,9 +390,18 @@ const OperatorView = () => {
   const [qrFeed,           setQrFeed]           = useState([]);
   const [resetConfirm,     setResetConfirm]     = useState(null);
   const [clockTick,        setClockTick]        = useState(Date.now());
-  const [viewportWidth,    setViewportWidth]    = useState(() =>
-    typeof window === "undefined" ? 1280 : window.innerWidth
-  );
+  const [mobileMenuOpen,   setMobileMenuOpen]   = useState(false);
+  
+  // Responsive breakpoints
+  const [breakpoint, setBreakpoint] = useState(() => {
+    if (typeof window === "undefined") return "xl";
+    const w = window.innerWidth;
+    if (w < 640) return "sm";
+    if (w < 768) return "md";
+    if (w < 1024) return "lg";
+    if (w < 1280) return "xl";
+    return "2xl";
+  });
 
   const selectedMachineIdRef = useRef("");
   const selectedStationRef   = useRef("");
@@ -321,17 +410,29 @@ const OperatorView = () => {
   const lastQrEventRef       = useRef({key:"",at:0});
   const lastPopupEventRef    = useRef({key:"",at:0});
 
+  const isMobile = breakpoint === "sm" || breakpoint === "md";
+  const isTablet = breakpoint === "lg";
+  const isCompact = isMobile || isTablet;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleResize = () => {
+      const w = window.innerWidth;
+      if (w < 640) setBreakpoint("sm");
+      else if (w < 768) setBreakpoint("md");
+      else if (w < 1024) setBreakpoint("lg");
+      else if (w < 1280) setBreakpoint("xl");
+      else setBreakpoint("2xl");
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
   const selectedMachine = useMemo(()=>machines.find(e=>e.id===Number(selectedMachineId))||null,[machines,selectedMachineId]);
   const selectedStation = useMemo(()=>getMachineStage(selectedMachine),[selectedMachine]);
 
   useEffect(()=>{ selectedMachineIdRef.current=String(selectedMachineId||""); },[selectedMachineId]);
   useEffect(()=>{ selectedStationRef.current=String(selectedStation||"").toUpperCase(); },[selectedStation]);
-  useEffect(() => {
-    if (typeof window === "undefined") return undefined;
-    const onResize = () => setViewportWidth(window.innerWidth);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
 
   const stationFeatureConfig = useMemo(()=>getStationFeatures(selectedStation,stationSettings),[selectedStation,stationSettings]);
 
@@ -373,12 +474,6 @@ const OperatorView = () => {
   },[stationStats?.recentParts]);
 
   const trendRows = useMemo(()=>[...(stationStats?.trend||[])].slice(-6),[stationStats?.trend]);
-  const isCompact = viewportWidth < 900;
-  const isTablet = viewportWidth >= 900 && viewportWidth < 1280;
-  const rowOneColumns = isCompact ? "1fr" : isTablet ? "1fr 1fr" : "280px 1fr 260px";
-  const statsGridColumns = viewportWidth < 640 ? "repeat(2,1fr)" : "repeat(4,1fr)";
-  const infoGridColumns = viewportWidth < 640 ? "1fr" : "1fr 1fr";
-  const rowTwoColumns = viewportWidth < 1100 ? "1fr" : "1fr 1fr";
 
   // ── Data fetching (unchanged logic) ──────────────────────────────────
   const loadMachines = useCallback(async({ silent = false } = {})=>{
@@ -575,33 +670,53 @@ const OperatorView = () => {
   //  RENDER
   // ─────────────────────────────────────────────────────────────────────
   return (
-    <div style={{display:"flex",flexDirection:"column",gap:20,paddingBottom:32,animation:"ovFadeIn .3s ease"}}>
+    <div style={{
+      display:"flex",flexDirection:"column",gap:isCompact?12:20,
+      paddingBottom:isCompact?24:32,
+      animation:"ovFadeIn .3s ease",
+      maxWidth:"100%",overflowX:"hidden",
+    }}>
       <GlobalPopup popup={popup} onClose={()=>setPopup(null)}
         onResetOperation={handleResetOperation}
         autoCloseMs={3500} criticalAutoCloseMs={9000} showAcknowledge={false}/>
 
       {/* ── Page Header ───────────────────────────────────────────── */}
-      <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
-        borderRadius:16,padding:"16px 20px",boxShadow:SH,overflow:"hidden"}}>
-        <div style={{height:3,background:`linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`,
-          margin:"-16px -20px 14px"}}/>
+      <div style={{
+        background:C.bg("card"),border:`1px solid ${C.bdr()}`,
+        borderRadius:isCompact?12:16,padding:isCompact?"12px 16px":"16px 20px",
+        boxShadow:SH,overflow:"hidden"
+      }}>
+        <div style={{
+          height:3,background:`linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`,
+          margin:`-${isCompact?"12px -16px 12px":"16px -20px 14px"}`,
+          marginBottom:isCompact?12:14,
+        }}/>
 
-        <div style={{display:"flex",alignItems:"flex-start",
-          justifyContent:"space-between",flexWrap:"wrap",gap:12}}>
+        <div style={{
+          display:"flex",alignItems:isCompact?"flex-start":"center",
+          justifyContent:"space-between",flexWrap:"wrap",gap:12,
+          flexDirection:isMobile?"column":"row",
+        }}>
           {/* Machine info */}
-          <div style={{display:"flex",alignItems:"center",gap:14}}>
-            <div style={{width:48,height:48,borderRadius:13,flexShrink:0,
+          <div style={{display:"flex",alignItems:"center",gap:isCompact?10:14,flex:1,minWidth:0}}>
+            <div style={{
+              width:isCompact?40:48,height:isCompact?40:48,borderRadius:isCompact?10:13,flexShrink:0,
               background:`linear-gradient(135deg,${C.navy()},${C.steel(0.8)})`,
               display:"flex",alignItems:"center",justifyContent:"center",
-              boxShadow:`0 4px 12px ${C.navy(0.35)}`}}>
-              <Factory size={22} color={C.linen()}/>
+              boxShadow:`0 4px 12px ${C.navy(0.35)}`,
+            }}>
+              <Factory size={isCompact?18:22} color={C.linen()}/>
             </div>
-            <div>
-              <h1 style={{fontSize:18,fontWeight:800,color:C.txt("pri"),
-                letterSpacing:"-0.02em",lineHeight:1.2}}>
+            <div style={{minWidth:0,flex:1}}>
+              <h1 style={{
+                fontSize:isCompact?16:18,fontWeight:800,color:C.txt("pri"),
+                letterSpacing:"-0.02em",lineHeight:1.2,
+                overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",
+              }}>
                 {selectedMachine?.machineName||"Select a Machine"}
               </h1>
-              <p style={{fontSize:12,color:C.txt("muted"),marginTop:3}}>
+              <p style={{fontSize:isCompact?10:12,color:C.txt("muted"),marginTop:3,
+                overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                 {selectedMachine?.lineName||"—"}
                 {selectedStation&&<> · Station <span style={{color:C.amber(),fontWeight:700}}>{selectedStation}</span></>}
                 {selectedMachine && (
@@ -622,22 +737,41 @@ const OperatorView = () => {
                 <span style={{color:machineMode==="Running"?C.ok():machineMode==="Idle"?C.amber():C.idle()}}>
                   {machineMode}
                 </span>
-                {" · "}{machineClock}
+                {!isMobile && <> · {machineClock}</>}
               </p>
             </div>
           </div>
 
           {/* Controls */}
-          <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-            {/* Machine selector */}
-            <div style={{minWidth:220}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",width:isMobile?"100%":"auto"}}>
+            {/* Mobile menu toggle for machine selector (simplified on mobile) */}
+            {isMobile && (
+              <button
+                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                style={{
+                  display:"flex",alignItems:"center",gap:6,
+                  height:36,padding:"0 12px",borderRadius:9,
+                  background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
+                  color:C.txt("sec"),fontSize:12,
+                }}
+              >
+                <Menu size={14}/>
+                {selectedMachine?.machineName?.slice(0,20) || "Select Machine"}
+              </button>
+            )}
+            
+            {/* Machine selector - hidden on mobile when menu closed */}
+            <div style={{
+              minWidth:isMobile?"100%":220,
+              display:isMobile && !mobileMenuOpen ? "none" : "block",
+            }}>
               <select value={selectedMachineId}
-                onChange={e=>setSelectedMachineId(e.target.value)}
+                onChange={e=>{ setSelectedMachineId(e.target.value); setMobileMenuOpen(false); }}
                 disabled={loadingMachines}
                 style={{
-                  height:38,padding:"0 12px",width:"100%",
+                  height:isMobile?36:38,padding:"0 10px",width:"100%",
                   background:C.bg("input"),border:`1px solid ${C.bdr()}`,
-                  borderRadius:9,fontSize:13,color:C.txt("pri"),
+                  borderRadius:9,fontSize:isMobile?12:13,color:C.txt("pri"),
                   outline:"none",fontFamily:"'DM Sans',sans-serif",
                 }}>
                 {machines.map(m=>(
@@ -649,22 +783,29 @@ const OperatorView = () => {
               </select>
             </div>
 
-            {/* Refresh */}
+            {/* Refresh button */}
             <button onClick={()=>selectedMachineId&&loadMachineTelemetry(selectedMachineId,false)}
               disabled={loadingStats||refreshing||!selectedMachineId}
               style={{
                 display:"inline-flex",alignItems:"center",gap:6,
-                height:38,padding:"0 14px",borderRadius:9,
-                fontSize:12,fontWeight:700,cursor:"pointer",
+                height:isMobile?36:38,padding:"0 12px",borderRadius:9,
+                fontSize:isMobile?11:12,fontWeight:700,cursor:"pointer",
                 background:"transparent",border:`1px solid ${C.bdr()}`,
                 color:C.txt("sec"),transition:"all .15s",
                 opacity:loadingStats||!selectedMachineId?0.5:1,
               }}>
-              <RefreshCw size={13} style={{animation:refreshing?"ovSpin .9s linear infinite":"none"}}/>
-              {refreshing?"Updating…":"Refresh"}
+              <RefreshCw size={isMobile?12:13} style={{animation:refreshing?"ovSpin .9s linear infinite":"none"}}/>
+              {isMobile?"":(refreshing?"Updating…":"Refresh")}
             </button>
           </div>
         </div>
+        
+        {/* Mobile clock display */}
+        {isMobile && (
+          <div style={{marginTop:8,fontSize:10,color:C.txt("muted"),textAlign:"center"}}>
+            {machineClock}
+          </div>
+        )}
       </div>
 
       {/* Loading */}
@@ -680,44 +821,50 @@ const OperatorView = () => {
 
       {!loadingStats&&!loadingMachines&&(
         <>
-          {/* ── Row 1: Status + Gauge + Station Rules ─────────────── */}
-          <div style={{display:"grid",gridTemplateColumns:rowOneColumns,gap:16,alignItems:"start"}}>
-
-            {/* ── Left: Station Status ─────────────────────────────── */}
-            <div style={{display:"flex",flexDirection:"column",gap:12}}>
-
-              {/* Connection status */}
-              <Card title="Connections" icon={Wifi} accent={C.steel()}>
+          {/* ── Row 1: Status + Gauge + Station Rules (Responsive Grid) ── */}
+          <div style={{
+            display:"grid",
+            gridTemplateColumns:isMobile ? "1fr" : (isTablet ? "repeat(2, 1fr)" : "280px 1fr 260px"),
+            gap:isCompact?12:16,
+            alignItems:"start",
+          }}>
+            {/* ── Left: Station Status (Connections + QR + Operation) ── */}
+            <div style={{display:"flex",flexDirection:"column",gap:isCompact?10:12}}>
+              <Card title="Connections" icon={Wifi} accent={C.steel()} collapsible={isMobile}>
                 <div style={{display:"flex",flexDirection:"column",gap:8}}>
                   {/* PLC */}
-                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-                    padding:"9px 11px",borderRadius:9,
+                  <div style={{
+                    display:"flex",alignItems:"center",justifyContent:"space-between",
+                    padding:"8px 10px",borderRadius:9,
                     background:plcConnected?C.ok(0.07):C.ng(0.07),
-                    border:`1px solid ${plcConnected?C.ok(0.22):C.ng(0.22)}`}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    border:`1px solid ${plcConnected?C.ok(0.22):C.ng(0.22)}`,
+                  }}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
                       <ConnDot connected={plcConnected}/>
-                      <div>
-                        <p style={{fontSize:12,fontWeight:700,color:C.txt("pri")}}>PLC Controller</p>
-                        <p style={{fontSize:10,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>
+                      <div style={{minWidth:0}}>
+                        <p style={{fontSize:isCompact?11:12,fontWeight:700,color:C.txt("pri")}}>PLC Controller</p>
+                        <p style={{fontSize:9,color:C.txt("muted"),fontFamily:"'DM Mono',monospace",overflow:"hidden",textOverflow:"ellipsis"}}>
                           {plcHealth?.ip||"—"}
                         </p>
                       </div>
                     </div>
-                    <Badge variant={plcConnected?"ok":"ng"} label={plcConnected?"Online":"Offline"} pulse={plcConnected}/>
+                    <Badge variant={plcConnected?"ok":"ng"} label={plcConnected?"Online":"Offline"} pulse={plcConnected} size={isCompact?"sm":"sm"}/>
                   </div>
 
                   {/* Scanner */}
-                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-                    padding:"9px 11px",borderRadius:9,
+                  <div style={{
+                    display:"flex",alignItems:"center",justifyContent:"space-between",
+                    padding:"8px 10px",borderRadius:9,
                     background:!scannerConfigured?C.idle(0.07):scannerConnected?C.ok(0.07):C.ng(0.07),
-                    border:`1px solid ${!scannerConfigured?C.bdr():scannerConnected?C.ok(0.22):C.ng(0.22)}`}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    border:`1px solid ${!scannerConfigured?C.bdr():scannerConnected?C.ok(0.22):C.ng(0.22)}`,
+                  }}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
                       <ConnDot connected={scannerConnected}/>
-                      <div>
-                        <p style={{fontSize:12,fontWeight:700,color:C.txt("pri")}}>
+                      <div style={{minWidth:0}}>
+                        <p style={{fontSize:isCompact?11:12,fontWeight:700,color:C.txt("pri")}}>
                           {scannerInfo?.scannerName||"Scanner"}
                         </p>
-                        <p style={{fontSize:10,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>
+                        <p style={{fontSize:9,color:C.txt("muted"),fontFamily:"'DM Mono',monospace",overflow:"hidden",textOverflow:"ellipsis"}}>
                           {scannerInfo?.scannerIp||scannerHealth?.scannerIp||"—"}
                         </p>
                       </div>
@@ -726,15 +873,9 @@ const OperatorView = () => {
                       variant={!scannerConfigured?"idle":scannerConnected?"ok":"ng"}
                       label={!scannerConfigured?"Not Set":scannerConnected?"Online":"Offline"}
                       pulse={scannerConnected}
+                      size={isCompact?"sm":"sm"}
                     />
                   </div>
-
-                  {scannerConfigured&&(
-                    <div style={{fontSize:10,color:C.txt("muted"),padding:"0 2px"}}>
-                      <p>Connected: {fmtTime(scannerHealth?.connectedAt)}</p>
-                      <p>Last data: {fmtTime(scannerHealth?.lastDataAt||scannerHealth?.lastSeenAt)}</p>
-                    </div>
-                  )}
                 </div>
               </Card>
 
@@ -746,6 +887,7 @@ const OperatorView = () => {
                   sub1={qrSignal?.partId||currentContext?.partId||"Waiting for scan…"}
                   sub2={(qrSignal?.reason||qrSignal?.message||"")+(qrSignal?.timestamp?` · ${fmtTime(qrSignal.timestamp)}`:"") || fmtDT(currentContext?.createdAt)}
                   accent
+                  compact={isCompact}
                 />
               </Card>
 
@@ -757,20 +899,21 @@ const OperatorView = () => {
                   sub1={currentContext?.partId||"—"}
                   sub2={(currentContext?.interlockReason||currentContext?.result||"")+(currentContext?.createdAt?` · ${fmtTime(currentContext.createdAt)}`:"")}
                   accent
+                  compact={isCompact}
                 />
                 {canQuickReset&&(
                   <button onClick={()=>openResetConfirm(currentContext.partId,selectedStation)}
                     style={{
-                      width:"100%",marginTop:12,height:38,
+                      width:"100%",marginTop:12,height:isCompact?34:38,
                       background:C.ng(),color:"white",
                       border:"none",borderRadius:9,
-                      fontSize:12,fontWeight:800,cursor:"pointer",
+                      fontSize:isCompact?11:12,fontWeight:800,cursor:"pointer",
                       display:"flex",alignItems:"center",justifyContent:"center",gap:6,
                       boxShadow:`0 3px 10px ${C.ng(0.3)}`,transition:"filter .15s",
                     }}
                     onMouseEnter={e=>e.currentTarget.style.filter="brightness(1.08)"}
                     onMouseLeave={e=>e.currentTarget.style.filter="none"}>
-                    <RefreshCw size={13}/> Reset Operation
+                    <RefreshCw size={isCompact?12:13}/> Reset Operation
                   </button>
                 )}
               </Card>
@@ -778,73 +921,47 @@ const OperatorView = () => {
 
             {/* ── Center: Production Gauge ──────────────────────────── */}
             <Card title="Production Overview" icon={Gauge} accent={C.amber()}>
-              {/* Radial gauge */}
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"8px 0 16px"}}>
-                <div style={{position:"relative",width:180,height:180}}>
-                  {/* SVG radial gauge */}
-                  <svg width={180} height={180} viewBox="0 0 180 180">
-                    <circle cx={90} cy={90} r={72} fill="none"
-                      stroke={C.bdr(0.3)} strokeWidth={14}/>
-                    <circle cx={90} cy={90} r={72} fill="none"
-                      stroke={qualityPct>=85?C.ok():qualityPct>=60?C.amber():C.ng()}
-                      strokeWidth={14} strokeLinecap="round"
-                      strokeDasharray={`${2*Math.PI*72}`}
-                      strokeDashoffset={`${2*Math.PI*72*(1-progressPct/100)}`}
-                      transform="rotate(-90 90 90)"
-                      style={{transition:"stroke-dashoffset .8s ease"}}/>
-                  </svg>
-                  <div style={{position:"absolute",inset:0,display:"flex",
-                    flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
-                    <p style={{fontSize:36,fontWeight:900,color:C.txt("pri"),
-                      fontFamily:"'DM Mono',monospace",lineHeight:1}}>{progressPct}%</p>
-                    <p style={{fontSize:10,color:C.txt("muted"),marginTop:4,
-                      textTransform:"uppercase",letterSpacing:"0.08em"}}>Shift Progress</p>
-                    <p style={{fontSize:12,fontWeight:700,color:C.steel(),marginTop:4}}>
-                      Quality {qualityPct}%
-                    </p>
-                  </div>
-                </div>
+              <ResponsiveGauge
+                progressPct={progressPct}
+                qualityPct={qualityPct}
+                producedCount={producedCount}
+                expectedCount={expectedCount}
+                compact={isCompact}
+              />
 
-                {/* Progress bar */}
-                <div style={{width:"100%",maxWidth:360,marginTop:12}}>
-                  <div style={{display:"flex",justifyContent:"space-between",
-                    fontSize:11,color:C.txt("muted"),marginBottom:5}}>
-                    <span>Produced: {producedCount}</span>
-                    <span>Expected: {expectedCount}</span>
-                  </div>
-                  <div style={{height:8,borderRadius:99,
-                    background:C.bdr(0.2),overflow:"hidden"}}>
-                    <div style={{height:"100%",borderRadius:99,
-                      background:`linear-gradient(90deg,${C.ok()},${C.steel()})`,
-                      width:`${progressPct}%`,transition:"width .5s ease"}}/>
-                  </div>
-                </div>
-              </div>
-
-              {/* OK / NG counters */}
-              <div style={{display:"grid",gridTemplateColumns:statsGridColumns,gap:10,marginBottom:16}}>
+              {/* OK / NG counters - responsive grid */}
+              <div style={{
+                display:"grid",
+                gridTemplateColumns:isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)",
+                gap:isCompact?8:10,
+                marginBottom:isCompact?12:16,
+              }}>
                 {[
-                  {label:"Pass (OK)",    value:qualitySummary.okCount||0,          color:C.ok(),   bg:C.ok(0.08),   bd:C.ok(0.2)  },
-                  {label:"Fail (NG)",    value:qualitySummary.ngCount||0,           color:C.ng(),   bg:C.ng(0.08),   bd:C.ng(0.2)  },
-                  {label:"Interlocked",  value:qualitySummary.interlockedCount||0,  color:C.amber(),bg:C.amber(0.08),bd:C.amber(0.2)},
-                  {label:"In Progress",  value:qualitySummary.inProgressCount||0,  color:C.steel(),bg:C.steel(0.08),bd:C.steel(0.2)},
+                  {label:"Pass",    value:qualitySummary.okCount||0,          color:C.ok(),   bg:C.ok(0.08),   bd:C.ok(0.2)  },
+                  {label:"Fail",    value:qualitySummary.ngCount||0,           color:C.ng(),   bg:C.ng(0.08),   bd:C.ng(0.2)  },
+                  {label:"Locked",  value:qualitySummary.interlockedCount||0,  color:C.amber(),bg:C.amber(0.08),bd:C.amber(0.2)},
+                  {label:"Active",  value:qualitySummary.inProgressCount||0,  color:C.steel(),bg:C.steel(0.08),bd:C.steel(0.2)},
                 ].map((s,i)=>(
-                  <div key={i} style={{borderRadius:10,padding:"10px 8px",textAlign:"center",
+                  <div key={i} style={{borderRadius:10,padding:"8px 4px",textAlign:"center",
                     background:s.bg,border:`1px solid ${s.bd}`}}>
-                    <p style={{fontSize:20,fontWeight:800,color:s.color,
-                      fontFamily:"'DM Mono',monospace",lineHeight:1,marginBottom:4}}>
+                    <p style={{fontSize:isCompact?16:20,fontWeight:800,color:s.color,
+                      fontFamily:"'DM Mono',monospace",lineHeight:1,marginBottom:2}}>
                       {s.value}
                     </p>
-                    <p style={{fontSize:9,fontWeight:700,color:C.txt("muted"),
+                    <p style={{fontSize:isCompact?8:9,fontWeight:700,color:C.txt("muted"),
                       textTransform:"uppercase",letterSpacing:"0.07em"}}>{s.label}</p>
                   </div>
                 ))}
               </div>
 
-              {/* Operator + station info */}
+              {/* Operator + station info - responsive */}
               <div style={{background:C.bg("surf"),borderRadius:10,
-                border:`1px solid ${C.bdr()}`,padding:"10px 14px"}}>
-                <div style={{display:"grid",gridTemplateColumns:infoGridColumns,gap:0}}>
+                border:`1px solid ${C.bdr()}`,padding:"8px 12px"}}>
+                <div style={{
+                  display:"grid",
+                  gridTemplateColumns:isMobile ? "1fr" : "repeat(2,1fr)",
+                  gap:isMobile?4:0,
+                }}>
                   <InfoRow label="Operator" value={user.username||"Operator"}/>
                   <InfoRow label="Status" value={currentContext?.plcStatus||"WAITING"}/>
                   <InfoRow label="Last Part" value={currentContext?.partId} mono/>
@@ -853,9 +970,9 @@ const OperatorView = () => {
               </div>
             </Card>
 
-            {/* ── Right: Station Rules ──────────────────────────────── */}
-            <div style={{display:"flex",flexDirection:"column",gap:12}}>
-              <Card title="Station Configuration" icon={ShieldCheck} accent={C.steel()}>
+            {/* ── Right: Station Rules + Rejection Summary ──────────── */}
+            <div style={{display:"flex",flexDirection:"column",gap:isCompact?10:12}}>
+              <Card title="Station Configuration" icon={ShieldCheck} accent={C.steel()} collapsible={isMobile}>
                 <div style={{display:"flex",flexDirection:"column",gap:0}}>
                   <FeatureRow label="QR Validation"      enabled={stationFeatureConfig.qr}/>
                   <FeatureRow label="Operation Rule"     enabled={stationFeatureConfig.operation}/>
@@ -865,7 +982,7 @@ const OperatorView = () => {
                   <FeatureRow label="Machine Bypass"     enabled={Boolean(selectedMachine?.machineBypassEnabled)}/>
                 </div>
                 {selectedMachine?.machineBypassEnabled && selectedMachine?.machineBypassReason && (
-                  <p style={{fontSize:11,color:C.amber(),marginTop:8}}>
+                  <p style={{fontSize:10,color:C.amber(),marginTop:6}}>
                     Reason: {selectedMachine.machineBypassReason}
                   </p>
                 )}
@@ -874,34 +991,35 @@ const OperatorView = () => {
               {/* Rejection summary */}
               <Card title="Rejection Summary" icon={AlertTriangle} accent={C.ng()}>
                 {!stationFeatureConfig.rejectionBin ? (
-                  <p style={{fontSize:12,color:C.txt("muted"),fontStyle:"italic"}}>
+                  <p style={{fontSize:11,color:C.txt("muted"),fontStyle:"italic"}}>
                     Rejection Bin is disabled for this station.
                   </p>
                 ) : rejectionSummary.length===0 ? (
                   <div style={{display:"flex",alignItems:"center",gap:8,
-                    padding:"8px 10px",borderRadius:8,
+                    padding:"6px 8px",borderRadius:8,
                     background:C.ok(0.07),border:`1px solid ${C.ok(0.2)}`}}>
-                    <CheckCircle2 size={14} color={C.ok()}/>
-                    <p style={{fontSize:12,color:C.ok(),fontWeight:600}}>
+                    <CheckCircle2 size={12} color={C.ok()}/>
+                    <p style={{fontSize:11,color:C.ok(),fontWeight:600}}>
                       No rejections in recent events
                     </p>
                   </div>
                 ) : (
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {rejectionSummary.map(e=>(
+                    {rejectionSummary.slice(0, isMobile ? 3 : 5).map(e=>(
                       <div key={e.reason} style={{
                         display:"flex",alignItems:"center",justifyContent:"space-between",
-                        padding:"7px 10px",borderRadius:8,
-                        background:C.ng(0.07),border:`1px solid ${C.ng(0.18)}`}}>
-                        <span style={{fontSize:11,color:C.txt("pri"),
+                        padding:"6px 8px",borderRadius:8,
+                        background:C.ng(0.07),border:`1px solid ${C.ng(0.18)}`,
+                      }}>
+                        <span style={{fontSize:10,color:C.txt("pri"),
                           overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",
                           flex:1}}>{e.reason}</span>
                         <span style={{
-                          fontSize:12,fontWeight:800,color:C.ng(),
+                          fontSize:10,fontWeight:800,color:C.ng(),
                           fontFamily:"'DM Mono',monospace",
-                          background:C.ng(0.12),padding:"2px 8px",
-                          borderRadius:5,border:`1px solid ${C.ng(0.25)}`,
-                          flexShrink:0,marginLeft:8,
+                          background:C.ng(0.12),padding:"1px 6px",
+                          borderRadius:4,border:`1px solid ${C.ng(0.25)}`,
+                          flexShrink:0,marginLeft:6,
                         }}>{e.count}</span>
                       </div>
                     ))}
@@ -911,45 +1029,49 @@ const OperatorView = () => {
             </div>
           </div>
 
-          {/* ── Row 2: Hourly Trend + Recent Events ───────────────── */}
-          <div style={{display:"grid",gridTemplateColumns:rowTwoColumns,gap:16}}>
-
+          {/* ── Row 2: Hourly Trend + Recent Events (Responsive) ────── */}
+          <div style={{
+            display:"grid",
+            gridTemplateColumns:isMobile ? "1fr" : "1fr 1fr",
+            gap:isCompact?12:16,
+          }}>
             {/* Hourly trend */}
             <Card title="Hourly Production Trend" icon={BarChart2} accent={C.steel()}>
               {trendRows.length===0 ? (
-                <p style={{fontSize:12,color:C.txt("muted")}}>No trend data for this station.</p>
+                <p style={{fontSize:11,color:C.txt("muted")}}>No trend data for this station.</p>
               ) : (
-                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
                   {trendRows.map(row=>{
                     const okPct = row.total>0?Math.round((row.ok/row.total)*100):0;
                     return (
                       <div key={row.hour} style={{
-                        display:"flex",alignItems:"center",gap:12,
-                        padding:"9px 12px",borderRadius:9,
+                        display:"flex",alignItems:"center",gap:isCompact?6:12,
+                        padding:"6px 8px",borderRadius:9,
                         background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
+                        flexWrap:isMobile?"wrap":"nowrap",
                       }}>
-                        <p style={{fontSize:12,fontWeight:700,color:C.txt("pri"),
-                          fontFamily:"'DM Mono',monospace",flexShrink:0,minWidth:48}}>
+                        <p style={{fontSize:isCompact?10:12,fontWeight:700,color:C.txt("pri"),
+                          fontFamily:"'DM Mono',monospace",flexShrink:0,minWidth:40}}>
                           {row.hour}
                         </p>
                         {/* Mini bar */}
-                        <div style={{flex:1,height:6,borderRadius:99,
-                          background:C.bdr(0.2),overflow:"hidden"}}>
+                        <div style={{flex:1,height:4,borderRadius:99,
+                          background:C.bdr(0.2),overflow:"hidden",minWidth:isMobile?60:"auto"}}>
                           <div style={{height:"100%",borderRadius:99,
                             background:C.ok(),width:`${okPct}%`,transition:"width .4s"}}/>
                         </div>
-                        <div style={{display:"flex",gap:8,flexShrink:0}}>
-                          <span style={{fontSize:11,fontWeight:700,color:C.ok(),
-                            padding:"2px 7px",borderRadius:5,
+                        <div style={{display:"flex",gap:6,flexShrink:0}}>
+                          <span style={{fontSize:isCompact?9:11,fontWeight:700,color:C.ok(),
+                            padding:"1px 5px",borderRadius:4,
                             background:C.ok(0.1),border:`1px solid ${C.ok(0.25)}`}}>
                             ✓ {row.ok}
                           </span>
-                          <span style={{fontSize:11,fontWeight:700,color:C.ng(),
-                            padding:"2px 7px",borderRadius:5,
+                          <span style={{fontSize:isCompact?9:11,fontWeight:700,color:C.ng(),
+                            padding:"1px 5px",borderRadius:4,
                             background:C.ng(0.1),border:`1px solid ${C.ng(0.25)}`}}>
                             ✗ {row.ng}
                           </span>
-                          <span style={{fontSize:11,color:C.txt("muted")}}>
+                          <span style={{fontSize:isCompact?9:10,color:C.txt("muted")}}>
                             / {row.total}
                           </span>
                         </div>
@@ -963,36 +1085,39 @@ const OperatorView = () => {
             {/* Recent events */}
             <Card title="Recent Scan Events" icon={Wrench} accent={C.navy()}>
               {(stationStats?.recentParts||[]).length===0 ? (
-                <p style={{fontSize:12,color:C.txt("muted")}}>No recent station events.</p>
+                <p style={{fontSize:11,color:C.txt("muted")}}>No recent station events.</p>
               ) : (
-                <div style={{display:"flex",flexDirection:"column",gap:7,
-                  maxHeight:320,overflowY:"auto"}}>
-                  {(stationStats?.recentParts||[]).map((row,i)=>{
+                <div style={{
+                  display:"flex",flexDirection:"column",gap:6,
+                  maxHeight:isCompact?280:320,overflowY:"auto",
+                }}>
+                  {(stationStats?.recentParts||[]).slice(0, isMobile ? 4 : 8).map((row,i)=>{
                     const res=String(row.result||"").toUpperCase();
                     const variant=res==="OK"?"ok":res==="NG"?"ng":"idle";
                     return (
                       <div key={row.id||i} style={{
-                        padding:"10px 13px",borderRadius:9,
+                        padding:"8px 10px",borderRadius:9,
                         background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
                         borderLeft:`3px solid ${STATUS_MAP[variant]?.fg||C.bdr()}`,
                       }}>
                         <div style={{display:"flex",alignItems:"center",
-                          justifyContent:"space-between",gap:8,marginBottom:4}}>
-                          <span style={{fontFamily:"'DM Mono',monospace",fontSize:11,
+                          justifyContent:"space-between",gap:6,marginBottom:3}}>
+                          <span style={{fontFamily:"'DM Mono',monospace",fontSize:10,
                             fontWeight:700,color:C.txt("pri"),
-                            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",
+                            flex:1}}>
                             {row.partId||"—"}
                           </span>
-                          <Badge variant={variant} label={variant==="ok"?"Pass":variant==="ng"?"Fail":"—"}/>
+                          <Badge variant={variant} label={variant==="ok"?"Pass":variant==="ng"?"Fail":"—"} size="sm"/>
                         </div>
                         <div style={{display:"flex",alignItems:"center",
-                          gap:12,fontSize:10,color:C.txt("muted")}}>
+                          gap:8,fontSize:9,color:C.txt("muted"),flexWrap:"wrap"}}>
                           <span>{row.plcStatus||"—"}</span>
                           <span>{fmtTime(row.createdAt)}</span>
                         </div>
                         {row.interlockReason&&(
-                          <p style={{fontSize:10,color:C.ng(),marginTop:4,lineHeight:1.4}}>
-                            ⚠ {row.interlockReason}
+                          <p style={{fontSize:9,color:C.ng(),marginTop:3,lineHeight:1.3}}>
+                            ⚠ {row.interlockReason.length > 40 ? row.interlockReason.slice(0,40)+"..." : row.interlockReason}
                           </p>
                         )}
                       </div>
@@ -1003,29 +1128,30 @@ const OperatorView = () => {
             </Card>
           </div>
 
-          {/* ── Row 3: Live QR Feed ────────────────────────────────── */}
+          {/* ── Row 3: Live QR Feed (Responsive) ────────────────────── */}
           {qrFeed.length>0&&(
             <Card title="Live QR Feed" icon={Radio} accent={C.steel()}>
               <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                {qrFeed.map(entry=>(
+                {qrFeed.slice(0, isMobile ? 3 : 6).map(entry=>(
                   <div key={entry.id} style={{
-                    display:"flex",alignItems:"center",gap:12,
-                    padding:"9px 13px",borderRadius:9,
+                    display:"flex",alignItems:"center",gap:isCompact?8:12,
+                    padding:"8px 10px",borderRadius:9,
                     background:STATUS_MAP[entry.variant]?.bg||C.bg("surf"),
                     border:`1px solid ${STATUS_MAP[entry.variant]?.bd||C.bdr()}`,
+                    flexWrap:isMobile?"wrap":"nowrap",
                   }}>
-                    <Badge variant={entry.variant} label={entry.label} pulse={entry.variant==="wip"}/>
-                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:11,
+                    <Badge variant={entry.variant} label={entry.label} pulse={entry.variant==="wip"} size="sm"/>
+                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:10,
                       fontWeight:700,color:C.txt("pri"),flex:1,
                       overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                       {entry.partId||"—"}
                     </span>
                     {entry.stationNo&&(
-                      <span style={{fontSize:10,color:C.txt("muted"),flexShrink:0}}>
+                      <span style={{fontSize:9,color:C.txt("muted"),flexShrink:0}}>
                         {entry.stationNo}
                       </span>
                     )}
-                    <span style={{fontSize:10,color:C.txt("muted"),
+                    <span style={{fontSize:9,color:C.txt("muted"),
                       fontFamily:"'DM Mono',monospace",flexShrink:0}}>
                       {fmtTime(entry.timestamp)}
                     </span>
@@ -1035,40 +1161,40 @@ const OperatorView = () => {
             </Card>
           )}
 
-          {/* ── Row 4: Bottom action bar ────────────────────────────── */}
+          {/* ── Row 4: Bottom action bar (Responsive) ────────────────── */}
           <div style={{
             display:"flex",alignItems:"center",justifyContent:"space-between",
-            flexWrap:"wrap",gap:12,
-            padding:"12px 16px",borderRadius:12,
+            flexWrap:"wrap",gap:10,
+            padding:"10px 14px",borderRadius:12,
             background:C.bg("card"),border:`1px solid ${C.bdr()}`,
             boxShadow:SH,
           }}>
-            <div style={{display:"flex",alignItems:"center",gap:20,flexWrap:"wrap"}}>
-              <button style={{display:"inline-flex",alignItems:"center",gap:6,
-                fontSize:12,fontWeight:600,color:C.txt("sec"),
+            <div style={{display:"flex",alignItems:"center",gap:isCompact?10:20,flexWrap:"wrap"}}>
+              <button style={{display:"inline-flex",alignItems:"center",gap:5,
+                fontSize:isCompact?10:12,fontWeight:600,color:C.txt("sec"),
                 background:"none",border:"none",cursor:"pointer"}}>
-                <CheckCircle2 size={14} color={C.ok()}/> Change Job
+                <CheckCircle2 size={isCompact?12:14} color={C.ok()}/> Change Job
               </button>
-              <button style={{display:"inline-flex",alignItems:"center",gap:6,
-                fontSize:12,fontWeight:600,color:C.txt("sec"),
+              <button style={{display:"inline-flex",alignItems:"center",gap:5,
+                fontSize:isCompact?10:12,fontWeight:600,color:C.txt("sec"),
                 background:"none",border:"none",cursor:"pointer"}}>
-                <AlertTriangle size={14} color={C.ng()}/> Reject Part
+                <AlertTriangle size={isCompact?12:14} color={C.ng()}/> Reject Part
               </button>
             </div>
-            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+            <div style={{display:"flex",gap:isCompact?6:10,flexWrap:"wrap"}}>
               {[
                 {label:"Availability", value:`${Math.max(0,100-(qualitySummary.interlockedCount||0))}%`},
                 {label:"Quality",      value:`${qualityPct}%`},
                 {label:"In Progress",  value:qualitySummary.inProgressCount||0},
               ].map((s,i)=>(
                 <div key={i} style={{
-                  padding:"5px 14px",borderRadius:8,
+                  padding:"4px 10px",borderRadius:8,
                   background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
-                  fontSize:11,color:C.txt("pri"),
-                  display:"flex",alignItems:"center",gap:6,
+                  fontSize:isCompact?9:11,color:C.txt("pri"),
+                  display:"flex",alignItems:"center",gap:4,
                 }}>
                   <span style={{color:C.txt("muted")}}>{s.label}:</span>
-                  <span style={{fontWeight:700,fontFamily:"'DM Mono',monospace"}}>{s.value}</span>
+                  <span style={{fontWeight:700,fontFamily:"'DM Mono',monospace",fontSize:isCompact?10:11}}>{s.value}</span>
                 </div>
               ))}
             </div>

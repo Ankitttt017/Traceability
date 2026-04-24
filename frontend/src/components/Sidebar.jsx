@@ -246,7 +246,7 @@ const Sidebar = ({ onClose }) => {
 
       {/* Footer */}
       {!collapsed && (
-        <div className="px-4 py-3 border-t border-border/60 text-center text-[10px] text-text-muted/60">
+        <div className="px-2 py-2 border-t border-border/60 text-center text-[10px] text-text-muted/60">
           IndusTrace v2.0
         </div>
       )}

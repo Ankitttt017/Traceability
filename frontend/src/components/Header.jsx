@@ -259,7 +259,7 @@ const Header = ({ onMenuClick }) => {
             <Search size={18} />
           </button>
 
-        <ThemeToggleButton className="px-2.5 sm:px-3" />
+        <ThemeToggleButton className="px-2 sm:px-2" />
 
         <div className="relative">
           <button

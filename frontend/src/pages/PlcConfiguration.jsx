@@ -138,9 +138,9 @@ const PlcConfiguration = () => {
                 {ranges.map(r => (
                   <tr key={r.id} className="hover:bg-bg-dark/20 transition-colors group">
                     <td className="px-5 py-4 font-bold text-text-main">{r.plcName || "—"}</td>
-                    <td className="px-5 py-4 font-mono text-primary flex flex-col gap-0.5 text-xs"><span>{r.plcIp}</span><span className="text-text-muted">Port {r.plcPort}</span></td>
+                    <td className="px-5 py-4 font-mono text-black flex flex-col gap-0.5 text-xs"><span>{r.plcIp}</span><span className="text-text-muted">Port {r.plcPort}</span></td>
                     <td className="px-5 py-4">
-                      <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-primary/10 text-primary border border-primary/20 rounded-md">{r.plcProtocol}</span>
+                      <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-primary/10 text-black border border-primary/20 rounded-md">{r.plcProtocol}</span>
                     </td>
                     <td className="px-5 py-4">
                       <span className="px-3 py-1 text-xs font-mono font-semibold bg-bg-dark border border-border rounded-lg text-text-muted">R{r.rangeStart}–R{r.rangeEnd}</span>

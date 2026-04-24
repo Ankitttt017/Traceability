@@ -237,7 +237,7 @@ function getMachineSpcConfig(machine) {
     plcResultDevice: String(source.plcResultDevice || source.resultDevice || "D").trim().toUpperCase() || "D",
     plcResultOkValues,
     plcResultNgValues,
-    plcAckEnabled: source.plcAckEnabled === true,
+    plcAckEnabled: source.plcAckEnabled !== false,
     plcAckRegister: Number.isFinite(Number(source.plcAckRegister ?? source.ackRegister))
       ? Math.trunc(Number(source.plcAckRegister ?? source.ackRegister))
       : null,
@@ -315,7 +315,7 @@ async function readQualityCheckResultFromPlc(machine, spcConfig) {
 }
 
 async function sendQualityCheckAckToPlc(machine, spcConfig, finalResult) {
-  if (!machine || !spcConfig?.enabled || spcConfig.plcAckEnabled !== true) {
+  if (!machine || !spcConfig?.enabled) {
     return { skipped: true, reason: "ACK_DISABLED" };
   }
   const registerNo = Number(spcConfig.plcAckRegister);
