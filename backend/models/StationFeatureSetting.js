@@ -22,11 +22,6 @@ const StationFeatureSetting = sequelize.define("StationFeatureSetting", {
     allowNull: false,
     defaultValue: true,
   },
-  plc_confirmation_enabled: {
-    type: DataTypes.BOOLEAN,
-    allowNull: false,
-    defaultValue: true,
-  },
   manual_result_enabled: {
     type: DataTypes.BOOLEAN,
     allowNull: false,
@@ -47,24 +42,8 @@ const StationFeatureSetting = sequelize.define("StationFeatureSetting", {
     defaultValue: false,
   },
   config: {
-    type: DataTypes.TEXT,
+    type: DataTypes.JSON,
     allowNull: true,
-    get() {
-      const rawValue = this.getDataValue('config');
-      if (!rawValue) return null;
-      try {
-        return JSON.parse(rawValue);
-      } catch (e) {
-        return null;
-      }
-    },
-    set(value) {
-      if (value) {
-        this.setDataValue('config', JSON.stringify(value));
-      } else {
-        this.setDataValue('config', null);
-      }
-    }
   },
   updated_by: {
     type: DataTypes.INTEGER,

@@ -21,6 +21,7 @@ import {
   Regex,
   Users,
   FileText,
+  Route,
 } from "lucide-react";
 
 import { APP_ROUTES } from "../constants/routes";
@@ -83,6 +84,12 @@ const Sidebar = ({ onClose }) => {
         path: APP_ROUTES.partJourney,
         icon: Wrench,
         moduleKey: "part_journey",
+      },
+      {
+        name: "Process Flow",
+        path: APP_ROUTES.processFlow,
+        icon: Route,
+        moduleKey: "process_flow",
       },
       {
         name: "Production",

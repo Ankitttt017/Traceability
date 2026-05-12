@@ -177,6 +177,10 @@ export const traceabilityApi = {
     const { data } = await apiClient.get(ENDPOINTS.traceability.operations);
     return data;
   },
+  processFlow: async (params) => {
+    const { data } = await apiClient.get(ENDPOINTS.traceability.processFlow, { params });
+    return data;
+  },
   partCatalog: async (params) => {
     const { data } = await apiClient.get(ENDPOINTS.traceability.parts, { params });
     return data;

@@ -25,6 +25,7 @@ export const ENDPOINTS = {
   roleAccessSettings: "/role-access-settings",
   traceability: {
     operations: "/traceability/operations",
+    processFlow: "/traceability/process-flow",
     parts: "/traceability/parts",
     byPart: (partId) => `/traceability/${encodeURIComponent(partId)}`,
     journeyByPart: (partId) => `/traceability/journey/${encodeURIComponent(partId)}`,

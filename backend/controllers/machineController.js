@@ -398,7 +398,7 @@ function validateIndustrialMachinePayload(payload = {}) {
     ["endOkRegister", "END_OK"],
     ["endNgRegister", "END_NG"],
     ["resetRegister", "RESET"],
-    ["heartbeatRegister", "CONFIRMATION"],
+
     ["partRegister", "PART_HASH"],
     ["stationRegister", "STATION_HASH"],
     ["bypassRegister", "BYPASS"],
@@ -443,7 +443,7 @@ function validateIndustrialMachinePayload(payload = {}) {
       if (s.includes("END_OK") || s.includes("OK_END")) return "END_OK";
       if (s.includes("END_NG") || s.includes("NG_END")) return "END_NG";
       if (s.includes("RESET")) return "RESET";
-      if (s.includes("CONFIRM") || s.includes("ACK")) return "CONFIRMATION";
+
       if (s.includes("BYPASS")) return "BYPASS";
       return s;
     });
@@ -452,9 +452,8 @@ function validateIndustrialMachinePayload(payload = {}) {
     
     // Group signals into "Compatible Families" to allow single-register mapping (Point 22)
     const families = {
-      CONTROL: ["START", "INTERLOCK", "BLOCK_INTERLOCK", "START_SENT", "WAITING_ACK"],
+      CONTROL: ["START", "INTERLOCK", "BLOCK_INTERLOCK", "START_SENT", "WAITING_RUNNING"],
       FEEDBACK: ["RUNNING", "END_OK", "END_NG", "COMPLETE", "WAITING_END"],
-      HEARTBEAT: ["CONFIRMATION", "HEARTBEAT", "ACK"],
       BYPASS: ["BYPASS"],
       REJECTION: ["REJECTION", "BIN_OPEN", "BIN_STATUS"]
     };
@@ -476,6 +475,28 @@ function validateIndustrialMachinePayload(payload = {}) {
     // But if they are all from the same family (e.g. START and BLOCK), it's allowed.
     if (detectedFamilies.size > 1) {
       errors.push(`Register ${register} has incompatible signal families: ${Array.from(detectedFamilies).join(", ")} (${entries.join(", ")})`);
+    }
+  }
+
+  // Hard Validation: Reject mismatched device families for SLMP (Point 6)
+  if (payload.plc_protocol === "SLMP") {
+    const configDevice = toText(payload.plc_slmp_device || "D").toUpperCase();
+    const handshakeMap = Array.isArray(parsed?.handshakeMap) ? parsed.handshakeMap : [];
+    
+    handshakeMap.forEach((row, idx) => {
+      if (!row.register) return;
+      const rowDevice = toText(row.device || configDevice).toUpperCase();
+      if (rowDevice !== configDevice) {
+        errors.push(`Signal "${row.signal || `Row ${idx + 1}`}" uses device family "${rowDevice}" which does not match machine default "${configDevice}".`);
+      }
+    });
+
+    // Check SPC config as well
+    const spc = parsed?.spcConfig || {};
+    if (spc.enabled && spc.mode === "PLC_REGISTER") {
+      if (spc.plcResultRegister && toText(spc.plcResultDevice || "D").toUpperCase() !== configDevice) {
+        errors.push(`SPC Result uses device family "${spc.plcResultDevice}" which does not match machine default "${configDevice}".`);
+      }
     }
   }
 

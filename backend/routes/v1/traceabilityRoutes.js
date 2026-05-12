@@ -5,6 +5,7 @@ const { verifyToken, isAdminOrEngineerStrict } = require("../../middleware/authM
 const router = express.Router();
 
 router.get("/traceability/operations", traceabilityController.getOperationSequence);
+router.get("/traceability/process-flow", traceabilityController.getProcessFlow);
 router.get("/traceability/parts", traceabilityController.getPartCatalog);
 router.get("/traceability/machine-stats", traceabilityController.getMachineStationStats);
 router.get("/traceability/plc-health", traceabilityController.getPlcHealth);

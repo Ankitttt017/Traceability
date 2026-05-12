@@ -8,8 +8,6 @@ const States = {
   SCANNED: "SCANNED",
   VALIDATED: "VALIDATED",
   START_SENT: "START_SENT",
-  WAITING_ACK: "WAITING_ACK",
-  ACK_RECEIVED: "ACK_RECEIVED",
   WAITING_RUNNING: "WAITING_RUNNING",
   RUNNING: "RUNNING",
   WAITING_END: "WAITING_END",
@@ -19,7 +17,6 @@ const States = {
   RESETTING: "RESETTING",
   RESET_ACK_WAIT: "RESET_ACK_WAIT",
   // Error/Timeout States
-  ACK_TIMEOUT: "ACK_TIMEOUT",
   RUNNING_TIMEOUT: "RUNNING_TIMEOUT",
   END_TIMEOUT: "END_TIMEOUT",
   RESET_TIMEOUT: "RESET_TIMEOUT",
@@ -28,31 +25,21 @@ const States = {
 };
 
 const Transitions = {
-  // IDLE can transition to any error/timeout state as a safe fallback
-  // This prevents crashes when onFailure fires after a race condition that
-  // already reset state to IDLE (e.g. IDLE → ACK_TIMEOUT was illegal before).
-  [States.IDLE]: [
-    States.SCANNED, States.RECOVERING, States.RESETTING,
-    // Error/timeout fallbacks from race-condition onFailure calls:
-    States.ACK_TIMEOUT, States.RUNNING_TIMEOUT, States.END_TIMEOUT,
-    States.RESET_TIMEOUT, States.PLC_ERROR,
-  ],
+  [States.IDLE]: [States.SCANNED, States.RECOVERING, States.RESETTING],
   [States.SCANNED]: [States.VALIDATED, States.IDLE, States.PLC_ERROR],
   [States.VALIDATED]: [States.START_SENT, States.IDLE, States.PLC_ERROR],
-  [States.START_SENT]: [States.WAITING_ACK, States.ACK_TIMEOUT, States.PLC_ERROR, States.RESETTING],
-  [States.WAITING_ACK]: [States.ACK_RECEIVED, States.ACK_TIMEOUT, States.PLC_ERROR, States.RESETTING],
-  [States.ACK_RECEIVED]: [States.WAITING_RUNNING, States.PLC_ERROR, States.RESETTING],
+  [States.START_SENT]: [States.WAITING_RUNNING, States.PLC_ERROR, States.RESETTING, States.RUNNING],
+
   [States.WAITING_RUNNING]: [States.RUNNING, States.RUNNING_TIMEOUT, States.PLC_ERROR, States.RESETTING],
-  [States.RUNNING]: [States.WAITING_END, States.PLC_ERROR, States.RESETTING],
+  [States.RUNNING]: [States.WAITING_END, States.COMPLETED_OK, States.COMPLETED_NG, States.PLC_ERROR, States.RESETTING],
   [States.WAITING_END]: [States.COMPLETED_OK, States.COMPLETED_NG, States.END_TIMEOUT, States.PLC_ERROR, States.RESETTING],
-  [States.COMPLETED_OK]: [States.IDLE, States.RESETTING],
-  [States.COMPLETED_NG]: [States.WAITING_BIN_ACK, States.IDLE, States.RESETTING],
-  [States.WAITING_BIN_ACK]: [States.IDLE, States.PLC_ERROR, States.RESETTING],
-  [States.RESETTING]: [States.RESET_ACK_WAIT, States.RESET_TIMEOUT, States.PLC_ERROR, States.IDLE],
+  [States.COMPLETED_OK]: [States.RESETTING, States.IDLE],
+  [States.COMPLETED_NG]: [States.WAITING_BIN_ACK, States.RESETTING, States.IDLE],
+  [States.WAITING_BIN_ACK]: [States.RESETTING, States.IDLE, States.PLC_ERROR],
+  [States.RESETTING]: [States.IDLE, States.RESET_ACK_WAIT, States.RESET_TIMEOUT, States.PLC_ERROR],
   [States.RESET_ACK_WAIT]: [States.IDLE, States.RESET_TIMEOUT, States.PLC_ERROR],
-  [States.ACK_TIMEOUT]: [States.RESETTING, States.IDLE, States.PLC_ERROR],
-  [States.RUNNING_TIMEOUT]: [States.RESETTING, States.IDLE, States.PLC_ERROR],
-  [States.END_TIMEOUT]: [States.RESETTING, States.IDLE, States.PLC_ERROR],
+  [States.RUNNING_TIMEOUT]: [States.RESETTING, States.IDLE],
+  [States.END_TIMEOUT]: [States.RESETTING, States.IDLE],
   [States.RESET_TIMEOUT]: [States.IDLE, States.PLC_ERROR],
   [States.PLC_ERROR]: [States.RECOVERING, States.RESETTING, States.IDLE],
   [States.RECOVERING]: [States.IDLE, States.RUNNING, States.WAITING_END, States.PLC_ERROR],
@@ -75,6 +62,12 @@ class PlcStateMachineService {
     const runtime = await this.getOrCreateRuntimeState(machineId);
     const currentState = runtime.current_state;
 
+    // RULE 1: STRICT RESETTING GUARD
+    if (currentState === States.RESETTING && newState !== States.IDLE && newState !== States.PLC_ERROR) {
+       console.warn(`[StateMachine] BLOCKING transition ${currentState} -> ${newState} for machine ${machineId}. System is RESETTING.`);
+       return runtime; // Ignore all events except IDLE or ERROR during reset
+    }
+
     // Guard Rules (Point 19)
     if (!this.isValidTransition(currentState, newState)) {
       const errorMsg = `Illegal state transition from ${currentState} to ${newState}`;
@@ -84,9 +77,9 @@ class PlcStateMachineService {
       if (!this.isRecoveryTransition(currentState, newState)) {
         throw new Error(errorMsg);
       }
-      logWarn("RECOVERY_TRANSITION_OVERRIDE", { 
-        machineId, 
-        from: currentState, 
+      logWarn("RECOVERY_TRANSITION_OVERRIDE", {
+        machineId,
+        from: currentState,
         to: newState,
         reason: "Allowing recovery transition despite invalid path"
       });
@@ -137,6 +130,14 @@ class PlcStateMachineService {
       ...metadata
     });
 
+    emitRealtime("operator_popup", {
+      type: "INFO",
+      machineId,
+      plcStatus: newState,
+      timestamp: updateData.last_transition_at,
+      ...metadata
+    });
+
     console.log(`[StateMachine] Machine ${machineId}: ${currentState} -> ${newState}`);
     return runtime;
   }
@@ -149,7 +150,7 @@ class PlcStateMachineService {
 
   isRecoveryTransition(from, to) {
     // Allow transitions between error/recovery states to prevent deadlocks
-    const errorStates = ["RESETTING", "RESET_TIMEOUT", "ACK_TIMEOUT", "RUNNING_TIMEOUT", "END_TIMEOUT", "PLC_ERROR", "RECOVERING"];
+    const errorStates = ["RESETTING", "RESET_TIMEOUT", "RUNNING_TIMEOUT", "END_TIMEOUT", "PLC_ERROR", "RECOVERING"];
     return errorStates.includes(from) && errorStates.includes(to) && from !== to;
   }
 

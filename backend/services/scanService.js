@@ -197,6 +197,18 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
   }
 
   if (!scanStartAllowed) {
+    const blockedLog = await OperationLog.create({
+      part_id: normalizedPartId,
+      machine_id: mId || null,
+      operation_no: station,
+      station_no: station,
+      plc_status: "INTERLOCKED",
+      result: "NG",
+      result_source: "AUDIT_BLOCK",
+      result_input: "BLOCK",
+      user_id: userId,
+      interlock_reason: "DUPLICATE_SCAN_IN_FLIGHT",
+    }).catch(() => null);
     emitRealtime("scan_event", {
       type: "WARNING",
       partId: normalizedPartId,
@@ -205,12 +217,14 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       decision: "BLOCK",
       reason: "DUPLICATE_SCAN_IN_FLIGHT",
       message: "Scan already in progress for this part/station",
+      operationLogId: blockedLog?.id || null,
     });
     return {
       decision: "BLOCK",
       reason: "DUPLICATE_SCAN_IN_FLIGHT",
       message: "Scan already in progress. Wait for current cycle processing.",
       currentStatus: "IN_PROGRESS",
+      operationLogId: blockedLog?.id || null,
     };
   }
 
@@ -307,7 +321,25 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       }
 
       await saveAuditLog(normalizedPartId, mId, "NG", "DUPLICATE_SCAN", userId);
-      return { decision: "BLOCK", reason: "DUPLICATE_SCAN", message: `Duplicate scan at ${station}`, currentStatus: part.status };
+      const blockedLog = await OperationLog.create({
+        part_id: normalizedPartId,
+        machine_id: mId || null,
+        operation_no: station,
+        station_no: station,
+        plc_status: "INTERLOCKED",
+        result: "NG",
+        result_source: "AUDIT_BLOCK",
+        result_input: "BLOCK",
+        user_id: userId,
+        interlock_reason: "DUPLICATE_SCAN",
+      });
+      return {
+        decision: "BLOCK",
+        reason: "DUPLICATE_SCAN",
+        message: `Duplicate scan at ${station}`,
+        currentStatus: part.status,
+        operationLogId: blockedLog.id,
+      };
     }
 
     if (isInterlockRecovery && existingAtStation && existingAtStation.plc_status !== "PENDING") {
@@ -328,13 +360,51 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       const prevStatus = toUpper(previousLog?.plc_status);
       if (prevStatus !== "ENDED_OK" && prevStatus !== "ENDED_NG") {
         await saveAuditLog(normalizedPartId, mId, "NG", "PREVIOUS_STATION_NOT_COMPLETED", userId);
-        return { decision: "BLOCK", reason: "PREVIOUS_STATION_NOT_COMPLETED", message: `Previous station ${previousStation} not completed`, expectedStation, currentStatus: part.status };
+        const blockedLog = await OperationLog.create({
+          part_id: normalizedPartId,
+          machine_id: mId || null,
+          operation_no: station,
+          station_no: station,
+          plc_status: "INTERLOCKED",
+          result: "NG",
+          result_source: "AUDIT_BLOCK",
+          result_input: "BLOCK",
+          user_id: userId,
+          interlock_reason: "PREVIOUS_STATION_NOT_COMPLETED",
+        });
+        return {
+          decision: "BLOCK",
+          reason: "PREVIOUS_STATION_NOT_COMPLETED",
+          message: `Previous station ${previousStation} not completed`,
+          expectedStation,
+          currentStatus: part.status,
+          operationLogId: blockedLog.id,
+        };
       }
     }
 
     if (!skipSequenceValidation && expectedStation && station !== expectedStation) {
       await saveAuditLog(normalizedPartId, mId, "NG", "PREVIOUS_STATION_NOT_COMPLETED", userId);
-      return { decision: "BLOCK", reason: "PREVIOUS_STATION_NOT_COMPLETED", message: `Seq violation. Expected ${expectedStation}`, expectedStation, currentStatus: part.status };
+      const blockedLog = await OperationLog.create({
+        part_id: normalizedPartId,
+        machine_id: mId || null,
+        operation_no: station,
+        station_no: station,
+        plc_status: "INTERLOCKED",
+        result: "NG",
+        result_source: "AUDIT_BLOCK",
+        result_input: "BLOCK",
+        user_id: userId,
+        interlock_reason: "PREVIOUS_STATION_NOT_COMPLETED",
+      });
+      return {
+        decision: "BLOCK",
+        reason: "PREVIOUS_STATION_NOT_COMPLETED",
+        message: `Seq violation. Expected ${expectedStation}`,
+        expectedStation,
+        currentStatus: part.status,
+        operationLogId: blockedLog.id,
+      };
     }
 
     if (normalizedResult === "NG") {

@@ -19,7 +19,6 @@ const { packPart, createSessionIfMissing } = require("../services/packingService
 const { tryAcquireMachineLock, clearMachineLock } = require("../services/machineLockService");
 const {
   getStationFeatureConfig,
-  isPlcConfirmationEnabled,
   normalizePlcPartCount,
 } = require("../services/stationFeatureService");
 const { isMachineBypassEnabled } = require("../services/machineBypassService");
@@ -738,41 +737,13 @@ async function handleStationPlcFlow({
   machine,
   stationNo,
   partId,
-  plcConfirmationRequired,
   requiredPlcPartCount,
 }) {
   if (scanResult.decision !== "ALLOW" || !scanResult.operationLogId) {
     return;
   }
 
-  if (!plcConfirmationRequired) {
-    const lock = await tryAcquireMachineLock({
-      machineId: machine.id,
-      partId,
-      stationNo,
-    });
-    if (!lock.acquired) {
-      await rollbackPendingOperation({
-        partId,
-        operationLogId: scanResult.operationLogId,
-      });
-      scanResult.decision = "BLOCK";
-      scanResult.reason = "MACHINE_RUNNING";
-      scanResult.message = lock.runningPartId
-        ? `Machine busy. Current part ${lock.runningPartId} is in operation.`
-        : "Machine busy with another cycle. Retry after current operation completes.";
-      scanResult.operationLogId = null;
-      scanResult.currentStatus = "IN_PROGRESS";
-      return;
-    }
-
-    // Keep scan locked and wait for explicit PLC end confirmation.
-    scanResult.plcHandshake = "WAITING_PLC_END";
-    scanResult.operationStatus = "PENDING";
-    scanResult.message = "QR verified. Waiting PLC operation end signal.";
-    emitRealtime("dashboard_refresh", { reason: "PLC_WAITING_END_SIGNAL" });
-    return;
-  }
+  // Direct mode: No WAITING_PLC_END block anymore
 
   if (requiredPlcPartCount <= 1) {
     const lock = await tryAcquireMachineLock({
@@ -1163,19 +1134,15 @@ server.on("connection", (socket) => {
         );
       }
       const machineBypassEnabled = isMachineBypassEnabled(machine.id);
-      const plcConfirmationRequired = machineBypassEnabled
-        ? false
-        : await isPlcConfirmationEnabled(stationNo);
-      const requiredPlcPartCount = plcConfirmationRequired
-        ? normalizePlcPartCount(stationFeatures.plcPartCount)
-        : 1;
+      const requiredPlcPartCount = normalizePlcPartCount(stationFeatures.plcPartCount || 1);
+      
+      console.log(`[TCP:PLC_HANDSHAKE_STARTING] partId=${partId} station=${stationNo}`);
 
       await handleStationPlcFlow({
         scanResult,
         machine,
         stationNo,
         partId,
-        plcConfirmationRequired,
         requiredPlcPartCount,
       });
       safeSocketWrite(`${scanResult.decision}\n`);
@@ -1300,6 +1267,8 @@ function startTcpServer() {
   if (server.listening) return;
   server.listen(tcpPort, () => {
     console.log(`TCP Server Running on Port ${tcpPort}`);
+    console.log("[TCP:ACK_MODE_DISABLED]");
+    console.log("[TCP:HANDSHAKE_DIRECT_MODE]");
   });
 }
 

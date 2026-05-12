@@ -38,17 +38,26 @@ function resolveOperationState(popup = {}) {
   )
     .trim()
     .toUpperCase();
-  if (["ENDED_OK", "PASSED", "COMPLETED", "COMPLETED_OK"].includes(status)) return "PASS";
-  if (["ENDED_NG", "COMPLETED_NG", "FAILED", "NG", "INTERLOCKED", "BLOCKED"].includes(status))
+    
+  // PRIORITY RULE: PASS > FAIL > RUN > WAIT
+  if (["ENDED_OK", "PASSED", "COMPLETED", "COMPLETED_OK", "PASS"].includes(status)) return "PASS";
+  if (["ENDED_NG", "COMPLETED_NG", "FAILED", "NG", "INTERLOCKED", "BLOCKED", "FAIL"].includes(status))
     return "FAIL";
-  if (["RUNNING", "WAITING_RUNNING", "WAITING_END", "START_SENT", "VALIDATED", "SCANNED", "WAITING_ACK", "ACK_RECEIVED", "WAITING_BIN_ACK"].includes(status))
-    return "RUN";
-  if (["RESETTING", "RECOVERING", "MACHINE_BUSY"].includes(status)) return "WAIT";
-  if (["PLC_COMM_ERROR", "COMM_ERROR", "PLC_TIMEOUT", "TIMEOUT"].includes(status))
+    
+  // If RUNNING signal arrives → FORCE UI = IN PROCESS immediately
+  if (["RUNNING", "WAITING_END", "IN_PROGRESS", "IN PROCESS", "STARTED"].includes(status)) return "RUN";
+  
+  // WAITING_RUNNING / OP_WAIT → OP WAIT
+  if (["WAITING_RUNNING", "START_SENT", "OP_WAIT", "OP WAIT", "WAITING MACHINE START"].includes(status)) return "OP_WAIT";
+  
+  if (["SCANNED", "VALIDATED"].includes(status)) return "SCANNED";
+  
+  if (["RESETTING", "RECOVERING", "MACHINE_BUSY", "PENDING"].includes(status)) return "WAIT";
+  
+  if (["END_TIMEOUT", "RUNNING_TIMEOUT", "RESET_TIMEOUT", "CYCLE_TIMEOUT", "PLC_COMM_ERROR", "COMM_ERROR", "PLC_TIMEOUT", "TIMEOUT"].includes(status))
     return "COMM";
-  if (["STARTED", "IN_PROGRESS"].includes(status)) return "RUN";
-  if (status === "PENDING") return "WAIT";
-  return "WAIT";
+    
+  return "IDLE";
 }
 
 function resolveRejectionState(popup = {}, operationState) {
@@ -65,12 +74,16 @@ function resolveRejectionState(popup = {}, operationState) {
 // --- Compact StatusBadge ------------------------------------------------------
 export const StatusBadge = ({ status }) => {
   const statusMap = {
-    PASS: { bg: "bg-success/15", text: "text-success", dot: "bg-success", label: "Pass" },
-    FAIL: { bg: "bg-danger/15", text: "text-danger", dot: "bg-danger", label: "Fail" },
-    RUN: { bg: "bg-warning/15", text: "text-warning", dot: "bg-warning animate-pulse", label: "Run" },
-    COMM: { bg: "bg-comm/15", text: "text-comm", dot: "bg-comm", label: "Comm Error" },
-    WAIT: { bg: "bg-bg-elevated", text: "text-text-muted", dot: "bg-border-strong", label: "Wait" },
-    PENDING: { bg: "bg-bg-elevated", text: "text-text-muted", dot: "bg-border-strong", label: "Pending" },
+    PASS: { bg: "bg-success/15", text: "text-success", dot: "bg-success", label: "PASSED" },
+    FAIL: { bg: "bg-danger/15", text: "text-danger", dot: "bg-danger", label: "FAILED" },
+    RUN: { bg: "bg-warning/15", text: "text-warning", dot: "bg-warning animate-pulse", label: "IN PROCESS" },
+    OP_WAIT: { bg: "bg-warning/10", text: "text-warning/80", dot: "bg-warning/60", label: "OP WAIT" },
+    SCANNED: { bg: "bg-primary/15", text: "text-primary", dot: "bg-primary", label: "SCANNED" },
+    COMM: { bg: "bg-comm/15", text: "text-comm", dot: "bg-comm", label: "PLC FAULT" },
+    TIMEOUT: { bg: "bg-danger/15", text: "text-danger", dot: "bg-danger", label: "CYCLE TIMEOUT" },
+    WAIT: { bg: "bg-bg-elevated", text: "text-text-muted", dot: "bg-border-strong", label: "WAITING" },
+    PENDING: { bg: "bg-bg-elevated", text: "text-text-muted", dot: "bg-border-strong", label: "PENDING" },
+    IDLE: { bg: "bg-bg-elevated", text: "text-text-muted", dot: "bg-border-strong", label: "IDLE" },
   };
 
   const theme = statusMap[status] || statusMap.WAIT;
@@ -213,12 +226,23 @@ const GlobalPopup = ({
     if (!popup) return undefined;
     const qrState = resolveQrState(popup);
     const operationState = resolveOperationState(popup);
+    
+    // Auto-close for PASS (1.5 seconds per industrial rule)
+    if (operationState === "PASS") {
+      const timer = setTimeout(() => onClose?.(), 1500);
+      return () => clearTimeout(timer);
+    }
+    
+    // Manual close for FAIL / COMM
+    if (operationState === "FAIL" || operationState === "COMM" || operationState === "TIMEOUT") {
+      return undefined;
+    }
+
     const isCritical =
       String(popup.type || "").toUpperCase() === "ERROR" ||
-      qrState === "FAIL" ||
-      operationState === "FAIL" ||
-      operationState === "COMM";
-    const hasStateDetails = Boolean(partId || stationNo || qrState !== "WAIT" || operationState !== "WAIT");
+      qrState === "FAIL";
+      
+    const hasStateDetails = Boolean(partId || stationNo || qrState !== "WAIT" || operationState !== "IDLE");
     
     if (!hasStateDetails) {
       const t = setTimeout(() => onClose?.(), 2500);
@@ -300,14 +324,32 @@ const GlobalPopup = ({
   const enrichedStations = stations.map((s, idx) => {
     const features = getStationFeatures(s.stationNo, stationSettings);
     let base = { ...s, features };
-    if (idx === currentStationIndex && (liveQrState !== "WAIT" || liveOperationState !== "WAIT")) {
-      return {
-        ...base,
-        qrVerification: liveQrState,
-        operation: liveOperationState,
-        qualityCheck: liveOperationState === "PASS" ? "PASS" : liveOperationState === "FAIL" ? "FAIL" : s.qualityCheck,
-        rejectionConfirmation: liveRejectionState,
-      };
+    
+    // MERGE LOGIC: If this is the current active station, merge live data from popup
+    if (idx === currentStationIndex) {
+      // If system is reset (IDLE/WAIT) AND no active QR is scanned, force journey to WAIT
+      if ((liveOperationState === "WAIT" || liveOperationState === "IDLE") && liveQrState === "WAIT") {
+        return {
+          ...base,
+          qrVerification: "WAIT",
+          operation: "WAIT",
+          isCurrent: true,
+          live: true
+        };
+      }
+      
+      // Otherwise, if we have active scan/operation data, show it
+      if (liveQrState !== "WAIT" || liveOperationState !== "WAIT") {
+        return {
+          ...base,
+          qrVerification: liveQrState,
+          operation: liveOperationState,
+          qualityCheck: liveOperationState === "PASS" ? "PASS" : liveOperationState === "FAIL" ? "FAIL" : s.qualityCheck,
+          rejectionConfirmation: liveRejectionState,
+          isCurrent: true,
+          live: true
+        };
+      }
     }
     return base;
   });

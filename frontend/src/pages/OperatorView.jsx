@@ -7,6 +7,9 @@ import {
   BarChart2, Target, Cpu, Radio, Maximize2,
   ChevronDown, ChevronUp, Menu, X
 } from "lucide-react";
+import {
+  ResponsiveContainer, ComposedChart, CartesianGrid, XAxis, YAxis, Tooltip, Bar, Line,
+} from "recharts";
 import { machineApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
 import ConfirmModal from "../components/ConfirmModal";
@@ -504,6 +507,28 @@ const OperatorView = () => {
   },[stationStats?.recentParts]);
 
   const trendRows = useMemo(()=>[...(stationStats?.trend||[])].slice(-6),[stationStats?.trend]);
+  const trendChartData = useMemo(
+    () =>
+      trendRows.map((row) => {
+        const total = Number(row.total || 0);
+        const ok = Number(row.ok || 0);
+        const ng = Number(row.ng || 0);
+        const interlocked = Number(row.interlocked || 0);
+        const commErrors = Number(row.commErrors || 0);
+        const denominator = total + interlocked + commErrors;
+        const utilization = denominator > 0 ? Math.round((total / denominator) * 100) : 0;
+        const hourToken = String(row.hour || "");
+        const hourLabel = hourToken.length >= 13 ? `${hourToken.slice(11, 13)}:00` : hourToken;
+        return {
+          hour: hourLabel,
+          ok,
+          ng,
+          total,
+          utilization,
+        };
+      }),
+    [trendRows]
+  );
 
   // ── Data fetching (unchanged logic) ──────────────────────────────────
   const loadMachines = useCallback(async({ silent = false } = {})=>{
@@ -1011,7 +1036,7 @@ const OperatorView = () => {
                   <FeatureRow label="QR Validation"      enabled={stationFeatureConfig.qr}/>
                   <FeatureRow label="Operation Rule"     enabled={stationFeatureConfig.operation}/>
                   <FeatureRow label="Rejection Bin"      enabled={stationFeatureConfig.rejectionBin}/>
-                  <FeatureRow label="PLC Confirmation"   enabled={stationFeatureConfig.plcConfirmation}/>
+
                   <FeatureRow label="Final Pack Station" enabled={stationFeatureConfig.finalPacking}/>
                   <FeatureRow label="Machine Bypass"     enabled={Boolean(selectedMachine?.machineBypassEnabled)}/>
                 </div>
@@ -1071,47 +1096,38 @@ const OperatorView = () => {
           }}>
             {/* Hourly trend */}
             <Card title="Hourly Production Trend" icon={BarChart2} accent={C.steel()}>
-              {trendRows.length===0 ? (
+              {trendChartData.length===0 ? (
                 <p style={{fontSize:11,color:C.txt("muted")}}>No trend data for this station.</p>
               ) : (
-                <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                  {trendRows.map(row=>{
-                    const okPct = row.total>0?Math.round((row.ok/row.total)*100):0;
-                    return (
-                      <div key={row.hour} style={{
-                        display:"flex",alignItems:"center",gap:isCompact?6:12,
-                        padding:"6px 8px",borderRadius:9,
-                        background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
-                        flexWrap:isMobile?"wrap":"nowrap",
-                      }}>
-                        <p style={{fontSize:isCompact?10:12,fontWeight:700,color:C.txt("pri"),
-                          fontFamily:"'DM Mono',monospace",flexShrink:0,minWidth:40}}>
-                          {row.hour}
-                        </p>
-                        {/* Mini bar */}
-                        <div style={{flex:1,height:4,borderRadius:99,
-                          background:C.bdr(0.2),overflow:"hidden",minWidth:isMobile?60:"auto"}}>
-                          <div style={{height:"100%",borderRadius:99,
-                            background:C.ok(),width:`${okPct}%`,transition:"width .4s"}}/>
-                        </div>
-                        <div style={{display:"flex",gap:6,flexShrink:0}}>
-                          <span style={{fontSize:isCompact?9:11,fontWeight:700,color:C.ok(),
-                            padding:"1px 5px",borderRadius:4,
-                            background:C.ok(0.1),border:`1px solid ${C.ok(0.25)}`}}>
-                            ✓ {row.ok}
-                          </span>
-                          <span style={{fontSize:isCompact?9:11,fontWeight:700,color:C.ng(),
-                            padding:"1px 5px",borderRadius:4,
-                            background:C.ng(0.1),border:`1px solid ${C.ng(0.25)}`}}>
-                            ✗ {row.ng}
-                          </span>
-                          <span style={{fontSize:isCompact?9:10,color:C.txt("muted")}}>
-                            / {row.total}
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })}
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <div style={{height:isCompact?220:250}}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={trendChartData} margin={{ top: 6, right: 8, left: -14, bottom: 0 }}>
+                        <CartesianGrid stroke={C.bdr(0.18)} strokeDasharray="3 4" vertical={false} />
+                        <XAxis dataKey="hour" tick={{ fontSize: 10, fill: C.txt("muted"), fontFamily: "'DM Mono',monospace" }} axisLine={false} tickLine={false} />
+                        <YAxis yAxisId="count" tick={{ fontSize: 10, fill: C.txt("muted") }} axisLine={false} tickLine={false} />
+                        <YAxis yAxisId="util" orientation="right" domain={[0, 100]} tick={{ fontSize: 10, fill: C.txt("muted") }} axisLine={false} tickLine={false} tickFormatter={(v)=>`${v}%`} />
+                        <Tooltip
+                          contentStyle={{ background: C.bg("card"), border: `1px solid ${C.bdr()}`, borderRadius: 10 }}
+                          labelStyle={{ color: C.txt("sec") }}
+                          formatter={(value, key) => {
+                            if (key === "utilization") return [`${value}%`, "Utilization"];
+                            if (key === "ok") return [value, "Pass"];
+                            if (key === "ng") return [value, "Fail"];
+                            return [value, "Output"];
+                          }}
+                        />
+                        <Bar yAxisId="count" dataKey="ok" name="Pass" fill={C.ok()} radius={[4,4,0,0]} maxBarSize={20} />
+                        <Bar yAxisId="count" dataKey="ng" name="Fail" fill={C.ng()} radius={[4,4,0,0]} maxBarSize={20} />
+                        <Line yAxisId="util" type="monotone" dataKey="utilization" name="Utilization" stroke={C.amber()} strokeWidth={2} dot={false} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                    <Badge variant="ok" label="Pass Output" />
+                    <Badge variant="ng" label="Fail Output" />
+                    <Badge variant="wip" label="Utilization %" />
+                  </div>
                 </div>
               )}
             </Card>
@@ -1266,3 +1282,4 @@ const OperatorView = () => {
 };
 
 export default OperatorView;
+

@@ -1067,7 +1067,6 @@ const IoMonitor = () => {
   const TABS=[
     {key:"plc_list", label:"PLC Overview",    icon:List   },
     {key:"signals",  label:"Mapped I/O",      icon:Signal },
-    {key:"control",  label:"PLC Control",     icon:Settings},
     {key:"logs",     label:"Connection Log",  icon:History},
   ];
 
@@ -1493,123 +1492,7 @@ const IoMonitor = () => {
         </div>
       )}
 
-      {/* ══ TAB: PLC Control ════════════════════════════════════ */}
-      {activeTab==="control" && (
-        <div style={{display:"flex",flexDirection:"column",gap:14}}>
-          {!canControl&&(
-            <div style={{display:"flex",flexDirection:"column",alignItems:"center",
-              padding:"40px 24px",textAlign:"center",gap:12,
-              background:C.ng(0.05),border:`1px solid ${C.ng(0.18)}`,borderRadius:14}}>
-              <ShieldAlert size={34} color={C.ng(0.7)}/>
-              <div>
-                <p style={{fontSize:14,fontWeight:800,color:C.txt("pri"),marginBottom:6}}>Access Restricted</p>
-                <p style={{fontSize:12,color:C.txt("muted"),maxWidth:340,margin:"0 auto",lineHeight:1.6}}>
-                  PLC control is available to Admin and Engineer roles only.
-                </p>
-              </div>
-            </div>
-          )}
-          <div style={{opacity:canControl?1:0.3,pointerEvents:canControl?"auto":"none",
-            display:"flex",flexDirection:"column",gap:14}}>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-              <SCard title="Test Connection" subtitle="Step 1 — Verify" accent={C.steel()}>
-                <p style={{fontSize:12,color:C.txt("muted"),lineHeight:1.6,marginBottom:14}}>
-                  Ping the PLC to confirm the TCP link is active.
-                </p>
-                <Btn full onClick={handleTest} loading={acting.testing} variant="navy">
-                  <Wifi size={13}/> Test PLC Connection
-                </Btn>
-              </SCard>
-              <SCard title="Reset PLC" subtitle="Step 2 — Fault Recovery" accent={C.ng(0.7)}>
-                <p style={{fontSize:12,color:C.txt("muted"),lineHeight:1.6,marginBottom:14}}>
-                  Send a reset signal to clear active faults and restore normal operation.
-                </p>
-                <Btn full onClick={()=>setShowResetConfirm(true)} loading={acting.resetting} variant="danger">
-                  <RotateCcw size={13}/> Reset PLC
-                </Btn>
-              </SCard>
-            </div>
-            <SCard title="Send Operation Command" subtitle="Step 3 — Control" accent={C.amber()}>
-              <p style={{fontSize:12,color:C.txt("muted"),lineHeight:1.6,marginBottom:14}}>
-                Send a direct command to the PLC. No part ID required.
-              </p>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:10,alignItems:"end"}}>
-                <div>
-                  <Label>Command</Label>
-                  <select value={plcCommand} onChange={e=>setPlcCommand(e.target.value)}
-                    style={inp(focus==="cmd")}
-                    onFocus={()=>setFocus("cmd")} onBlur={()=>setFocus("")}>
-                    <option value="START_OPERATION">Start Operation</option>
-                    <option value="BLOCK_OPERATION">Block Operation</option>
-                    <option value="RESET_OPERATION">Reset Operation</option>
-                  </select>
-                </div>
-                <div>
-                  <Label>Station No.</Label>
-                  <input value={commandStation} onChange={e=>setCommandStation(e.target.value)}
-                    placeholder="e.g. OP-10"
-                    style={inp(focus==="stn")}
-                    onFocus={()=>setFocus("stn")} onBlur={()=>setFocus("")}/>
-                </div>
-                <Btn onClick={handleCommand} loading={acting.commanding} variant="amber" style={{whiteSpace:"nowrap"}}>
-                  <Zap size={13}/> Send
-                </Btn>
-              </div>
-            </SCard>
-            <SCard title="Write Register Value" subtitle="Step 4 — Manual Override" accent={C.ok()}>
-              <p style={{fontSize:12,color:C.txt("muted"),lineHeight:1.6,marginBottom:14}}>
-                Directly write a value to a PLC register. For diagnostics only.
-              </p>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:10,alignItems:"end"}}>
-                <div>
-                  <Label>Signal</Label>
-                  <select value={writeSignal}
-                    onChange={e=>{
-                      setWriteSignal(e.target.value);
-                      if (e.target.value!=="CUSTOM")
-                        setWriteValue(String(getMappedVal(selectedMachine,e.target.value)??writableOpts.find(o=>o.key===e.target.value)?.currentValue??1));
-                    }}
-                    style={inp(focus==="wsig")} onFocus={()=>setFocus("wsig")} onBlur={()=>setFocus("")}>
-                    {writableOpts.map(o=><option key={o.key} value={o.key}>{o.label}</option>)}
-                    <option value="CUSTOM">Custom register…</option>
-                  </select>
-                </div>
-                <div>
-                  <Label>Register</Label>
-                  <input readOnly={writeSignal!=="CUSTOM"}
-                    value={writeSignal==="CUSTOM"?customReg:(getMappedReg(selectedMachine,writeSignal)||"—")}
-                    onChange={e=>setCustomReg(e.target.value)}
-                    placeholder="e.g. 100"
-                    style={{...inp(focus==="wreg"),fontFamily:"'DM Mono',monospace",color:C.steel(),
-                      background:writeSignal!=="CUSTOM"?C.bg("surf"):C.bg("input")}}
-                    onFocus={()=>setFocus("wreg")} onBlur={()=>setFocus("")}/>
-                </div>
-                <div>
-                  <Label>Value</Label>
-                  <div style={{display:"flex",gap:6}}>
-                    {[0,1,9].map(p=>(
-                      <button key={p} onClick={()=>setWriteValue(String(p))}
-                        style={{flex:1,height:38,borderRadius:7,fontSize:13,fontWeight:800,cursor:"pointer",
-                          background:writeValue===String(p)?C.ok(0.15):"transparent",
-                          border:`1px solid ${writeValue===String(p)?C.ok(0.4):C.bdr()}`,
-                          color:writeValue===String(p)?C.ok():C.txt("muted"),transition:"all .12s"}}>
-                        {p}
-                      </button>
-                    ))}
-                    <input value={writeValue} onChange={e=>setWriteValue(e.target.value)}
-                      placeholder="…"
-                      style={{...inp(focus==="wval"),flex:1,fontFamily:"'DM Mono',monospace",textAlign:"center"}}
-                      onFocus={()=>setFocus("wval")} onBlur={()=>setFocus("")}/>
-                  </div>
-                </div>
-                <Btn onClick={handleWrite} loading={acting.writing} variant="ok">
-                  <Save size={13}/> Write
-                </Btn>
-              </div>
-            </SCard>
-          </div>
-        </div>
-      )}
+    
 
       {/* ══ TAB: Connection Log ═══════════════════════════════════ */}
       {activeTab==="logs" && (

@@ -5,7 +5,7 @@ class PlcConnectionManager {
     this.endpointQueues = new Map();
     this.machineLastOperation = new Map();
     this.endpointStats = new Map();
-    this.DEFAULT_OPERATION_TIMEOUT_MS = Math.max(Number(process.env.PLC_QUEUE_OPERATION_TIMEOUT_MS || 45000), 1000);
+    this.DEFAULT_OPERATION_TIMEOUT_MS = Math.max(Number(process.env.PLC_QUEUE_OPERATION_TIMEOUT_MS || 15000), 1000);
   }
 
   getEndpointKey({ ip, port }) {

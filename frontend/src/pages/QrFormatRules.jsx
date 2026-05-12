@@ -1,10 +1,11 @@
 // QrFormatRules.jsx — QR / Barcode Validation Engine
-// Redesigned: modal for adding rules, live regex tester, rules table
+// Enhanced with Regex Builder for manufacturing patterns
 
 import { useEffect, useState } from "react";
 import {
   Regex, Plus, Save, Trash2, CheckCircle, AlertCircle,
-  Scan, Terminal, ShieldCheck, HelpCircle, Edit2, RefreshCw, Info, X, Layers
+  Scan, Terminal, ShieldCheck, HelpCircle, Edit2, RefreshCw, Info, X, Layers,
+  Calendar, Hash, Package, Factory, Settings, Wand2, Copy, Check
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { qrFormatApi } from "../api/services";
@@ -23,6 +24,67 @@ const PATTERN_EXAMPLES = [
   { label: "Fixed length 12", pattern: "^.{12}$", desc: "Exactly 12 characters" },
 ];
 
+// Manufacturing pattern templates
+const MANUFACTURING_TEMPLATES = {
+  partNumber: {
+    name: "Part Number",
+    icon: <Hash size={14} />,
+    patterns: [
+      { label: "Basic Alphanumeric", pattern: "^[A-Z]{2,4}\\d{4,8}$", example: "ABC12345", desc: "2-4 letters + 4-8 digits" },
+      { label: "With Dashes", pattern: "^[A-Z]{2,4}-\\d{4,8}$", example: "ABC-12345", desc: "Letters-dash-numbers" },
+      { label: "Revision Suffix", pattern: "^[A-Z]{2,4}\\d{4,8}[A-Z]{1,2}$", example: "ABC12345R1", desc: "Includes revision code" },
+      { label: "Customer Specific", pattern: "^[A-Z0-9]{10,15}$", example: "CUST12345ABC", desc: "Mixed alphanumeric" },
+    ]
+  },
+  dateCode: {
+    name: "Date Code",
+    icon: <Calendar size={14} />,
+    patterns: [
+      { label: "YYMMDD", pattern: "^(20|19)\\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\\d|3[01])$", example: "20241215", desc: "YYYYMMDD format" },
+      { label: "YYWW (Week)", pattern: "^\\d{2}(0[1-9]|[1-4]\\d|5[0-3])$", example: "2408", desc: "YYWW - Year and week number" },
+      { label: "MMDDYY", pattern: "^(0[1-9]|1[0-2])(0[1-9]|[12]\\d|3[01])(20|19)\\d{2}$", example: "12152024", desc: "MMDDYYYY format" },
+      { label: "Julian Date", pattern: "^\\d{3}$", example: "245", desc: "3-digit day of year" },
+    ]
+  },
+  dieCavity: {
+    name: "Die / Cavity",
+    icon: <Factory size={14} />,
+    patterns: [
+      { label: "Single Digit", pattern: "^[1-8]$", example: "4", desc: "1-8 cavity number" },
+      { label: "Two Digit", pattern: "^[1-9][0-9]?$", example: "12", desc: "1-99 cavity number" },
+      { label: "Die + Cavity", pattern: "^D\\d{2}C\\d{1,2}$", example: "D12C4", desc: "Die number + cavity" },
+      { label: "Mold ID Format", pattern: "^M\\d{3}-C\\d$", example: "M123-C4", desc: "Mold ID with cavity" },
+    ]
+  },
+  lotBatch: {
+    name: "Lot / Batch",
+    icon: <Package size={14} />,
+    patterns: [
+      { label: "Basic Lot", pattern: "^LOT\\d{6,10}$", example: "LOT123456", desc: "LOT + 6-10 digits" },
+      { label: "Date + Lot", pattern: "^\\d{6}[A-Z]{2,4}\\d{3}$", example: "241215ABC123", desc: "YYMMDD + code + sequence" },
+      { label: "Shift Code", pattern: "^[A-Z]{2}\\d{4}[ABCS]$", example: "AB1234A", desc: "Includes shift identifier" },
+    ]
+  },
+  serialNumber: {
+    name: "Serial Number",
+    icon: <Hash size={14} />,
+    patterns: [
+      { label: "Sequential", pattern: "^[A-Z0-9]{8,12}$", example: "SN12345678", desc: "8-12 alphanumeric chars" },
+      { label: "With Prefix", pattern: "^[A-Z]{2,3}-\\d{6,10}$", example: "SN-12345678", desc: "Prefix + dash + numbers" },
+      { label: "Complex Format", pattern: "^[A-Z]{2}\\d{4}[A-Z]\\d{4}$", example: "AB1234C5678", desc: "Mixed format" },
+    ]
+  },
+  combinedFormat: {
+    name: "Combined Format",
+    icon: <Layers size={14} />,
+    patterns: [
+      { label: "Part+Date+Die", pattern: "^[A-Z]{2,4}\\d{4,8}-\\d{6}-D\\d$", example: "ABC12345-241215-D4", desc: "Part-Date-Die" },
+      { label: "Full Traceability", pattern: "^[A-Z]{3}\\d{6}[A-Z]\\d{2}\\d{3}$", example: "ENG12345A12123", desc: "Complete trace code" },
+      { label: "Supplier Format", pattern: "^[A-Z]{4}\\d{8}[A-Z0-9]{4}$", example: "SUPP12345678ABCD", desc: "Vendor specific" },
+    ]
+  }
+};
+
 /* ─── component ────────────────────────────────────────────── */
 const QrFormatRules = () => {
   const [rules, setRules] = useState([]);
@@ -33,6 +95,9 @@ const QrFormatRules = () => {
   const [testResult, setTestResult] = useState(null);
   const [showModal, setShowModal] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState(null);
+  const [showRegexBuilder, setShowRegexBuilder] = useState(false);
+  const [builderPattern, setBuilderPattern] = useState("");
+  const [copiedPattern, setCopiedPattern] = useState(null);
 
   const loadRules = async () => {
     setLoadingRules(true);
@@ -45,7 +110,7 @@ const QrFormatRules = () => {
 
   useEffect(() => { loadRules(); }, []);
 
-  const resetForm = () => { setForm(emptyForm); setEditingId(null); setTestResult(null); };
+  const resetForm = () => { setForm(emptyForm); setEditingId(null); setTestResult(null); setShowRegexBuilder(false); };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -77,6 +142,7 @@ const QrFormatRules = () => {
       isActive: Boolean(rule.isActive),
     });
     setTestResult(null);
+    setShowRegexBuilder(false);
     setShowModal(true);
   };
 
@@ -98,7 +164,7 @@ const QrFormatRules = () => {
       const isOk = re.test(form.sampleValue);
       setTestResult({
         status: isOk ? "pass" : "fail",
-        message: isOk ? "Match — pattern accepted this value" : "No match — pattern rejected this value",
+        message: isOk ? "✓ Match — pattern accepted this value" : "✗ No match — pattern rejected this value",
       });
     } catch {
       setTestResult({ status: "error", message: "Invalid regex syntax — check your pattern" });
@@ -108,6 +174,28 @@ const QrFormatRules = () => {
   const applyExample = (pattern) => {
     setForm(prev => ({ ...prev, regexPattern: pattern }));
     setTestResult(null);
+    setShowRegexBuilder(false);
+    toast.success("Pattern applied");
+  };
+
+  const applyTemplatePattern = (pattern) => {
+    setBuilderPattern(pattern);
+  };
+
+  const useBuilderPattern = () => {
+    if (builderPattern) {
+      setForm(prev => ({ ...prev, regexPattern: builderPattern }));
+      setTestResult(null);
+      setShowRegexBuilder(false);
+      toast.success("Pattern applied from builder");
+    }
+  };
+
+  const copyToClipboard = (pattern) => {
+    navigator.clipboard.writeText(pattern);
+    setCopiedPattern(pattern);
+    setTimeout(() => setCopiedPattern(null), 2000);
+    toast.success("Pattern copied");
   };
 
   const inputCls = "w-full bg-bg-dark border border-border rounded-lg px-3 py-2 text-sm text-text-main outline-none focus:border-primary/60 transition-colors placeholder:text-text-muted/40";
@@ -121,7 +209,7 @@ const QrFormatRules = () => {
   };
 
   return (
-    <div className="space-y-6 rise-in">
+    <div className="space-y-6 rise-in" style={{ fontFamily: "var(--font-outfit)" }}>
       {/* ── Header ── */}
       <div className="db-header-card mb-6">
         <div className="db-header-gradient-bar" />
@@ -192,8 +280,13 @@ const QrFormatRules = () => {
                       </div>
                     </td>
                     <td className="px-5 py-4">
-                      <div className="px-2.5 py-1 bg-bg-dark border border-border rounded font-mono text-xs text-black max-w-[180px] truncate" title={rule.regexPattern}>
-                        {rule.regexPattern}
+                      <div className="flex items-center gap-2">
+                        <code className="px-2.5 py-1 bg-bg-dark border border-border rounded font-mono text-xs text-text-main max-w-[200px] truncate" title={rule.regexPattern}>
+                          {rule.regexPattern}
+                        </code>
+                        <button onClick={() => copyToClipboard(rule.regexPattern)} className="p-1 text-text-muted hover:text-primary transition-colors">
+                          {copiedPattern === rule.regexPattern ? <Check size={12} /> : <Copy size={12} />}
+                        </button>
                       </div>
                     </td>
                     <td className="px-5 py-4">
@@ -231,7 +324,7 @@ const QrFormatRules = () => {
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-bg-dark/90 backdrop-blur-sm" onClick={() => { setShowModal(false); resetForm(); }} />
-          <div className="relative w-full max-w-2xl bg-bg-card border border-border/60 rounded-2xl overflow-hidden flex flex-col max-h-[90vh] rise-in shadow-2xl">
+          <div className="relative w-full max-w-4xl bg-bg-card border border-border/60 rounded-2xl overflow-hidden flex flex-col max-h-[90vh] rise-in shadow-2xl">
             {/* Modal header */}
             <div className="px-6 py-5 border-b border-border flex items-center justify-between bg-bg-dark/30">
               <div className="flex items-center gap-3">
@@ -248,63 +341,128 @@ const QrFormatRules = () => {
               </button>
             </div>
 
-            {/* Form body */}
-            <form id="qr-rule-form" onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-5">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Rule name *</label>
-                  <input required value={form.formatName} onChange={e => setForm({ ...form, formatName: e.target.value })}
-                    placeholder="e.g. Engine head QR" className={inputCls} />
-                </div>
-                <div>
-                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Model Code</label>
-                  <input value={form.modelCode} onChange={e => setForm({ ...form, modelCode: e.target.value.toUpperCase() })}
-                    placeholder="Model Name.." className={`${inputCls} font-mono`} />
-                </div>
-              </div>
-
-              <div>
-                <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">
-                  Station scope
-                  <span className="text-text-muted/50 normal-case tracking-normal font-normal ml-2">— leave blank to apply everywhere</span>
-                </label>
-                <input value={form.stationScope} onChange={e => setForm({ ...form, stationScope: e.target.value.toUpperCase() })}
-                  placeholder="e.g. OP010,OP020 or leave blank for all" className={`${inputCls} font-mono`} />
-              </div>
-
-              {/* Regex pattern — visually distinct */}
-              <div className="p-4 bg-gray/5 border border-gray-600 rounded-xl space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="text-[11px] font-bold text-gray-600 uppercase tracking-widest flex items-center gap-1.5">
-                    <Terminal size={12} /> Regex pattern *
-                  </label>
-                  <details className="relative">
-                    <summary className="text-[10px] text-text-muted hover:text-black flex items-center gap-1 transition-colors font-semibold cursor-pointer">
-                      <HelpCircle size={11} /> Examples
-                    </summary>
-                    <div className="absolute right-0 top-6 z-10 w-72 bg-bg-card border border-border rounded-lg shadow-xl p-2 space-y-1">
-                      {PATTERN_EXAMPLES.map(ex => (
-                        <button key={ex.pattern} type="button" onClick={() => applyExample(ex.pattern)}
-                          className="w-full flex items-center justify-between px-3 py-2 bg-bg-dark/60 border border-border rounded-lg hover:border-gray/40 hover:bg-gray/5 transition-all text-left group">
-                          <div>
-                            <span className="text-[11px] font-semibold text-text-main group-hover:text-black transition-colors">{ex.label}</span>
-                            <span className="text-[10px] text-text-muted ml-2">{ex.desc}</span>
-                          </div>
-                          <code className="text-[10px] font-mono text-black/70 bg-bg-dark px-2 py-0.5 rounded ml-2 flex-shrink-0">{ex.pattern}</code>
-                        </button>
-                      ))}
+            {/* Form body with two columns */}
+            <form id="qr-rule-form" onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6">
+              <div className="grid grid-cols-2 gap-6">
+                {/* Left column - Basic info */}
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Model name *</label>
+                    <input required value={form.formatName} onChange={e => setForm({ ...form, formatName: e.target.value })}
+                      placeholder="e.g. Engine Head QR" className={inputCls} />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Model Code</label>
+                    <input value={form.modelCode} onChange={e => setForm({ ...form, modelCode: e.target.value.toUpperCase() })}
+                      placeholder="Model Code (optional)" className={`${inputCls} font-mono`} />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">
+                      Station scope
+                    </label>
+                    <input value={form.stationScope} onChange={e => setForm({ ...form, stationScope: e.target.value.toUpperCase() })}
+                      placeholder="e.g. OP010, OP020 or leave blank for all" className={`${inputCls} font-mono`} />
+                  </div>
+                  <div className="flex items-center justify-between py-3 px-4 bg-bg-dark/50 rounded-xl border border-border">
+                    <div>
+                      <p className="text-xs font-semibold text-text-main">Active rule</p>
+                      <p className="text-[10px] text-text-muted mt-0.5">Apply this rule to live scanning</p>
                     </div>
-                  </details>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input type="checkbox" checked={form.isActive} onChange={e => setForm({ ...form, isActive: e.target.checked })} className="sr-only peer" />
+                      <div className="w-9 h-5 bg-border rounded-full peer peer-checked:bg-accent transition-colors"></div>
+                      <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full transition-transform peer-checked:translate-x-4 shadow-sm"></div>
+                    </label>
+                  </div>
                 </div>
-                <input required value={form.regexPattern}
-                  onChange={e => { setForm({ ...form, regexPattern: e.target.value }); setTestResult(null); }}
-                  placeholder="^[A-Z]{3}\d{6}$"
-                  className="w-full bg-transparent border-0 border-b border-black/40 pb-2 text-black text-base font-mono font-bold outline-none focus:border-gray-600 placeholder:text-gray/30 placeholder:font-normal" />
-                <p className="text-[10px] text-text-muted/60 italic">PCRE syntax. Use <span className="font-mono">.*</span> to bypass validation.</p>
+
+                {/* Right column - Regex builder */}
+                <div className="space-y-4">
+                  {/* Toggle for Regex Builder */}
+                  <button
+                    type="button"
+                    onClick={() => setShowRegexBuilder(!showRegexBuilder)}
+                    className="w-full flex items-center justify-between p-3 bg-primary/5 border border-primary/20 rounded-xl hover:bg-primary/10 transition-all"
+                  >
+                    <div className="flex items-center gap-2">
+                      <Wand2 size={16} className="text-primary" />
+                      <span className="text-xs font-bold text-text-main">Regex Pattern Builder</span>
+                    </div>
+                    <span className="text-[10px] text-primary font-semibold">
+                      {showRegexBuilder ? "Hide builder" : "Show builder"}
+                    </span>
+                  </button>
+
+                  {showRegexBuilder && (
+                    <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2">
+                      {Object.entries(MANUFACTURING_TEMPLATES).map(([key, category]) => (
+                        <div key={key} className="border border-border rounded-xl overflow-hidden">
+                          <div className="px-3 py-2 bg-bg-dark/50 border-b border-border flex items-center gap-2">
+                            {category.icon}
+                            <span className="text-[11px] font-bold text-text-main uppercase tracking-wider">{category.name}</span>
+                          </div>
+                          <div className="p-2 space-y-1">
+                            {category.patterns.map((pattern, idx) => (
+                              <button
+                                key={idx}
+                                type="button"
+                                onClick={() => applyTemplatePattern(pattern.pattern)}
+                                className={`w-full text-left p-2 rounded-lg transition-all group ${builderPattern === pattern.pattern ? 'bg-primary/10 border-primary/30' : 'hover:bg-bg-dark/50'}`}
+                              >
+                                <div className="flex items-center justify-between mb-1">
+                                  <span className="text-[11px] font-semibold text-text-main">{pattern.label}</span>
+                                  <code className="text-[9px] font-mono text-primary/70 bg-primary/5 px-1.5 py-0.5 rounded">
+                                    {pattern.example}
+                                  </code>
+                                </div>
+                                <p className="text-[9px] text-text-muted">{pattern.desc}</p>
+                                <code className="text-[9px] font-mono text-accent block mt-1 truncate">{pattern.pattern}</code>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                      
+                      {builderPattern && (
+                        <div className="flex gap-2 pt-2">
+                          <button
+                            type="button"
+                            onClick={useBuilderPattern}
+                            className="flex-1 py-2 bg-primary text-on-strong rounded-lg text-[11px] font-bold uppercase tracking-wider hover:brightness-110 transition-all"
+                          >
+                            Use This Pattern
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard(builderPattern)}
+                            className="px-3 py-2 bg-bg-dark border border-border rounded-lg hover:border-primary/50 transition-all"
+                          >
+                            {copiedPattern === builderPattern ? <Check size={14} /> : <Copy size={14} />}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Manual Regex Input */}
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest flex items-center gap-1.5">
+                      <Terminal size={11} /> Regex Pattern *
+                    </label>
+                    <textarea
+                      required
+                      value={form.regexPattern}
+                      onChange={e => { setForm({ ...form, regexPattern: e.target.value }); setTestResult(null); }}
+                      placeholder="^[A-Z]{3}\\d{6}$"
+                      rows={3}
+                      className="w-full bg-bg-dark border border-border rounded-lg px-3 py-2 text-text-main font-mono text-sm outline-none focus:border-primary/60 transition-colors resize-none"
+                    />
+                  </div>
+                </div>
               </div>
 
-              {/* Test tool */}
-              <div className="space-y-2">
+              {/* Test tool - Full width */}
+              <div className="mt-6 space-y-3">
                 <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest flex items-center gap-1.5">
                   <Scan size={11} /> Test your pattern
                 </label>
@@ -314,8 +472,8 @@ const QrFormatRules = () => {
                     placeholder="Paste a sample scan string here…"
                     className={`${inputCls} flex-1`} />
                   <button type="button" onClick={testRegex}
-                    className="h-9 px-4 bg-bg-dark border border-border rounded-lg text-xs font-bold text-text-muted hover:text-primary hover:border-primary/40 transition-all whitespace-nowrap">
-                    Run test
+                    className="px-5 py-2 bg-bg-dark border border-border rounded-lg text-xs font-bold text-text-muted hover:text-primary hover:border-primary/40 transition-all whitespace-nowrap">
+                    Run Test
                   </button>
                 </div>
                 {testResult && (
@@ -326,17 +484,17 @@ const QrFormatRules = () => {
                 )}
               </div>
 
-              {/* Active toggle */}
-              <div className="flex items-center justify-between py-3 px-4 bg-bg-dark/50 rounded-xl border border-border">
-                <div>
-                  <p className="text-xs font-semibold text-text-main">Active rule</p>
-                  <p className="text-[10px] text-text-muted mt-0.5">Apply this rule to live scanning</p>
+              {/* Quick Examples */}
+              <div className="mt-4 pt-3 border-t border-border">
+                <p className="text-[9px] font-semibold text-text-muted uppercase tracking-wider mb-2">Quick Templates</p>
+                <div className="flex flex-wrap gap-2">
+                  {PATTERN_EXAMPLES.map(ex => (
+                    <button key={ex.pattern} type="button" onClick={() => applyExample(ex.pattern)}
+                      className="px-2 py-1 bg-bg-dark border border-border rounded-lg text-[10px] font-mono text-text-muted hover:text-primary hover:border-primary/40 transition-all">
+                      {ex.label}
+                    </button>
+                  ))}
                 </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input type="checkbox" checked={form.isActive} onChange={e => setForm({ ...form, isActive: e.target.checked })} className="sr-only peer" />
-                  <div className="w-9 h-5 bg-border rounded-full peer peer-checked:bg-accent transition-colors"></div>
-                  <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full transition-transform peer-checked:translate-x-4 shadow-sm"></div>
-                </label>
               </div>
             </form>
 

@@ -113,6 +113,7 @@ async function acquireSocket({ ip, port, timeoutMs }) {
 function releaseSocket({ socket, pooled, key }) {
   if (!pooled) {
     try {
+      socket.removeAllListeners();
       socket.destroy();
     } catch (_error) {
       // noop
@@ -123,8 +124,20 @@ function releaseSocket({ socket, pooled, key }) {
   const entry = pool.get(key);
   if (!entry || entry.socket !== socket) {
     // If it's not the current entry, just destroy it
-    try { socket.destroy(); } catch(e) {}
+    try { 
+      socket.removeAllListeners();
+      socket.destroy(); 
+    } catch(e) {}
     return;
+  }
+
+  // Cleanup listeners before returning to pool to prevent MaxListenersExceededWarning
+  try {
+    socket.removeAllListeners("data");
+    socket.removeAllListeners("error");
+    socket.removeAllListeners("timeout");
+  } catch (e) {
+    console.warn(`[PLC:SocketPool] Error cleaning up listeners for ${key}:`, e.message);
   }
 
   entry.inUse = false;

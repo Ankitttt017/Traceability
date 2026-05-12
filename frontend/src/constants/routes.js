@@ -16,6 +16,7 @@ export const APP_ROUTES = {
   shifts: "/shifts",
   qrRules: "/qr-format-rules",
   partJourney: "/component-journey",
+  processFlow: "/process-flow",
   operatorView: "/operator-view",
   packing: "/packing",
   packingManagement: "/packing-management",

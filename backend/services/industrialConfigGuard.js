@@ -28,9 +28,6 @@ class IndustrialConfigGuard {
     // Critical states where config change is dangerous
     const unsafeStates = [
       plcStateMachineService.states.START_SENT,
-      plcStateMachineService.states.WAITING_ACK,
-      plcStateMachineService.states.ACK_RECEIVED,
-      plcStateMachineService.states.WAITING_RUNNING,
       plcStateMachineService.states.RUNNING,
       plcStateMachineService.states.WAITING_END
     ];

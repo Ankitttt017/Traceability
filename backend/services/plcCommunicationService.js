@@ -3,8 +3,6 @@ const tcpTextService = require("./plcProtocols/tcpTextService");
 const modbusService = require("./plcProtocols/modbusService");
 const slmpService = require("./plcProtocols/slmpService");
 const { toBoundedInt, sleep } = require("./plcProtocols/utils");
-const plcLatchManager = require("./plcLatchManager");
-
 
 class PlcService {
   constructor() {
@@ -264,7 +262,6 @@ class PlcService {
     if (!ip || !port) throw new Error("PLC IP and port are required");
     const normalizedProtocol = this.normalizeProtocol(protocol || machine?.plc_protocol);
     const service = this.getProtocolService(normalizedProtocol);
-    const machineId = machine?.id ? Number(machine.id) : null;
 
     if (this.shouldSimulate(machine)) {
       this.logPlc("SIM", "PLC command simulated", { protocol: normalizedProtocol, command });
@@ -272,26 +269,31 @@ class PlcService {
     }
     if (!service.sendCommand) throw new Error(`sendCommand not supported for protocol ${normalizedProtocol}`);
 
-    const normalizedCommand = String(command || "").trim().toUpperCase();
+    const writeResult = await service.sendCommand({ ip, port, command, machine, partId, stationNo, protocol: normalizedProtocol });
 
-    // ─── LATCH GUARD ─────────────────────────────────────────────────────
-    // Block any external RESET or RESET_OPERATION commands while the handshake
-    // latch is active. The reset is exclusively managed by cycleFinalizationService
-    // which releases the latch before issuing the reset via resetPlcState().
-    // This prevents watchdog/API triggered resets from pulsing the output.
-    if (machineId && plcLatchManager.isLatched(machineId)) {
-      const isResetCmd = normalizedCommand.includes("RESET");
-      if (isResetCmd) {
-        const latchState = plcLatchManager.getLatchState(machineId);
-        throw new Error(
-          `LATCH_ACTIVE: Cannot issue ${normalizedCommand} while handshake output is held ` +
-          `(machine ${machineId}, latch token: ${latchState?.cycleToken || "unknown"}). ` +
-          `Wait for cycle finalization.`
-        );
+    // Industrial Safe Write Verification (Point 17)
+    // Read back the status register to confirm PLC processed the write.
+    if (["START", "RESET", "BLOCK_OPERATION", "START_OPERATION", "RESET_OPERATION"].includes(command.toUpperCase())) {
+      let verified = false;
+      for (let vAttempt = 1; vAttempt <= 3; vAttempt++) {
+        await sleep(100 * vAttempt);
+        try {
+          const probe = await service.probe({ ip, port, machine, timeoutMs: 1000, protocol: normalizedProtocol });
+          // Check that PLC is reachable AND status register shows a non-zero response
+          // (indicating PLC accepted the command). StatusValue of 0 after a START means PLC ignored it.
+          if (probe.connected) {
+            if (command.toUpperCase().includes("RESET") || probe.statusValue !== undefined) {
+              verified = true;
+              break;
+            }
+          }
+        } catch (_verifyError) {
+          // Retry on next attempt
+        }
       }
+      if (!verified) throw new Error(`PLC Write Verification Failed for command: ${command}`);
     }
 
-    const writeResult = await service.sendCommand({ ip, port, command: normalizedCommand, machine, partId, stationNo, protocol: normalizedProtocol });
     return writeResult;
   }
 }

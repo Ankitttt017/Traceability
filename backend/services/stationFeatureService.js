@@ -4,7 +4,6 @@ const DEFAULT_FEATURES = {
   qr: true,
   operation: true,
   rejectionBin: true,
-  plcConfirmation: true,
   manualResult: false,
   plcPartCount: 1,
   finalPacking: false,
@@ -42,17 +41,13 @@ async function getStationFeatureConfig(stationNo) {
     qr: row.qr_enabled !== false,
     operation: row.operation_enabled !== false,
     rejectionBin: row.rejection_bin_enabled !== false,
-    plcConfirmation: row.plc_confirmation_enabled !== false,
     manualResult: row.manual_result_enabled === true,
     plcPartCount: normalizePlcPartCount(row.plc_part_count),
     finalPacking: row.final_packing_enabled === true,
   };
 }
 
-async function isPlcConfirmationEnabled(stationNo) {
-  const config = await getStationFeatureConfig(stationNo);
-  return config.plcConfirmation !== false;
-}
+
 
 async function getFinalPackingStations() {
   const rows = await StationFeatureSetting.findAll({
@@ -70,6 +65,5 @@ module.exports = {
   DEFAULT_FEATURES,
   normalizePlcPartCount,
   getStationFeatureConfig,
-  isPlcConfirmationEnabled,
   getFinalPackingStations,
 };

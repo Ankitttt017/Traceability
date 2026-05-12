@@ -12,9 +12,9 @@ import { io } from "socket.io-client";
 import {
   AlertTriangle, CheckCircle2, Clock3, RefreshCw, RotateCcw,
   Search, X, XCircle, Activity, Layers, ChevronRight,
-  MapPin, Zap, Package, QrCode, Trash2, Eye, EyeOff,
+  MapPin, Zap, Package, QrCode, Trash2, Eye, EyeOff, Download,
 } from "lucide-react";
-import { stationSettingsApi, traceabilityApi } from "../api/services";
+import { machineApi, shiftApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
 import {
   getStationFeatureSettings, getStationFeatures, saveStationFeatureSettings,
@@ -443,7 +443,20 @@ const ComponentJourney = () => {
   useEffect(()=>{ injectTheme(); injectKeyframes(); },[]);
 
   const [searchTerm,       setSearchTerm]       = useState("");
+  const [filters,          setFilters]          = useState({
+    dateFrom:"",
+    dateTo:"",
+    partId:"",
+    machineId:"",
+    stationNo:"",
+    status:"",
+    operatorId:"",
+    shiftCode:"",
+    lineName:"",
+  });
   const [parts,            setParts]            = useState([]);
+  const [machines,         setMachines]         = useState([]);
+  const [availableShifts,  setAvailableShifts]  = useState([]);
   const [selectedPartId,   setSelectedPartId]   = useState("");
   const [journeyData,      setJourneyData]      = useState(null);
   const [loading,          setLoading]          = useState(false);
@@ -469,6 +482,10 @@ const ComponentJourney = () => {
   const lastQrEventRef         = useRef({key:"",at:0});
 
   const selectedPart    = useMemo(()=>parts.find(e=>e.partId===selectedPartId)||null,[parts,selectedPartId]);
+  const lineOptions     = useMemo(
+    ()=>Array.from(new Set((machines||[]).map((row)=>String(row.lineName || "").trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b)),
+    [machines]
+  );
   const stationTimeline = useMemo(()=>journeyData?.stationTimeline||[],[journeyData?.stationTimeline]);
   const statusSummary   = useMemo(()=>stationTimeline.reduce((acc,st)=>{
     const s=String(st.stageState||"").toUpperCase();
@@ -481,12 +498,24 @@ const ComponentJourney = () => {
 
   // ── Data / socket logic (100% unchanged logic) ─────────────────────────
   const loadPartCatalog = useCallback(async(search)=>{
-    const rows=await traceabilityApi.partCatalog({search,limit:80});
+    const rows=await traceabilityApi.partCatalog({
+      search,
+      limit:80,
+      dateFrom: filters.dateFrom || undefined,
+      dateTo: filters.dateTo || undefined,
+      partId: filters.partId || undefined,
+      machineId: filters.machineId || undefined,
+      stationNo: filters.stationNo || undefined,
+      status: filters.status || undefined,
+      operatorId: filters.operatorId || undefined,
+      shiftCode: filters.shiftCode || undefined,
+      lineName: filters.lineName || undefined,
+    });
     setParts(rows||[]);
     if (!selectedPartId&&rows?.length) setSelectedPartId(rows[0].partId);
     if (selectedPartId&&!(rows||[]).some(e=>e.partId===selectedPartId))
       setSelectedPartId(rows?.[0]?.partId||"");
-  },[selectedPartId]);
+  },[selectedPartId, filters]);
 
   const loadJourney = useCallback(async(partId,showLoader=true)=>{
     if (!partId){setJourneyData(null);return;}
@@ -564,6 +593,54 @@ const ComponentJourney = () => {
     catch(e){ setPopup({type:"ERROR",title:"Refresh Failed",message:e.response?.data?.error||"Unable to refresh"}); }
     finally { setRefreshing(false); }
   },[loadPartCatalog,searchTerm,refreshJourneyNow]);
+
+  const exportJourneyReport = useCallback((format = "csv") => {
+    const rows = (stationTimeline || []).map((station) => {
+      const latest = Array.isArray(station.attempts) && station.attempts.length > 0
+        ? station.attempts[station.attempts.length - 1]
+        : null;
+      return {
+        stationNo: station.stationNo || "",
+        stageState: station.stageState || "PENDING",
+        latestStatus: station.latestStatus || "",
+        latestResult: latest?.result || station.latestResult || "",
+        interlockReason: station.latestInterlockReason || latest?.interlockReason || "",
+        completedAt: station.latestAt || latest?.createdAt || "",
+      };
+    });
+    if (!rows.length) {
+      setPopup({ type:"WARNING", title:"No Data", message:"No part journey rows available for export." });
+      return;
+    }
+
+    const pad = (v) => String(v).padStart(2, "0");
+    const now = new Date();
+    const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+    const nameBase = `TRACEABILITY_REPORT_${stamp}`;
+    const header = ["PART_ID","STATION","STATE","LATEST_STATUS","RESULT","REMARK","TIMESTAMP"];
+    const lines = [
+      header.join(","),
+      ...rows.map((row) => [
+        selectedPartId || "",
+        row.stationNo,
+        row.stageState,
+        row.latestStatus,
+        row.latestResult,
+        row.interlockReason,
+        row.completedAt ? new Date(row.completedAt).toLocaleString() : "",
+      ].map((cell) => `"${String(cell || "").replace(/"/g, '""')}"`).join(",")),
+    ];
+    const csv = lines.join("\n");
+    const blob = new Blob([csv], {
+      type: format === "excel" ? "application/vnd.ms-excel;charset=utf-8;" : "text/csv;charset=utf-8;",
+    });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${nameBase}.${format === "excel" ? "xls" : "csv"}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }, [selectedPartId, stationTimeline]);
 
   const handleResetStation = useCallback((sNo)=>{
     if (!selectedPartId||!sNo) return;
@@ -651,7 +728,7 @@ const ComponentJourney = () => {
   useEffect(()=>{const t=setInterval(()=>loadPartCatalog(searchTermRef.current).catch(()=>{}),CATALOG_SYNC_INTERVAL);return()=>clearInterval(t);},[loadPartCatalog]);
   useEffect(()=>{
     const sync=async()=>{
-      try { const r=await stationSettingsApi.list(); if (r&&Object.keys(r).length>0){setStationSettings(r);saveStationFeatureSettings(r);return;} } catch {}
+      try { const r=await stationSettingsApi.list(); if (r&&Object.keys(r).length>0){setStationSettings(r);saveStationFeatureSettings(r);return;} } catch (_syncError) { void _syncError; }
       setStationSettings(getStationFeatureSettings());
     };
     sync();
@@ -659,6 +736,38 @@ const ComponentJourney = () => {
     window.addEventListener("focus",onFocus); window.addEventListener("storage",onStorage);
     return()=>{ window.removeEventListener("focus",onFocus); window.removeEventListener("storage",onStorage); };
   },[]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadFilterSources = async () => {
+      try {
+        const [machineRows, shifts] = await Promise.all([
+          machineApi.list(),
+          shiftApi.list().catch(() => []),
+        ]);
+        if (cancelled) return;
+        setMachines(machineRows || []);
+        setAvailableShifts(
+          (shifts || [])
+            .filter((row) => row?.isActive !== false)
+            .map((row) => ({
+              shiftCode: row.shiftCode || row.shift_code,
+              shiftName: row.shiftName || row.shift_name || row.shiftCode || row.shift_code,
+            }))
+        );
+      } catch (_error) {
+        void _error;
+        if (!cancelled) {
+          setMachines([]);
+          setAvailableShifts([]);
+        }
+      }
+    };
+    loadFilterSources();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ─────────────────────────────────────────────────────────────────────
   //  RENDER
@@ -755,10 +864,18 @@ const ComponentJourney = () => {
                 </p>
               </div>
             </div>
-            <Btn variant="ghost" onClick={handleRefresh} disabled={refreshing||loading} loading={refreshing}>
-              {!refreshing&&<RefreshCw size={13}/>}
-              {refreshing?"Refreshing…":"Refresh"}
-            </Btn>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <Btn variant="ghost" onClick={()=>exportJourneyReport("csv")} disabled={!stationTimeline.length}>
+                <Download size={13}/> CSV
+              </Btn>
+              <Btn variant="ghost" onClick={()=>exportJourneyReport("excel")} disabled={!stationTimeline.length}>
+                <Download size={13}/> Excel
+              </Btn>
+              <Btn variant="ghost" onClick={handleRefresh} disabled={refreshing||loading} loading={refreshing}>
+                {!refreshing&&<RefreshCw size={13}/>}
+                {refreshing?"Refreshing…":"Refresh"}
+              </Btn>
+            </div>
           </div>
 
           {/* Search bar */}
@@ -781,6 +898,86 @@ const ComponentJourney = () => {
                 onBlur={e=>{e.target.style.borderColor=C.border();e.target.style.boxShadow="none";}}
               />
             </div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:8,marginBottom:14}}>
+            <input
+              type="date"
+              value={filters.dateFrom}
+              onChange={(e)=>setFilters((prev)=>({...prev,dateFrom:e.target.value}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            />
+            <input
+              type="date"
+              value={filters.dateTo}
+              onChange={(e)=>setFilters((prev)=>({...prev,dateTo:e.target.value}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            />
+            <select
+              value={filters.lineName}
+              onChange={(e)=>setFilters((prev)=>({...prev,lineName:e.target.value,machineId:""}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            >
+              <option value="">All Lines</option>
+              {lineOptions.map((line)=><option key={line} value={line}>{line}</option>)}
+            </select>
+            <select
+              value={filters.machineId}
+              onChange={(e)=>setFilters((prev)=>({...prev,machineId:e.target.value}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            >
+              <option value="">All Machines</option>
+              {machines
+                .filter((machine)=>!filters.lineName || String(machine.lineName || "").trim() === filters.lineName)
+                .map((machine)=>(
+                  <option key={machine.id} value={machine.id}>{machine.machineName}</option>
+                ))}
+            </select>
+            <input
+              value={filters.stationNo}
+              onChange={(e)=>setFilters((prev)=>({...prev,stationNo:e.target.value.toUpperCase()}))}
+              placeholder="Station"
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            />
+            <select
+              value={filters.status}
+              onChange={(e)=>setFilters((prev)=>({...prev,status:e.target.value}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            >
+              <option value="">All Status</option>
+              <option value="IN_PROGRESS">RUNNING</option>
+              <option value="COMPLETED">PASSED</option>
+              <option value="NG">FAILED</option>
+              <option value="INTERLOCKED">BLOCKED</option>
+            </select>
+            <input
+              value={filters.operatorId}
+              onChange={(e)=>setFilters((prev)=>({...prev,operatorId:e.target.value}))}
+              placeholder="Operator ID"
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            />
+            <select
+              value={filters.shiftCode}
+              onChange={(e)=>setFilters((prev)=>({...prev,shiftCode:e.target.value}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            >
+              <option value="">All Shifts</option>
+              {availableShifts.map((shift)=>(
+                <option key={shift.shiftCode} value={shift.shiftCode}>{shift.shiftName}</option>
+              ))}
+            </select>
+            <input
+              value={filters.partId}
+              onChange={(e)=>setFilters((prev)=>({...prev,partId:e.target.value}))}
+              placeholder="Part ID"
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            />
+            <button
+              onClick={()=>setFilters({dateFrom:"",dateTo:"",partId:"",machineId:"",stationNo:"",status:"",operatorId:"",shiftCode:"",lineName:""})}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.ng(0.25)}`,background:C.ng(0.08),color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer"}}
+            >
+              Clear Filters
+            </button>
           </div>
 
           {/* 3 KPI stat cards — only shown when a part is selected */}

@@ -9,8 +9,6 @@ const plcStateMachineService = require("./plcStateMachineService");
 const { clearMachineLock } = require("./machineLockService");
 const { TIMELINE_EVENTS } = require("./operationTimelineService");
 const { logInfo, logWarn } = require("./industrialLogger");
-const plcLatchManager = require("./plcLatchManager");
-
 
 function toIntOrNull(value) {
   const parsed = Number(value);
@@ -111,15 +109,6 @@ async function finalizeCycleAfterPlc({ machine }) {
   const protocol = normalizeProtocol(machine);
 
   await plcHandshakeEngine.markResetting(machineId);
-
-  // ─── RELEASE LATCH (authorized reset path) ───────────────────────────────
-  // This is the ONE authorized place to release the PLC output latch.
-  // The latch has been holding the start register at its active value
-  // since the handshake wrote it. Releasing here authorizes the reset
-  // sequence below to write 0 (and the reset value) to the PLC.
-  // Any other code that tries to write 0 while the latch was active
-  // would have been blocked by plcLatchManager.isRegisterWriteBlocked().
-  plcLatchManager.releaseLatch(machineId, "CYCLE_FINALIZATION_RESET");
 
   const result = await resetValidation.executeResetAndUnlock({
     machineId,

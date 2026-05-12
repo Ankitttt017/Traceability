@@ -38,7 +38,7 @@ class PlcRecoveryService {
         recoveredState = plcStateMachineService.states.WAITING_END;
       } else if (liveSignals.RESET) {
         recoveredState = plcStateMachineService.states.RESETTING;
-      } else if (dbState === plcStateMachineService.states.START_SENT || dbState === plcStateMachineService.states.WAITING_ACK) {
+      } else if (dbState === plcStateMachineService.states.START_SENT) {
         // If we were waiting for ACK and PLC is IDLE, we might need to resend START or enter error
         recoveredState = plcStateMachineService.states.RECOVERING;
       }

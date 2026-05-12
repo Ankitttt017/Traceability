@@ -3,15 +3,15 @@
 //  ✓ Auto-generated QR code (square, scannable) per box
 //  ✓ Scan QR → show box ID, packed count, parts list
 //  ✓ Professional Navy/Steel/Amber/Linen theme
-//  ✓ Box grid visualization
-//  ✓ Print label with QR + barcode + parts table
+//  ✓ Box grid visualization with smaller boxes
+//  ✓ Clickable QR icon in header opens modal
 // ============================================================
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import {
   Boxes, Printer, RefreshCw, ScanLine, CheckCircle2,
   Clock, Package, QrCode, X, AlertCircle,
-  LayoutGrid, List, Zap, Radio,
+  LayoutGrid, List, Zap, Radio, Eye,
 } from "lucide-react";
 import { packingApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
@@ -101,15 +101,11 @@ function toBars(value){
 }
 
 // ── QR Code Generator — pure JS matrix ────────────────────────────────────
-// Minimal QR-like matrix using a deterministic bit pattern from the string
-// This generates a visual QR pattern. For production scanning, use a proper library.
 function generateQRMatrix(text,size=25){
-  // Simple deterministic pattern based on text hash
   let hash=0;
   for(let i=0;i<text.length;i++){hash=((hash<<5)-hash)+text.charCodeAt(i);hash|=0;}
   const mat=Array.from({length:size},()=>new Array(size).fill(0));
 
-  // Finder patterns (3 corners)
   const finder=(r,c)=>{
     for(let i=0;i<7;i++)for(let j=0;j<7;j++){
       if(i===0||i===6||j===0||j===6)mat[r+i][c+j]=1;
@@ -119,16 +115,13 @@ function generateQRMatrix(text,size=25){
   };
   finder(0,0);finder(0,size-7);finder(size-7,0);
 
-  // Timing patterns
   for(let i=8;i<size-8;i++){
     mat[6][i]=i%2===0?1:0;
     mat[i][6]=i%2===0?1:0;
   }
 
-  // Format info areas (separators)
   for(let i=0;i<8;i++){mat[7][i]=0;mat[i][7]=0;mat[7][size-1-i]=0;mat[size-8][i]=0;}
 
-  // Data modules from hash
   let bit=0;
   for(let r=size-1;r>=1;r-=2){
     if(r===6)r=5;
@@ -136,7 +129,6 @@ function generateQRMatrix(text,size=25){
       for(let cc=0;cc<2;cc++){
         const c=r-cc;
         if(c<0||c>=size)continue;
-        // Skip finder + timing zones
         const inFinder=(r<9&&c<9)||(r<9&&c>=size-8)||(r>=size-8&&c<9)||(r===6||c===6);
         if(!inFinder){
           const byteIdx=Math.floor(bit/8),bitIdx=7-(bit%8);
@@ -168,32 +160,15 @@ const QRCodeSVG=({value,size=140,fgColor="#000",bgColor="#fff"})=>{
   );
 };
 
-// ── Barcode SVG ────────────────────────────────────────────────────────────
-const BarcodeSVG=({value,height=48})=>{
-  const bars=useMemo(()=>toBars(value),[value]);
-  const w=bars.reduce((s,b)=>s+b.width,0);
-  let cur=0;
-  return(
-    <svg viewBox={`0 0 ${w} ${height}`} style={{width:"100%",height,display:"block"}}>
-      {bars.map((b,i)=>{const x=cur;cur+=b.width;return b.isBar?<rect key={i} x={x} y={0} width={b.width} height={height} fill="#000"/>:null;})}
-    </svg>
-  );
-};
-
 // ── Print handler ──────────────────────────────────────────────────────────
-function printBoxLabel(session,items,machineMap){
+function printBoxLabel(session,items){
   if(!session)return;
   const labelCode=session.labelCode||session.boxNumber;
 
-  // Build QR matrix SVG string
   const mat=generateQRMatrix(labelCode);
-  const n=mat.length,cell=5,pad=4,qSize=n*cell+pad*2;
+  const n=mat.length,cell=4,pad=4,qSize=n*cell+pad*2;
   const qRects=mat.map((row,r)=>row.map((v,c)=>v?`<rect x="${pad+c*cell}" y="${pad+r*cell}" width="${cell}" height="${cell}" fill="#000"/>`:"").join("")).join("");
   const qSvg=`<svg width="${qSize}" height="${qSize}" viewBox="0 0 ${qSize} ${qSize}" xmlns="http://www.w3.org/2000/svg" style="shape-rendering:crispEdges"><rect width="${qSize}" height="${qSize}" fill="#fff"/>${qRects}</svg>`;
-
-  // Barcode
-  const eff=session.createdAt?
-    (items.length/Math.max(1,(new Date()-new Date(session.createdAt))/60000)).toFixed(1):"—";
 
   const partsRows=(items||[]).map((item,i)=>`
     <tr>
@@ -202,7 +177,7 @@ function printBoxLabel(session,items,machineMap){
       <td style="font-family:monospace;font-weight:700;color:#1a3263">${item.partId||"—"}</td>
       <td style="color:#374151">${item.operationNo||"—"}</td>
       <td style="color:#22C55E;font-weight:700">✓ Pass</td>
-      <td style="font-family:monospace;font-size:9px;color:#6b7280">${item.packedAt?new Date(item.packedAt).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):"—"}</td>
+      <td style="font-family:monospace;font-size:9px;color:#6b7280">${item.packedAt?new Date(item.packedAt).toLocaleString():"—"}</td>
     </tr>`).join("");
 
   const html=`<!DOCTYPE html><html><head>
@@ -211,132 +186,33 @@ function printBoxLabel(session,items,machineMap){
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',Arial,sans-serif;background:#fff;color:#0f172a;font-size:11px}
 .page{max-width:920px;margin:0 auto;padding:20px 26px}
-
-/* Header */
 .hdr{background:linear-gradient(135deg,#1a3263,#547792);color:#fff;padding:18px 24px;border-radius:12px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center}
-.hdr h1{font-size:18px;font-weight:900;letter-spacing:-.02em;margin-bottom:3px}
-.hdr p{font-size:9px;opacity:.75;letter-spacing:.05em}
-.certified{display:inline-flex;align-items:center;gap:5px;background:rgba(250,185,91,.2);border:1px solid rgba(250,185,91,.5);color:#FAB95B;padding:4px 12px;border-radius:99px;font-size:9px;font-weight:800;letter-spacing:.08em}
-
-/* Top label area — QR left, meta right */
-.label-area{display:flex;gap:18px;margin-bottom:16px;align-items:stretch}
-.qr-col{background:#fff;border:2px solid #1a3263;border-radius:12px;padding:14px 12px;display:flex;flex-direction:column;align-items:center;gap:8px;flex-shrink:0}
-.qr-lbl{font-size:7px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:#547792;text-align:center}
-.qr-id{font-family:monospace;font-size:10px;font-weight:900;color:#1a3263;text-align:center;letter-spacing:.07em;margin-top:2px;word-break:break-all;max-width:140px}
-.scan-note{font-size:7px;color:#94a3b8;text-align:center;margin-top:2px}
-
-/* Meta */
-.meta-col{flex:1;display:flex;flex-direction:column;gap:10px}
+.hdr h1{font-size:18px;font-weight:900;margin-bottom:3px}
+.certified{background:rgba(250,185,91,.2);border:1px solid rgba(250,185,91,.5);color:#FAB95B;padding:4px 12px;border-radius:99px;font-size:9px;font-weight:800}
+.label-area{display:flex;gap:18px;margin-bottom:16px}
+.qr-col{background:#fff;border:2px solid #1a3263;border-radius:12px;padding:14px 12px;display:flex;flex-direction:column;align-items:center;gap:8px}
+.meta-col{flex:1}
 .meta-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
-.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
-.meta-item,.kpi{background:#f8fafc;border:1px solid #e2e8f0;border-radius:9px;padding:9px 11px}
-.kpi{border-left:3px solid}
-.lbl{font-size:7px;font-weight:800;text-transform:uppercase;letter-spacing:.09em;color:#94a3b8;margin-bottom:3px}
-.val{font-size:15px;font-weight:900;font-family:monospace;color:#1a3263;line-height:1}
-.sub{font-size:7px;color:#94a3b8;margin-top:2px}
-.kpi .val{font-size:17px}
-
-/* Section */
-.sec-ttl{font-size:8px;font-weight:800;text-transform:uppercase;letter-spacing:.1em;color:#547792;margin-bottom:7px;padding-bottom:5px;border-bottom:1.5px solid #e2e8f0;display:flex;align-items:center;gap:5px}
-.sec-ttl::before{content:'';display:inline-block;width:3px;height:10px;background:#1a3263;border-radius:2px}
-
-/* Table */
-table{width:100%;border-collapse:collapse;font-size:10px}
+.meta-item{background:#f8fafc;border:1px solid #e2e8f0;border-radius:9px;padding:9px 11px}
+.lbl{font-size:7px;font-weight:800;text-transform:uppercase;color:#94a3b8;margin-bottom:3px}
+.val{font-size:15px;font-weight:900;font-family:monospace;color:#1a3263}
+table{width:100%;border-collapse:collapse}
 thead tr{background:#1a3263;color:#fff}
-thead th{padding:7px 10px;text-align:left;font-size:7px;font-weight:700;text-transform:uppercase;letter-spacing:.07em}
-tbody tr:nth-child(odd){background:#fff}
-tbody tr:nth-child(even){background:#f8fafc}
-tbody td{padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#1e293b;vertical-align:middle}
-.tbl-wrap{border:1px solid #e2e8f0;border-radius:9px;overflow:hidden}
-
-.footer{margin-top:16px;padding-top:9px;border-top:1px solid #e2e8f0;display:flex;justify-content:space-between;font-size:7px;color:#94a3b8}
-@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}.page{padding:14px 18px}}
+thead th{padding:7px 10px;text-align:left;font-size:7px;font-weight:700}
+tbody td{padding:6px 10px;border-bottom:1px solid #f1f5f9}
+.footer{margin-top:16px;padding-top:9px;border-top:1px solid #e2e8f0;display:flex;justify-content:space-between;font-size:7px}
+@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 </style></head>
 <body><div class="page">
-
-<!-- HEADER -->
-<div class="hdr">
-  <div>
-    <h1>📦 Certified Packing List</h1>
-    <p>IndusTrace Manufacturing Execution System — Final Goods Registry</p>
-  </div>
-  <div class="certified">✓ QUALITY CERTIFIED</div>
-</div>
-
-<!-- LABEL AREA -->
-<div class="label-area">
-  <!-- QR Code only (no barcode) -->
-  <div class="qr-col">
-    <div class="qr-lbl">Box QR Code</div>
-    ${qSvg}
-    <div class="qr-id">${labelCode}</div>
-    <div class="scan-note">Scan to verify contents</div>
-  </div>
-
-  <!-- Meta info -->
-  <div class="meta-col">
-    <div class="meta-grid">
-      <div class="meta-item">
-        <div class="lbl">Box ID</div>
-        <div class="val" style="font-size:12px">${session.boxNumber}</div>
-        <div class="sub">Unique identifier</div>
-      </div>
-      <div class="meta-item">
-        <div class="lbl">Packed / Capacity</div>
-        <div class="val" style="color:#22C55E">${session.packedCount||items.length} / ${session.capacity||"—"}</div>
-        <div class="sub">Units in this box</div>
-      </div>
-      <div class="meta-item">
-        <div class="lbl">Status</div>
-        <div class="val" style="color:${session.status==="CLOSED"?"#22C55E":"#FAB95B"};font-size:12px">${session.status||"OPEN"}</div>
-        <div class="sub">${session.status==="CLOSED"?"Sealed & Ready":"Active packing"}</div>
-      </div>
-      <div class="meta-item">
-        <div class="lbl">Session Created</div>
-        <div class="val" style="font-size:10px">${session.createdAt?new Date(session.createdAt).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):"—"}</div>
-        <div class="sub">Start time</div>
-      </div>
-      <div class="meta-item">
-        <div class="lbl">Sealed At</div>
-        <div class="val" style="font-size:10px">${session.closedAt?new Date(session.closedAt).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):"Still Active"}</div>
-        <div class="sub">Closure time</div>
-      </div>
-      <div class="meta-item">
-        <div class="lbl">Pack Rate</div>
-        <div class="val" style="color:#547792">${eff}</div>
-        <div class="sub">parts / minute</div>
-      </div>
-    </div>
-    <!-- KPI strip -->
-    <div class="kpis">
-      <div class="kpi" style="border-color:#22C55E"><div class="lbl">Total Units</div><div class="val" style="color:#22C55E">${items.length}</div></div>
-      <div class="kpi" style="border-color:#1a3263"><div class="lbl">Capacity</div><div class="val" style="color:#1a3263">${session.capacity||"—"}</div></div>
-      <div class="kpi" style="border-color:#547792"><div class="lbl">Fill Rate</div><div class="val" style="color:#547792">${session.capacity?Math.round((items.length/session.capacity)*100):100}%</div></div>
-      <div class="kpi" style="border-color:#22C55E"><div class="lbl">QC Result</div><div class="val" style="color:#22C55E">Pass</div></div>
-      <div class="kpi" style="border-color:#FAB95B"><div class="lbl">Source</div><div class="val" style="color:#FAB95B;font-size:10px">${session.generationSource||"AUTO"}</div></div>
-    </div>
-  </div>
-</div>
-
-<!-- PARTS TABLE -->
-<div class="sec-ttl">Production Parts Ledger — All ${items.length} Units Packed</div>
-<div class="tbl-wrap">
-<table>
-  <thead><tr>
-    <th>#</th><th>Slot No.</th><th>Part Serial No.</th>
-    <th>Operation</th><th>QC Result</th><th>Packed At</th>
-  </tr></thead>
-  <tbody>
-    ${partsRows||"<tr><td colspan='6' style='text-align:center;color:#94a3b8;padding:16px'>No parts in this session</td></tr>"}
-  </tbody>
-</table>
-</div>
-
-<div class="footer">
-  <span>IndusTrace MES — Certified Packing List — Box: ${session.boxNumber}</span>
-  <span>Total: ${items.length} units · Fill: ${session.capacity?Math.round((items.length/session.capacity)*100):100}%</span>
-  <span>Printed: ${new Date().toLocaleString("en-IN",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})}</span>
-</div>
+<div class="hdr"><div><h1>📦 Certified Packing List</h1><p>IndusTrace MES — Final Goods Registry</p></div><div class="certified">✓ QUALITY CERTIFIED</div></div>
+<div class="label-area"><div class="qr-col">${qSvg}<div style="font-family:monospace;font-size:10px;font-weight:900">${labelCode}</div></div>
+<div class="meta-col"><div class="meta-grid">
+<div class="meta-item"><div class="lbl">Box ID</div><div class="val">${session.boxNumber}</div></div>
+<div class="meta-item"><div class="lbl">Packed</div><div class="val" style="color:#22C55E">${items.length} / ${session.capacity}</div></div>
+<div class="meta-item"><div class="lbl">Status</div><div class="val" style="color:#22C55E">${session.status||"OPEN"}</div></div>
+</div></div></div>
+<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Slot</th><th>Part Serial</th><th>Operation</th><th>QC</th><th>Packed At</th></tr></thead><tbody>${partsRows}</tbody></table></div>
+<div class="footer"><span>IndusTrace MES — Box: ${session.boxNumber}</span><span>Printed: ${new Date().toLocaleString()}</span></div>
 </div>
 <script>window.onload=function(){setTimeout(function(){window.print();},700);}</script>
 </body></html>`;
@@ -350,7 +226,7 @@ tbody td{padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#1e293b;vertical
 const Card=({title,subtitle,icon:Icon,accent,right,children,noPad})=>(
   <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
     borderRadius:14,overflow:"hidden",boxShadow:SH,
-    borderLeft:accent?`3px solid ${accent}`:"none"}}>
+    borderTop:accent?`3px solid ${accent}`:"none"}}>
     {(title||right)&&(
       <div style={{padding:"12px 17px",borderBottom:`1px solid ${C.bdr()}`,
         background:C.bg("surf"),display:"flex",alignItems:"center",
@@ -384,7 +260,7 @@ const Badge=({v="idle",l,pulse})=>{
       animation:pulse?"pkPulse 1.2s ease-in-out infinite":"none"}}/>{l}</span>;
 };
 
-// ── Scan Input Hook — detects barcode/QR scanner keyboard input ────────────
+// ── Scan Input Hook ────────────────────────────────────────────────────────
 function useScanInput(onScan){
   const bufRef=useRef(""),timerRef=useRef(null);
   useEffect(()=>{
@@ -414,16 +290,16 @@ const Packing=()=>{
   injectDS();
 
   const[overview,    setOverview]    =useState({activeSession:null,activeItems:[],recentSessions:[],finalPackingStations:[],managementSettings:null});
-  const[selectedBox, setSelectedBox] =useState("");
+  const[selectedBox, setSelectedBox]  =useState("");
   const[selectedSess,setSelectedSess]=useState(null);
   const[popup,       setPopup]       =useState(null);
   const[loadingOv,   setLoadingOv]   =useState(true);
   const[loadingSess, setLoadingSess] =useState(false);
-  const[feed,        setFeed]        =useState([]);
   const[hoveredSlot, setHoveredSlot] =useState(null);
-  const[view,        setView]        =useState("grid"); // "grid" | "list"
-  const[scanFlash,   setScanFlash]   =useState(false); // flash on scan
-  const[scanResult,  setScanResult]  =useState(null);  // QR scan result modal
+  const[view,        setView]        =useState("grid");
+  const[scanFlash,   setScanFlash]   =useState(false);
+  const[scanResult,  setScanResult]  =useState(null);
+  const[showQRModal, setShowQRModal] =useState(false);
   const selectedBoxRef=useRef("");
 
   const activeSession=overview.activeSession;
@@ -470,14 +346,11 @@ const Packing=()=>{
 
   useEffect(()=>{loadOverview();},[loadOverview]);
 
-  // QR / barcode scanner input detection
   useScanInput(useCallback((scanned)=>{
     setScanFlash(true);setTimeout(()=>setScanFlash(false),800);
-    // Try to match with known box numbers
     const boxes=[activeSession?.boxNumber,...(overview.recentSessions||[]).map(s=>s.boxNumber)].filter(Boolean);
     const matched=boxes.find(b=>scanned.includes(b)||b.includes(scanned)||scanned===b);
     const boxNum=matched||scanned;
-
     setSelectedBox(boxNum);selectedBoxRef.current=boxNum;
     loadSession(boxNum).then(()=>{
       setScanResult({boxNumber:boxNum,scannedAt:new Date().toISOString()});
@@ -487,11 +360,6 @@ const Packing=()=>{
   useEffect(()=>{
     const socket=io(SOCKET_URL,{path:"/socket.io/",transports:["websocket","polling"]});
     socket.on("packing_update",(payload={})=>{
-      const msg=payload.event==="BOX_CLOSED"
-        ?`Box ${payload.boxNumber} sealed — ${payload.packedCount} units packed`
-        :`Part ${payload.partId} packed → Slot ${payload.slotNo}`;
-      setFeed(prev=>[{id:Date.now(),msg,timestamp:new Date().toISOString(),
-        type:payload.event==="BOX_CLOSED"?"closed":"pack"},...prev].slice(0,30));
       loadOverview(payload.boxNumber).catch(()=>{});
     });
     return()=>socket.disconnect();
@@ -502,20 +370,24 @@ const Packing=()=>{
     setSelectedBox(v);selectedBoxRef.current=v;loadSession(v);
   };
 
-  const handlePrint=()=>{
-    printBoxLabel(displaySess,displayItems);
-  };
+  const handlePrint=()=>{printBoxLabel(displaySess,displayItems);};
 
   const eff=displaySess?.createdAt
     ?(displayItems.length/Math.max(1,(Date.now()-new Date(displaySess.createdAt).getTime())/60000)).toFixed(1)
     :"—";
 
-  // ── RENDER ──────────────────────────────────────────────────────────────
+  // Calculate optimal box size based on capacity
+  const getBoxSize = () => {
+    if (capacity <= 36) return 72;
+    if (capacity <= 64) return 58;
+    if (capacity <= 100) return 48;
+    return 42;
+  };
+  const boxSize = getBoxSize();
+
   return(
     <div style={{display:"flex",flexDirection:"column",gap:18,paddingBottom:32,
-      animation:"pkFadeIn .3s ease",
-      // Scan flash overlay
-      outline:scanFlash?`3px solid ${C.ok()}`:"none",
+      animation:"pkFadeIn .3s ease",outline:scanFlash?`3px solid ${C.ok()}`:"none",
       transition:"outline .1s",borderRadius:4}}>
 
       <GlobalPopup popup={popup} onClose={()=>setPopup(null)} simple/>
@@ -529,7 +401,6 @@ const Packing=()=>{
             border:`1px solid ${C.bdr()}`,borderRadius:18,overflow:"hidden",
             boxShadow:SHM,animation:"pkFadeIn .2s ease"}}>
             <div style={{height:3,background:`linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`}}/>
-            {/* Modal header */}
             <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.bdr()}`,
               background:C.bg("surf"),display:"flex",alignItems:"center",
               justifyContent:"space-between"}}>
@@ -552,14 +423,12 @@ const Packing=()=>{
                 <X size={13}/>
               </button>
             </div>
-            {/* Modal body */}
             <div style={{padding:"18px 20px 22px"}}>
-              {/* Box summary */}
               <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
                 {[
-                  {label:"Box ID",        value:displaySess?.boxNumber||scanResult.boxNumber,mono:true},
-                  {label:"Packed / Total",value:`${filledCount} / ${capacity}`,              mono:true},
-                  {label:"Status",        value:displaySess?.status||"OPEN",                  mono:false},
+                  {label:"Box ID", value:displaySess?.boxNumber||scanResult.boxNumber,mono:true},
+                  {label:"Packed / Total",value:`${filledCount} / ${capacity}`,mono:true},
+                  {label:"Status", value:displaySess?.status||"OPEN",mono:false},
                 ].map((f,i)=>(
                   <div key={i} style={{background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
                     borderRadius:9,padding:"9px 11px"}}>
@@ -570,69 +439,19 @@ const Packing=()=>{
                   </div>
                 ))}
               </div>
-
-              {/* Fill progress bar */}
               <div style={{marginBottom:14}}>
-                <div style={{display:"flex",justifyContent:"space-between",
-                  fontSize:10,color:C.txt("muted"),marginBottom:5}}>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:C.txt("muted"),marginBottom:5}}>
                   <span>Fill level</span>
-                  <span style={{fontFamily:"'DM Mono',monospace",fontWeight:700,color:fillColor}}>
-                    {progressPct}%
-                  </span>
+                  <span style={{fontFamily:"'DM Mono',monospace",fontWeight:700,color:fillColor}}>{progressPct}%</span>
                 </div>
                 <div style={{height:8,borderRadius:99,background:C.bdr(0.15),overflow:"hidden"}}>
-                  <div style={{height:"100%",background:fillColor,
-                    width:`${progressPct}%`,transition:"width .5s",borderRadius:99}}/>
+                  <div style={{height:"100%",background:fillColor,width:`${progressPct}%`,transition:"width .5s",borderRadius:99}}/>
                 </div>
               </div>
-
-              {/* Parts mini list */}
-              <p style={{fontSize:10,fontWeight:800,textTransform:"uppercase",
-                letterSpacing:"0.08em",color:C.txt("muted"),marginBottom:8}}>
-                Parts in this box ({displayItems.length})
-              </p>
-              <div style={{maxHeight:160,overflowY:"auto",display:"flex",
-                flexDirection:"column",gap:4,marginBottom:16}}>
-                {displayItems.length===0?(
-                  <p style={{fontSize:12,color:C.txt("muted"),fontStyle:"italic",
-                    textAlign:"center",padding:"16px 0"}}>No parts scanned yet.</p>
-                ):displayItems.slice(0,50).map((item,i)=>(
-                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,
-                    padding:"6px 10px",borderRadius:7,
-                    background:C.bg("surf"),border:`1px solid ${C.bdr()}`}}>
-                    <span style={{fontSize:10,fontWeight:700,color:C.steel(),
-                      fontFamily:"'DM Mono',monospace",flexShrink:0,minWidth:28}}>
-                      #{item.slotNo||i+1}
-                    </span>
-                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:11,
-                      fontWeight:700,color:C.txt("pri"),flex:1,
-                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                      {item.partId||"—"}
-                    </span>
-                    <span style={{fontSize:10,color:C.ok(),fontWeight:700,flexShrink:0}}>
-                      ✓
-                    </span>
-                    <span style={{fontSize:10,color:C.txt("muted"),
-                      fontFamily:"'DM Mono',monospace",flexShrink:0}}>
-                      {fmtTime(item.packedAt||item.createdAt)}
-                    </span>
-                  </div>
-                ))}
-                {displayItems.length>50&&(
-                  <p style={{fontSize:10,color:C.txt("muted"),textAlign:"center",padding:"6px 0"}}>
-                    +{displayItems.length-50} more parts — Print label to see full list
-                  </p>
-                )}
-              </div>
-
-              {/* Actions */}
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>setScanResult(null)}
                   style={{flex:1,height:38,borderRadius:9,fontSize:12,fontWeight:700,
-                    cursor:"pointer",background:"transparent",
-                    border:`1px solid ${C.bdr()}`,color:C.txt("sec")}}>
-                  Close
-                </button>
+                    cursor:"pointer",background:"transparent",border:`1px solid ${C.bdr()}`,color:C.txt("sec")}}>Close</button>
                 <button onClick={()=>{setScanResult(null);handlePrint();}}
                   style={{flex:2,height:38,borderRadius:9,fontSize:12,fontWeight:800,
                     cursor:"pointer",background:C.amber(),border:"none",color:C.navy(),
@@ -646,6 +465,66 @@ const Packing=()=>{
         </div>
       )}
 
+      {/* ── QR Code Modal (click from header) ────────────────────── */}
+      {showQRModal && displaySess && (
+        <div style={{position:"fixed",inset:0,zIndex:1200,display:"flex",
+          alignItems:"center",justifyContent:"center",padding:16,
+          background:"rgba(0,0,0,0.72)",backdropFilter:"blur(6px)"}}>
+          <div style={{width:"100%",maxWidth:420,background:C.bg("card"),
+            border:`1px solid ${C.bdr()}`,borderRadius:20,overflow:"hidden",
+            boxShadow:SHM,animation:"pkFadeIn .2s ease"}}>
+            <div style={{height:3,background:`linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`}}/>
+            <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.bdr()}`,
+              background:C.bg("surf"),display:"flex",alignItems:"center",
+              justifyContent:"space-between"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <div style={{width:32,height:32,borderRadius:8,background:C.amber(0.12),
+                  border:`1px solid ${C.amber(0.3)}`,display:"flex",alignItems:"center",
+                  justifyContent:"center"}}>
+                  <QrCode size={15} color={C.amber()}/>
+                </div>
+                <div>
+                  <p style={{fontSize:9,fontWeight:800,textTransform:"uppercase",
+                    letterSpacing:"0.1em",color:C.txt("muted"),marginBottom:1}}>Box QR Code</p>
+                  <p style={{fontSize:13,fontWeight:700,color:C.amber()}}>Scan to Verify</p>
+                </div>
+              </div>
+              <button onClick={()=>setShowQRModal(false)} style={{width:28,height:28,
+                borderRadius:6,background:"none",border:`1px solid ${C.bdr()}`,
+                cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",
+                color:C.txt("muted")}}>
+                <X size={13}/>
+              </button>
+            </div>
+            <div style={{padding:"28px 20px",textAlign:"center"}}>
+              <div style={{background:"#ffffff",borderRadius:16,padding:20,
+                display:"inline-block",boxShadow:`0 8px 28px rgba(0,0,0,0.15)`,
+                marginBottom:16}}>
+                <QRCodeSVG
+                  value={displaySess.labelCode||displaySess.boxNumber}
+                  size={220}
+                  fgColor="#1a3263"
+                  bgColor="#ffffff"
+                />
+              </div>
+              <p style={{fontFamily:"'DM Mono',monospace",fontSize:14,fontWeight:800,
+                color:C.txt("pri"),marginBottom:8,letterSpacing:"0.06em"}}>
+                {displaySess.labelCode||displaySess.boxNumber}
+              </p>
+              <p style={{fontSize:11,color:C.txt("muted")}}>
+                Scan this QR code to view box contents and packing status
+              </p>
+              <button onClick={()=>setShowQRModal(false)}
+                style={{marginTop:20,padding:"8px 24px",borderRadius:9,
+                  background:C.navy(),border:"none",color:C.linen(),
+                  fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ══ HEADER ══════════════════════════════════════════════════ */}
       <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
         borderRadius:16,overflow:"hidden",boxShadow:SH}}>
@@ -653,7 +532,6 @@ const Packing=()=>{
         <div style={{padding:"14px 20px"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
             flexWrap:"wrap",gap:12}}>
-            {/* Title */}
             <div style={{display:"flex",alignItems:"center",gap:13}}>
               <div style={{width:46,height:46,borderRadius:12,flexShrink:0,
                 background:`linear-gradient(135deg,${C.navy()},${C.steel(0.85)})`,
@@ -668,11 +546,9 @@ const Packing=()=>{
                   </h1>
                   <span style={{fontSize:10,fontWeight:700,color:C.ok(),
                     background:C.ok(0.1),padding:"2px 9px",borderRadius:99,
-                    border:`1px solid ${C.ok(0.3)}`,
-                    display:"flex",alignItems:"center",gap:4}}>
+                    border:`1px solid ${C.ok(0.3)}`,display:"flex",alignItems:"center",gap:4}}>
                     <span style={{width:5,height:5,borderRadius:"50%",background:C.ok(),
-                      animation:"pkPulse 1.2s ease-in-out infinite"}}/>
-                    LIVE
+                      animation:"pkPulse 1.2s ease-in-out infinite"}}/>LIVE
                   </span>
                 </div>
                 <p style={{fontSize:11,color:C.txt("muted"),marginTop:3}}>
@@ -681,8 +557,19 @@ const Packing=()=>{
               </div>
             </div>
 
-            {/* Controls */}
             <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+              {/* QR Icon Button */}
+              <button onClick={()=>displaySess&&setShowQRModal(true)} disabled={!displaySess}
+                style={{width:36,height:36,borderRadius:9,display:"flex",
+                  alignItems:"center",justifyContent:"center",
+                  background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
+                  cursor:displaySess?"pointer":"not-allowed",
+                  color:C.txt("sec"),opacity:displaySess?1:0.5,
+                  transition:"all .15s"}}
+                title="View Box QR Code">
+                <Eye size={14}/>
+              </button>
+
               {/* Box selector */}
               <div style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",
                 background:C.bg("surf"),border:`1px solid ${C.bdr()}`,borderRadius:10}}>
@@ -691,19 +578,12 @@ const Packing=()=>{
                   style={{background:"transparent",border:"none",outline:"none",
                     fontSize:12,fontWeight:700,color:C.txt("pri"),cursor:"pointer",
                     fontFamily:"'DM Mono',monospace"}}>
-                  {activeSession&&(
-                    <option value={activeSession.boxNumber}>{activeSession.boxNumber} — ACTIVE</option>
-                  )}
-                  {(overview.recentSessions||[]).map(s=>(
-                    <option key={s.id} value={s.boxNumber}>{s.boxNumber} — {s.status}</option>
-                  ))}
-                  {!activeSession&&!(overview.recentSessions||[]).length&&(
-                    <option value="">No box sessions</option>
-                  )}
+                  {activeSession&&<option value={activeSession.boxNumber}>{activeSession.boxNumber} — ACTIVE</option>}
+                  {(overview.recentSessions||[]).map(s=><option key={s.id} value={s.boxNumber}>{s.boxNumber} — {s.status}</option>)}
+                  {!activeSession&&!(overview.recentSessions||[]).length&&<option value="">No box sessions</option>}
                 </select>
               </div>
 
-              {/* Refresh */}
               <button onClick={()=>loadOverview(selectedBox)} disabled={loadingOv}
                 style={{width:36,height:36,borderRadius:9,display:"flex",
                   alignItems:"center",justifyContent:"center",
@@ -712,7 +592,6 @@ const Packing=()=>{
                 <RefreshCw size={14} style={{animation:loadingOv?"pkSpin .9s linear infinite":"none"}}/>
               </button>
 
-              {/* Print */}
               <button onClick={handlePrint} disabled={!displaySess}
                 style={{display:"inline-flex",alignItems:"center",gap:7,height:36,
                   padding:"0 16px",borderRadius:9,fontSize:12,fontWeight:800,
@@ -720,9 +599,7 @@ const Packing=()=>{
                   background:displaySess?C.amber():C.idle(0.1),
                   border:"none",color:displaySess?C.navy():C.txt("muted"),
                   boxShadow:displaySess?`0 3px 12px ${C.amber(0.3)}`:"none",
-                  opacity:displaySess?1:0.5,transition:"all .15s"}}
-                onMouseEnter={e=>{if(displaySess)e.currentTarget.style.filter="brightness(1.08)";}}
-                onMouseLeave={e=>e.currentTarget.style.filter="none"}>
+                  opacity:displaySess?1:0.5,transition:"all .15s"}}>
                 <Printer size={14}/> Print Label
               </button>
             </div>
@@ -731,13 +608,9 @@ const Packing=()=>{
       </div>
 
       {/* ══ SCAN HINT BAR ═══════════════════════════════════════════ */}
-      <div style={{
-        display:"flex",alignItems:"center",gap:10,padding:"10px 16px",
-        borderRadius:11,
-        background:scanFlash?C.ok(0.12):C.bg("card"),
-        border:`1px solid ${scanFlash?C.ok(0.35):C.bdr()}`,
-        boxShadow:SH,transition:"all .2s",
-      }}>
+      <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 16px",
+        borderRadius:11,background:scanFlash?C.ok(0.12):C.bg("card"),
+        border:`1px solid ${scanFlash?C.ok(0.35):C.bdr()}`,boxShadow:SH,transition:"all .2s"}}>
         <div style={{position:"relative",width:16,height:16,flexShrink:0}}>
           <div style={{position:"absolute",inset:0,borderRadius:"50%",
             background:C.ok(0.4),animation:"pkPing 1.8s ease-out infinite"}}/>
@@ -747,18 +620,12 @@ const Packing=()=>{
           </div>
         </div>
         <p style={{fontSize:12,fontWeight:600,color:scanFlash?C.ok():C.txt("muted"),transition:"color .2s"}}>
-          {scanFlash
-            ?"QR code detected — loading box details…"
-            :"Ready to scan — point any barcode or QR scanner at this screen or scan a box QR code"}
+          {scanFlash?"QR code detected — loading box details…":"Ready to scan — point any barcode or QR scanner at this screen"}
         </p>
-        <div style={{marginLeft:"auto",fontSize:10,color:C.txt("muted"),
-          fontFamily:"'DM Mono',monospace"}}>
-          Scanner: active
-        </div>
       </div>
 
       {/* ══ MAIN CONTENT ════════════════════════════════════════════ */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 320px",gap:16,alignItems:"start"}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 280px",gap:16,alignItems:"start"}}>
 
         {/* ── Left: Box grid + ledger ──────────────────────────── */}
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -774,9 +641,8 @@ const Packing=()=>{
                   l={`${filledCount} / ${capacity} packed`}/>
               </div>
               <div style={{display:"flex",alignItems:"center",gap:10}}>
-                <span style={{fontSize:18,fontWeight:900,
-                  color:fillColor,fontFamily:"'DM Mono',monospace"}}>{progressPct}%</span>
-                {/* Grid / List toggle */}
+                <span style={{fontSize:18,fontWeight:900,color:fillColor,
+                  fontFamily:"'DM Mono',monospace"}}>{progressPct}%</span>
                 <div style={{display:"flex",gap:3,padding:3,background:C.bg("surf"),
                   border:`1px solid ${C.bdr()}`,borderRadius:7}}>
                   {[{k:"grid",ic:<LayoutGrid size={12}/>},{k:"list",ic:<List size={12}/>}].map(t=>(
@@ -791,59 +657,43 @@ const Packing=()=>{
                 </div>
               </div>
             </div>
-            {/* Segmented fill bar */}
             <div style={{height:8,borderRadius:99,background:C.bdr(0.15),overflow:"hidden",
               display:"flex",gap:1}}>
-              {Array.from({length:Math.min(capacity,40)},(_,i)=>{
+              {Array.from({length:Math.min(capacity,60)},(_,i)=>{
                 const filled=filledMap.has(i+1)||i<filledCount;
-                return(
-                  <div key={i} style={{flex:1,height:"100%",borderRadius:1,
-                    background:filled?fillColor:C.bdr(0.2),
-                    transition:`background .1s ${i*10}ms`}}/>
-                );
+                return(<div key={i} style={{flex:1,height:"100%",borderRadius:1,
+                  background:filled?fillColor:C.bdr(0.2),transition:`background .1s ${i*10}ms`}}/>);
               })}
             </div>
           </div>
 
-          {/* Box Slot Grid or List */}
-          <Card noPad title="Box Slot Map"
-            subtitle="Digital Twin"
-            icon={LayoutGrid}
+          {/* Box Slot Grid */}
+          <Card noPad title="Box Slot Map" subtitle="Digital Twin" icon={LayoutGrid}
             accent={C.steel()}
-            right={
-              displaySess&&(
-                <div style={{display:"flex",alignItems:"center",gap:6}}>
-                  <span style={{fontSize:9,color:C.txt("muted")}}>
-                    Box: <strong style={{fontFamily:"'DM Mono',monospace",color:C.txt("pri")}}>
-                      {displaySess.boxNumber}
-                    </strong>
-                  </span>
-                  <Badge v={displaySess?.status==="CLOSED"?"ok":"amber"}
-                    l={displaySess?.status||"OPEN"}/>
-                </div>
-              )
-            }>
+            right={displaySess&&(
+              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                <span style={{fontSize:9,color:C.txt("muted")}}>
+                  Box: <strong style={{fontFamily:"'DM Mono',monospace",color:C.txt("pri")}}>
+                    {displaySess.boxNumber}
+                  </strong>
+                </span>
+                <Badge v={displaySess?.status==="CLOSED"?"ok":"amber"} l={displaySess?.status||"OPEN"}/>
+              </div>
+            )}>
             {loadingOv||loadingSess?(
               <div style={{padding:"48px 24px",textAlign:"center"}}>
-                <RefreshCw size={22} color={C.txt("muted")}
-                  style={{margin:"0 auto 12px",animation:"pkSpin .9s linear infinite"}}/>
+                <RefreshCw size={22} color={C.txt("muted")} style={{margin:"0 auto 12px",animation:"pkSpin .9s linear infinite"}}/>
                 <p style={{fontSize:12,color:C.txt("muted")}}>Loading box data…</p>
               </div>
             ):!displaySess?(
               <div style={{padding:"56px 24px",textAlign:"center"}}>
                 <Boxes size={32} color={C.txt("muted")} style={{margin:"0 auto 14px"}}/>
-                <p style={{fontSize:13,fontWeight:600,color:C.txt("sec"),marginBottom:6}}>
-                  No box selected
-                </p>
-                <p style={{fontSize:12,color:C.txt("muted")}}>
-                  Select a box from the dropdown or scan a QR code.
-                </p>
+                <p style={{fontSize:13,fontWeight:600,color:C.txt("sec"),marginBottom:6}}>No box selected</p>
+                <p style={{fontSize:12,color:C.txt("muted")}}>Select a box from the dropdown or scan a QR code.</p>
               </div>
             ):view==="grid"?(
               <div style={{padding:20}}>
-                <div style={{display:"grid",
-                  gridTemplateColumns:`repeat(auto-fill,minmax(${capacity>80?68:82}px,1fr))`,
-                  gap:12}}>
+                <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fill,minmax(${boxSize}px,1fr))`,gap:8}}>
                   {Array.from({length:capacity},(_,i)=>{
                     const slotId=i+1;
                     const item=filledMap.get(slotId);
@@ -854,151 +704,79 @@ const Packing=()=>{
                         onMouseLeave={()=>setHoveredSlot(null)}
                         style={{
                           position:"relative",
-                          height:capacity>80?72:86,
-                          borderRadius:12,
-                          border:`2px solid ${item?C.ok(0.5):C.bdr(0.22)}`,
-                          background:item
-                            ?`linear-gradient(135deg,${C.ok(0.15)},${C.ok(0.07)})`
-                            :C.bg("slot"),
+                          height:boxSize,
+                          borderRadius:10,
+                          border:`1.5px solid ${item?C.ok(0.5):C.bdr(0.22)}`,
+                          background:item?`linear-gradient(135deg,${C.ok(0.15)},${C.ok(0.07)})`:C.bg("slot"),
                           display:"flex",flexDirection:"column",
                           alignItems:"center",justifyContent:"center",
-                          gap:5,
-                          cursor:"default",transition:"all .15s",
-                          transform:isHov?"scale(1.08)":"scale(1)",
+                          gap:3,cursor:"default",transition:"all .12s",
+                          transform:isHov?"scale(1.05)":"scale(1)",
                           zIndex:isHov?10:1,
-                          boxShadow:item
-                            ?(isHov?`0 0 20px ${C.ok(0.4)}`:SH)
-                            :isHov?`0 3px 10px ${C.bdr(0.3)}`:"none",
+                          boxShadow:item?SH:isHov?`0 3px 10px ${C.bdr(0.3)}`:"none",
                         }}>
-                        {/* Slot number */}
-                        <span style={{
-                          fontSize:capacity>80?11:14,fontWeight:900,
-                          color:item?C.ok():C.txt("muted"),
-                          fontFamily:"'DM Mono',monospace",lineHeight:1,
-                        }}>
+                        <span style={{fontSize:capacity>80?10:12,fontWeight:900,
+                          color:item?C.ok():C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>
                           {slotId}
                         </span>
-                        {/* Status indicator */}
                         {item?(
-                          <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-                            <div style={{
-                              width:7,height:7,borderRadius:"50%",
-                              background:C.ok(),
-                              boxShadow:`0 0 8px ${C.ok(0.7)}`,
-                              animation:"pkPulse 2s ease-in-out infinite",
-                            }}/>
-                            <span style={{fontSize:8,fontWeight:700,color:C.ok(0.8),
-                              textTransform:"uppercase",letterSpacing:"0.05em"}}>
-                              Packed
-                            </span>
-                          </div>
+                          <div style={{width:6,height:6,borderRadius:"50%",background:C.ok(),
+                            boxShadow:`0 0 6px ${C.ok(0.7)}`,animation:"pkPulse 2s ease-in-out infinite"}}/>
                         ):(
-                          <span style={{fontSize:9,color:C.txt("muted"),
-                            textTransform:"uppercase",letterSpacing:"0.04em",
-                            fontWeight:600}}>Empty</span>
+                          <span style={{fontSize:7,color:C.txt("muted"),textTransform:"uppercase",fontWeight:600}}>Empty</span>
                         )}
-                        {/* Tooltip — filled */}
                         {isHov&&item&&(
-                          <div style={{
-                            position:"absolute",bottom:"calc(100% + 10px)",
-                            left:"50%",transform:"translateX(-50%)",
-                            background:C.bg("card"),border:`1px solid ${C.ok(0.35)}`,
-                            borderRadius:10,padding:"10px 13px",
-                            boxShadow:SHM,whiteSpace:"nowrap",zIndex:20,
-                            animation:"pkFadeIn .12s ease",minWidth:190,
-                          }}>
+                          <div style={{position:"absolute",bottom:"calc(100% + 8px)",left:"50%",
+                            transform:"translateX(-50%)",background:C.bg("card"),border:`1px solid ${C.ok(0.35)}`,
+                            borderRadius:8,padding:"8px 12px",boxShadow:SHM,whiteSpace:"nowrap",zIndex:20,
+                            animation:"pkFadeIn .12s ease",minWidth:180}}>
                             <p style={{fontSize:9,fontWeight:800,textTransform:"uppercase",
-                              letterSpacing:"0.08em",color:C.ok(),marginBottom:5}}>
-                              ✓ Slot {slotId} — Packed
-                            </p>
-                            <p style={{fontFamily:"'DM Mono',monospace",fontSize:12,
-                              fontWeight:700,color:C.txt("pri"),marginBottom:3}}>
-                              {item.partId}
-                            </p>
-                            {item.operationNo&&(
-                              <p style={{fontSize:10,color:C.txt("muted"),marginBottom:2}}>
-                                Op: {item.operationNo}
-                              </p>
-                            )}
-                            {item.machineName&&(
-                              <p style={{fontSize:10,color:C.txt("muted"),marginBottom:2}}>
-                                Machine: {item.machineName}
-                              </p>
-                            )}
-                            <p style={{fontSize:10,color:C.txt("muted")}}>
-                              {fmtDT(item.packedAt||item.createdAt)}
-                            </p>
-                          </div>
-                        )}
-                        {/* Tooltip — empty */}
-                        {isHov&&!item&&(
-                          <div style={{
-                            position:"absolute",bottom:"calc(100% + 8px)",
-                            left:"50%",transform:"translateX(-50%)",
-                            background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
-                            borderRadius:7,padding:"5px 10px",
-                            whiteSpace:"nowrap",zIndex:20,animation:"pkFadeIn .1s ease",
-                          }}>
-                            <p style={{fontSize:10,color:C.txt("muted")}}>
-                              Slot {slotId} — Empty
-                            </p>
+                              letterSpacing:"0.08em",color:C.ok(),marginBottom:4}}>✓ Slot {slotId}</p>
+                            <p style={{fontFamily:"'DM Mono',monospace",fontSize:11,fontWeight:700,
+                              color:C.txt("pri"),marginBottom:2}}>{item.partId}</p>
+                            <p style={{fontSize:9,color:C.txt("muted")}}>{fmtDT(item.packedAt||item.createdAt)}</p>
                           </div>
                         )}
                       </div>
                     );
                   })}
                 </div>
-                {/* Legend */}
-                <div style={{display:"flex",alignItems:"center",gap:16,marginTop:14,
-                  padding:"10px 0",borderTop:`1px solid ${C.bdr()}`}}>
+                <div style={{display:"flex",alignItems:"center",gap:16,marginTop:14,padding:"8px 0",
+                  borderTop:`1px solid ${C.bdr()}`,fontSize:10,color:C.txt("muted")}}>
                   <div style={{display:"flex",alignItems:"center",gap:6}}>
-                    <div style={{width:14,height:14,borderRadius:4,
-                      background:`linear-gradient(135deg,${C.ok(0.2)},${C.ok(0.08)})`,
-                      border:`2px solid ${C.ok(0.45)}`}}/>
-                    <span style={{fontSize:11,color:C.txt("muted")}}>Packed</span>
+                    <div style={{width:12,height:12,borderRadius:3,background:`linear-gradient(135deg,${C.ok(0.2)},${C.ok(0.08)})`,
+                      border:`1.5px solid ${C.ok(0.45)}`}}/>
+                    <span>Packed</span>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:6}}>
-                    <div style={{width:14,height:14,borderRadius:4,background:C.bg("slot"),
-                      border:`2px solid ${C.bdr(0.22)}`}}/>
-                    <span style={{fontSize:11,color:C.txt("muted")}}>Empty slot</span>
+                    <div style={{width:12,height:12,borderRadius:3,background:C.bg("slot"),
+                      border:`1.5px solid ${C.bdr(0.22)}`}}/>
+                    <span>Empty</span>
                   </div>
-                  <span style={{marginLeft:"auto",fontSize:11,color:C.txt("muted"),fontStyle:"italic"}}>
-                    Hover any slot to see part details
-                  </span>
+                  <span style={{marginLeft:"auto",fontStyle:"italic"}}>Hover for details</span>
                 </div>
               </div>
             ):(
-              /* List view */
               <div style={{overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                  <thead>
-                    <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
-                      {["Slot","Part Serial No.","Operation","Result","Packed At"].map(h=>(
-                        <th key={h} style={{padding:"9px 14px",textAlign:"left",fontSize:9,
-                          fontWeight:800,textTransform:"uppercase",letterSpacing:"0.09em",
-                          color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
+                  <thead><tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
+                    {["Slot","Part Serial No.","Operation","Result","Packed At"].map(h=>(
+                      <th key={h} style={{padding:"9px 14px",textAlign:"left",fontSize:9,
+                        fontWeight:800,textTransform:"uppercase",letterSpacing:"0.09em",
+                        color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
+                    ))}
+                  </tr></thead>
                   <tbody>
                     {displayItems.length===0?(
-                      <tr><td colSpan={5} style={{padding:"32px",textAlign:"center",
-                        color:C.txt("muted"),fontSize:12}}>No parts in this box yet.</td></tr>
+                      <tr><td colSpan={5} style={{padding:"32px",textAlign:"center",color:C.txt("muted")}}>No parts yet</td></tr>
                     ):displayItems.map((item,i)=>(
                       <tr key={i} style={{borderBottom:`1px solid ${C.bdr()}`,
-                        background:i%2===1?C.bg("surf"):"transparent",transition:"background .1s"}}
-                        onMouseEnter={e=>e.currentTarget.style.background=C.ok(0.04)}
-                        onMouseLeave={e=>e.currentTarget.style.background=i%2===1?C.bg("surf"):"transparent"}>
-                        <td style={{padding:"9px 14px",fontFamily:"'DM Mono',monospace",
-                          fontWeight:700,color:C.steel()}}>{item.slotNo||"—"}</td>
-                        <td style={{padding:"9px 14px",fontFamily:"'DM Mono',monospace",
-                          fontSize:11,fontWeight:700,color:C.txt("pri")}}>{item.partId||"—"}</td>
+                        background:i%2===1?C.bg("surf"):"transparent"}}>
+                        <td style={{padding:"9px 14px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.steel()}}>{item.slotNo||"—"}</td>
+                        <td style={{padding:"9px 14px",fontFamily:"'DM Mono',monospace",fontSize:11,fontWeight:700,color:C.txt("pri")}}>{item.partId||"—"}</td>
                         <td style={{padding:"9px 14px",fontSize:11,color:C.txt("sec")}}>{item.operationNo||"—"}</td>
                         <td style={{padding:"9px 14px"}}><Badge v="ok" l="✓ Pass"/></td>
-                        <td style={{padding:"9px 14px",fontSize:10,color:C.txt("muted"),
-                          fontFamily:"'DM Mono',monospace"}}>
-                          {fmtTime(item.packedAt||item.createdAt)}
-                        </td>
+                        <td style={{padding:"9px 14px",fontSize:10,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>{fmtTime(item.packedAt||item.createdAt)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1008,10 +786,8 @@ const Packing=()=>{
           </Card>
         </div>
 
-        {/* ── Right: QR code + label info + feed ──────────────── */}
+        {/* ── Right: QR code + label info ─────────────────────────────── */}
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
-
-          {/* QR Code card */}
           <Card title="Box QR Code" subtitle="Scan to Verify" icon={QrCode} accent={C.amber()}>
             {!displaySess?(
               <div style={{padding:"32px 16px",textAlign:"center"}}>
@@ -1019,281 +795,98 @@ const Packing=()=>{
                 <p style={{fontSize:12,color:C.txt("muted")}}>Select a box to see its QR code</p>
               </div>
             ):(
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:14}}>
-                {/* QR Code */}
-                <div style={{background:"#ffffff",borderRadius:12,padding:14,
-                  border:`2px solid ${C.navy(0.2)}`,
-                  boxShadow:`0 4px 20px ${C.navy(0.12)}`}}>
-                  <QRCodeSVG
-                    value={displaySess.labelCode||displaySess.boxNumber}
-                    size={160}
-                    fgColor="#1a3263"
-                    bgColor="#ffffff"
-                  />
-                  <p style={{fontFamily:"'DM Mono',monospace",fontSize:10,fontWeight:700,
-                    color:"#1a3263",textAlign:"center",marginTop:8,letterSpacing:"0.06em"}}>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:12}}>
+                <div style={{background:"#ffffff",borderRadius:12,padding:12,
+                  border:`2px solid ${C.navy(0.2)}`,cursor:"pointer",
+                  transition:"transform .2s",":hover":{transform:"scale(1.02)"}}}
+                  onClick={()=>setShowQRModal(true)}>
+                  <QRCodeSVG value={displaySess.labelCode||displaySess.boxNumber} size={140} fgColor="#1a3263" bgColor="#ffffff"/>
+                  <p style={{fontFamily:"'DM Mono',monospace",fontSize:9,fontWeight:700,
+                    color:"#1a3263",textAlign:"center",marginTop:6,letterSpacing:"0.06em"}}>
                     {displaySess.labelCode||displaySess.boxNumber}
                   </p>
                 </div>
 
-                {/* Box meta */}
                 <div style={{width:"100%",display:"flex",flexDirection:"column",gap:6}}>
                   {[
-                    {l:"Box ID",     v:displaySess.boxNumber,            mono:true },
-                    {l:"Status",     v:displaySess.status||"OPEN",       mono:false},
-                    {l:"Packed",     v:`${filledCount} / ${capacity}`,   mono:true },
-                    {l:"Created",    v:fmtDT(displaySess.createdAt),     mono:true },
+                    {l:"Box ID", v:displaySess.boxNumber, mono:true},
+                    {l:"Status", v:displaySess.status||"OPEN", mono:false},
+                    {l:"Packed", v:`${filledCount} / ${capacity}`, mono:true},
+                    {l:"Created", v:fmtDT(displaySess.createdAt), mono:true},
                   ].map(f=>(
-                    <div key={f.l} style={{display:"flex",alignItems:"center",
-                      justifyContent:"space-between",padding:"6px 0",
-                      borderBottom:`1px solid ${C.bdr()}`}}>
-                      <span style={{fontSize:11,color:C.txt("muted")}}>{f.l}</span>
-                      <span style={{fontSize:11,fontWeight:700,color:C.txt("pri"),
-                        fontFamily:f.mono?"'DM Mono',monospace":"inherit"}}>
-                        {f.v||"—"}
-                      </span>
+                    <div key={f.l} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.bdr()}`}}>
+                      <span style={{fontSize:10,color:C.txt("muted")}}>{f.l}</span>
+                      <span style={{fontSize:10,fontWeight:700,color:C.txt("pri"),fontFamily:f.mono?"'DM Mono',monospace":"inherit"}}>{f.v||"—"}</span>
                     </div>
                   ))}
-                  {/* Pack rate */}
-                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-                    padding:"6px 0"}}>
-                    <span style={{fontSize:11,color:C.txt("muted")}}>Pack Rate</span>
-                    <span style={{fontSize:11,fontWeight:700,color:C.steel(),
-                      fontFamily:"'DM Mono',monospace"}}>{eff} p/min</span>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"5px 0"}}>
+                    <span style={{fontSize:10,color:C.txt("muted")}}>Pack Rate</span>
+                    <span style={{fontSize:10,fontWeight:700,color:C.steel(),fontFamily:"'DM Mono',monospace"}}>{eff} p/min</span>
                   </div>
                 </div>
 
-                {/* Print button */}
-                <button onClick={handlePrint} style={{width:"100%",height:40,
-                  background:C.amber(),border:"none",borderRadius:9,
-                  fontSize:12,fontWeight:800,cursor:"pointer",color:C.navy(),
-                  display:"flex",alignItems:"center",justifyContent:"center",gap:7,
+                <button onClick={handlePrint} style={{width:"100%",height:38,background:C.amber(),
+                  border:"none",borderRadius:9,fontSize:11,fontWeight:800,cursor:"pointer",
+                  color:C.navy(),display:"flex",alignItems:"center",justifyContent:"center",gap:6,
                   boxShadow:`0 3px 12px ${C.amber(0.3)}`,transition:"filter .15s"}}
                   onMouseEnter={e=>e.currentTarget.style.filter="brightness(1.08)"}
                   onMouseLeave={e=>e.currentTarget.style.filter="none"}>
-                  <Printer size={14}/> Print Box Label
+                  <Printer size={13}/> Print Label
                 </button>
               </div>
             )}
           </Card>
         </div>
-      </div>{/* end 2-col grid */}
+      </div>
 
-      {/* ══ PACKED PARTS TABLE — full width ══════════════════════════ */}
-      <Card noPad
-        title={`Packed Parts — ${displayItems.length} of ${capacity} slots filled`}
-        subtitle="Live Record — all available fields shown — updates as parts are scanned"
-        icon={List}
-        accent={C.ok()}
+      {/* ══ PACKED PARTS TABLE ─────────────────────────────────────── */}
+      <Card noPad title={`Packed Parts — ${displayItems.length} of ${capacity} slots filled`}
+        subtitle="Live Record" icon={List} accent={C.ok()}
         right={
           <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 9px",
-              borderRadius:99,background:C.ok(0.1),border:`1px solid ${C.ok(0.25)}`}}>
-              <div style={{width:5,height:5,borderRadius:"50%",background:C.ok(),
-                animation:"pkPulse 1.2s ease-in-out infinite"}}/>
-              <span style={{fontSize:10,fontWeight:700,color:C.ok()}}>
-                {activeSession?`Live · ${filledCount} packed`:"History view"}
-              </span>
-            </div>
-            <div style={{display:"flex",alignItems:"center",gap:6,
-              padding:"4px 10px",borderRadius:8,
-              background:C.bg("surf"),border:`1px solid ${C.bdr()}`}}>
-              <div style={{width:64,height:5,borderRadius:99,background:C.bdr(0.15),overflow:"hidden"}}>
-                <div style={{height:"100%",background:fillColor,width:`${progressPct}%`,transition:"width .5s"}}/>
-              </div>
-              <span style={{fontSize:11,fontWeight:700,color:fillColor,
-                fontFamily:"'DM Mono',monospace"}}>{progressPct}% full</span>
+            <div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 9px",borderRadius:99,
+              background:C.ok(0.1),border:`1px solid ${C.ok(0.25)}`}}>
+              <div style={{width:5,height:5,borderRadius:"50%",background:C.ok(),animation:"pkPulse 1.2s ease-in-out infinite"}}/>
+              <span style={{fontSize:10,fontWeight:700,color:C.ok()}}>{activeSession?"Live":"History"}</span>
             </div>
           </div>
         }>
         {displayItems.length===0?(
           <div style={{padding:"56px 24px",textAlign:"center"}}>
-            <div style={{width:48,height:48,borderRadius:14,background:C.bg("surf"),
-              border:`1px solid ${C.bdr()}`,display:"flex",alignItems:"center",
-              justifyContent:"center",margin:"0 auto 14px"}}>
-              <Package size={22} color={C.txt("muted")}/>
-            </div>
-            <p style={{fontSize:14,fontWeight:600,color:C.txt("sec"),marginBottom:6}}>
-              No parts packed yet
-            </p>
-            <p style={{fontSize:12,color:C.txt("muted")}}>
-              Parts will appear here automatically as they are scanned and packed into this box.
-            </p>
+            <Package size={28} color={C.txt("muted")} style={{margin:"0 auto 14px"}}/>
+            <p style={{fontSize:13,fontWeight:600,color:C.txt("sec"),marginBottom:6}}>No parts packed yet</p>
           </div>
         ):(
-          <>
-            <div style={{overflowX:"auto"}}>
-              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                <thead>
-                  <tr style={{background:`linear-gradient(90deg,${C.navy()},${C.steel(0.9)})`}}>
-                    {[
-                      "#",
-                      "Slot No.",
-                      "Part Serial No.",
-                      "Batch / Job",
-                      "Operation",
-                      "Station No.",
-                      "Machine",
-                      "QR Code",
-                      "QC Result",
-                      "Packed At",
-                    ].map(h=>(
-                      <th key={h} style={{padding:"11px 13px",textAlign:"left",
-                        fontSize:9,fontWeight:800,textTransform:"uppercase",
-                        letterSpacing:"0.09em",color:C.linen(0.85),whiteSpace:"nowrap"}}>
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayItems.map((item,i)=>(
-                    <tr key={i}
-                      style={{
-                        borderBottom:`1px solid ${C.bdr()}`,
-                        background:i%2===1?C.bg("surf"):"transparent",
-                        transition:"background .1s",
-                      }}
-                      onMouseEnter={e=>e.currentTarget.style.background=C.ok(0.04)}
-                      onMouseLeave={e=>e.currentTarget.style.background=i%2===1?C.bg("surf"):"transparent"}>
-
-                      {/* # */}
-                      <td style={{padding:"10px 13px",color:C.txt("muted"),fontSize:10,
-                        fontFamily:"'DM Mono',monospace",flexShrink:0}}>
-                        {i+1}
-                      </td>
-
-                      {/* Slot */}
-                      <td style={{padding:"10px 13px"}}>
-                        <div style={{
-                          display:"inline-flex",alignItems:"center",justifyContent:"center",
-                          width:32,height:32,borderRadius:8,
-                          background:C.ok(0.1),border:`1.5px solid ${C.ok(0.3)}`,
-                          fontFamily:"'DM Mono',monospace",fontSize:12,
-                          fontWeight:800,color:C.ok(),
-                        }}>
-                          {item.slotNo||"—"}
-                        </div>
-                      </td>
-
-                      {/* Part Serial */}
-                      <td style={{padding:"10px 13px"}}>
-                        <p style={{fontFamily:"'DM Mono',monospace",fontSize:12,
-                          fontWeight:700,color:C.txt("pri"),marginBottom:item.batchNo?2:0}}>
-                          {item.partId||"—"}
-                        </p>
-                      </td>
-
-                      {/* Batch / Job */}
-                      <td style={{padding:"10px 13px"}}>
-                        <span style={{fontSize:11,color:C.txt("sec"),
-                          fontFamily:"'DM Mono',monospace"}}>
-                          {item.batchNo||item.batchId||item.jobNo||item.jobId||"—"}
-                        </span>
-                      </td>
-
-                      {/* Operation */}
-                      <td style={{padding:"10px 13px"}}>
-                        <span style={{fontSize:11,fontWeight:600,color:C.txt("sec")}}>
-                          {item.operationNo||item.operation||item.operationName||"—"}
-                        </span>
-                      </td>
-
-                      {/* Station No */}
-                      <td style={{padding:"10px 13px"}}>
-                        <span style={{fontSize:11,color:C.txt("muted"),
-                          fontFamily:"'DM Mono',monospace"}}>
-                          {item.stationNo||item.station||"—"}
-                        </span>
-                      </td>
-
-                      {/* Machine */}
-                      <td style={{padding:"10px 13px"}}>
-                        <p style={{fontSize:11,color:C.txt("pri"),fontWeight:600,
-                          marginBottom:item.machineId?2:0}}>
-                          {item.machineName||item.machine||"—"}
-                        </p>
-                        {item.machineId&&(
-                          <p style={{fontSize:9,color:C.txt("muted"),
-                            fontFamily:"'DM Mono',monospace"}}>
-                            ID: {item.machineId}
-                          </p>
-                        )}
-                      </td>
-
-                      {/* QR Code */}
-                      <td style={{padding:"10px 13px"}}>
-                        <span style={{fontSize:10,color:C.steel(),
-                          fontFamily:"'DM Mono',monospace",
-                          overflow:"hidden",textOverflow:"ellipsis",
-                          whiteSpace:"nowrap",display:"block",maxWidth:120}}>
-                          {item.qrCode||item.qrData||item.labelCode||item.partId||"—"}
-                        </span>
-                      </td>
-
-                      {/* QC Result */}
-                      <td style={{padding:"10px 13px"}}>
-                        <span style={{
-                          display:"inline-flex",alignItems:"center",gap:5,
-                          padding:"3px 10px",borderRadius:99,fontSize:11,fontWeight:700,
-                          color:C.ok(),background:C.ok(0.1),border:`1px solid ${C.ok(0.25)}`,
-                          whiteSpace:"nowrap",
-                        }}>
-                          <CheckCircle2 size={11}/> Pass
-                        </span>
-                      </td>
-
-                      {/* Packed At */}
-                      <td style={{padding:"10px 13px",whiteSpace:"nowrap"}}>
-                        <p style={{fontSize:11,color:C.txt("pri"),
-                          fontFamily:"'DM Mono',monospace",marginBottom:2}}>
-                          {fmtTime(item.packedAt||item.createdAt)}
-                        </p>
-                        <p style={{fontSize:9,color:C.txt("muted")}}>
-                          {item.packedAt||item.createdAt
-                            ?new Date(item.packedAt||item.createdAt)
-                              .toLocaleDateString("en-IN",{day:"2-digit",month:"short"})
-                            :""}
-                        </p>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Table footer */}
-            <div style={{
-              padding:"10px 16px",borderTop:`1px solid ${C.bdr()}`,
-              background:C.bg("surf"),display:"flex",alignItems:"center",
-              justifyContent:"space-between",flexWrap:"wrap",gap:10,
-            }}>
-              <div style={{display:"flex",alignItems:"center",gap:18,flexWrap:"wrap"}}>
-                {[
-                  {dot:C.ok(),  label:"Packed",    v:filledCount,         c:C.ok()        },
-                  {dot:C.bdr(), label:"Remaining",  v:capacity-filledCount,c:C.txt("pri") },
-                  {dot:C.steel(),label:"Capacity",  v:capacity,            c:C.steel()    },
-                ].map(s=>(
-                  <div key={s.label} style={{display:"flex",alignItems:"center",gap:6}}>
-                    <div style={{width:8,height:8,borderRadius:2,background:s.dot}}/>
-                    <span style={{fontSize:11,color:C.txt("muted")}}>{s.label}:{" "}
-                      <strong style={{color:s.c,fontFamily:"'DM Mono',monospace"}}>{s.v}</strong>
-                    </span>
-                  </div>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+              <thead><tr style={{background:`linear-gradient(90deg,${C.navy()},${C.steel(0.9)})`}}>
+                {["#","Slot","Part ID","Operation","Station","Machine","QC","Packed At"].map(h=>(
+                  <th key={h} style={{padding:"9px 12px",textAlign:"left",fontSize:8,
+                    fontWeight:800,textTransform:"uppercase",letterSpacing:"0.09em",
+                    color:C.linen(0.85),whiteSpace:"nowrap"}}>{h}</th>
                 ))}
-              </div>
-              <span style={{fontSize:12,fontWeight:800,color:fillColor,
-                fontFamily:"'DM Mono',monospace"}}>
-                {progressPct}% complete
-              </span>
-            </div>
-          </>
+               </tr></thead>
+              <tbody>
+                {displayItems.map((item,i)=>(
+                  <tr key={i} style={{borderBottom:`1px solid ${C.bdr()}`,
+                    background:i%2===1?C.bg("surf"):"transparent"}}>
+                    <td style={{padding:"8px 12px",color:C.txt("muted"),fontSize:9,fontFamily:"'DM Mono',monospace"}}>{i+1}</td>
+                    <td style={{padding:"8px 12px"}}><div style={{display:"inline-flex",alignItems:"center",justifyContent:"center",width:28,height:28,borderRadius:6,background:C.ok(0.1),border:`1px solid ${C.ok(0.3)}`,fontSize:11,fontWeight:800,color:C.ok()}}>{item.slotNo||"—"}</div></td>
+                    <td style={{padding:"8px 12px",fontFamily:"'DM Mono',monospace",fontSize:11,fontWeight:700,color:C.txt("pri")}}>{item.partId||"—"}</td>
+                    <td style={{padding:"8px 12px",fontSize:10,color:C.txt("sec")}}>{item.operationNo||"—"}</td>
+                    <td style={{padding:"8px 12px",fontSize:10,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>{item.stationNo||"—"}</td>
+                    <td style={{padding:"8px 12px",fontSize:10,color:C.txt("pri")}}>{item.machineName||"—"}</td>
+                    <td style={{padding:"8px 12px"}}><Badge v="ok" l="Pass"/></td>
+                    <td style={{padding:"8px 12px",fontSize:9,color:C.txt("muted"),fontFamily:"'DM Mono',monospace",whiteSpace:"nowrap"}}>{fmtTime(item.packedAt||item.createdAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </Card>
-
     </div>
   );
 };
 
 export default Packing;
-

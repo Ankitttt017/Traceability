@@ -566,6 +566,13 @@ const ProductionCharts=()=>{
   const[partsList, setPartsList] =useState([]);
   const[partsSearch,setPartsSearch]=useState("");
   const[partsFilter,setPartsFilter]=useState("all");
+  const[filters,setFilters]=useState({
+    machineId:"",
+    lineName:"",
+    partId:"",
+    status:"",
+    shiftCode:"",
+  });
 
   const[summary,setSummary]=useState({
     machines:{total:0,active:0,inactive:0},
@@ -575,15 +582,29 @@ const ProductionCharts=()=>{
   const[report,setReport]=useState({
     machineWise:[],hourlyProduction:[],
     shiftProduction:{SHIFT_A:{total:0,ok:0,ng:0},SHIFT_B:{total:0,ok:0,ng:0},SHIFT_C:{total:0,ok:0,ng:0}},
+    availableLines:[],
+    availableShifts:[],
+    partsList:[],
   });
 
   const query=useMemo(()=>{
+    const commonFilters = {
+      machineId: filters.machineId || undefined,
+      lineName: filters.lineName || undefined,
+      partId: filters.partId || undefined,
+      status: filters.status || undefined,
+      shiftCode: filters.shiftCode || undefined,
+    };
     if(timeRange==="custom"&&customDate.from&&customDate.to){
       const to=new Date(customDate.to);to.setHours(23,59,59,999);
-      return{dateFrom:new Date(customDate.from).toISOString(),dateTo:to.toISOString()};
+      return{
+        dateFrom:new Date(customDate.from).toISOString(),
+        dateTo:to.toISOString(),
+        ...commonFilters,
+      };
     }
-    return toDateRange(timeRange);
-  },[timeRange,customDate]);
+    return { ...toDateRange(timeRange), ...commonFilters };
+  },[timeRange,customDate,filters]);
 
   const loadData=useCallback(async()=>{
     setLoading(true);setError("");
@@ -609,11 +630,21 @@ const ProductionCharts=()=>{
 
   const machineMap=useMemo(()=>new Map(machines.map(m=>[Number(m.id),m.machineName])),[machines]);
   const lineContextLabel = useMemo(() => {
+    const selectedMachineId = Number(filters.machineId || 0);
+    if (selectedMachineId) {
+      const selected = machines.find((m) => Number(m.id) === selectedMachineId);
+      if (selected?.lineName) {
+        return `Line: ${selected.lineName}`;
+      }
+    }
+    if (filters.lineName) {
+      return `Line: ${filters.lineName}`;
+    }
     const lineSet = new Set((machines || []).map((m) => String(m.lineName || "").trim()).filter(Boolean));
     if (lineSet.size === 0) return "Line: All";
     if (lineSet.size === 1) return `Line: ${Array.from(lineSet)[0]}`;
     return `Line: All (${lineSet.size})`;
-  }, [machines]);
+  }, [machines, filters.machineId, filters.lineName]);
   const totalOk   =Number(summary.quality?.ok||0);
   const totalNg   =Number(summary.quality?.ng||0);
   const totalUnits=totalOk+totalNg;
@@ -797,6 +828,71 @@ const ProductionCharts=()=>{
       </div>
 
       {/* ══ DOWNLOAD BAR — TOP ═══════════════════════════════════════ */}
+      <div style={{
+        background:C.bg("card"),
+        border:`1px solid ${C.bdr()}`,
+        borderRadius:12,
+        padding:"12px 14px",
+        boxShadow:SH,
+        display:"grid",
+        gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",
+        gap:8,
+      }}>
+        <select
+          value={filters.lineName}
+          onChange={(e)=>setFilters((prev)=>({...prev,lineName:e.target.value,machineId:""}))}
+          style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.txt("pri"),fontSize:12}}
+        >
+          <option value="">All Lines</option>
+          {(report.availableLines || []).map((line)=>(
+            <option key={line} value={line}>{line}</option>
+          ))}
+        </select>
+        <select
+          value={filters.machineId}
+          onChange={(e)=>setFilters((prev)=>({...prev,machineId:e.target.value}))}
+          style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.txt("pri"),fontSize:12}}
+        >
+          <option value="">All Machines</option>
+          {machines
+            .filter((m)=>!filters.lineName || String(m.lineName || "").trim() === filters.lineName)
+            .map((m)=>(
+              <option key={m.id} value={m.id}>{m.machineName}</option>
+            ))}
+        </select>
+        <input
+          value={filters.partId}
+          onChange={(e)=>setFilters((prev)=>({...prev,partId:e.target.value}))}
+          placeholder="Part ID"
+          style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.txt("pri"),fontSize:12}}
+        />
+        <select
+          value={filters.status}
+          onChange={(e)=>setFilters((prev)=>({...prev,status:e.target.value}))}
+          style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.txt("pri"),fontSize:12}}
+        >
+          <option value="">All Status</option>
+          <option value="OK">PASSED</option>
+          <option value="NG">FAILED</option>
+        </select>
+        <select
+          value={filters.shiftCode}
+          onChange={(e)=>setFilters((prev)=>({...prev,shiftCode:e.target.value}))}
+          style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.txt("pri"),fontSize:12}}
+        >
+          <option value="">All Shifts</option>
+          {(report.availableShifts || []).map((shift)=>(
+            <option key={shift.shiftCode} value={shift.shiftCode}>{shift.shiftName || shift.shiftCode}</option>
+          ))}
+        </select>
+        <button
+          onClick={()=>setFilters({machineId:"",lineName:"",partId:"",status:"",shiftCode:""})}
+          style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.ng(0.3)}`,background:C.ng(0.08),color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer"}}
+        >
+          Clear
+        </button>
+      </div>
+
       <div style={{
         display:"flex",alignItems:"center",justifyContent:"space-between",
         flexWrap:"wrap",gap:10,padding:"13px 18px",borderRadius:13,

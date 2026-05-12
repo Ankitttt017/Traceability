@@ -1,10 +1,10 @@
 // ============================================================
-//  Dashboard.jsx — IndusTrace Premium Redesign
+//  Dashboard.jsx â€” IndusTrace Premium Redesign
 //  Color Theme: Navy / Steel / Amber / Linen
-//  Clean professional language — no jargon
+//  Clean professional language â€” no jargon
 //  Supports: Dark + Light via [data-theme] on <html>
 // ============================================================
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { io } from "socket.io-client";
 import {
   Download, RefreshCw, Filter, CheckCircle2, XCircle,
@@ -27,7 +27,7 @@ import { loadReportConfig, prependCsvReportHeader } from "../utils/reportConfig"
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
 const API_BASE   = import.meta.env.VITE_API_URL    || "http://localhost:4000/api";
 
-// ── Design tokens ─────────────────────────────────────────────────────────
+// â”€â”€ Design tokens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const DS = `
   @keyframes dbSpin    { to { transform:rotate(360deg) } }
   @keyframes dbFadeIn  { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
@@ -80,7 +80,7 @@ function injectDS() {
     document.documentElement.setAttribute("data-theme","dark");
 }
 
-// ── Color helpers ─────────────────────────────────────────────────────────
+// â”€â”€ Color helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const C = {
   navy:   (o=1) => `rgba(var(--db-navy),${o})`,
   steel:  (o=1) => `rgba(var(--db-steel),${o})`,
@@ -105,6 +105,18 @@ function downloadBlob(blob, filename) {
   a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
+function uniqueStages(rows = []) {
+  const seen = new Set();
+  const out = [];
+  for (const row of rows) {
+    const token = String(row || "").trim();
+    if (!token || seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+  }
+  return out;
+}
+
 const EMPTY_SUMMARY = {
   machines:{ total:0, active:0, inactive:0 },
   parts:{ inProgress:0, completed:0, ng:0, interlocked:0, rework:0 },
@@ -117,7 +129,7 @@ const EMPTY_REPORT = {
   interlockHistory:[], reworkCount:0, partJourney:[],
 };
 
-// ── OEE Radial Gauge ──────────────────────────────────────────────────────
+// â”€â”€ OEE Radial Gauge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const OeeGauge = ({ value=0, size=88, stroke=9 }) => {
   const pct   = Math.min(100, Math.max(0, value));
   const r     = (size-stroke)/2;
@@ -140,7 +152,7 @@ const OeeGauge = ({ value=0, size=88, stroke=9 }) => {
   );
 };
 
-// ── Status Badge ─────────────────────────────────────────────────────────
+// â”€â”€ Status Badge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const Badge = ({ variant="idle", label }) => {
   const map = {
     ok:   { fg:C.ok(),   bg:C.ok(0.1),   bdr:C.ok(0.25)   },
@@ -159,7 +171,7 @@ const Badge = ({ variant="idle", label }) => {
   );
 };
 
-// ── KPI Card ─────────────────────────────────────────────────────────────
+// â”€â”€ KPI Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const KpiCard = ({ label, value, icon:Icon, accent, sub }) => (
   <div style={{
     background:C.bg("card"),border:`1px solid ${C.bdr()}`,
@@ -183,7 +195,7 @@ const KpiCard = ({ label, value, icon:Icon, accent, sub }) => (
   </div>
 );
 
-// ── Machine KPI Card ─────────────────────────────────────────────────────
+// â”€â”€ Machine KPI Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const MachineCard = ({ row, plcOnline=true, nowMs=0 }) => {
   const acc   = Number(row.accuracy||0);
   const color = acc>=85 ? C.ok() : acc>=60 ? C.amber() : C.ng();
@@ -224,7 +236,7 @@ const MachineCard = ({ row, plcOnline=true, nowMs=0 }) => {
           </p>
           <p style={{fontSize:11,color:C.txt("muted"),overflow:"hidden",
             textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-            {row.lineName||"—"} · {row.stationNo||"—"}
+            {row.lineName||"â€”"} Â· {row.stationNo||"â€”"}
           </p>
         </div>
       </div>
@@ -268,7 +280,7 @@ const MachineCard = ({ row, plcOnline=true, nowMs=0 }) => {
   );
 };
 
-// ── Section header ────────────────────────────────────────────────────────
+// â”€â”€ Section header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const SectionHead = ({ title, right }) => (
   <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
     marginBottom:16,flexWrap:"wrap",gap:8}}>
@@ -278,7 +290,7 @@ const SectionHead = ({ title, right }) => (
   </div>
 );
 
-// ── Chart tooltip theme ───────────────────────────────────────────────────
+// â”€â”€ Chart tooltip theme â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const TooltipStyle = {
   contentStyle:{
     background:C.bg("card"),border:`1px solid ${C.bdr()}`,
@@ -289,9 +301,9 @@ const TooltipStyle = {
   itemStyle:{ color:C.txt("pri") },
 };
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  DASHBOARD
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const Dashboard = () => {
   injectDS();
 
@@ -305,13 +317,14 @@ const Dashboard = () => {
   const [plcMap,       setPlcMap]       = useState({});
   const [nowMs,        setNowMs]        = useState(Date.now());
   const [filters,      setFilters]      = useState({
-    dateFrom:"", dateTo:"", machineId:"", partId:"", status:"", shiftCode:"",
+    dateFrom:"", dateTo:"", machineId:"", lineName:"", partId:"", status:"", shiftCode:"",
   });
 
   const query = useMemo(()=>({
     dateFrom:   filters.dateFrom   || undefined,
     dateTo:     filters.dateTo     || undefined,
     machineId:  filters.machineId  || undefined,
+    lineName:   filters.lineName   || undefined,
     partId:     filters.partId     || undefined,
     status:     filters.status     || undefined,
     shiftCode:  filters.shiftCode  || undefined,
@@ -359,11 +372,14 @@ const Dashboard = () => {
       const machine = machines.find((row) => Number(row.id) === selectedMachineId);
       return machine?.lineName ? `Line: ${machine.lineName}` : "Line: -";
     }
+    if (filters.lineName) {
+      return `Line: ${filters.lineName}`;
+    }
     const lines = [...new Set((machines || []).map((row) => String(row.lineName || "").trim()).filter(Boolean))];
     if (lines.length === 0) return "Line: All";
     if (lines.length === 1) return `Line: ${lines[0]}`;
     return `Line: All (${lines.length})`;
-  }, [filters.machineId, machines]);
+  }, [filters.machineId, filters.lineName, machines]);
 
   // Pie data
   const pieData = useMemo(()=>[
@@ -406,7 +422,7 @@ const Dashboard = () => {
     }
   }, [query, exportPeriodLabel]);
 
-  // ── Tabs config ──
+  // â”€â”€ Tabs config â”€â”€
   const TABS = [
     { id:"overview",  label:"Overview",          icon:BarChart3  },
     { id:"machines",  label:"Machine KPIs",      icon:Cpu        },
@@ -418,7 +434,7 @@ const Dashboard = () => {
     <div style={{display:"flex",flexDirection:"column",gap:20,paddingBottom:32,
       animation:"dbFadeIn 0.3s ease"}}>
 
-      {/* ── Page Header ─────────────────────────────────────────────── */}
+      {/* â”€â”€ Page Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div style={{
         background:C.bg("card"),border:`1px solid ${C.bdr()}`,
         borderRadius:16,padding:"18px 20px",boxShadow:SHADOW,overflow:"hidden",
@@ -447,7 +463,7 @@ const Dashboard = () => {
                   <div style={{width:8,height:8,borderRadius:"50%",background:C.ok()}}/>
                 </div>
                 <p style={{fontSize:12,color:C.txt("muted")}}>
-                  Live — auto-refreshes every 15 seconds · {lineContextLabel}
+                  Live â€” auto-refreshes every 15 seconds Â· {lineContextLabel}
                 </p>
               </div>
             </div>
@@ -485,7 +501,7 @@ const Dashboard = () => {
                 opacity:loading?0.6:1,
               }}>
               <RefreshCw size={13} style={{animation:loading?"dbSpin 0.9s linear infinite":"none"}}/>
-              {loading?"Updating…":"Refresh"}
+              {loading?"Updatingâ€¦":"Refresh"}
             </button>
 
             <button onClick={handleExportReport}
@@ -531,6 +547,25 @@ const Dashboard = () => {
             ))}
 
             <select
+              value={filters.lineName}
+              onChange={e=>setFilters(prev=>({...prev,lineName:e.target.value,machineId:""}))}
+              style={{
+                height:36,padding:"0 12px",
+                background:C.bg("input"),
+                border:`1px solid ${C.bdr()}`,
+                borderRadius:8,fontSize:12,
+                color:C.txt("pri"),outline:"none",
+                fontFamily:"var(--font-db)",
+                minWidth:140,cursor:"pointer",
+                appearance:"auto",
+              }}>
+              <option value="">All Lines</option>
+              {uniqueStages((summary.availableLines || []).map((line) => String(line || "").trim()).filter(Boolean)).map((line)=>(
+                <option key={line} value={line}>{line}</option>
+              ))}
+            </select>
+
+            <select
               value={filters.machineId}
               onChange={e=>setFilters(prev=>({...prev,machineId:e.target.value}))}
               style={{
@@ -544,7 +579,9 @@ const Dashboard = () => {
                 appearance:"auto",
               }}>
               <option value="">All Machines</option>
-              {machines.map(m=>(
+              {machines
+                .filter((m) => !filters.lineName || String(m.lineName || "").trim() === filters.lineName)
+                .map(m=>(
                 <option key={m.id} value={m.id}>{m.machineName}</option>
               ))}
             </select>
@@ -606,7 +643,7 @@ const Dashboard = () => {
             </select>
 
             {hasFilters && (
-              <button onClick={()=>setFilters({dateFrom:"",dateTo:"",machineId:"",partId:"",status:"",shiftCode:""})}
+              <button onClick={()=>setFilters({dateFrom:"",dateTo:"",machineId:"",lineName:"",partId:"",status:"",shiftCode:""})}
                 style={{height:36,padding:"0 14px",borderRadius:8,
                   background:C.ng(0.08),border:`1px solid ${C.ng(0.25)}`,
                   color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer"}}>
@@ -617,7 +654,7 @@ const Dashboard = () => {
         )}
       </div>
 
-      {/* ── KPI Row ────────────────────────────────────────────────────── */}
+      {/* â”€â”€ KPI Row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div style={{display:"grid",
         gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
         <KpiCard label="Active Machines"  value={summary.machines.active}         icon={Cpu}          accent={C.steel()}  sub={`Out of ${summary.machines.total} total machines`}/>
@@ -628,7 +665,7 @@ const Dashboard = () => {
         <KpiCard label="Pass Rate"        value={`${efficiency}%`}                 icon={TrendingUp}   accent={efficiency>=85?C.ok():efficiency>=60?C.amber():C.ng()} sub="Overall quality rate"/>
       </div>
 
-      {/* ── Tabs ───────────────────────────────────────────────────────── */}
+      {/* â”€â”€ Tabs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div style={{display:"flex",gap:6,padding:"6px",
         background:C.bg("card"),border:`1px solid ${C.bdr()}`,
         borderRadius:12,width:"fit-content",
@@ -655,7 +692,7 @@ const Dashboard = () => {
         })}
       </div>
 
-      {/* ── TAB: Overview ──────────────────────────────────────────────── */}
+      {/* â”€â”€ TAB: Overview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {activeTab==="overview" && (
         <div style={{display:"flex",flexDirection:"column",gap:16}}>
 
@@ -783,31 +820,28 @@ const Dashboard = () => {
                 <p style={{fontSize:11,fontWeight:800,textTransform:"uppercase",
                   letterSpacing:"0.09em",color:C.txt("muted")}}>Recent Scans</p>
               </div>
-              <div style={{maxHeight:220,overflowY:"auto"}}>
+            <div style={{maxHeight:220,overflowY:"auto"}}>
                 {(summary.recentScans||[]).length===0 ? (
                   <div style={{padding:"32px 16px",textAlign:"center",
                     color:C.txt("muted"),fontSize:12}}>No recent scans</div>
-                ) : (summary.recentScans||[]).slice(0,8).map((sc,i)=>(
-                  <div key={i} style={{
-                    display:"flex",alignItems:"center",justifyContent:"space-between",
-                    padding:"10px 16px",
-                    borderBottom: i<7 ? `1px solid ${C.bdr()}` : "none",
-                    background: i%2===1?C.bg("surf"):"transparent",
-                  }}>
-                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:11,
-                      fontWeight:700,color:C.txt("pri"),
-                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",
-                      maxWidth:140}}>{sc.partId||"—"}</span>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <span style={{fontSize:10,color:C.txt("muted"),
-                        fontFamily:"'DM Mono',monospace"}}>
-                        {sc.stationNo||"—"}
-                      </span>
-                      <Badge variant={sc.result==="OK"?"ok":sc.result==="NG"?"ng":"wip"}
-                        label={sc.result==="OK"?"Pass":sc.result==="NG"?"Fail":"In Progress"}/>
-                    </div>
+                ) : (
+                  <div style={{display:"grid",gridTemplateColumns:"1.4fr 0.9fr 1.2fr 0.9fr 1fr"}}>
+                    <div style={{padding:"8px 10px",fontSize:10,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.07em"}}>Part ID</div>
+                    <div style={{padding:"8px 10px",fontSize:10,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.07em"}}>Station</div>
+                    <div style={{padding:"8px 10px",fontSize:10,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.07em"}}>Machine</div>
+                    <div style={{padding:"8px 10px",fontSize:10,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.07em"}}>Result</div>
+                    <div style={{padding:"8px 10px",fontSize:10,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.07em"}}>Timestamp</div>
+                    {(summary.recentScans||[]).slice(0,8).map((sc,i)=>( 
+                      <Fragment key={`scan-${i}`}>
+                        <div style={{padding:"9px 10px",borderTop:`1px solid ${C.bdr(0.14)}`,background:i%2===1?C.bg("surf"):"transparent",fontFamily:"'DM Mono',monospace",fontSize:11,fontWeight:700,color:C.txt("pri"),overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sc.partId||"-"}</div>
+                        <div style={{padding:"9px 10px",borderTop:`1px solid ${C.bdr(0.14)}`,background:i%2===1?C.bg("surf"):"transparent",fontSize:10,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>{sc.stationNo||sc.station||"-"}</div>
+                        <div style={{padding:"9px 10px",borderTop:`1px solid ${C.bdr(0.14)}`,background:i%2===1?C.bg("surf"):"transparent",fontSize:10,color:C.txt("sec"),overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sc.machine||"-"}</div>
+                        <div style={{padding:"9px 10px",borderTop:`1px solid ${C.bdr(0.14)}`,background:i%2===1?C.bg("surf"):"transparent"}}><Badge variant={sc.result==="OK"?"ok":sc.result==="NG"?"ng":"wip"} label={sc.result==="OK"?"Pass":sc.result==="NG"?"Fail":"In Progress"}/></div>
+                        <div style={{padding:"9px 10px",borderTop:`1px solid ${C.bdr(0.14)}`,background:i%2===1?C.bg("surf"):"transparent",fontSize:10,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>{sc.timestamp ? new Date(sc.timestamp).toLocaleTimeString() : "-"}</div>
+                      </Fragment>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
             </div>
           </div>

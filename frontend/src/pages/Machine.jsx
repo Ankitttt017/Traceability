@@ -90,9 +90,7 @@ function buildDefaultHandshakeRows(cfg = {}) {
     createHandshakeRow({ signal: "End OK", direction: "READ", register: toFormValue(cfg.endOkRegister, ""), value: toFormValue(cfg.endOkValue, "3"), meaning: "Cycle completed OK", required: true, category: "handshake" }),
     createHandshakeRow({ signal: "End NG", direction: "READ", register: toFormValue(cfg.endNgRegister, ""), value: toFormValue(cfg.endNgValue, "4"), meaning: "Cycle completed NG", required: true, category: "handshake" }),
     createHandshakeRow({ signal: "Reset", direction: "WRITE", register: toFormValue(cfg.resetRegister, ""), value: toFormValue(cfg.resetValue, "9"), meaning: "Reset/clear machine state", required: true, category: "handshake" }),
-    createHandshakeRow({ signal: "Confirmation", direction: "BOTH", register: toFormValue(cfg.heartbeatRegister, ""), value: "1", meaning: "Confirmation / Heartbeat", required: true, category: "handshake" }),
     createHandshakeRow({ signal: "Bypass", direction: "BOTH", register: toFormValue(cfg.bypassRegister, ""), value: "1", meaning: "Bypass Enable (Write) and Status (Read)", required: false, category: "bypass" }),
-    createHandshakeRow({ signal: "Heartbeat", direction: "BOTH", register: toFormValue(cfg.heartbeatRegister, ""), value: "1", meaning: "Additional Heartbeat / Confirmation", required: false, category: "handshake" }),
     createHandshakeRow({ signal: "Rejection Bin", direction: "WRITE", register: "", value: "1", meaning: "Write 1 to open rejection bin", required: false, category: "rejection" }),
   ];
 }
@@ -142,7 +140,6 @@ function normalizeStandardHandshakeSignalKey(signal) {
 const FAMILIES = {
   CONTROL: ["START", "INTERLOCK", "BLOCK_INTERLOCK", "START_SENT", "WAITING_ACK", "START REGISTER", "BLOCK REGISTER", "INTERLOCK REGISTER"],
   FEEDBACK: ["RUNNING", "END_OK", "END_NG", "COMPLETE", "WAITING_END", "RUNNING REGISTER", "END OK REGISTER", "END NG REGISTER", "COMPLETE REGISTER"],
-  HEARTBEAT: ["CONFIRMATION", "HEARTBEAT", "HEARTBEAT REGISTER", "CONFIRMATION REGISTER", "ACK"],
   BYPASS: ["BYPASS", "BYPASS ENABLE", "BYPASS STATUS", "BYPASS REGISTER"],
   REJECTION: ["REJECTION BIN", "REJECTION BIN STATUS", "REJECTION BIN REGISTER", "BIN OPEN", "BIN STATUS"],
   RESET: ["RESET", "CLEAR", "RESET REGISTER", "RESET SIGNAL"]
@@ -155,7 +152,6 @@ const getFamily = (label) => {
   if (s.includes("RUNNING") || s.includes("COMPLETE") || s.includes("STARTED") || s.includes("PROGRESS")) return "FEEDBACK";
   if (s.includes("ENDOK") || s.includes("ENDEDOK") || s.includes("FINISHOK")) return "FEEDBACK";
   if (s.includes("ENDNG") || s.includes("ENDEDNG") || s.includes("FINISHNG")) return "FEEDBACK";
-  if (s.includes("HEARTBEAT") || s.includes("CONFIRMATION") || s.includes("ACK") || s.includes("HANDSHAKE")) return "HEARTBEAT";
   if (s.includes("BYPASS")) return "BYPASS";
   if (s.includes("REJECTION") || s.includes("BIN") || s.includes("SCRAP")) return "REJECTION";
   if (s.includes("RESET") || s.includes("CLEAR")) return "RESET";
@@ -183,7 +179,7 @@ const STANDARD_HANDSHAKE_SIGNAL_META = {
   REJECTION_BIN: { signal: "Rejection Bin", direction: "WRITE", registerKey: null, valueKey: "1", defaultValue: "1", defaultMeaning: "Open rejection bin" },
   REJECTION_BIN_STATUS: { signal: "Rejection Bin Status", direction: "READ", registerKey: null, valueKey: "1", defaultValue: "1", defaultMeaning: "Rejection bin status" },
 };
-const REQUIRED_HANDSHAKE_KEYS = ["START", "RUNNING", "END_OK", "END_NG", "RESET", "CONFIRMATION"];
+const REQUIRED_HANDSHAKE_KEYS = ["START", "RUNNING", "END_OK", "END_NG", "RESET"];
 
 function syncStandardHandshakeRowsWithCore(rows, cfg = {}) {
   const nextRows = normalizeHandshakeRows(rows, cfg);
@@ -541,7 +537,6 @@ const FORM_TABS = [
 const HANDSHAKE_GROUP_CORE_KEY_MAP = {
   START_GROUP: "startRegister", BLOCK_GROUP: "blockRegister", RUNNING_GROUP: "runningRegister",
   END_OK_GROUP: "endOkRegister", END_NG_GROUP: "endNgRegister", RESET_GROUP: "resetRegister",
-  CONFIRMATION_GROUP: "heartbeatRegister",
 };
 
 /* ─── Design tokens ─────────────────────────────────────────── */
@@ -713,7 +708,6 @@ const modalOverlay = { position: "fixed", inset: 0, zIndex: 50, display: "flex",
 const STATION_FEATURES = [
   { key: "qr", label: "QR / Barcode Scan", note: "Require QR or barcode scan before cycle", color: T.blue, hasRegister: false },
   { key: "operation", label: "Sequence Validation", note: "Enforce previous station sequence check", color: T.blue, hasRegister: false },
-  { key: "plcConfirmation", label: "PLC Confirmation", note: "Wait for PLC end-of-cycle confirmation", color: T.teal, hasRegister: false },
   { key: "manualResult", label: "Manual Result Entry", note: "Operator can enter OK/NG result manually", color: T.purple, hasRegister: false },
   { key: "rejectionBin", label: "Rejection Bin", note: "Use rejection/rework bin signal", color: T.red, hasRegister: false },
   { key: "rejectionBinStatus", label: "Bin Full Status", note: "Read bin-full feedback from PLC", color: T.red, hasRegister: false },
@@ -936,7 +930,7 @@ const MachinePage = () => {
       const entry = normalizedRows.find((row) => row.key === requiredKey);
       if (!entry) { issues.push(`Missing required handshake signal: ${requiredKey}.`); continue; }
       if (entry.register === null) { issues.push(`${requiredKey}: register is required.`); }
-      if (requiredKey !== "CONFIRMATION" && entry.value === null) { issues.push(`${requiredKey}: value is required.`); }
+      if (entry.value === null) { issues.push(`${requiredKey}: value is required.`); }
     }
     const directionExpectations = { START: "WRITE", RUNNING: "READ", END_OK: "READ", END_NG: "READ", RESET: "WRITE" };
     for (const [key, expectedDirection] of Object.entries(directionExpectations)) {
@@ -1378,7 +1372,7 @@ const MachinePage = () => {
                       </td>
                       <td style={{ padding: "12px 16px" }}>
                         {range ? (
-                          <span style={{ padding: "2px 8px", background: T.blueLight, border: `1px solid ${T.blueBorder}`, borderRadius: 4, fontSize: 11, fontFamily: "ui-monospace,monospace", color: T.blue, fontWeight: 600 }}>R{range.rangeStart}-R{range.rangeEnd}</span>
+                          <span style={{ padding: "2px 8px", background: T.blueLight, border: `1px solid ${T.blueBorder}`, borderRadius: 4, fontSize: 11, fontFamily: "ui-monospace,monospace", color: T.blue, fontWeight: 600 }}>{(m.plcSlmpDevice || "D")}{range.rangeStart}-{(m.plcSlmpDevice || "D")}{range.rangeEnd}</span>
                         ) : <span style={{ color: T.textMuted, fontSize: 12 }}>-</span>}
                       </td>
                       <td style={{ padding: "12px 16px" }}>
@@ -1511,8 +1505,8 @@ const MachinePage = () => {
                       </FieldSelect>
                       {formData.plcRangeId && rangeById[formData.plcRangeId] && (
                         <div style={{ marginTop: 10, padding: "10px 12px", background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: 8, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, fontSize: 12 }}>
-                          <div><span style={{ color: T.textMuted }}>Start: </span><span style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>R{rangeById[formData.plcRangeId].rangeStart}</span></div>
-                          <div><span style={{ color: T.textMuted }}>End: </span><span style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>R{rangeById[formData.plcRangeId].rangeEnd}</span></div>
+                          <div><span style={{ color: T.textMuted }}>Start: </span><span style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>{(formData.plcSlmpDevice || "D")}{rangeById[formData.plcRangeId].rangeStart}</span></div>
+                          <div><span style={{ color: T.textMuted }}>End: </span><span style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>{(formData.plcSlmpDevice || "D")}{rangeById[formData.plcRangeId].rangeEnd}</span></div>
                           <div><span style={{ color: T.textMuted }}>IP: </span><span style={{ fontFamily: "ui-monospace,monospace", color: T.blue }}>{rangeById[formData.plcRangeId].plcIp}</span></div>
                         </div>
                       )}
@@ -1614,7 +1608,7 @@ const MachinePage = () => {
                             <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
                               <ActionBadge action={row.direction || "READ"} />
                               {row.register && (
-                                <span style={{ fontFamily: "ui-monospace,monospace", fontSize: 10, color: T.blue, fontWeight: 800, background: T.blueLight, border: `1px solid ${T.blueBorder}`, borderRadius: 4, padding: "1px 7px" }}>R{row.register}</span>
+                                <span style={{ fontFamily: "ui-monospace,monospace", fontSize: 10, color: T.blue, fontWeight: 800, background: T.blueLight, border: `1px solid ${T.blueBorder}`, borderRadius: 4, padding: "1px 7px" }}>{(row.device || formData.plcSlmpDevice || "D")}{row.register}</span>
                               )}
                               {row.value !== "" && row.value !== null && row.value !== undefined && (
                                 <span style={{ fontFamily: "ui-monospace,monospace", fontSize: 10, color: T.navy, fontWeight: 700, background: T.bgMuted, border: `1px solid ${T.border}`, borderRadius: 4, padding: "1px 6px" }}>={row.value}</span>
@@ -1666,7 +1660,7 @@ const MachinePage = () => {
                                   style={registerIssue ? { borderColor: T.red, background: T.redLight } : {}}>
                                   <option value="">— Select —</option>
                                   {Array.from({ length: rangeBounds.end - rangeBounds.start + 1 }, (_, i) => rangeBounds.start + i).map(n => (
-                                    <option key={n} value={n}>R{n}</option>
+                                    <option key={n} value={n}>{(formData.plcSlmpDevice || "D")}{n}</option>
                                   ))}
                                 </FieldSelect>
                               ) : (
@@ -1722,7 +1716,7 @@ const MachinePage = () => {
                                   </td>
                                   <td style={{ padding: "8px 14px", fontWeight: 600, color: T.text }}>{row.signal || "-"}</td>
                                   <td style={{ padding: "8px 14px" }}><ActionBadge action={row.direction || "READ"} /></td>
-                                  <td style={{ padding: "8px 14px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: row.register ? T.blue : T.textMuted }}>{row.register ? `R${row.register}` : "—"}</td>
+                                  <td style={{ padding: "8px 14px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: row.register ? T.blue : T.textMuted }}>{row.register ? `${row.device || formData.plcSlmpDevice || "D"}${row.register}` : "—"}</td>
                                   <td style={{ padding: "8px 14px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.navy }}>{row.value ?? "—"}</td>
                                   <td style={{ padding: "8px 14px", color: T.textSec, fontSize: 11, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.meaning || "—"}</td>
                                   <td style={{ padding: "8px 14px" }}><Chip label={row.required !== false ? "Must" : "Optional"} color={row.required !== false ? "blue" : "gray"} /></td>
@@ -2084,7 +2078,7 @@ const MachinePage = () => {
                                           {mappedRow ? "Mapped in Tuning" : "Not Mapped"}
                                         </p>
                                         <p style={{ margin: "1px 0 0", fontSize: 11, fontFamily: "ui-monospace,monospace", fontWeight: 700, color: mappedRow ? T.text : T.textMuted }}>
-                                          {mappedRow ? `Register R${mappedRow.register}` : "No register assigned"}
+                                          {mappedRow ? `Register ${mappedRow.device || formData.plcSlmpDevice || "D"}${mappedRow.register}` : "No register assigned"}
                                         </p>
                                       </div>
                                     );

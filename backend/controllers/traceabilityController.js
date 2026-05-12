@@ -6,6 +6,7 @@ const OperationLog = require("../models/OperationLog");
 const ProductionLog = require("../models/ProductionLog");
 const ReworkLog = require("../models/ReworkLog");
 const Shift = require("../models/Shift");
+const MachineRuntimeState = require("../models/MachineRuntimeState");
 const { saveScan } = require("../services/scanService");
 const { getPlcCircuitSnapshot } = require("../services/plcCommunicationService");
 const plcHandshakeEngine = require("../services/plcHandshakeEngine");
@@ -27,7 +28,6 @@ const { finalizeCycleAfterPlc } = require("../services/cycleFinalizationService"
 const { TIMELINE_EVENTS, recordTimelineEvent } = require("../services/operationTimelineService");
 const {
   getStationFeatureConfig,
-  isPlcConfirmationEnabled,
   normalizePlcPartCount,
 } = require("../services/stationFeatureService");
 const {
@@ -730,6 +730,17 @@ function mapScanDecisionToPopupType(scanResult) {
   return "ERROR";
 }
 
+function getBlockedPopupMessage(scanResult = {}) {
+  const reason = String(scanResult?.reason || "").trim().toUpperCase();
+  if (reason === "PREVIOUS_STATION_NOT_COMPLETED") {
+    return "BLOCKED - Previous Station Incomplete";
+  }
+  if (reason === "DUPLICATE_SCAN" || reason === "DUPLICATE_SCAN_IN_FLIGHT") {
+    return "BLOCKED - Duplicate Part";
+  }
+  return scanResult?.message || reason || "BLOCKED";
+}
+
 function hasRejectionBinConfirmation(payload = {}) {
   const raw =
     payload.rejectionBinConfirmed ??
@@ -1298,49 +1309,29 @@ async function handleStationPlcFlow({
   stationNo,
   partId,
   userId,
-  plcConfirmationRequired,
   requiredPlcPartCount,
 }) {
   if (response.decision !== "ALLOW" || !response.operationLogId) {
-    // If it was a global rejection, saveScan might have already returned ALLOW.
-    // We double check the operationLogId exists.
-    return;
-  }
-
-  if (!plcConfirmationRequired) {
-    const lock = await tryAcquireMachineLock({
-      machineId: machine.id,
-      partId,
-      stationNo,
-    });
-
-    if (!lock.acquired) {
-      await rollbackPendingOperation({
+    if (response.operationLogId) {
+      await safeRecordTimeline({
+        operationId: response.operationLogId,
         partId,
-        operationLogId: response.operationLogId,
+        machineId: machine.id,
+        stationNo,
+        eventType: TIMELINE_EVENTS.INTERLOCKED,
+        eventData: {
+          reason: response.reason || "REJECTED_SCAN",
+          message: getBlockedPopupMessage(response),
+        },
       });
-      response.decision = "BLOCK";
-      response.reason = "MACHINE_RUNNING";
-      response.message = lock.runningPartId
-        ? `Machine busy. Current part ${lock.runningPartId} is in operation.`
-        : "Machine busy with another cycle. Retry after current operation completes.";
-      response.operationLogId = null;
-      response.lock = {
-        runningPartId: lock.runningPartId || null,
-        runningStationNo: lock.runningStationNo || null,
-        runningStartedAt: lock.runningStartedAt || null,
-      };
-      return;
     }
-
-    // Even when station confirmation toggle is disabled, keep the cycle held
-    // until an explicit PLC end signal/API confirmation is received.
-    response.plcHandshake = "WAITING_PLC_END";
-    response.operationStatus = "PENDING";
-    response.message = "QR verified. Waiting PLC operation end signal.";
-    emitRealtime("dashboard_refresh", { reason: "PLC_WAITING_END_SIGNAL" });
+    // Rule: Send interlock signal for duplicates or invalid sequences
+    plcHandshakeEngine.signalInterlock(machine.id, response.reason || "REJECTED_SCAN")
+      .catch(err => console.error("[PLC:INTERLOCK_TRIGGER_FAILED]", err.message));
     return;
   }
+
+  // Direct mode: No WAITING_PLC_END block anymore
 
   if (requiredPlcPartCount <= 1) {
     const lock = await tryAcquireMachineLock({
@@ -2111,56 +2102,168 @@ exports.getPartCatalog = async (req, res) => {
   try {
     const search = String(req.query.search || "").trim();
     const limit = Math.min(Math.max(Number(req.query.limit || 120), 1), 400);
+    const { from, to } = getDateRangeFromQuery(req.query);
+    const statusFilter = String(req.query.status || "").trim().toUpperCase();
+    const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
+    const lineNameFilter = normalizeLineName(req.query.lineName);
+    const stationFilter = normalizeStation(req.query.stationNo);
+    const machineIdFilter = Number(req.query.machineId || 0) || null;
+    const operatorIdFilter = Number(req.query.operatorId || 0) || null;
+    const partIdFilter = String(req.query.partId || "").trim();
 
-    const where = search
-      ? {
-          part_id: {
-            [Op.like]: `%${search}%`,
-          },
-        }
-      : undefined;
+    const partWhere = {};
+    if (search) {
+      partWhere.part_id = { [Op.like]: `%${search}%` };
+    }
+    if (partIdFilter) {
+      partWhere.part_id = { [Op.like]: `%${partIdFilter}%` };
+    }
+    if (statusFilter && ["IN_PROGRESS", "COMPLETED", "NG", "INTERLOCKED", "REWORK"].includes(statusFilter)) {
+      partWhere.status = statusFilter;
+    }
+
+    let scopedMachineIds = null;
+    if (machineIdFilter) {
+      scopedMachineIds = [machineIdFilter];
+    } else if (lineNameFilter) {
+      const machines = await Machine.findAll({
+        where: { line_name: lineNameFilter },
+        attributes: ["id"],
+        raw: true,
+      });
+      scopedMachineIds = machines.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+      if (scopedMachineIds.length === 0) {
+        return res.json([]);
+      }
+    }
+
+    const operationWhere = {
+      createdAt: {
+        [Op.gte]: from,
+        [Op.lte]: to,
+      },
+    };
+    if (scopedMachineIds && scopedMachineIds.length > 0) {
+      operationWhere.machine_id = { [Op.in]: scopedMachineIds };
+    }
+    if (stationFilter) {
+      operationWhere.station_no = stationFilter;
+    }
+    if (operatorIdFilter) {
+      operationWhere.user_id = operatorIdFilter;
+    }
+
+    const hasOperationLevelFilter =
+      Boolean(req.query.dateFrom || req.query.dateTo || shiftCodeFilter || scopedMachineIds || stationFilter || operatorIdFilter);
+
+    let scopedPartIds = null;
+    if (hasOperationLevelFilter) {
+      const scopedLogs = await OperationLog.findAll({
+        where: operationWhere,
+        attributes: ["part_id", "createdAt"],
+        order: [["createdAt", "DESC"]],
+        raw: true,
+        limit: 6000,
+      });
+      const shifts = shiftCodeFilter ? await getActiveShiftDefinitions() : [];
+      const filteredScopedLogs = shiftCodeFilter ? applyShiftFilter(scopedLogs, shiftCodeFilter, shifts) : scopedLogs;
+      scopedPartIds = uniqueStages(filteredScopedLogs.map((row) => String(row.part_id || "").trim()).filter(Boolean));
+      if (scopedPartIds.length === 0) {
+        return res.json([]);
+      }
+      partWhere.part_id = partWhere.part_id
+        ? {
+            [Op.and]: [partWhere.part_id, { [Op.in]: scopedPartIds }],
+          }
+        : { [Op.in]: scopedPartIds };
+    }
 
     const parts = await Part.findAll({
-      where,
+      where: Object.keys(partWhere).length ? partWhere : undefined,
       order: [["updatedAt", "DESC"]],
       limit,
     });
-
     if (!parts.length) {
       return res.json([]);
     }
 
     const partIds = parts.map((part) => part.part_id);
-    const logs = await OperationLog.findAll({
-      where: { part_id: { [Op.in]: partIds } },
+    const logRows = await OperationLog.findAll({
+      where: {
+        part_id: { [Op.in]: partIds },
+      },
       order: [["createdAt", "DESC"]],
+      raw: true,
+      limit: 8000,
     });
 
+    const machineIds = uniqueStages(logRows.map((row) => String(row.machine_id || "")).filter(Boolean))
+      .map((entry) => Number(entry))
+      .filter((entry) => Number.isFinite(entry));
+    const machineRows = machineIds.length
+      ? await Machine.findAll({
+          where: { id: { [Op.in]: machineIds } },
+          attributes: ["id", "machine_name", "line_name", "operation_no"],
+          raw: true,
+        })
+      : [];
+    const machineMap = machineRows.reduce((acc, row) => {
+      acc[row.id] = row;
+      return acc;
+    }, {});
+
     const latestByPart = new Map();
-    for (const row of logs) {
+    for (const row of logRows) {
+      const machine = machineMap[row.machine_id] || null;
+      if (lineNameFilter && machine && String(machine.line_name || "").trim() !== lineNameFilter) {
+        continue;
+      }
+      if (stationFilter && normalizeStation(row.station_no || row.operation_no) !== stationFilter) {
+        continue;
+      }
       if (!latestByPart.has(row.part_id)) {
         latestByPart.set(row.part_id, row);
       }
     }
 
-    const response = parts.map((part) => {
-      const latest = latestByPart.get(part.part_id);
-      return {
-        partId: part.part_id,
-        status: part.status,
-        currentStation: part.current_station,
-        currentOperation: part.current_operation,
-        isInterlocked: Boolean(part.is_interlocked),
-        interlockReason: part.interlock_reason,
-        isRework: Boolean(part.is_rework),
-        qrFormatName: part.qr_format_name,
-        updatedAt: part.updatedAt,
-        latestStatus: latest?.plc_status || null,
-        latestResult: latest?.result || null,
-        latestStation: normalizeStation(latest?.station_no || latest?.operation_no),
-        latestAt: latest?.createdAt || null,
-      };
-    });
+    let shifts = [];
+    if (shiftCodeFilter) {
+      shifts = await getActiveShiftDefinitions();
+    }
+
+    const response = parts
+      .map((part) => {
+        const latest = latestByPart.get(part.part_id);
+        const machine = latest ? machineMap[latest.machine_id] || null : null;
+        return {
+          partId: part.part_id,
+          status: part.status,
+          currentStation: part.current_station,
+          currentOperation: part.current_operation,
+          isInterlocked: Boolean(part.is_interlocked),
+          interlockReason: part.interlock_reason,
+          isRework: Boolean(part.is_rework),
+          qrFormatName: part.qr_format_name,
+          updatedAt: part.updatedAt,
+          latestStatus: latest?.plc_status || null,
+          latestResult: latest?.result || null,
+          latestStation: normalizeStation(latest?.station_no || latest?.operation_no),
+          latestAt: latest?.createdAt || null,
+          machineId: latest?.machine_id || null,
+          machineName: machine?.machine_name || null,
+          lineName: machine?.line_name || null,
+          operatorId: latest?.user_id || null,
+        };
+      })
+      .filter((row) => {
+        if (shiftCodeFilter && row.latestAt) {
+          return resolveShiftCodeForDate(row.latestAt, shifts) === shiftCodeFilter;
+        }
+        if (shiftCodeFilter && !row.latestAt) {
+          return false;
+        }
+        return true;
+      });
 
     res.json(response);
   } catch (error) {
@@ -2435,12 +2538,7 @@ exports.processScan = async (req, res) => {
       error: error.message,
     }));
 
-    const plcConfirmationRequired = machineBypassEnabled
-      ? false
-      : await isPlcConfirmationEnabled(normalizedStation);
-    const requiredPlcPartCount = plcConfirmationRequired
-      ? normalizePlcPartCount(stationFeatures.plcPartCount)
-      : 1;
+    const requiredPlcPartCount = normalizePlcPartCount(stationFeatures.plcPartCount || 1);
 
     await handleStationPlcFlow({
       response,
@@ -2448,7 +2546,6 @@ exports.processScan = async (req, res) => {
       stationNo: normalizedStation,
       partId: normalizedPartId,
       userId: req.user?.id,
-      plcConfirmationRequired,
       requiredPlcPartCount,
     });
 
@@ -2456,23 +2553,23 @@ exports.processScan = async (req, res) => {
     const operationStatus = response.operationStatus || (response.decision === "ALLOW" ? "PENDING" : "WAIT");
     const popupType =
       response.decision === "ALLOW" && operationStatus === "ENDED_OK" ? "SUCCESS" : mapScanDecisionToPopupType(response);
+    const popupMessage = response.decision === "ALLOW" ? (response.message || "Scan processed") : getBlockedPopupMessage(response);
     emitOperatorPopup(popupType, {
       partId: normalizedPartId,
       stationNo: normalizedStation,
       machineId: machine.id,
       machineName: machine.machine_name,
-      status: operationStatus,
-      plcStatus: operationStatus,
+      status: response.decision === "ALLOW" ? operationStatus : "BLOCKED",
+      plcStatus: response.decision === "ALLOW" ? operationStatus : "BLOCKED",
       qrResult: qrStatus,
       reason: response.reason || null,
       expectedStation: response.expectedStation || null,
       qrReason: response.reason || null,
-      message: response.message || response.reason || "Scan processed",
+      message: popupMessage,
     });
 
     response.qrStatus = qrStatus;
     response.operationStatus = operationStatus;
-    response.plcConfirmationRequired = plcConfirmationRequired;
     response.plcPartCountRequired = requiredPlcPartCount;
     response.resultSource = resultSource;
     response.manualResultEnabled = manualResultEnabled;
@@ -2617,12 +2714,7 @@ exports.verifyScanForOperator = async (req, res) => {
       ok: false,
       error: error.message,
     }));
-    const plcConfirmationRequired = machineBypassEnabled
-      ? false
-      : await isPlcConfirmationEnabled(stationNo);
-    const requiredPlcPartCount = plcConfirmationRequired
-      ? normalizePlcPartCount(stationFeatures.plcPartCount)
-      : 1;
+    const requiredPlcPartCount = normalizePlcPartCount(stationFeatures.plcPartCount || 1);
 
     await handleStationPlcFlow({
       response,
@@ -2630,7 +2722,6 @@ exports.verifyScanForOperator = async (req, res) => {
       stationNo,
       partId: normalizedPartId,
       userId: req.user?.id,
-      plcConfirmationRequired,
       requiredPlcPartCount,
     });
 
@@ -2638,23 +2729,23 @@ exports.verifyScanForOperator = async (req, res) => {
     const operationStatus = response.operationStatus || (response.decision === "ALLOW" ? "PENDING" : "WAIT");
     const popupType =
       response.decision === "ALLOW" && operationStatus === "ENDED_OK" ? "SUCCESS" : mapScanDecisionToPopupType(response);
+    const popupMessage = response.decision === "ALLOW" ? (response.message || "Scan processed") : getBlockedPopupMessage(response);
     emitOperatorPopup(popupType, {
       partId: normalizedPartId,
       stationNo,
       machineId: machine.id,
       machineName: machine.machine_name,
-      status: operationStatus,
-      plcStatus: operationStatus,
+      status: response.decision === "ALLOW" ? operationStatus : "BLOCKED",
+      plcStatus: response.decision === "ALLOW" ? operationStatus : "BLOCKED",
       qrResult: qrStatus,
       reason: response.reason || null,
       expectedStation: response.expectedStation || null,
       qrReason: response.reason || null,
-      message: response.message || response.reason || "Scan processed",
+      message: popupMessage,
     });
 
     response.qrStatus = qrStatus;
     response.operationStatus = operationStatus;
-    response.plcConfirmationRequired = plcConfirmationRequired;
     response.plcPartCountRequired = requiredPlcPartCount;
     response.resultSource = resultSource;
     response.manualResultEnabled = manualResultEnabled;
@@ -2958,7 +3049,8 @@ exports.resetOperation = async (req, res) => {
     await part.save();
 
     if (opLog.machine_id) {
-      await clearMachineLock(opLog.machine_id);
+      // Rule: RESET must HARD RESET runtime + FSM + listeners + QR state
+      await plcHandshakeEngine.hardReset(opLog.machine_id);
     }
 
     emitOperatorPopup("INFO", {
@@ -3325,6 +3417,126 @@ exports.getOperationSequence = async (_req, res) => {
   }
 };
 
+exports.getProcessFlow = async (req, res) => {
+  try {
+    const lineNameFilter = normalizeLineName(req.query.lineName);
+    const machineWhere = {
+      is_active: true,
+      ...(lineNameFilter ? { line_name: lineNameFilter } : {}),
+    };
+    const machines = await Machine.findAll({
+      where: machineWhere,
+      order: [["line_name", "ASC"], ["sequence_no", "ASC"]],
+      attributes: ["id", "machine_name", "line_name", "operation_no", "sequence_no", "is_running", "running_part_id"],
+      raw: true,
+    });
+    if (!machines.length) {
+      return res.json({
+        generatedAt: new Date().toISOString(),
+        lines: [],
+        availableLines: [],
+      });
+    }
+
+    const machineIds = machines.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+    const [runtimeRows, operationRows] = await Promise.all([
+      MachineRuntimeState.findAll({
+        where: { machine_id: { [Op.in]: machineIds } },
+        attributes: ["machine_id", "current_state", "is_locked", "updatedAt"],
+        raw: true,
+      }),
+      OperationLog.findAll({
+        where: { machine_id: { [Op.in]: machineIds } },
+        attributes: ["machine_id", "plc_status", "result", "interlock_reason", "createdAt"],
+        order: [["createdAt", "DESC"]],
+        raw: true,
+        limit: Math.max(machineIds.length * 20, 200),
+      }),
+    ]);
+
+    const runtimeMap = runtimeRows.reduce((acc, row) => {
+      acc[row.machine_id] = row;
+      return acc;
+    }, {});
+    const latestOperationByMachine = new Map();
+    for (const row of operationRows) {
+      if (!latestOperationByMachine.has(row.machine_id)) {
+        latestOperationByMachine.set(row.machine_id, row);
+      }
+    }
+
+    const statusForMachine = (machine) => {
+      const runtime = runtimeMap[machine.id] || null;
+      const latest = latestOperationByMachine.get(machine.id) || null;
+      const plcStatus = String(latest?.plc_status || "").trim().toUpperCase();
+      const result = String(latest?.result || "").trim().toUpperCase();
+      const runtimeState = String(runtime?.current_state || "").trim().toUpperCase();
+
+      if (Boolean(machine.is_running) || ["RUNNING", "WAITING_END", "START_SENT", "WAITING_RUNNING"].includes(runtimeState)) {
+        return "RUNNING";
+      }
+      if (plcStatus === "INTERLOCKED" || runtime?.is_locked) {
+        return "BLOCKED";
+      }
+      if (plcStatus === "ENDED_OK" && result === "OK") {
+        return "PASSED";
+      }
+      if (plcStatus === "ENDED_NG" || result === "NG" || plcStatus === "PLC_COMM_ERROR") {
+        return "FAILED";
+      }
+      return "IDLE";
+    };
+
+    const lineMap = new Map();
+    for (const machine of machines) {
+      const lineName = String(machine.line_name || "UNASSIGNED").trim() || "UNASSIGNED";
+      if (!lineMap.has(lineName)) {
+        lineMap.set(lineName, []);
+      }
+      const status = statusForMachine(machine);
+      lineMap.get(lineName).push({
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        stationNo: normalizeStation(machine.operation_no),
+        sequenceNo: Number(machine.sequence_no || 0),
+        status,
+        activePartId: machine.running_part_id || null,
+        runtimeState: runtimeMap[machine.id]?.current_state || null,
+        interlockReason: latestOperationByMachine.get(machine.id)?.interlock_reason || null,
+        lastUpdatedAt:
+          runtimeMap[machine.id]?.updatedAt ||
+          latestOperationByMachine.get(machine.id)?.createdAt ||
+          null,
+      });
+    }
+
+    const lines = Array.from(lineMap.entries())
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+      .map(([lineName, nodes]) => {
+        const sortedNodes = [...nodes].sort((a, b) => Number(a.sequenceNo || 0) - Number(b.sequenceNo || 0));
+        const connections = sortedNodes.slice(0, -1).map((node, index) => ({
+          fromMachineId: node.machineId,
+          toMachineId: sortedNodes[index + 1].machineId,
+          fromStation: node.stationNo,
+          toStation: sortedNodes[index + 1].stationNo,
+        }));
+        return {
+          lineName,
+          nodes: sortedNodes,
+          connections,
+        };
+      });
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      availableLines: lines.map((line) => line.lineName),
+      lines,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 function getDateRangeFromQuery(query) {
   const now = new Date();
   const from = query.dateFrom ? new Date(query.dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
@@ -3392,39 +3604,119 @@ function formatHourBucket(dateValue) {
   return `${y}-${m}-${d} ${h}:00`;
 }
 
+function normalizeLineName(value) {
+  const normalized = String(value || "").trim();
+  return normalized || null;
+}
+
+function buildMachineUniqKey(machine = {}) {
+  return String(machine.machine_number || `${machine.machine_name || ""}|${machine.line_name || ""}|${machine.operation_no || ""}`)
+    .trim()
+    .toUpperCase();
+}
+
+function dedupeMachines(rows = []) {
+  const map = new Map();
+  for (const row of rows) {
+    const key = buildMachineUniqKey(row);
+    if (!key) {
+      continue;
+    }
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, row);
+      continue;
+    }
+    const existingUpdatedAt = new Date(existing.updatedAt || 0).getTime();
+    const candidateUpdatedAt = new Date(row.updatedAt || 0).getTime();
+    if (candidateUpdatedAt >= existingUpdatedAt) {
+      map.set(key, row);
+    }
+  }
+  return Array.from(map.values());
+}
+
+function toCsvField(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  const text = String(value);
+  if (!/[",\n]/.test(text)) {
+    return text;
+  }
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function formatReportTimestamp(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toISOString().replace("T", " ").slice(0, 19);
+}
+
+function buildReportFileTimestamp(now = new Date()) {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  return `${y}${m}${d}_${hh}${mm}`;
+}
+
 exports.getDashboardSummary = async (req, res) => {
   try {
     const { from, to } = getDateRangeFromQuery(req.query);
-    const logWhere = { createdAt: { [Op.gte]: from, [Op.lte]: to } };
+    const lineNameFilter = normalizeLineName(req.query.lineName);
+    const machineIdFilter = Number(req.query.machineId || 0) || null;
     const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
+    const machineWhere = {};
+    if (lineNameFilter) {
+      machineWhere.line_name = lineNameFilter;
+    }
 
-    const [machineTotal, machineActive, partCounts, interlockedCount, reworkCount, recentRows, qualityRows, shifts] =
-      await Promise.all([
-        Machine.count(),
-        Machine.count({ where: { is_active: true } }),
-        Part.findAll({
-          attributes: ["status", [fn("COUNT", col("id")), "count"]],
-          group: ["status"],
-          raw: true,
-        }),
-        Part.count({ where: { status: "INTERLOCKED" } }),
-        Part.count({ where: { is_rework: true } }),
-        ProductionLog.findAll({
-          where: logWhere,
-          order: [["createdAt", "DESC"]],
-          limit: 250,
-          raw: true,
-        }),
-        ProductionLog.findAll({
-          where: logWhere,
-          attributes: ["status", "createdAt"],
-          raw: true,
-        }),
-        getActiveShiftDefinitions(),
-      ]);
+    const machineRows = await Machine.findAll({
+      where: Object.keys(machineWhere).length > 0 ? machineWhere : undefined,
+      attributes: ["id", "machine_name", "operation_no", "line_name", "machine_number", "is_active", "updatedAt"],
+      raw: true,
+    });
+    const uniqueMachines = dedupeMachines(machineRows);
+    const scopedMachineIds = uniqueMachines
+      .filter((row) => row.is_active !== false)
+      .map((row) => Number(row.id))
+      .filter((id) => Number.isFinite(id) && id > 0);
+    const filteredMachineIds = machineIdFilter ? [machineIdFilter] : scopedMachineIds;
+
+    const logWhere = {
+      createdAt: { [Op.gte]: from, [Op.lte]: to },
+      ...(filteredMachineIds.length > 0 ? { machine_id: { [Op.in]: filteredMachineIds } } : {}),
+    };
+
+    const [partCounts, recentRows, qualityRows, shifts] = await Promise.all([
+      Part.findAll({
+        attributes: ["status", [fn("COUNT", col("id")), "count"]],
+        group: ["status"],
+        raw: true,
+      }),
+      ProductionLog.findAll({
+        where: logWhere,
+        order: [["createdAt", "DESC"]],
+        limit: 500,
+        raw: true,
+      }),
+      ProductionLog.findAll({
+        where: logWhere,
+        attributes: ["status", "createdAt", "machine_id"],
+        raw: true,
+      }),
+      getActiveShiftDefinitions(),
+    ]);
 
     const filteredQualityRows = applyShiftFilter(qualityRows, shiftCodeFilter, shifts);
-    const filteredRecentRows = applyShiftFilter(recentRows, shiftCodeFilter, shifts).slice(0, 10);
+    const filteredRecentRows = applyShiftFilter(recentRows, shiftCodeFilter, shifts).slice(0, 20);
     const okLogs = filteredQualityRows.filter((row) => row.status === "OK").length;
     const ngLogs = filteredQualityRows.filter((row) => row.status === "NG").length;
 
@@ -3452,11 +3744,34 @@ exports.getDashboardSummary = async (req, res) => {
       }
     }
 
+    const machineMap = uniqueMachines.reduce((acc, row) => {
+      acc[row.id] = row;
+      return acc;
+    }, {});
+
+    const recentScans = filteredRecentRows.map((row) => {
+      const machine = machineMap[row.machine_id] || {};
+      return {
+        partId: row.part_id,
+        stationNo: machine.operation_no || null,
+        station: machine.operation_no || null,
+        machine: machine.machine_name || null,
+        lineName: machine.line_name || null,
+        result: row.status,
+        timestamp: row.createdAt,
+      };
+    });
+
+    const interlockedCount = Number(statusMap.INTERLOCKED || 0);
+    const reworkCount = Number(statusMap.REWORK || 0);
+    const activeCount = uniqueMachines.filter((row) => row.is_active !== false).length;
+    const availableLines = uniqueStages(uniqueMachines.map((row) => String(row.line_name || "").trim()).filter(Boolean));
+
     res.json({
       machines: {
-        total: machineTotal,
-        active: machineActive,
-        inactive: Math.max(machineTotal - machineActive, 0),
+        total: uniqueMachines.length,
+        active: activeCount,
+        inactive: Math.max(uniqueMachines.length - activeCount, 0),
       },
       parts: {
         inProgress: statusMap.IN_PROGRESS || 0,
@@ -3476,7 +3791,8 @@ exports.getDashboardSummary = async (req, res) => {
         startTime: normalizeTimeValue(shift.start_time, { includeSeconds: true }),
         endTime: normalizeTimeValue(shift.end_time, { includeSeconds: true }),
       })),
-      recentScans: filteredRecentRows,
+      availableLines,
+      recentScans,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -3486,10 +3802,29 @@ exports.getDashboardSummary = async (req, res) => {
 exports.getDashboardTrends = async (req, res) => {
   try {
     const { from, to } = getDateRangeFromQuery(req.query);
+    const lineNameFilter = normalizeLineName(req.query.lineName);
+    const machineIdFilter = Number(req.query.machineId || 0) || null;
     const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
+    const machineWhere = {};
+    if (lineNameFilter) {
+      machineWhere.line_name = lineNameFilter;
+    }
+    const machineRows = await Machine.findAll({
+      where: Object.keys(machineWhere).length ? machineWhere : undefined,
+      attributes: ["id", "machine_number", "machine_name", "line_name", "operation_no", "updatedAt", "is_active"],
+      raw: true,
+    });
+    const uniqueMachines = dedupeMachines(machineRows).filter((row) => row.is_active !== false);
+    const scopedIds = machineIdFilter
+      ? [machineIdFilter]
+      : uniqueMachines.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+
     const [rows, shifts] = await Promise.all([
       ProductionLog.findAll({
-        where: { createdAt: { [Op.gte]: from, [Op.lte]: to } },
+        where: {
+          createdAt: { [Op.gte]: from, [Op.lte]: to },
+          ...(scopedIds.length ? { machine_id: { [Op.in]: scopedIds } } : {}),
+        },
         attributes: ["status", "createdAt"],
         raw: true,
       }),
@@ -3500,13 +3835,14 @@ exports.getDashboardTrends = async (req, res) => {
     const map = filteredRows.reduce((acc, row) => {
       const key = formatHourBucket(row.createdAt);
       if (!acc[key]) {
-        acc[key] = { hour: key, ok: 0, ng: 0 };
+        acc[key] = { hour: key, ok: 0, ng: 0, total: 0 };
       }
       if (row.status === "OK") {
         acc[key].ok += 1;
       } else {
         acc[key].ng += 1;
       }
+      acc[key].total += 1;
       return acc;
     }, {});
 
@@ -3522,8 +3858,27 @@ exports.getDashboardReport = async (req, res) => {
   try {
     const { from, to } = getDateRangeFromQuery(req.query);
     const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
+    const lineNameFilter = normalizeLineName(req.query.lineName);
+    const stationNoFilter = normalizeStation(req.query.stationNo);
+    const operatorIdFilter = Number(req.query.operatorId || 0) || null;
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const pageSize = Math.min(Math.max(Number(req.query.pageSize || 100), 1), 500);
+
+    const machineWhere = {
+      is_active: true,
+      ...(lineNameFilter ? { line_name: lineNameFilter } : {}),
+    };
+    const allMachineRowsRaw = await Machine.findAll({
+      where: machineWhere,
+      attributes: ["id", "machine_name", "line_name", "operation_no", "sequence_no", "daily_target_qty", "is_active", "machine_number", "updatedAt"],
+      order: [["sequence_no", "ASC"], ["updatedAt", "DESC"]],
+      raw: true,
+    });
+    const machineRows = dedupeMachines(allMachineRowsRaw);
+    const machineIdScope = machineRows.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
     const productionWhere = {
       createdAt: { [Op.gte]: from, [Op.lte]: to },
+      ...(machineIdScope.length ? { machine_id: { [Op.in]: machineIdScope } } : {}),
     };
 
     if (req.query.machineId) {
@@ -3536,43 +3891,41 @@ exports.getDashboardReport = async (req, res) => {
       productionWhere.status = String(req.query.status).toUpperCase();
     }
 
-    const [productionRows, operationRows, machineRows, interlocks, reworkCount, partHistory, shifts] = await Promise.all([
+    const operationWhere = {
+      createdAt: { [Op.gte]: from, [Op.lte]: to },
+      ...(machineIdScope.length ? { machine_id: { [Op.in]: machineIdScope } } : {}),
+      ...(req.query.machineId ? { machine_id: Number(req.query.machineId) } : {}),
+      ...(req.query.partId ? { part_id: req.query.partId } : {}),
+      ...(stationNoFilter ? { station_no: stationNoFilter } : {}),
+      ...(operatorIdFilter ? { user_id: operatorIdFilter } : {}),
+    };
+
+    const [productionRows, operationRows, interlocks, reworkCount, shifts] = await Promise.all([
       ProductionLog.findAll({
         where: productionWhere,
         attributes: ["id", "part_id", "machine_id", "status", "createdAt"],
         raw: true,
       }),
       OperationLog.findAll({
-        where: {
-          createdAt: { [Op.gte]: from, [Op.lte]: to },
-          ...(req.query.machineId ? { machine_id: Number(req.query.machineId) } : {}),
-          ...(req.query.partId ? { part_id: req.query.partId } : {}),
-        },
-        attributes: ["id", "part_id", "machine_id", "station_no", "operation_no", "plc_status", "result", "createdAt"],
-        raw: true,
-      }),
-      Machine.findAll({
-        attributes: ["id", "machine_name", "line_name", "operation_no", "sequence_no", "daily_target_qty", "is_active"],
-        order: [["sequence_no", "ASC"]],
+        where: operationWhere,
+        attributes: ["id", "part_id", "machine_id", "station_no", "operation_no", "plc_status", "result", "user_id", "interlock_reason", "createdAt"],
         raw: true,
       }),
       OperationLog.findAll({
         where: {
           interlock_reason: { [Op.ne]: null },
           createdAt: { [Op.gte]: from, [Op.lte]: to },
+          ...(machineIdScope.length ? { machine_id: { [Op.in]: machineIdScope } } : {}),
         },
         order: [["createdAt", "DESC"]],
         limit: 100,
+        raw: true,
       }),
       ReworkLog.count({
-        where: { createdAt: { [Op.gte]: from, [Op.lte]: to } },
+        where: {
+          createdAt: { [Op.gte]: from, [Op.lte]: to },
+        },
       }),
-      req.query.partId
-        ? OperationLog.findAll({
-            where: { part_id: req.query.partId },
-            order: [["createdAt", "ASC"]],
-          })
-        : [],
       getActiveShiftDefinitions(),
     ]);
 
@@ -3592,6 +3945,10 @@ exports.getDashboardReport = async (req, res) => {
     }, {});
     const machineWise = Object.values(machineWiseMap);
 
+    const machineRowMapById = machineRows.reduce((acc, machine) => {
+      acc[machine.id] = machine;
+      return acc;
+    }, {});
     const machineMetaById = machineRows.reduce((acc, machine) => {
       acc[machine.id] = {
         machineId: machine.id,
@@ -3725,7 +4082,12 @@ exports.getDashboardReport = async (req, res) => {
     const hourlyMap = filteredRows.reduce((acc, row) => {
       const key = formatHourBucket(row.createdAt);
       if (!acc[key]) {
-        acc[key] = { hour: key, total: 0 };
+        acc[key] = { hour: key, ok: 0, ng: 0, total: 0 };
+      }
+      if (String(row.status || "").toUpperCase() === "OK") {
+        acc[key].ok += 1;
+      } else {
+        acc[key].ng += 1;
       }
       acc[key].total += 1;
       return acc;
@@ -3751,6 +4113,44 @@ exports.getDashboardReport = async (req, res) => {
       }
     }
 
+    const partHistory = [...filteredOperationRows]
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    const historyTotal = partHistory.length;
+    const historyStart = (page - 1) * pageSize;
+    const pagedHistory = partHistory.slice(historyStart, historyStart + pageSize);
+
+    const partsList = partHistory.slice(0, 3000).map((row) => {
+      const machine = machineMetaById[Number(row.machine_id)] || machineRowMapById[Number(row.machine_id)] || {};
+      const plcStatus = String(row.plc_status || "").trim().toUpperCase();
+      const result = String(row.result || "").trim().toUpperCase();
+      let statusLabel = "RUNNING";
+      if (plcStatus === "INTERLOCKED") {
+        statusLabel = "BLOCKED";
+      } else if (plcStatus === "ENDED_OK" && result === "OK") {
+        statusLabel = "PASSED";
+      } else if (plcStatus === "ENDED_NG" || result === "NG") {
+        statusLabel = "FAILED";
+      } else if (plcStatus === "PLC_COMM_ERROR") {
+        statusLabel = "BLOCKED";
+      }
+      return {
+        id: row.id,
+        partId: row.part_id,
+        machineId: row.machine_id,
+        machineName: machine.machineName || machine.machine_name || null,
+        lineName: machine.lineName || machine.line_name || null,
+        stationNo: normalizeStation(row.station_no || row.operation_no),
+        operationNo: row.operation_no || null,
+        result,
+        status: statusLabel,
+        reason: row.interlock_reason || null,
+        interlockReason: row.interlock_reason || null,
+        createdAt: row.createdAt,
+      };
+    });
+
+    const availableLines = uniqueStages(machineRows.map((row) => String(row.line_name || "").trim()).filter(Boolean));
+
     res.json({
       filters: {
         from,
@@ -3759,6 +4159,9 @@ exports.getDashboardReport = async (req, res) => {
         partId: req.query.partId || null,
         status: req.query.status || null,
         shiftCode: shiftCodeFilter,
+        lineName: lineNameFilter,
+        stationNo: stationNoFilter || null,
+        operatorId: operatorIdFilter || null,
       },
       machineWise,
       machineCards,
@@ -3767,7 +4170,14 @@ exports.getDashboardReport = async (req, res) => {
       shiftProduction,
       interlockHistory: interlocks,
       reworkCount,
-      partJourney: partHistory,
+      partJourney: pagedHistory,
+      partJourneyPagination: {
+        page,
+        pageSize,
+        total: historyTotal,
+      },
+      partsList,
+      availableLines,
       availableShifts: shifts.map((shift) => ({
         shiftCode: shift.shift_code,
         shiftName: shift.shift_name,
@@ -3784,9 +4194,24 @@ exports.exportDashboardReportCsv = async (req, res) => {
   try {
     const { from, to } = getDateRangeFromQuery(req.query);
     const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
+    const lineNameFilter = normalizeLineName(req.query.lineName);
     const where = {
       createdAt: { [Op.gte]: from, [Op.lte]: to },
     };
+    if (lineNameFilter) {
+      const rows = await Machine.findAll({
+        where: { line_name: lineNameFilter, is_active: true },
+        attributes: ["id"],
+        raw: true,
+      });
+      const ids = rows.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+      if (!ids.length) {
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader("Content-Disposition", `attachment; filename=TRACEABILITY_REPORT_${buildReportFileTimestamp()}.csv`);
+        return res.send("PART_ID,LINE,STATION,MACHINE,SHIFT,STATUS,RESULT,TIMESTAMP\n");
+      }
+      where.machine_id = { [Op.in]: ids };
+    }
     if (req.query.machineId) {
       where.machine_id = Number(req.query.machineId);
     }
@@ -3807,25 +4232,48 @@ exports.exportDashboardReportCsv = async (req, res) => {
     ]);
 
     const filteredRows = applyShiftFilter(rows, shiftCodeFilter, shifts);
+    const machineIds = uniqueStages(filteredRows.map((row) => String(row.machine_id || "")).filter(Boolean))
+      .map((entry) => Number(entry))
+      .filter((entry) => Number.isFinite(entry));
+    const machineRows = machineIds.length
+      ? await Machine.findAll({
+          where: { id: { [Op.in]: machineIds } },
+          attributes: ["id", "machine_name", "line_name", "operation_no"],
+          raw: true,
+        })
+      : [];
+    const machineMap = machineRows.reduce((acc, row) => {
+      acc[row.id] = row;
+      return acc;
+    }, {});
 
-    const header = "id,part_id,machine_id,status,shift_code,ng_reason,createdAt";
+    const header = "PART_ID,LINE,STATION,MACHINE,SHIFT,STATUS,RESULT,REASON,TIMESTAMP";
     const body = filteredRows
-      .map((row) =>
-        [
-          row.id,
-          row.part_id,
-          row.machine_id,
-          row.status,
+      .map((row) => {
+        const machine = machineMap[row.machine_id] || {};
+        const result = String(row.status || "").trim().toUpperCase();
+        const statusText = result === "OK" ? "PASSED" : "FAILED";
+        const fields = [
+          row.part_id || "",
+          machine.line_name || "",
+          machine.operation_no || "",
+          machine.machine_name || "",
           resolveShiftCodeForDate(row.createdAt, shifts),
+          statusText,
+          result,
           row.ng_reason || "",
-          row.createdAt,
-        ].join(",")
-      )
+          formatReportTimestamp(row.createdAt),
+        ];
+        return fields.map((value) => toCsvField(value)).join(",");
+      })
       .join("\n");
     const csv = `${header}\n${body}`;
 
     res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", "attachment; filename=traceability_report.csv");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=TRACEABILITY_REPORT_${buildReportFileTimestamp()}.csv`
+    );
     res.send(csv);
   } catch (error) {
     res.status(500).json({ error: error.message });

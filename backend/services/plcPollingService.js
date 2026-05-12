@@ -4,8 +4,6 @@ const plcSnapshotService = require("./plcSnapshotService");
 const plcStateMachineService = require("./plcStateMachineService");
 const { emitRealtime } = require("./realtimeService");
 const { readSlmpRegisters, readModbusRegisters } = require("./plcIoService");
-const plcLatchManager = require("./plcLatchManager");
-
 
 class PlcPollingService {
   constructor() {
@@ -59,6 +57,14 @@ class PlcPollingService {
     const poller = this.pollers.get(machine.id);
     if (!poller || !poller.active) return;
 
+    // Guard: Skip polling during active handshake cycle to prevent lease contention
+    const plcHandshakeEngine = require("./plcHandshakeEngine");
+    if (plcHandshakeEngine.machineBusy.has(machine.id)) {
+      // Re-schedule next poll without performing current one
+      poller.timeoutRef = setTimeout(() => this.pollLoop(machine, interval), interval);
+      return;
+    }
+
     const startTime = Date.now();
     await this.poll(machine);
 
@@ -75,16 +81,6 @@ class PlcPollingService {
 
   async poll(machine) {
     try {
-      // ─── LATCH GUARD & CONTENTION PREVENTION ────────────────────────────
-      // If the handshake has an active latch on this machine, the PLC output
-      // is currently being HELD by the handshake engine. The polling service
-      // must NOT poll or drive the state machine during this time.
-      // Skipping the poll completely prevents socket lease contention which
-      // otherwise starves the active handshake read loop.
-      if (plcLatchManager.isLatched(machine.id)) {
-        return;
-      }
-
       // In industrial mode, we read all configured registers at once
       const registers = await this.readAllRegisters(machine);
       if (!registers) return;
@@ -95,7 +91,7 @@ class PlcPollingService {
       // Debounce and Validate Signals (Point 6, 20)
       const stableSignals = this.getStableSignals(machine.id, registers, machine.debounce_polls);
       const conflicts = plcSnapshotService.detectConflicts(stableSignals);
-      
+
       if (conflicts.length > 0) {
         emitRealtime("plc_signal_conflict", {
           machineId: machine.id,
@@ -149,7 +145,7 @@ class PlcPollingService {
       let values = {};
       if (protocol === "SLMP") {
         const defaultDevice = String(machine.plc_slmp_device || "D").trim().toUpperCase() || "D";
-        
+
         // Extract configured frame mode from the JSON payload if the top-level column is missing
         let frameMode = machine.plc_slmp_frame_mode || "AUTO";
         if ((!frameMode || frameMode === "AUTO") && machine.plc_registers) {
@@ -157,7 +153,7 @@ class PlcPollingService {
             const parsed = typeof machine.plc_registers === "string" ? JSON.parse(machine.plc_registers) : machine.plc_registers;
             const nestedMode = parsed?.slmpFrameMode || parsed?.slmpFrame || parsed?.frameMode;
             if (nestedMode) frameMode = String(nestedMode).toUpperCase();
-          } catch(e) {}
+          } catch (e) { }
         }
 
         const result = await readSlmpRegisters({
@@ -204,7 +200,6 @@ class PlcPollingService {
         signals.RUNNING = sv === startedValue;
         signals.END_OK = sv === endOkValue;
         signals.END_NG = sv === endNgValue;
-        signals.ACK = sv !== 0;
       }
       signals.TIMESTAMP = Date.now();
       return signals;
@@ -222,7 +217,6 @@ class PlcPollingService {
       RUNNING: false,
       END_OK: false,
       END_NG: false,
-      ACK: false,
       TIMESTAMP: Date.now()
     };
   }
@@ -234,7 +228,7 @@ class PlcPollingService {
     if (!this.signalHistory.has(machineId)) {
       this.signalHistory.set(machineId, {});
     }
-    
+
     const history = this.signalHistory.get(machineId);
     const stable = {};
 
@@ -266,7 +260,9 @@ class PlcPollingService {
     };
 
     // Transition Logic based on signals
-    if (state === plcStateMachineService.states.WAITING_RUNNING && signals.RUNNING) {
+    if (state === plcStateMachineService.states.START_SENT && signals.RUNNING) {
+      await safeTransition(plcStateMachineService.states.RUNNING);
+    } else if (state === plcStateMachineService.states.WAITING_RUNNING && signals.RUNNING) {
       await safeTransition(plcStateMachineService.states.RUNNING);
     } else if (state === plcStateMachineService.states.RUNNING && !signals.RUNNING) {
       await safeTransition(plcStateMachineService.states.WAITING_END);
@@ -280,11 +276,13 @@ class PlcPollingService {
       await safeTransition(plcStateMachineService.states.RESETTING);
     }
 
-    // NOTE: Do NOT auto-idle from COMPLETED_OK / COMPLETED_NG here.
-    // The registers must hold their end-status value until cycleFinalizationService
-    // explicitly sends the reset command and transitions the machine through
-    // RESETTING -> RESET_ACK_WAIT -> IDLE. Auto-idling here caused the register
-    // flicker (END value visible briefly then gone before reset fires).
+    // Auto-idle after completion
+    if ([plcStateMachineService.states.COMPLETED_OK, plcStateMachineService.states.COMPLETED_NG].includes(state)) {
+      // Delay slightly or wait for PLC to clear signals
+      if (!signals.END_OK && !signals.END_NG) {
+        await safeTransition(plcStateMachineService.states.IDLE);
+      }
+    }
   }
 }
 

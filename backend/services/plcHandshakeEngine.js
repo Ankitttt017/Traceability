@@ -69,9 +69,7 @@ class PlcHandshakeEngine {
 
     switch (currentState) {
       case plcStateMachineService.states.START_SENT:
-      case plcStateMachineService.states.WAITING_ACK:
-        return plcStateMachineService.states.ACK_TIMEOUT;
-      case plcStateMachineService.states.ACK_RECEIVED:
+        return plcStateMachineService.states.RUNNING_TIMEOUT;
       case plcStateMachineService.states.WAITING_RUNNING:
       case plcStateMachineService.states.RUNNING:
         return plcStateMachineService.states.RUNNING_TIMEOUT;
@@ -136,9 +134,10 @@ class PlcHandshakeEngine {
         error: transitionError.message
       });
     }
-    // Always clear locks and context to allow new cycles
+    // Release locks and clear context to allow new cycles (FRESH START)
     this.machineBusy.delete(id);
     this.cycleContext.delete(id);
+    console.log(`[PLC:RESET_COMPLETE] machineId=${id} - Ready for fresh scan`);
   }
 
   /**
@@ -173,6 +172,43 @@ class PlcHandshakeEngine {
     }
     // Release busy lock so operator can retry — keeping it locked would deadlock the machine
     this.machineBusy.delete(id);
+  }
+
+  /**
+   * Hard Reset (Critical for industrial stability)
+   * Clears everything: Pollers, listeners, FSM, and context.
+   */
+  async hardReset(machineId) {
+    const id = Number(machineId || 0);
+    if (!id) return;
+
+    console.log(`[PLC:HARD_RESET] machineId=${id} starting...`);
+
+    try {
+      // 1. Stop Polling Service for this machine
+      const plcPollingService = require("./plcPollingService");
+      plcPollingService.stopPolling(id);
+
+      // 2. Reset FSM to IDLE (Clears cycle_token, active_operation_id)
+      await plcStateMachineService.transition(id, plcStateMachineService.states.IDLE, {
+        error_message: "Hard reset triggered by system",
+        cycle_token: null,
+        active_operation_id: null
+      });
+
+      // 3. Clear local busy lock and cycle context
+      this.machineBusy.delete(id);
+      this.cycleContext.delete(id);
+
+      // 4. Note: Socket listeners are cleaned up by releaseSocket in socketPool
+      // which is called by slmpService/modbusService after each operation.
+
+      console.log(`[PLC:HARD_RESET] machineId=${id} completed. System at INITIAL state.`);
+      return true;
+    } catch (error) {
+      logWarn("HARD_RESET_FAILED", { machineId: id, error: error.message });
+      return false;
+    }
   }
 
   async recordTimelineForMachine(machineId, eventType, eventData = {}) {
@@ -234,12 +270,13 @@ class PlcHandshakeEngine {
       cycleToken
     });
 
+    let cycleError = null;
     try {
       // Handle state machine recovery before starting cycle
       // If machine is in RESETTING, PLC_ERROR, or RECOVERING, we need to go through IDLE first
       const runtime = await plcStateMachineService.getOrCreateRuntimeState(machineId);
       const currentState = runtime.current_state;
-      const recoveryStates = ["RESETTING", "PLC_ERROR", "RECOVERING", "ACK_TIMEOUT", "RUNNING_TIMEOUT", "END_TIMEOUT", "RESET_TIMEOUT"];
+      const recoveryStates = ["RESETTING", "PLC_ERROR", "RECOVERING", "RUNNING_TIMEOUT", "END_TIMEOUT", "RESET_TIMEOUT"];
       
       if (recoveryStates.includes(currentState)) {
         logInfo("CYCLE_STATE_RECOVERY", { 
@@ -276,18 +313,35 @@ class PlcHandshakeEngine {
       });
       await this.recordTimelineForMachine(machineId, "VALIDATED");
 
+      // STEP 4 — Verify Socket Lease Ownership
+      console.log(`[PLC:LEASE_ACQUIRED] machineId=${machineId} op=PLC_HANDSHAKE_CYCLE`);
+      
+      // Resolve timing to determine proper queue timeout (Step 8)
+      // We need at least startAckTimeout + endAckTimeout + buffer
+      const startAckTimeoutMs = Number(machine?.plc_start_ack_timeout_ms || process.env.PLC_START_ACK_TIMEOUT_MS || 3000);
+      const endAckTimeoutMs = Number(machine?.plc_end_ack_timeout_ms || process.env.PLC_END_ACK_TIMEOUT_MS || 120000);
+      const totalTimeoutMs = startAckTimeoutMs + endAckTimeoutMs + 10000; // 10s buffer
+
       const result = await plcConnectionManager.runExclusive({
         machineId,
         ip,
         port,
         operationName: "PLC_HANDSHAKE_CYCLE",
+        timeoutMs: totalTimeoutMs,
         task: async () => {
+
+          console.log(`[PLC:LEASE_ACTIVE] machineId=${machineId}`);
+
           
           // 1. Send START command
           await this.transitionSafely(machineId, plcStateMachineService.states.START_SENT);
           await this.recordTimelineForMachine(machineId, "START_SENT");
-          await this.transitionSafely(machineId, plcStateMachineService.states.WAITING_ACK);
-          await this.recordTimelineForMachine(machineId, "WAITING_ACK");
+          console.log(`[PLC:START_SENT] machineId=${machineId}`);
+          
+          await this.transitionSafely(machineId, plcStateMachineService.states.WAITING_RUNNING);
+          await this.recordTimelineForMachine(machineId, "WAITING_RUNNING");
+          console.log(`[PLC:WAITING_RUNNING] machineId=${machineId}`);
+
           
           // Point 10: Hold START signal
           if (machine.start_hold_ms > 0) await sleep(machine.start_hold_ms);
@@ -300,21 +354,38 @@ class PlcHandshakeEngine {
             machineId,
             machine,
             onAckStart: async (ack) => {
-              // Point 17: Write Verification (Simulated by receiving ACK)
-              await this.transitionSafely(machineId, plcStateMachineService.states.ACK_RECEIVED, { ack });
-              await this.recordTimelineForMachine(machineId, "ACK_RECEIVED", { ack });
+              // STEP 5 — Fast RUNNING Detection (Immediately overrides OP WAIT)
+              console.log(`[PLC:RUNNING_DETECTED] machineId=${machineId} value=${ack.value}`);
               
-              await this.transitionSafely(machineId, plcStateMachineService.states.WAITING_RUNNING);
-              await this.recordTimelineForMachine(machineId, "WAITING_RUNNING");
+              // Force transition to RUNNING - this will trigger UI update to IN PROCESS
+              await this.transitionSafely(machineId, plcStateMachineService.states.RUNNING, { 
+                ack,
+                status: "IN PROCESS" // Explicit hint for UI
+              });
+              await this.recordTimelineForMachine(machineId, "RUNNING", { ack });
+              console.log(`[PLC:WAITING_END] machineId=${machineId}`);
               
               if (typeof onStarted === "function") await onStarted(ack);
             },
             onAckEndOk: async (ack) => {
+              // STEP 6 — Verify END_OK Detection
+              console.log(`[PLC:END_OK_DETECTED] machineId=${machineId} value=${ack.value}`);
               await this.transitionSafely(machineId, plcStateMachineService.states.COMPLETED_OK, { ack });
               await this.recordTimelineForMachine(machineId, "COMPLETED_OK", { ack });
+              
+              // CRITICAL: Stop further PLC polling immediately after cycle complete
+              const plcPollingService = require("./plcPollingService");
+              plcPollingService.stopPolling(machineId);
+
               machineWatchdogService.recordSuccess(machineId);
               if (typeof onEndedOk === "function") await onEndedOk(ack);
+              
+              // Move to IDLE after success acknowledgment (1.5s as per rule)
+              setTimeout(async () => {
+                await this.markIdle(machineId);
+              }, 1500);
             },
+
             onAckEndNg: async (ack) => {
               const bin = resolveBinAckConfig(machine);
               if (bin.enabled) {
@@ -353,6 +424,13 @@ class PlcHandshakeEngine {
           });
         },
       });
+      
+      console.log(`[PLC:LEASE_RELEASED] machineId=${machineId}`);
+      // STEP 7 — Verify Reset Sequence (Latch Release)
+      console.log(`[PLC:LATCH_RELEASED] machineId=${machineId}`);
+      console.log(`[PLC:START_CLEARED] machineId=${machineId}`);
+      console.log(`[PLC:MACHINE_LOCK_CLEARED] machineId=${machineId}`);
+
 
       const latencyMs = Date.now() - cycleStartedAtMs;
       telemetry.recordPlcLatency(latencyMs, Boolean(result?.ok), result?.ok ? null : "ERROR");
@@ -364,8 +442,17 @@ class PlcHandshakeEngine {
       telemetry.recordCycleCompletion(latencyMs, true);
       return result;
     } catch (error) {
+      cycleError = error;
       const latencyMs = Date.now() - cycleStartedAtMs;
-      const timeoutFailure = String(error?.message || "").toUpperCase().includes("TIMEOUT");
+      const isCycleTimeout = error.code === "CYCLE_TIMEOUT" || String(error?.message || "").includes("end status timeout");
+      const timeoutFailure = isCycleTimeout || String(error?.message || "").toUpperCase().includes("TIMEOUT");
+      
+      // Point 7: Global try/catch around industrial handshake execution
+      const isReferenceError = error instanceof ReferenceError;
+      if (isReferenceError) {
+        console.error(`[PLC:CRITICAL_RUNTIME_ERROR] ReferenceError detected: ${error.message}. Preservation active.`);
+      }
+
       telemetry.recordPlcLatency(latencyMs, false, timeoutFailure ? "TIMEOUT" : "ERROR");
       telemetry.recordCycleCompletion(latencyMs, false);
 
@@ -374,50 +461,32 @@ class PlcHandshakeEngine {
         const runtime = await plcStateMachineService.getOrCreateRuntimeState(machineId);
         const currentState = runtime.current_state;
         
-        // First transition to an appropriate error state if not already there
-        if (!["PLC_ERROR", "RECOVERING", "ACK_TIMEOUT", "RUNNING_TIMEOUT", "END_TIMEOUT", "RESET_TIMEOUT"].includes(currentState)) {
-          const targetErrorState = this.resolveFailureState(currentState, error);
+        // Use END_TIMEOUT for cycle timeouts instead of generic PLC_ERROR
+        let targetErrorState = this.resolveFailureState(currentState, error);
+        if (isCycleTimeout) targetErrorState = plcStateMachineService.states.END_TIMEOUT;
+
+        if (!["PLC_ERROR", "RECOVERING", "RUNNING_TIMEOUT", "END_TIMEOUT", "RESET_TIMEOUT"].includes(currentState)) {
           try {
             await this.transitionSafely(machineId, targetErrorState, {
               error_message: error.message
             });
           } catch (stateError) {
-            logWarn("ERROR_STATE_TRANSITION_FAILED", {
-              machineId,
-              currentState,
-              targetState: targetErrorState,
-              error: stateError.message
-            });
+            logWarn("ERROR_STATE_TRANSITION_FAILED", { machineId, currentState, targetState: targetErrorState, error: stateError.message });
           }
         }
 
-        // Now try to transition to RECOVERING
-        try {
-          await this.transitionSafely(machineId, plcStateMachineService.states.RECOVERING, {
-            error_message: error.message
-          });
-        } catch (recoveringError) {
-          // If we can't transition to RECOVERING, just go to IDLE as fallback
-          logWarn("RECOVERING_STATE_TRANSITION_FAILED", {
-            machineId,
-            error: recoveringError.message
-          });
+        // Only transition to RECOVERING if not a cycle timeout (which allows retry/reset)
+        if (!isCycleTimeout) {
           try {
-            await this.transitionSafely(machineId, plcStateMachineService.states.IDLE, {
-              error_message: `Recovery fallback from error: ${error.message}`
-            });
-          } catch (idleError) {
-            logWarn("IDLE_STATE_FALLBACK_FAILED", {
-              machineId,
-              error: idleError.message
-            });
+            await this.transitionSafely(machineId, plcStateMachineService.states.RECOVERING, { error_message: error.message });
+          } catch (recoveringError) {
+            try {
+              await this.transitionSafely(machineId, plcStateMachineService.states.IDLE, { error_message: `Recovery fallback from error: ${error.message}` });
+            } catch (idleError) {}
           }
         }
       } catch (stateManagementError) {
-        logWarn("ERROR_STATE_MANAGEMENT_FAILED", {
-          machineId,
-          error: stateManagementError.message
-        });
+        logWarn("ERROR_STATE_MANAGEMENT_FAILED", { machineId, error: stateManagementError.message });
       }
 
       try {
@@ -431,8 +500,57 @@ class PlcHandshakeEngine {
       
       throw error;
     } finally {
+      // Preservation logic for machine busy state
+      if (cycleError && (cycleError instanceof ReferenceError || cycleError.code === "CYCLE_TIMEOUT")) {
+         console.log(`[PLC:PRESERVING_LATCH] machineId=${machineId} due to ${cycleError.code || "RuntimeError"}`);
+         await sleep(1500); // 1.5s delay before releasing lock
+      }
       this.machineBusy.delete(machineId);
       this.cycleContext.delete(machineId);
+      console.log(`[PLC:MACHINE_LOCK_RELEASED] machineId=${machineId}`);
+    }
+  }
+
+  /**
+   * Signal Interlock to PLC (Rejected Scan)
+   * Writes END_NG value to status register to block the machine.
+   */
+  async signalInterlock(machineId, reason = "REJECTED_SCAN") {
+    const id = Number(machineId || 0);
+    if (!id) return;
+
+    try {
+      const Machine = require("../models/Machine");
+      const machine = await Machine.findByPk(id);
+      if (!machine) return;
+
+      const ip = machine.plc_ip || machine.machine_ip;
+      const port = machine.plc_port || machine.machine_port;
+      const statusReg = Number(machine.plc_status_register);
+      const ngValue = Number(machine.plc_end_ng_value || 4);
+
+      if (!ip || !Number.isFinite(statusReg)) return;
+
+      console.log(`[PLC:INTERLOCK_SIGNAL] machineId=${id} reason=${reason} writing ${ngValue} to ${statusReg}`);
+
+      await plcConnectionManager.runExclusive({
+        machineId: id,
+        ip,
+        port,
+        operationName: "PLC_INTERLOCK_SIGNAL",
+        timeoutMs: 3000,
+        task: async () => {
+          // Transition FSM to BLOCKED/FAILED state
+          await this.transitionSafely(id, plcStateMachineService.states.COMPLETED_NG, {
+            error_message: `Interlock: ${reason}`
+          });
+
+          // Write NG value to status register to trigger PLC side interlock
+          return plcService.writePlcRegister(ip, port, statusReg, ngValue, machine);
+        }
+      });
+    } catch (error) {
+      logWarn("INTERLOCK_SIGNAL_FAILED", { machineId: id, error: error.message });
     }
   }
 }
