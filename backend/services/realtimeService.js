@@ -45,12 +45,6 @@ function emitRealtime(event, payload) {
 
   ioRef.emit(event, payload);
 
-  const partRoom = getPartRoom(payload?.partId || payload?.part_id);
-  if (partRoom) {
-    // Narrowcast the original payload to clients subscribed to that part.
-    ioRef.to(partRoom).emit(event, payload);
-  }
-
   if (event === "operator_popup" || event === "scan_event") {
     const journeyPayload = buildJourneyUpdatePayload(event, payload);
     if (!journeyPayload) {
@@ -58,10 +52,6 @@ function emitRealtime(event, payload) {
     }
 
     ioRef.emit("journey_update", journeyPayload);
-    const journeyRoom = getPartRoom(journeyPayload.partId);
-    if (journeyRoom) {
-      ioRef.to(journeyRoom).emit("journey_update", journeyPayload);
-    }
   }
 }
 

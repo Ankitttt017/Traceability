@@ -8,6 +8,7 @@
 import { useEffect } from "react";
 import { io } from "socket.io-client";
 import toast from "react-hot-toast";
+import IndustrialToast from "../components/IndustrialToast";
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
 
@@ -24,20 +25,19 @@ const ICONS = {
 };
 
 function alarmToast({ icon, title, detail, type = "error" }) {
-  const content = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      <span style={{ fontWeight: 900, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.07em", opacity: 0.8 }}>
-        {title}
-      </span>
-      {detail && (
-        <span style={{ fontSize: 12, opacity: 0.9 }}>{detail}</span>
-      )}
-    </div>
-  );
-
-  if (type === "success") return toast.success(content, { icon, duration: 4000 });
-  if (type === "warning") return toast(content, { icon, duration: 6000 });
-  return toast.error(content, { icon, duration: 8000 });
+  const toastType = type === "success" ? "SUCCESS" : type === "warning" ? "WARNING" : "ERROR";
+  
+  return toast.custom((t) => (
+    <IndustrialToast 
+      id={t.id}
+      type={toastType}
+      message={title}
+      detail={detail}
+      onClose={() => toast.dismiss(t.id)}
+    />
+  ), { 
+    duration: type === "success" ? 4000 : type === "warning" ? 6000 : 8000 
+  });
 }
 
 export function useAlarmToasts() {
@@ -115,36 +115,38 @@ export function useAlarmToasts() {
       const type = String(data.type || "").trim().toUpperCase();
       const reason = String(data.reason || "").trim().toUpperCase();
       const isOk = decision === "ALLOW" || type === "INFO" || type === "SUCCESS";
-      if (isOk) return;
+      
+      if (isOk) {
+        // Optional: Brief success toast for operator confirmation
+        return;
+      }
 
-      if (reason.includes("PLC_TIMEOUT") || reason.includes("PLC_COMM") || reason === "RESET_REQUIRED_AFTER_PLC_COMM_ERROR") {
-        toast(
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <span style={{ fontWeight: 900, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.07em" }}>
-              PLC Communication Issue
-            </span>
-            <span style={{ fontSize: 12 }}>
-              {data.partId || "Unknown"} - {data.machineName || `M${data.machineId}`}
-            </span>
-          </div>,
-          { icon: "!", duration: 5000 }
-        );
+      const isPlcIssue = reason.includes("PLC_TIMEOUT") || reason.includes("PLC_COMM") || reason === "RESET_REQUIRED_AFTER_PLC_COMM_ERROR";
+      
+      if (isPlcIssue) {
+        toast.custom((t) => (
+          <IndustrialToast 
+            id={t.id}
+            type="PLC_ERROR"
+            message="PLC Communication Issue"
+            detail={`${data.partId || "Unknown"} - ${data.machineName || `M${data.machineId}`} (${reason})`}
+            onClose={() => toast.dismiss(t.id)}
+          />
+        ), { duration: 6000 });
         return;
       }
 
       // Show NG/block scans only
       if (decision === "BLOCK" || type === "ERROR" || type === "WARNING") {
-        toast.error(
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <span style={{ fontWeight: 900, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.07em" }}>
-              NG Scan Detected
-            </span>
-            <span style={{ fontSize: 12 }}>
-              {data.partId || "Unknown"} - {data.machineName || `M${data.machineId}`}
-            </span>
-          </div>,
-          { icon: "x", duration: 5000 }
-        );
+        toast.custom((t) => (
+          <IndustrialToast 
+            id={t.id}
+            type={decision === "BLOCK" ? "BLOCKED" : "ERROR"}
+            message={decision === "BLOCK" ? "Part Interlocked" : "NG Scan Detected"}
+            detail={`${data.partId || "Unknown"} - ${data.machineName || `M${data.machineId}`} (${reason || "Quality Check Failed"})`}
+            onClose={() => toast.dismiss(t.id)}
+          />
+        ), { duration: 8000 });
       }
     });
 

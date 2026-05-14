@@ -172,8 +172,8 @@ const Traceability = () => {
                   {historyRows.map((row, index) => (
                     <div key={row.id} className="relative rise-in" style={{ animationDelay: `${index * 80}ms` }}>
                       {/* Connector Marker */}
-                      <div className={`absolute -left-[58px] top-0 w-8 h-8 rounded-full border-4 border-bg-dark flex items-center justify-center ${row.result === 'OK' ? 'bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.4)]' : 'bg-red-500 shadow-[0_0_15px_rgba(239,68,68,0.4)]'}`}>
-                        {row.result === 'OK' ? <CheckCircle size={14} className="text-on-strong" /> : <XCircle size={14} className="text-on-strong" />}
+                      <div className={`absolute -left-[58px] top-0 w-8 h-8 rounded-full border-4 border-bg-dark flex items-center justify-center ${["OK", "PASS", "SUCCESS", "ALLOW"].includes(String(row.result || "").toUpperCase()) ? 'bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.4)]' : 'bg-red-500 shadow-[0_0_15px_rgba(239,68,68,0.4)]'}`}>
+                        {["OK", "PASS", "SUCCESS", "ALLOW"].includes(String(row.result || "").toUpperCase()) ? <CheckCircle size={14} className="text-on-strong" /> : <XCircle size={14} className="text-on-strong" />}
                       </div>
 
                       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 bg-bg-dark/20 p-6 rounded-3xl border border-border/40 hover:border-primary/20 transition-all group">

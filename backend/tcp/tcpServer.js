@@ -5,7 +5,7 @@ const Part = require("../models/Part");
 const OperationLog = require("../models/OperationLog");
 const ProductionLog = require("../models/ProductionLog");
 const { saveScan } = require("../services/scanService");
-const { executePlcHandshake } = require("../services/plcCommunicationService");
+const plcHandshakeEngine = require("../services/plcHandshakeEngine");
 const {
   readModbusRegisters,
   readSlmpRegisters,
@@ -19,15 +19,19 @@ const { packPart, createSessionIfMissing } = require("../services/packingService
 const { tryAcquireMachineLock, clearMachineLock } = require("../services/machineLockService");
 const {
   getStationFeatureConfig,
-  isPlcConfirmationEnabled,
   normalizePlcPartCount,
 } = require("../services/stationFeatureService");
 const { isMachineBypassEnabled } = require("../services/machineBypassService");
 const { normalizeIp, sameIp } = require("../utils/networkAddress");
+const { finalizeCycleAfterPlc } = require("../services/cycleFinalizationService");
+const { TIMELINE_EVENTS, recordTimelineEvent } = require("../services/operationTimelineService");
 
 const tcpPort = Number(process.env.TCP_PORT || 5000);
 const SOCKET_CHUNK_FLUSH_MS = Math.max(Number(process.env.SCANNER_BUFFER_FLUSH_MS || 35), 10);
 const SOCKET_BUFFER_MAX_CHARS = Math.max(Number(process.env.SCANNER_BUFFER_MAX_CHARS || 8192), 1024);
+
+const activeSockets = new Set();
+const server = net.createServer();
 
 function normalizeStation(value) {
   return String(value || "")
@@ -401,6 +405,29 @@ async function getActiveStationSequence() {
   return uniqueStages(machines.map((machine) => getMachineOperationStage(machine)));
 }
 
+async function safeRecordTimeline({
+  operationId,
+  partId,
+  machineId,
+  stationNo,
+  eventType,
+  eventData = {},
+}) {
+  if (!operationId || !eventType) return;
+  try {
+    await recordTimelineEvent({
+      operationId,
+      partId: partId || null,
+      machineId: machineId || null,
+      stationNo: stationNo || null,
+      eventType,
+      eventData,
+    });
+  } catch (_error) {
+    // timeline persistence is best-effort in live scanner flow
+  }
+}
+
 async function markStart(operationLogId, machineId) {
   const opLog = await OperationLog.findByPk(operationLogId);
   if (!opLog) {
@@ -528,19 +555,31 @@ async function getPendingStationOperations({ machineId, stationNo }) {
 }
 
 async function startPlcFlow({ operationLogId, partId, stationNo, machine, releaseLock = true }) {
-  const plcIp = machine.plc_ip || machine.machine_ip;
-  const plcPort = machine.plc_port || machine.machine_port;
-
+  let plcCycleCompleted = false;
   try {
-    await executePlcHandshake({
-      ip: plcIp,
-      port: plcPort,
+    await safeRecordTimeline({
+      operationId: operationLogId,
+      partId,
+      machineId: machine.id,
+      stationNo,
+      eventType: TIMELINE_EVENTS.START_SENT,
+      eventData: { source: "tcpServer.startPlcFlow" },
+    });
+
+    await plcHandshakeEngine.executeCycle({
+      machine,
       partId,
       stationNo,
-      machineId: machine.id,
-      machine,
-      onAckStart: async () => {
+      operationLogId,
+      onStarted: async () => {
         await markStart(operationLogId, machine.id);
+        await safeRecordTimeline({
+          operationId: operationLogId,
+          partId,
+          machineId: machine.id,
+          stationNo,
+          eventType: TIMELINE_EVENTS.RUNNING,
+        });
         emitRealtime("operator_popup", {
           type: "INFO",
           partId,
@@ -553,8 +592,16 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, releas
           message: "PLC start acknowledged",
         });
       },
-      onAckEndOk: async () => {
+      onEndedOk: async () => {
         await markEndOk({ operationLogId, partId, stationNo, machineId: machine.id });
+        plcCycleCompleted = true;
+        await safeRecordTimeline({
+          operationId: operationLogId,
+          partId,
+          machineId: machine.id,
+          stationNo,
+          eventType: TIMELINE_EVENTS.COMPLETED_OK,
+        });
         emitRealtime("operator_popup", {
           type: "SUCCESS",
           partId,
@@ -568,8 +615,16 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, releas
         });
         emitRealtime("dashboard_refresh", { reason: "PLC_END_OK" });
       },
-      onAckEndNg: async () => {
+      onEndedNg: async () => {
         await markEndNg({ operationLogId, partId, stationNo, machineId: machine.id, reason: "PLC_END_NG" });
+        plcCycleCompleted = true;
+        await safeRecordTimeline({
+          operationId: operationLogId,
+          partId,
+          machineId: machine.id,
+          stationNo,
+          eventType: TIMELINE_EVENTS.COMPLETED_NG,
+        });
         emitRealtime("operator_popup", {
           type: "ERROR",
           partId,
@@ -583,12 +638,22 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, releas
         });
         emitRealtime("dashboard_refresh", { reason: "PLC_END_NG" });
       },
-      onFailure: async (error) => {
+      onError: async (error) => {
         await markCommunicationError({
           operationLogId,
           partId,
           stationNo,
           reason: `PLC_TIMEOUT_${String(error.message || "").slice(0, 120)}`,
+        });
+        await safeRecordTimeline({
+          operationId: operationLogId,
+          partId,
+          machineId: machine.id,
+          stationNo,
+          eventType: String(error?.message || "").toUpperCase().includes("TIMEOUT")
+            ? TIMELINE_EVENTS.PLC_TIMEOUT
+            : TIMELINE_EVENTS.PLC_ERROR,
+          eventData: { error: String(error?.message || "PLC communication failure") },
         });
         emitRealtime("operator_popup", {
           type: "WARNING",
@@ -606,7 +671,26 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, releas
     });
   } finally {
     if (releaseLock) {
-      await clearMachineLock(machine.id);
+      if (plcCycleCompleted) {
+        const finalize = await finalizeCycleAfterPlc({ machine });
+        if (!finalize.success) {
+          emitRealtime("operator_popup", {
+            type: "WARNING",
+            partId,
+            stationNo,
+            machineId: machine.id,
+            machineName: machine.machine_name,
+            status: "RECOVERING",
+            plcStatus: "RECOVERING",
+            qrResult: "PASS",
+            reason: finalize.reason || "RESET_VALIDATION_FAILED",
+            message: "Cycle ended but reset validation failed. Manual recovery may be required.",
+          });
+        }
+      } else {
+        await clearMachineLock(machine.id);
+        await plcHandshakeEngine.markIdle(machine.id);
+      }
     }
   }
 }
@@ -630,7 +714,21 @@ async function startPlcBatchFlow({ batchItems, stationNo, machine }) {
       }
     }
   } finally {
-    await clearMachineLock(machine.id);
+    const finalize = await finalizeCycleAfterPlc({ machine });
+    if (!finalize.success) {
+      emitRealtime("operator_popup", {
+        type: "WARNING",
+        partId: batchItems[batchItems.length - 1]?.partId || null,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "RECOVERING",
+        plcStatus: "RECOVERING",
+        qrResult: "PASS",
+        reason: finalize.reason || "RESET_VALIDATION_FAILED",
+        message: "Batch ended but reset validation failed. Manual recovery may be required.",
+      });
+    }
   }
 }
 
@@ -639,47 +737,17 @@ async function handleStationPlcFlow({
   machine,
   stationNo,
   partId,
-  plcConfirmationRequired,
   requiredPlcPartCount,
 }) {
-  if (scanResult.decision !== "ALLOW" || !scanResult.operationLogId) {
-    return;
+  const isValid = scanResult.decision === "ALLOW" || scanResult.valid === true;
+  if (!isValid) {
+    // Section 1, 2 & 3: Signal Interlock to PLC and transition FSM, but KEEP scanner socket open.
+    await plcHandshakeEngine.signalInterlock(machine.id, scanResult.reason || "VALIDATION_FAILED");
+    console.warn(`[PLC:BLOCK_SENT] machineId=${machine.id} reason=${scanResult.reason}`);
+    return; // Do NOT disconnect scanner; do NOT proceed with machine cycle
   }
 
-  if (!plcConfirmationRequired) {
-    const lock = await tryAcquireMachineLock({
-      machineId: machine.id,
-      partId,
-      stationNo,
-    });
-    if (!lock.acquired) {
-      await rollbackPendingOperation({
-        partId,
-        operationLogId: scanResult.operationLogId,
-      });
-      scanResult.decision = "BLOCK";
-      scanResult.reason = "MACHINE_RUNNING";
-      scanResult.message = lock.runningPartId
-        ? `Machine busy. Current part ${lock.runningPartId} is in operation.`
-        : "Machine busy with another cycle. Retry after current operation completes.";
-      scanResult.operationLogId = null;
-      scanResult.currentStatus = "IN_PROGRESS";
-      return;
-    }
-
-    await markEndOk({
-      operationLogId: scanResult.operationLogId,
-      partId,
-      stationNo,
-      machineId: machine.id,
-    });
-    await clearMachineLock(machine.id);
-    scanResult.plcHandshake = "SKIPPED";
-    scanResult.operationStatus = "ENDED_OK";
-    scanResult.message = "QR verified. PLC confirmation skipped as per station settings. Marked OK.";
-    emitRealtime("dashboard_refresh", { reason: "PLC_CONFIRMATION_SKIPPED" });
-    return;
-  }
+  // Direct mode: No WAITING_PLC_END block anymore
 
   if (requiredPlcPartCount <= 1) {
     const lock = await tryAcquireMachineLock({
@@ -760,8 +828,32 @@ async function handleStationPlcFlow({
   scanResult.batchPartIds = batchRows.map((row) => row.part_id);
 }
 
-const server = net.createServer((socket) => {
-  const scannerIp = normalizeIp(socket.remoteAddress);
+server.on("connection", (socket) => {
+  const scannerIp = normalizeIp(socket.remoteAddress || "");
+  activeSockets.add(socket);
+  
+  socket.on("close", (hadError) => {
+    activeSockets.delete(socket);
+    if (!disconnectedHandled) {
+      disconnectedHandled = true;
+      scannerService.markScannerDisconnected({ scannerIp });
+    }
+    console.log(`Scanner Disconnected: ${scannerIp} (hadError: ${hadError})`);
+  });
+  
+  socket.on("error", (error) => {
+    activeSockets.delete(socket);
+    console.warn(`[TCP:SCANNER_SOCKET_ERROR] ${scannerIp}:`, error.message);
+  });
+
+  socket.setKeepAlive(true, 10000); // 10s keep-alive probes for persistent industrial sockets
+  socket.setTimeout(86400000); // 24 hours inactivity timeout
+  
+  socket.on("timeout", () => {
+    // Industrial Rule: Do NOT disconnect scanners during idle periods
+    console.warn(`[TCP:SCANNER_IDLE] ${scannerIp} - Idle for extended period. Maintaining connection.`);
+  });
+
   let activeScanner = null;
   let activeMachine = null;
   let inboundBuffer = "";
@@ -1021,6 +1113,31 @@ const server = net.createServer((socket) => {
           : finalResult,
         qualityPayload,
       });
+      if (scanResult?.decision === "ALLOW" && scanResult?.operationLogId) {
+        await safeRecordTimeline({
+          operationId: scanResult.operationLogId,
+          partId,
+          machineId: machine.id,
+          stationNo,
+          eventType: TIMELINE_EVENTS.SCANNED,
+          eventData: {
+            scannerIp,
+            scannerName: scanner.scanner_name,
+            resultSource,
+          },
+        });
+        await safeRecordTimeline({
+          operationId: scanResult.operationLogId,
+          partId,
+          machineId: machine.id,
+          stationNo,
+          eventType: TIMELINE_EVENTS.VALIDATED,
+          eventData: {
+            stationFeatures,
+            spcMode: spcConfig.mode,
+          },
+        });
+      }
       const qualityAck = await sendQualityCheckAckToPlc(machine, spcConfig, finalResult).catch((error) => ({
         ok: false,
         error: error.message,
@@ -1035,41 +1152,43 @@ const server = net.createServer((socket) => {
         );
       }
       const machineBypassEnabled = isMachineBypassEnabled(machine.id);
-      const plcConfirmationRequired = machineBypassEnabled
-        ? false
-        : await isPlcConfirmationEnabled(stationNo);
-      const requiredPlcPartCount = plcConfirmationRequired
-        ? normalizePlcPartCount(stationFeatures.plcPartCount)
-        : 1;
+      const requiredPlcPartCount = normalizePlcPartCount(stationFeatures.plcPartCount || 1);
+      
+      console.log(`[TCP:PLC_HANDSHAKE_STARTING] partId=${partId} station=${stationNo}`);
 
       await handleStationPlcFlow({
         scanResult,
         machine,
         stationNo,
         partId,
-        plcConfirmationRequired,
         requiredPlcPartCount,
       });
       safeSocketWrite(`${scanResult.decision}\n`);
 
-      const operationStatus = scanResult.operationStatus || (scanResult.decision === "ALLOW" ? "PENDING" : "WAIT");
-      const popupType =
-        scanResult.decision === "ALLOW" && operationStatus === "ENDED_OK" ? "SUCCESS" : mapScanDecisionToPopupType(scanResult);
+      const operationStatus = scanResult.operationStatus || (scanResult.decision === "ALLOW" ? "PENDING" : "BLOCKED");
+      const isBlocked = scanResult.decision === "BLOCK";
+      
+      let popupType = mapScanDecisionToPopupType(scanResult);
+      let popupMessage = scanResult.message || scanResult.reason || "Scan processed";
+      
+      if (isBlocked) {
+        popupType = "ERROR"; // Must be ERROR to trigger frontend formatScanErrorMessage rules
+        popupMessage = scanResult.message || `BLOCKED - ${scanResult.reason || "Interlocked"}`;
+      }
+
       emitRealtime("operator_popup", {
         type: popupType,
-        message: scanResult.message || scanResult.reason || "Scan processed",
+        message: popupMessage,
         partId,
         stationNo,
         machineId: machine.id,
         machineName: machine.machine_name,
         scannerName: scanner.scanner_name,
         scannerIp,
-        status: operationStatus,
-        plcStatus: operationStatus,
-        qrResult: scanResult.decision === "ALLOW" || scanResult.reason === "MACHINE_RUNNING" ? "PASS" : "FAIL",
+        status: isBlocked ? "BLOCKED" : operationStatus,
+        plcStatus: isBlocked ? "BLOCKED" : operationStatus,
+        qrResult: scanResult.decision === "ALLOW" ? "PASS" : "FAIL",
         reason: scanResult.reason || null,
-        expectedStation: scanResult.expectedStation || null,
-        qrReason: scanResult.reason || null,
         timestamp: new Date().toISOString(),
       });
 
@@ -1077,8 +1196,25 @@ const server = net.createServer((socket) => {
         `Part: ${partId} | Station: ${stationNo} | Outcome: ${scanResult.decision} | Reason: ${scanResult.reason} | Status: ${scanResult.currentStatus}`
       );
     } catch (error) {
-      console.error("TCP scan handling failed:", error.message);
+      const errorMsg = error.message || "Unknown scan handling error";
+      console.error(`[TCP] Scan handling failed for ${scannerIp}:`, error);
+      
       safeSocketWrite("BLOCK\n");
+
+      // Point: Always show global popup even on system/validation errors
+      emitRealtime("operator_popup", {
+        type: "ERROR",
+        message: `System Error: ${errorMsg}`,
+        partId: String(inputChunk || "").trim().slice(0, 40),
+        stationNo: activeMachine ? getMachineOperationStage(activeMachine) : "UNKNOWN",
+        machineId: activeMachine?.id || null,
+        machineName: activeMachine?.machine_name || "Unknown Machine",
+        status: "SYSTEM_ERROR",
+        plcStatus: "SYSTEM_ERROR",
+        qrResult: "FAIL",
+        reason: "VALIDATION_ERROR",
+        timestamp: new Date().toISOString(),
+      });
     }
   };
 
@@ -1132,26 +1268,7 @@ const server = net.createServer((socket) => {
     }
   });
 
-  socket.on("error", (error) => {
-    if (error.code !== "ECONNRESET") {
-      console.error(`[TCP] Socket error for ${scannerIp}:`, error.message);
-    }
-    clearFlushTimer();
-    if (!disconnectedHandled) {
-      disconnectedHandled = true;
-      scannerService.markScannerDisconnected({ scannerIp });
-    }
-  });
-
   socket.on("end", () => {
-    clearFlushTimer();
-    if (!disconnectedHandled) {
-      disconnectedHandled = true;
-      scannerService.markScannerDisconnected({ scannerIp });
-    }
-  });
-
-  socket.on("close", () => {
     clearFlushTimer();
     if (!disconnectedHandled) {
       disconnectedHandled = true;
@@ -1170,6 +1287,28 @@ server.on("error", (error) => {
   console.error("[TCP] Server failed:", error.message);
 });
 
-server.listen(tcpPort, () => {
-  console.log(`TCP Server Running on Port ${tcpPort}`);
-});
+function startTcpServer() {
+  if (server.listening) return;
+  server.listen(tcpPort, () => {
+    console.log(`TCP Server Running on Port ${tcpPort}`);
+    console.log("[TCP:ACK_MODE_DISABLED]");
+    console.log("[TCP:HANDSHAKE_DIRECT_MODE]");
+  });
+}
+
+async function shutdownTcpServer() {
+  console.log("[TCP] Shutting down TCP scanner server...");
+  for (const socket of activeSockets) {
+    socket.destroy();
+  }
+  activeSockets.clear();
+  
+  if (server.listening) {
+    await new Promise((resolve) => server.close(() => resolve()));
+  }
+}
+
+module.exports = {
+  startTcpServer,
+  shutdownTcpServer
+};

@@ -7,6 +7,7 @@ const DEFAULT_ROLE_ACCESS_SETTINGS = {
   production: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN" },
   io_monitor: { admin: "VIEW_CONTROL", engineer: "VIEW_CONTROL", supervisor: "VIEW", operator: "VIEW" },
   part_journey: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW" },
+  process_flow: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW" },
   operator_view: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW" },
   packing: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW" },
   packing_management: { admin: "VIEW_EDIT", engineer: "VIEW_EDIT", supervisor: "VIEW", operator: "HIDDEN" },

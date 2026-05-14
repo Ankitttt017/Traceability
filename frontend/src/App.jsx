@@ -10,6 +10,7 @@ import Traceability from "./pages/Traceability";
 import Machine from "./pages/Machine";
 import UsersPage from "./pages/Users";
 import ComponentJourney from "./pages/ComponentJourney";
+import ProcessFlow from "./pages/ProcessFlow";
 import OperatorView from "./pages/OperatorView";
 import QrFormatRules from "./pages/QrFormatRules";
 import Scanners from "./pages/Scanners";
@@ -23,6 +24,7 @@ import PlcConfiguration from "./pages/PlcConfiguration";
 import IoMonitor from "./pages/IoMonitor";
 import ReportConfiguration from "./pages/ReportConfiguration";
 import OrganizationStub from "./pages/OrganizationStub";
+import ReportsPage from "./pages/Reports/ReportsPage";
 import { getUserRole, isAuthenticated } from "./utils/authStorage";
 import { APP_ROUTES } from "./constants/routes";
 import { canAccessModule, getRoleAccessSettings } from "./utils/roleAccess";
@@ -43,6 +45,7 @@ const MODULE_REDIRECT_ORDER = [
   { moduleKey: "production", path: APP_ROUTES.production },
   { moduleKey: "io_monitor", path: APP_ROUTES.ioMonitor },
   { moduleKey: "part_journey", path: APP_ROUTES.partJourney },
+  { moduleKey: "process_flow", path: APP_ROUTES.processFlow },
   { moduleKey: "parts", path: APP_ROUTES.parts },
   { moduleKey: "machines", path: APP_ROUTES.machineMaster },
   { moduleKey: "operations", path: APP_ROUTES.operations },
@@ -180,6 +183,14 @@ function App() {
                 </ModuleRoute>
               }
             />
+            <Route
+              path={APP_ROUTES.reports.slice(1)}
+              element={
+                <ModuleRoute moduleKey="dashboard">
+                  <ReportsPage />
+                </ModuleRoute>
+              }
+            />
             
             <Route
               path={APP_ROUTES.production.slice(1)}
@@ -260,6 +271,14 @@ function App() {
               element={
                 <ModuleRoute moduleKey="part_journey">
                   <ComponentJourney />
+                </ModuleRoute>
+              }
+            />
+            <Route
+              path={APP_ROUTES.processFlow.slice(1)}
+              element={
+                <ModuleRoute moduleKey="process_flow">
+                  <ProcessFlow />
                 </ModuleRoute>
               }
             />

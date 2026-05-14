@@ -125,7 +125,7 @@
   --color-border-muted: var(--app-border-muted);
   --color-border-strong: var(--app-border-strong);
   --color-on-strong: var(--app-on-strong);
-  --font-outfit: "Sora", "Outfit", system-ui, -apple-system, sans-serif;
+  --font-outfit: "Inter", "Sora", "Outfit", system-ui, sans-serif;
 }
 
 body {
@@ -137,12 +137,7 @@ body {
     radial-gradient(circle at 90% 90%, var(--app-grad-b), transparent 35%),
     linear-gradient(160deg, var(--app-bg-start) 0%, var(--app-bg-end) 100%);
   color: var(--app-text-main);
-  font-family:
-    "Sora",
-    "Outfit",
-    system-ui,
-    -apple-system,
-    sans-serif;
+  font-family: var(--font-outfit);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   transition:

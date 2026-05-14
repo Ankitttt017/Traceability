@@ -25,11 +25,13 @@ function normalizeInputMap(rawSettings = {}) {
       return acc;
     }
 
+    // Preserve everything in the config object
     acc[stationNo] = {
+      ...rawValue,
       qr: rawValue.qr !== false,
       operation: rawValue.operation !== false,
       rejectionBin: rawValue.rejectionBin !== false,
-      plcConfirmation: rawValue.plcConfirmation !== false,
+      qualityCheck: rawValue.qualityCheck === true,
       manualResult: rawValue.manualResult === true,
       plcPartCount: normalizePlcPartCount(rawValue.plcPartCount ?? rawValue.plc_part_count),
       finalPacking: rawValue.finalPacking === true,
@@ -44,11 +46,16 @@ function rowsToMap(rows = []) {
     if (!stationNo) {
       return acc;
     }
+
+    // Start with values from the config JSON column if available
+    const config = row.config && typeof row.config === "object" ? row.config : {};
+
     acc[stationNo] = {
+      ...config,
       qr: Boolean(row.qr_enabled),
       operation: Boolean(row.operation_enabled),
       rejectionBin: Boolean(row.rejection_bin_enabled),
-      plcConfirmation: row.plc_confirmation_enabled !== false,
+      qualityCheck: config.qualityCheck === true,
       manualResult: row.manual_result_enabled === true,
       plcPartCount: normalizePlcPartCount(row.plc_part_count),
       finalPacking: row.final_packing_enabled === true,
@@ -78,19 +85,24 @@ exports.saveSettings = async (req, res) => {
     }
 
     await Promise.all(
-      stations.map((stationNo) =>
-        StationFeatureSetting.upsert({
+      stations.map((stationNo) => {
+        const data = payload[stationNo];
+        
+        // Sanitize data to ensure only valid fields are passed to Sequelize
+        const updateData = {
           station_no: stationNo,
-          qr_enabled: payload[stationNo].qr,
-          operation_enabled: payload[stationNo].operation,
-          rejection_bin_enabled: payload[stationNo].rejectionBin,
-          plc_confirmation_enabled: payload[stationNo].plcConfirmation,
-          manual_result_enabled: payload[stationNo].manualResult === true,
-          plc_part_count: payload[stationNo].plcPartCount,
-          final_packing_enabled: payload[stationNo].finalPacking === true,
+          qr_enabled: Boolean(data.qr),
+          operation_enabled: Boolean(data.operation),
+          rejection_bin_enabled: Boolean(data.rejectionBin),
+          manual_result_enabled: data.manualResult === true,
+          plc_part_count: normalizePlcPartCount(data.plcPartCount ?? data.plc_part_count),
+          final_packing_enabled: data.finalPacking === true,
+          config: data, // JSON column handles the full object
           updated_by: req.user?.id || null,
-        })
-      )
+        };
+
+        return StationFeatureSetting.upsert(updateData);
+      })
     );
 
     const rows = await StationFeatureSetting.findAll({

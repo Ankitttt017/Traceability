@@ -6,7 +6,6 @@ import {
   ChevronLeft,
   ChevronDown,
   ChevronRight,
-  QrCode,
   UserCog,
   Wrench,
   Boxes,
@@ -21,7 +20,9 @@ import {
   Regex,
   Users,
   FileText,
-  X,
+  Route,
+  Zap,
+  BarChart3,
 } from "lucide-react";
 
 import { APP_ROUTES } from "../constants/routes";
@@ -32,7 +33,31 @@ import {
   getRoleAccessSettings,
   saveRoleAccessSettings,
 } from "../utils/roleAccess";
+import logo from "../assets/images/logo.jpg";
 
+
+const RicoIcon = () => (
+  <div className="flex flex-col items-center leading-none select-none">
+    <span
+      style={{
+        fontFamily:
+          "'Arial Black', 'Impact', 'Franklin Gothic Medium', sans-serif",
+        fontWeight: 900,
+        fontSize: "40px",
+        color: "#1a3a7c",
+        lineHeight: 1,
+        letterSpacing: "0.05em",
+      }}
+    >
+      R
+    </span>
+    
+  </div>
+);
+
+// ─────────────────────────────────────────────
+// Sidebar
+// ─────────────────────────────────────────────
 const Sidebar = ({ onClose }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [traceOpen, setTraceOpen] = useState(true);
@@ -45,60 +70,181 @@ const Sidebar = ({ onClose }) => {
   const location = useLocation();
   const userRole = getUserRole();
 
-  // Close mobile sidebar on route change
   useEffect(() => {
     if (onClose) onClose();
   }, [location.pathname]);
 
-  // ===============================
-  // 🔹 TRACEABILITY (WITH CONFIG)
-  // ===============================
+  // ── TRACEABILITY ──────────────────────────
   const traceabilityNavigation = useMemo(
     () => [
-      // Main
-      { name: "Dashboard", path: APP_ROUTES.dashboard, icon: LayoutDashboard, moduleKey: "dashboard" },
-      { name: "Operator View", path: APP_ROUTES.operatorView, icon: UserCog, moduleKey: "operator_view" },
-      { name: "I/O Monitor", path: APP_ROUTES.ioMonitor, icon: Activity, moduleKey: "io_monitor" },
-      { name: "Scanner Monitor", path: APP_ROUTES.scannerMonitor, icon: Wifi, moduleKey: "scanners" },
-      { name: "Part Journey", path: APP_ROUTES.partJourney, icon: Wrench, moduleKey: "part_journey" },
-      { name: "Production", path: APP_ROUTES.production, icon: Factory, moduleKey: "production" },
-      { name: "Packing", path: APP_ROUTES.packing, icon: Boxes, moduleKey: "packing" },
-
-      // Configuration (merged)
-      { name: "Role Access", path: APP_ROUTES.masterSettings, icon: SlidersHorizontal, moduleKey: "master_settings" },
-      { name: "Station Controls", path: APP_ROUTES.stationControls, icon: Settings2, moduleKey: "master_settings" },
-      { name: "Machine Manager", path: APP_ROUTES.machines, icon: Cpu, moduleKey: "machines" },
-
-      { name: "PLC Manager", path: APP_ROUTES.plcConfig, icon: Cpu, moduleKey: "plc_config" },
-      { name: "Scanner Manager", path: APP_ROUTES.scanners, icon: ScanLine, moduleKey: "scanners" },
-      { name: "Shift Manager", path: APP_ROUTES.shifts, icon: Clock3, moduleKey: "shifts" },
-      { name: "QR Manager", path: APP_ROUTES.qrRules, icon: Regex, moduleKey: "qr_rules" },
-      { name: "Report Config", path: APP_ROUTES.masterReports, icon: FileText, moduleKey: "master_settings" },
-      { name: "Packing Management", path: APP_ROUTES.packingManagement, icon: Boxes, moduleKey: "packing_management" },
-      { name: "User Management", path: APP_ROUTES.users, icon: Users, moduleKey: "users" },
+      {
+        name: "Dashboard",
+        path: APP_ROUTES.dashboard,
+        icon: LayoutDashboard,
+        moduleKey: "dashboard",
+      },
+      {
+        name: "Production Analytics",
+        path: APP_ROUTES.reports,
+        icon: BarChart3,
+        moduleKey: "dashboard",
+      },
+      {
+        name: "Operator View",
+        path: APP_ROUTES.operatorView,
+        icon: UserCog,
+        moduleKey: "operator_view",
+      },
+      {
+        name: "I/O Monitor",
+        path: APP_ROUTES.ioMonitor,
+        icon: Activity,
+        moduleKey: "io_monitor",
+      },
+      {
+        name: "Scanner Monitor",
+        path: APP_ROUTES.scannerMonitor,
+        icon: Wifi,
+        moduleKey: "scanners",
+      },
+      {
+        name: "Part Journey",
+        path: APP_ROUTES.partJourney,
+        icon: Wrench,
+        moduleKey: "part_journey",
+      },
+      {
+        name: "Process Flow",
+        path: APP_ROUTES.processFlow,
+        icon: Route,
+        moduleKey: "process_flow",
+      },
+      {
+        name: "Production",
+        path: APP_ROUTES.production,
+        icon: Factory,
+        moduleKey: "production",
+      },
+      {
+        name: "Packing",
+        path: APP_ROUTES.packing,
+        icon: Boxes,
+        moduleKey: "packing",
+      },
+      {
+        name: "Role Access",
+        path: APP_ROUTES.masterSettings,
+        icon: SlidersHorizontal,
+        moduleKey: "master_settings",
+      },
+      {
+        name: "Station Controls",
+        path: APP_ROUTES.stationControls,
+        icon: Settings2,
+        moduleKey: "master_settings",
+      },
+      {
+        name: "Machine Manager",
+        path: APP_ROUTES.machines,
+        icon: Cpu,
+        moduleKey: "machines",
+      },
+      {
+        name: "PLC Manager",
+        path: APP_ROUTES.plcConfig,
+        icon: Zap,
+        moduleKey: "plc_config",
+      },
+      {
+        name: "Scanner Manager",
+        path: APP_ROUTES.scanners,
+        icon: ScanLine,
+        moduleKey: "scanners",
+      },
+      {
+        name: "Shift Manager",
+        path: APP_ROUTES.shifts,
+        icon: Clock3,
+        moduleKey: "shifts",
+      },
+      {
+        name: "QR Manager",
+        path: APP_ROUTES.qrRules,
+        icon: Regex,
+        moduleKey: "qr_rules",
+      },
+      {
+        name: "Report Config",
+        path: APP_ROUTES.masterReports,
+        icon: FileText,
+        moduleKey: "master_settings",
+      },
+      {
+        name: "Packing Management",
+        path: APP_ROUTES.packingManagement,
+        icon: Boxes,
+        moduleKey: "packing_management",
+      },
+      {
+        name: "User Management",
+        path: APP_ROUTES.users,
+        icon: Users,
+        moduleKey: "users",
+      },
     ],
     []
   );
 
-  // ===============================
-  // 🔹 ORGANIZATION MASTER
-  // ===============================
+  // ── ORGANIZATION ──────────────────────────
   const organizationNavigation = useMemo(
     () => [
-      { name: "Part Master", path: APP_ROUTES.parts, icon: Package, moduleKey: "parts" },
-      { name: "Machine Master", path: APP_ROUTES.machineMaster, icon: Cpu, moduleKey: "machines" },
-      { name: "Operation Master", path: APP_ROUTES.operations, icon: Wrench, moduleKey: "operations" },
-      { name: "Line Master", path: APP_ROUTES.lines, icon: Activity, moduleKey: "lines" },
-      { name: "Plant Master", path: APP_ROUTES.plants, icon: Factory, moduleKey: "plants" },
-      { name: "Division Master", path: APP_ROUTES.divisions, icon: Boxes, moduleKey: "divisions" },
-      { name: "Die Master", path: APP_ROUTES.dies, icon: Settings2, moduleKey: "dies" },
+      {
+        name: "Part Master",
+        path: APP_ROUTES.parts,
+        icon: Package,
+        moduleKey: "parts",
+      },
+      {
+        name: "Machine Master",
+        path: APP_ROUTES.machineMaster,
+        icon: Cpu,
+        moduleKey: "machines",
+      },
+      {
+        name: "Operation Master",
+        path: APP_ROUTES.operations,
+        icon: Wrench,
+        moduleKey: "operations",
+      },
+      {
+        name: "Line Master",
+        path: APP_ROUTES.lines,
+        icon: Activity,
+        moduleKey: "lines",
+      },
+      {
+        name: "Plant Master",
+        path: APP_ROUTES.plants,
+        icon: Factory,
+        moduleKey: "plants",
+      },
+      {
+        name: "Division Master",
+        path: APP_ROUTES.divisions,
+        icon: Boxes,
+        moduleKey: "divisions",
+      },
+      {
+        name: "Die Master",
+        path: APP_ROUTES.dies,
+        icon: Settings2,
+        moduleKey: "dies",
+      },
     ],
     []
   );
 
-  // ===============================
-  // 🔹 ROLE FILTER
-  // ===============================
+  // ── ROLE FILTER ───────────────────────────
   const visibleTraceNavigation = useMemo(
     () =>
       traceabilityNavigation.filter((item) =>
@@ -115,9 +261,7 @@ const Sidebar = ({ onClose }) => {
     [organizationNavigation, roleAccessSettings, userRole]
   );
 
-  // ===============================
-  // 🔹 FETCH ROLE ACCESS
-  // ===============================
+  // ── FETCH ROLE ACCESS ─────────────────────
   useEffect(() => {
     let cancelled = false;
     roleAccessApi
@@ -127,15 +271,13 @@ const Sidebar = ({ onClose }) => {
         saveRoleAccessSettings(data);
         setRoleAccessSettings(getRoleAccessSettings());
       })
-      .catch(() => { });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // ===============================
-  // 🔹 COMMON RENDER
-  // ===============================
+  // ── NAV ITEM ──────────────────────────────
   const renderNavItem = (item, nested = false) => {
     const Icon = item.icon;
     return (
@@ -145,109 +287,168 @@ const Sidebar = ({ onClose }) => {
         end
         title={collapsed ? item.name : undefined}
         className={({ isActive }) =>
-          `flex items-center ${collapsed ? "justify-center" : "gap-3"} px-3 py-2.5 rounded-xl transition-all duration-200
-           ${nested && !collapsed ? "ml-3" : ""}
-           ${isActive
-            ? "bg-[#1a3263] text-[#e8e2db] font-semibold border border-transparent shadow-[0_2px_8px_rgba(26,50,99,0.3)]"
-            : "text-text-muted hover:bg-bg-hover/60 hover:text-text-main border border-transparent"
+          `group flex items-center
+          ${collapsed ? "justify-center px-2" : "gap-3 px-3"}
+          py-2 rounded-xl transition-all duration-200
+          ${nested && !collapsed ? "ml-3" : ""}
+          ${
+            isActive
+              ? "bg-[#1a3263] text-[#e8e2db] font-semibold shadow-md"
+              : "text-text-muted hover:bg-bg-hover/60 hover:text-text-main"
           }`
         }
       >
-        <Icon size={17} className="flex-shrink-0" />
-        {!collapsed && <span className="text-sm truncate">{item.name}</span>}
+        <Icon size={18} className="flex-shrink-0" />
+        {!collapsed && (
+          <span className="text-sm truncate">{item.name}</span>
+        )}
       </NavLink>
     );
   };
 
-  const sectionLabel = (label) =>
-    !collapsed && (
-      <p className="px-3 pt-4 pb-1.5 text-[10px] font-bold uppercase tracking-widest text-text-muted/60 select-none">
-        {label}
-      </p>
+  // ── SECTION TOGGLE BUTTON ─────────────────
+  const renderSectionToggle = (label, icon, isOpen, onToggle) => {
+    const Icon = icon;
+    return (
+      <button
+        onClick={onToggle}
+        className={`w-full flex items-center justify-between px-2 py-2 rounded-xl transition-all
+        ${
+          isOpen
+            ? "bg-bg-hover text-primary"
+            : "text-text-muted hover:bg-bg-hover/60"
+        }`}
+      >
+        <span
+          className={`flex items-center ${
+            collapsed ? "justify-center w-full" : "gap-3"
+          }`}
+        >
+          <Icon size={18} />
+          {!collapsed && <span className="text-sm">{label}</span>}
+        </span>
+        {!collapsed && (
+          <ChevronDown
+            size={14}
+            className={`transition-transform ${isOpen ? "rotate-180" : ""}`}
+          />
+        )}
+      </button>
     );
+  };
 
-  // ===============================
-  // 🔹 UI
-  // ===============================
+  // ─────────────────────────────────────────
   return (
     <aside
-      className={`${collapsed ? "w-[72px]" : "w-64"} h-screen flex flex-col
-      bg-bg-card/80 backdrop-blur-2xl border-r border-border/60
-      transition-all duration-300 overflow-hidden`}
+      className={`
+        ${collapsed ? "w-[60px]" : "w-[240px]"}
+        h-screen flex flex-col
+        fixed md:relative z-50
+        bg-bg-card/90 backdrop-blur-xl
+        border-r border-border/60
+        transition-all duration-300
+        overflow-hidden
+      `}
     >
-      {/* Header */}
-      <div className="h-16 flex items-center justify-between px-3 border-b border-border/60">
+      {/* ── HEADER ── */}
+      <div className="h-14 flex items-center justify-between px-3 border-b border-border/60">
+
         {!collapsed ? (
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 bg-primary/10 rounded-xl flex items-center justify-center border border-primary/20">
-              <QrCode className="text-primary" size={20} />
-            </div>
-            <span className="font-bold text-lg text-text-main">
-              Indus<span className="text-primary">Trace</span>
-            </span>
+          /* EXPANDED — real logo image, height-constrained, left-aligned */
+          <div className="flex items-center flex-1 min-w-0">
+            <img
+              src={logo}
+              alt="RICO"
+              draggable={false}
+              style={{
+                height: "30px",       /* fits comfortably in the 56px header */
+                width: "auto",
+                objectFit: "contain",
+                objectPosition: "left center",
+                display: "block",
+                userSelect: "none",
+              }}
+            />
           </div>
         ) : (
-          <QrCode />
+          /* COLLAPSED — R lettermark with red bar */
+          <div className="w-full flex justify-center">
+            <RicoIcon />
+          </div>
         )}
 
-        <button onClick={() => setCollapsed((p) => !p)}>
-          {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
-        </button>
+        {/* Collapse / expand button */}
+        {!collapsed ? (
+          <button
+            onClick={() => setCollapsed(true)}
+            className="p-1 rounded-lg hover:bg-bg-hover/60 flex-shrink-0 ml-1"
+            title="Collapse sidebar"
+          >
+            <ChevronLeft size={16} />
+          </button>
+        ) : (
+          <button
+            onClick={() => setCollapsed(false)}
+            className="absolute top-4 right-[-12px] bg-bg-card border border-border rounded-full p-1 shadow-md"
+            title="Expand sidebar"
+          >
+            <ChevronRight size={14} />
+          </button>
+        )}
       </div>
 
-      {/* NAV */}
-      <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-1">
-
-       
-        {/* ORGANIZATION */}
-        {sectionLabel("Organization")}
-        <button
-          onClick={() => setOrgOpen((p) => !p)}
-          className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl"
-        >
-          <span className="flex items-center gap-3">
-            <SlidersHorizontal size={17} />
-            {!collapsed && <span className="text-sm">Organization Master</span>}
-          </span>
-          {!collapsed && (
-            <ChevronDown size={14} className={orgOpen ? "rotate-180" : ""} />
-          )}
-        </button>
-
-        {!collapsed && orgOpen && (
+      {/* ── NAVIGATION ── */}
+      <nav className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
+        {/* Organization */}
+        {renderSectionToggle(
+          "Organization",
+          SlidersHorizontal,
+          orgOpen,
+          () => setOrgOpen((p) => !p)
+        )}
+        {(orgOpen || collapsed) && (
           <div className="space-y-0.5">
-            {visibleOrgNavigation.map((item) => renderNavItem(item, true))}
+            {visibleOrgNavigation.map((item) =>
+              renderNavItem(item, !collapsed)
+            )}
           </div>
         )}
 
-
-         {/* TRACEABILITY */}
-        {sectionLabel("Main")}
-        <button
-          onClick={() => setTraceOpen((p) => !p)}
-          className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl"
-        >
-          <span className="flex items-center gap-3">
-            <Factory size={17} />
-            {!collapsed && <span className="text-sm">Traceability</span>}
-          </span>
-          {!collapsed && (
-            <ChevronDown size={14} className={traceOpen ? "rotate-180" : ""} />
-          )}
-        </button>
-
-        {!collapsed && traceOpen && (
+        {/* Traceability */}
+        {renderSectionToggle(
+          "Traceability",
+          Factory,
+          traceOpen,
+          () => setTraceOpen((p) => !p)
+        )}
+        {(traceOpen || collapsed) && (
           <div className="space-y-0.5">
-            {visibleTraceNavigation.map((item) => renderNavItem(item, true))}
+            {visibleTraceNavigation.map((item) =>
+              renderNavItem(item, !collapsed)
+            )}
           </div>
         )}
-
       </nav>
 
-      {/* Footer */}
+      {/* ── FOOTER ── */}
       {!collapsed && (
-        <div className="px-2 py-2 border-t border-border/60 text-center text-[10px] text-text-muted/60">
-          IndusTrace v2.0
+        <div className="px-3 py-2 border-t border-border/60 flex items-center gap-2">
+          {/* Faded logo repeat */}
+          <img
+            src={logo}
+            alt="RICO"
+            draggable={false}
+            style={{
+              height: "13px",
+              width: "auto",
+              objectFit: "contain",
+              opacity: 0.45,
+              userSelect: "none",
+            }}
+          />
+          <span className="text-[10px] text-text-muted/60">
+            Traceability v2.0
+          </span>
         </div>
       )}
     </aside>

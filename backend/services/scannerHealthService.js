@@ -70,7 +70,10 @@ function getScannerHealthSnapshot({ machineId, scannerIp } = {}) {
     return toSnapshot(scannerStateMap.get(normalizeIp(scannerIp)));
   }
 
-  const all = Array.from(scannerStateMap.values()).map((entry) => toSnapshot(entry));
+  const all = Array.from(scannerStateMap.values())
+    .map((entry) => toSnapshot(entry))
+    .sort((a, b) => (b.ageMs === a.ageMs ? 0 : a.ageMs - b.ageMs)); // Smallest ageMs (most recent) first
+
   if (!machineId) {
     return all;
   }

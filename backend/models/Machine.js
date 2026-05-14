@@ -34,7 +34,6 @@ const Machine = sequelize.define("Machine", {
   qr_scanner_ip: {
     type: DataTypes.STRING,
     allowNull: true,
-    unique: true,
   },
   plc_ip: {
     type: DataTypes.STRING,
@@ -129,6 +128,10 @@ const Machine = sequelize.define("Machine", {
     allowNull: true,
     defaultValue: 2,
   },
+  plc_block_register: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
   plc_heartbeat_register: {
     type: DataTypes.INTEGER,
     allowNull: true,
@@ -142,10 +145,16 @@ const Machine = sequelize.define("Machine", {
     type: DataTypes.INTEGER,
     allowNull: false,
     defaultValue: 0,
-    validate: {
-      min: 0,
-      max: 1000000,
-    },
+  },
+  cycle_time: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: 0,
+  },
+  loading_time: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: 0,
   },
   status: {
     type: DataTypes.ENUM("ACTIVE", "INACTIVE"),
@@ -171,6 +180,113 @@ const Machine = sequelize.define("Machine", {
     type: DataTypes.DATE,
     allowNull: true,
   },
+  // Hardening Fields
+  routing_strategy: {
+    type: DataTypes.ENUM("LEAST_BUSY", "ROUND_ROBIN", "PRIORITY_ORDER", "FIRST_AVAILABLE", "MANUAL_SELECTION"),
+    defaultValue: "FIRST_AVAILABLE",
+  },
+  capabilities: {
+    type: DataTypes.TEXT, // Store as JSON or comma-separated
+    allowNull: true,
+  },
+  config_version: {
+    type: DataTypes.INTEGER,
+    defaultValue: 1,
+  },
+  stagger_delay_ms: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
+  },
+  debounce_polls: {
+    type: DataTypes.INTEGER,
+    defaultValue: 2,
+  },
+  start_hold_ms: {
+    type: DataTypes.INTEGER,
+    defaultValue: 500,
+  },
+  reset_hold_ms: {
+    type: DataTypes.INTEGER,
+    defaultValue: 1000,
+  },
+  block_hold_ms: {
+    type: DataTypes.INTEGER,
+    defaultValue: 500,
+  },
+  ack_hold_ms: {
+    type: DataTypes.INTEGER,
+    defaultValue: 200,
+  },
+  polling_interval_ms: {
+    type: DataTypes.INTEGER,
+    defaultValue: 300,
+  },
+  scan_cycle_timing: {
+    type: DataTypes.STRING,
+    defaultValue: "STANDARD", // FAST, SLOW, NOISY
+  },
+  plc_running_register: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  plc_running_value: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: 1,
+  },
+  plc_end_ok_register: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  plc_end_ng_register: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  plc_bypass_register: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  plc_bypass_value: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: 1,
+  },
+  signal_hold_ms: {
+    type: DataTypes.INTEGER,
+    defaultValue: 700,
+  },
+  reconnect_interval_ms: {
+    type: DataTypes.INTEGER,
+    defaultValue: 3000,
+  },
+  retry_count: {
+    type: DataTypes.INTEGER,
+    defaultValue: 3,
+  },
+  running_timeout_ms: {
+    type: DataTypes.INTEGER,
+    defaultValue: 30000,
+  },
+  cycle_timeout_ms: {
+    type: DataTypes.INTEGER,
+    defaultValue: 60000,
+  },
+  bypass_enabled: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+  },
+  interlock_enable: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: true,
+  },
+  duplicate_behavior: {
+    type: DataTypes.ENUM("BLOCK", "WARNING", "ALLOW"),
+    defaultValue: "BLOCK",
+  },
+  scanner_validation_mode: {
+    type: DataTypes.ENUM("STRICT", "LAX"),
+    defaultValue: "STRICT",
+  }
 });
 
 module.exports = Machine;

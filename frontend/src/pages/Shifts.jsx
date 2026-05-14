@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Clock3, Plus, Save, Trash2, Pencil, X, RefreshCw, CheckCircle2 } from "lucide-react";
+import { Clock3, Plus, Save, Trash2, Pencil, X, RefreshCw, CheckCircle2, Calendar, TrendingUp, Activity } from "lucide-react";
 import toast from "react-hot-toast";
 import { shiftApi } from "../api/services";
 import ConfirmModal from "../components/ConfirmModal";
@@ -7,10 +7,10 @@ import ConfirmModal from "../components/ConfirmModal";
 const EMPTY_FORM = { shiftName: "", shiftCode: "", startTime: "", endTime: "", isActive: true };
 
 const INPUT_CLS =
-  "w-full bg-bg-dark border border-border rounded-xl px-3 py-2.5 text-sm text-text-main focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30 transition-colors placeholder:text-text-muted/50";
+  "w-full bg-bg-dark border border-border rounded-lg px-3 py-2 text-sm text-text-main focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30 transition-colors placeholder:text-text-muted/50";
 
 const Label = ({ children, required }) => (
-  <label className="block text-xs font-semibold uppercase tracking-wide text-text-muted mb-1.5">
+  <label className="block text-[10px] font-black uppercase tracking-wider text-text-muted mb-1.5">
     {children} {required && <span className="text-primary">*</span>}
   </label>
 );
@@ -152,65 +152,91 @@ const Shifts = () => {
     let mins = endMins - startMins;
     if (mins < 0) mins += 1440;
     const h = Math.floor(mins / 60), m = mins % 60;
-    return `${h}h${m > 0 ? ` ${m}m` : ""}`;
+    return `${h}h ${m > 0 ? `${m}m` : ""}`;
   };
 
+  // Calculate stats
+  const activeShifts = shifts.filter(s => s.isActive).length;
+  const totalHours = shifts.reduce((total, shift) => {
+    const startMins = toMinutes(shift.startTime);
+    const endMins = toMinutes(shift.endTime);
+    if (startMins !== null && endMins !== null) {
+      let mins = endMins - startMins;
+      if (mins < 0) mins += 1440;
+      return total + mins;
+    }
+    return total;
+  }, 0);
+  const avgHoursPerShift = shifts.length > 0 ? (totalHours / shifts.length / 60).toFixed(1) : 0;
+
   return (
-    <div className="space-y-6 rise-in">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="p-3 rounded-2xl bg-primary/10 border border-primary/20">
-            <Clock3 className="text-primary" size={26} />
+    <div className="space-y-6 rise-in" style={{ fontFamily: "var(--font-outfit)" }}>
+      {/* Header matching Station Control */}
+      <div className="db-header-card mb-6">
+        <div className="db-header-gradient-bar" />
+        <div className="db-header-inner">
+          <div className="db-header-title-group">
+            <div className="db-header-icon-box">
+              <Clock3 size={22} />
+            </div>
+            <div>
+              <h1 className="db-header-title">Shift Manager</h1>
+              <p className="db-header-subtitle">Define production shifts for reporting and time-based filtering</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-2xl font-bold text-text-main">Shift Manager</h1>
-            <p className="text-text-muted text-sm">Define production shifts for reporting and time-based filtering</p>
+          <div className="flex items-center gap-3">
+            <button onClick={() => loadShifts()} disabled={refreshing} className="db-action-btn">
+              <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} /> Refresh
+            </button>
+            <button onClick={() => { setShowForm((p) => !p); if (editingId) resetForm(); }} className="db-action-btn">
+              {showForm && !editingId ? <X size={14} /> : <Plus size={14} />}
+              {showForm && !editingId ? "Cancel" : "Add Shift"}
+            </button>
           </div>
-        </div>
-        <div className="flex gap-2">
-          <button onClick={() => loadShifts()} disabled={refreshing} className="p-2.5 rounded-xl border border-border bg-bg-card text-text-muted hover:border-primary/50 transition-colors">
-            <RefreshCw size={15} className={refreshing ? "animate-spin" : ""} />
-          </button>
-          <button onClick={() => { setShowForm((p) => !p); if (editingId) resetForm(); }}
-            className="px-4 py-2.5 rounded-xl bg-primary text-on-strong font-semibold text-sm inline-flex items-center gap-2 hover:brightness-110 transition-all">
-            {showForm && !editingId ? <X size={15} /> : <Plus size={15} />}
-            {showForm && !editingId ? "Cancel" : "Add Shift"}
-          </button>
         </div>
       </div>
 
-      {/* Shift KPI Cards */}
-      {shifts.length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {shifts.map((shift, i) => (
-            <div key={shift.id} className={`industrial-card p-4 border ${SHIFT_COLORS[i % SHIFT_COLORS.length].split(" ").pop()}`}>
-              <div className="flex items-center justify-between mb-2">
-                <span className={`text-xs font-bold px-2.5 py-1 rounded-lg border ${SHIFT_COLORS[i % SHIFT_COLORS.length]}`}>
-                  {shift.shiftCode}
-                </span>
-                {shift.isActive && <CheckCircle2 size={14} className="text-accent" />}
-              </div>
-              <p className="font-bold text-text-main mt-2">{shift.shiftName}</p>
-              <p className="text-sm text-text-muted font-mono mt-1">
-                {formatHHmm(shift.startTime)} {" -> "} {formatHHmm(shift.endTime)}
-              </p>
-              <p className="text-xs text-text-muted mt-1">
-                Duration: <span className="text-text-main font-semibold">{formatDuration(shift.startTime, shift.endTime)}</span>
-              </p>
+      {/* Compact Stats Cards */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="industrial-card p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">Total Shifts</p>
+              <p className="text-2xl font-black text-primary font-mono">{shifts.length}</p>
             </div>
-          ))}
+            <Calendar size={28} className="text-primary/30" />
+          </div>
         </div>
-      )}
+        
+        <div className="industrial-card p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">Active Shifts</p>
+              <p className="text-2xl font-black text-accent font-mono">{activeShifts}</p>
+            </div>
+            <Activity size={28} className="text-accent/30" />
+          </div>
+        </div>
+        
+        <div className="industrial-card p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">Avg Duration</p>
+              <p className="text-2xl font-black text-primary font-mono">{avgHoursPerShift}h</p>
+            </div>
+            <TrendingUp size={28} className="text-primary/30" />
+          </div>
+        </div>
+      </div>
 
       {/* Form */}
       {showForm && (
-        <div className="industrial-card p-6">
-          <h2 className="font-bold text-text-main mb-5 flex items-center gap-2">
-            {editingId ? <><Pencil size={16} className="text-primary" /> Edit Shift</> : <><Plus size={16} className="text-primary" /> New Shift</>}
+        <div className="industrial-card p-5">
+          <h2 className="font-bold text-text-main mb-4 flex items-center gap-2 text-sm">
+            {editingId ? <><Pencil size={14} className="text-primary" /> Edit Shift</> : <><Plus size={14} className="text-primary" /> New Shift</>}
           </h2>
-          <form onSubmit={handleSubmit} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            <div className="sm:col-span-2 lg:col-span-1">
+          <form onSubmit={handleSubmit} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div>
               <Label required>Shift Name</Label>
               <input value={form.shiftName} onChange={set("shiftName")} required className={INPUT_CLS} placeholder="e.g. Morning Shift" />
             </div>
@@ -233,10 +259,10 @@ const Shifts = () => {
                 <option value="0">Inactive</option>
               </select>
             </div>
-            <div className="sm:col-span-2 lg:col-span-1 flex items-end gap-2">
-              <button type="button" onClick={resetForm} className="flex-1 px-4 py-2.5 border border-border rounded-xl text-text-muted hover:bg-bg-dark text-sm transition-colors">Cancel</button>
-              <button type="submit" disabled={loading} className="flex-1 px-4 py-2.5 bg-primary text-on-strong font-semibold rounded-xl text-sm inline-flex items-center justify-center gap-2 hover:brightness-110 disabled:opacity-50">
-                {loading ? <RefreshCw size={14} className="animate-spin" /> : editingId ? <Save size={14} /> : <Plus size={14} />}
+            <div className="flex items-end gap-2">
+              <button type="button" onClick={resetForm} className="flex-1 px-4 py-2 border border-border rounded-lg text-text-muted hover:bg-bg-dark text-xs font-bold uppercase tracking-wider transition-colors">Cancel</button>
+              <button type="submit" disabled={loading} className="flex-1 px-4 py-2 bg-primary text-on-strong font-bold rounded-lg text-xs uppercase tracking-wider inline-flex items-center justify-center gap-2 hover:brightness-110 disabled:opacity-50">
+                {loading ? <RefreshCw size={12} className="animate-spin" /> : editingId ? <Save size={12} /> : <Plus size={12} />}
                 {loading ? "Saving..." : editingId ? "Update" : "Create"}
               </button>
             </div>
@@ -244,48 +270,79 @@ const Shifts = () => {
         </div>
       )}
 
-      {/* Table */}
-      <div className="industrial-card overflow-hidden">
-        <div className="px-6 py-4 border-b border-border flex items-center justify-between">
-          <h2 className="font-bold text-text-main">All Shifts</h2>
-          <span className="text-xs text-text-muted bg-bg-dark px-3 py-1 rounded-lg border border-border">{shifts.length} shift{shifts.length !== 1 ? "s" : ""}</span>
+      {/* Shifts Table */}
+      <div className="industrial-card p-0 overflow-hidden">
+        <div className="px-5 py-3 border-b border-border bg-bg-dark/40 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Clock3 size={14} className="text-primary" />
+            <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">Shift Directory</h2>
+          </div>
+          <span className="text-[9px] font-black text-text-muted uppercase tracking-widest bg-bg-dark px-2 py-1 rounded border border-border">
+            {shifts.length} Shift{shifts.length !== 1 ? "s" : ""}
+          </span>
         </div>
+        
         <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-bg-dark/60 border-b border-border">
+          <table className="w-full text-sm">
+            <thead className="bg-bg-dark/60 text-[9px] font-black uppercase tracking-wider text-text-muted border-b border-border">
               <tr>
-                {["Shift Name", "Code", "Start", "End", "Duration", "Status", "Actions"].map((h) => (
-                  <th key={h} className={`px-5 py-3 text-xs font-bold uppercase tracking-wide text-text-muted ${h === "Actions" ? "text-right" : "text-left"}`}>{h}</th>
-                ))}
+                <th className="px-4 py-3 text-left">Shift Name</th>
+                <th className="px-4 py-3 text-left">Code</th>
+                <th className="px-4 py-3 text-left">Start</th>
+                <th className="px-4 py-3 text-left">End</th>
+                <th className="px-4 py-3 text-left">Duration</th>
+                <th className="px-4 py-3 text-left">Status</th>
+                <th className="px-4 py-3 text-right">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-border">
+            <tbody className="divide-y divide-border/20">
               {shifts.map((shift, i) => (
                 <tr key={shift.id} className="hover:bg-bg-dark/30 transition-colors">
-                  <td className="px-5 py-4 font-medium text-text-main">{shift.shiftName}</td>
-                  <td className="px-5 py-4"><span className={`text-xs font-bold px-2.5 py-1 rounded-lg border ${SHIFT_COLORS[i % SHIFT_COLORS.length]}`}>{shift.shiftCode}</span></td>
-                  <td className="px-5 py-4 text-sm font-mono text-text-main">{formatHHmm(shift.startTime)}</td>
-                  <td className="px-5 py-4 text-sm font-mono text-text-main">{formatHHmm(shift.endTime)}</td>
-                  <td className="px-5 py-4 text-sm text-text-muted">{formatDuration(shift.startTime, shift.endTime)}</td>
-                  <td className="px-5 py-4">
-                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold ${shift.isActive ? "bg-accent/10 text-accent border border-accent/20" : "bg-bg-dark text-text-muted border border-border"}`}>
-                      {shift.isActive ? "Active" : "Inactive"}
+                  <td className="px-4 py-3 font-semibold text-text-main text-sm">{shift.shiftName}</td>
+                  <td className="px-4 py-3">
+                    <span className={`text-[9px] font-black px-2 py-0.5 rounded border ${SHIFT_COLORS[i % SHIFT_COLORS.length]}`}>
+                      {shift.shiftCode}
                     </span>
                   </td>
-                  <td className="px-5 py-4 text-right">
-                    <div className="inline-flex gap-2">
-                      <button onClick={() => handleEdit(shift)} className="p-2 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors" title="Edit"><Pencil size={14} /></button>
-                      <button onClick={() => setDeleteTarget(shift)} className="p-2 rounded-lg bg-danger/10 text-danger hover:bg-danger/20 transition-colors" title="Delete"><Trash2 size={14} /></button>
+                  <td className="px-4 py-3 font-mono text-text-main text-xs">{formatHHmm(shift.startTime)}</td>
+                  <td className="px-4 py-3 font-mono text-text-main text-xs">{formatHHmm(shift.endTime)}</td>
+                  <td className="px-4 py-3 text-text-muted text-xs font-semibold">{formatDuration(shift.startTime, shift.endTime)}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-1.5">
+                      <div className={`w-1.5 h-1.5 rounded-full ${shift.isActive ? 'bg-accent animate-pulse' : 'bg-text-muted/30'}`} />
+                      <span className={`text-[9px] font-black uppercase ${shift.isActive ? 'text-accent' : 'text-text-muted'}`}>
+                        {shift.isActive ? "Active" : "Inactive"}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <button 
+                        onClick={() => handleEdit(shift)} 
+                        className="p-1.5 text-text-muted hover:text-primary hover:bg-primary/10 rounded transition-all"
+                        title="Edit shift"
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <button 
+                        onClick={() => setDeleteTarget(shift)} 
+                        className="p-1.5 text-text-muted hover:text-danger hover:bg-danger/10 rounded transition-all"
+                        title="Delete shift"
+                      >
+                        <Trash2 size={13} />
+                      </button>
                     </div>
                   </td>
                 </tr>
               ))}
               {shifts.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-6 py-16 text-center">
-                    <Clock3 size={40} className="mx-auto opacity-20 mb-3" />
-                    <p className="text-text-muted text-sm">No shifts configured yet</p>
-                    <button onClick={() => setShowForm(true)} className="mt-3 text-sm text-primary hover:underline">+ Add your first shift</button>
+                  <td colSpan={7} className="px-4 py-16 text-center">
+                    <Clock3 size={32} className="mx-auto opacity-20 mb-3" />
+                    <p className="text-text-muted text-xs font-medium">No shifts configured</p>
+                    <button onClick={() => setShowForm(true)} className="mt-2 text-primary text-[10px] font-bold uppercase tracking-wider hover:underline">
+                      + Add your first shift
+                    </button>
                   </td>
                 </tr>
               )}
@@ -297,9 +354,11 @@ const Shifts = () => {
       <ConfirmModal
         isOpen={!!deleteTarget}
         title="Delete Shift"
-        message={`Are you sure you want to delete shift "${deleteTarget?.shiftName}" (${deleteTarget?.shiftCode})? All historical reports linked to this shift code will retain their data.`}
+        message={`Are you sure you want to delete shift "${deleteTarget?.shiftName}" (${deleteTarget?.shiftCode})?`}
         onConfirm={handleDeleteConfirm}
         onCancel={() => setDeleteTarget(null)}
+        confirmText="Delete Shift"
+        confirmStyle="danger"
       />
     </div>
   );

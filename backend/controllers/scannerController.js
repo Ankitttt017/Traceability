@@ -4,6 +4,7 @@ const Machine = require("../models/Machine");
 const { normalizeIp } = require("../utils/networkAddress");
 const scannerService = require("../services/scannerConnectionService");
 const { getScannerHealthSnapshot } = require("../services/scannerHealthService");
+const { emitRealtime } = require("../services/realtimeService");
 
 function toInt(value) {
   if (value === undefined || value === null || value === "") {
@@ -198,12 +199,15 @@ exports.createScanner = async (req, res) => {
       });
     }
 
+
+
     const machine = await Machine.findByPk(payload.mapped_machine_id);
     if (!machine) {
       return res.status(404).json({ error: "Mapped machine not found" });
     }
 
     const created = await Scanner.create(payload);
+    emitRealtime("dashboard_refresh", { reason: "SCANNER_CREATED", scannerId: created.id });
     res.status(201).json(await toResponse(created));
   } catch (error) {
     handleError(error, res);
@@ -230,6 +234,7 @@ exports.updateScanner = async (req, res) => {
     }
 
     await scanner.update(payload);
+    emitRealtime("dashboard_refresh", { reason: "SCANNER_UPDATED", scannerId: scanner.id });
     res.json(await toResponse(scanner));
   } catch (error) {
     handleError(error, res);
@@ -242,7 +247,9 @@ exports.deleteScanner = async (req, res) => {
     if (!scanner) {
       return res.status(404).json({ error: "Scanner not found" });
     }
+    const id = scanner.id;
     await scanner.destroy();
+    emitRealtime("dashboard_refresh", { reason: "SCANNER_DELETED", scannerId: id });
     res.status(204).send();
   } catch (error) {
     handleError(error, res);

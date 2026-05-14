@@ -22,11 +22,6 @@ const StationFeatureSetting = sequelize.define("StationFeatureSetting", {
     allowNull: false,
     defaultValue: true,
   },
-  plc_confirmation_enabled: {
-    type: DataTypes.BOOLEAN,
-    allowNull: false,
-    defaultValue: true,
-  },
   manual_result_enabled: {
     type: DataTypes.BOOLEAN,
     allowNull: false,
@@ -45,6 +40,10 @@ const StationFeatureSetting = sequelize.define("StationFeatureSetting", {
     type: DataTypes.BOOLEAN,
     allowNull: false,
     defaultValue: false,
+  },
+  config: {
+    type: DataTypes.JSON,
+    allowNull: true,
   },
   updated_by: {
     type: DataTypes.INTEGER,

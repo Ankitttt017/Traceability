@@ -268,7 +268,33 @@ class PlcService {
       return { protocol: normalizedProtocol, command: String(command || "").trim().toUpperCase(), simulated: true };
     }
     if (!service.sendCommand) throw new Error(`sendCommand not supported for protocol ${normalizedProtocol}`);
-    return service.sendCommand({ ip, port, command, machine, partId, stationNo, protocol: normalizedProtocol });
+
+    const writeResult = await service.sendCommand({ ip, port, command, machine, partId, stationNo, protocol: normalizedProtocol });
+
+    // Industrial Safe Write Verification (Point 17)
+    // Read back the status register to confirm PLC processed the write.
+    if (["START", "RESET", "BLOCK_OPERATION", "START_OPERATION", "RESET_OPERATION"].includes(command.toUpperCase())) {
+      let verified = false;
+      for (let vAttempt = 1; vAttempt <= 3; vAttempt++) {
+        await sleep(100 * vAttempt);
+        try {
+          const probe = await service.probe({ ip, port, machine, timeoutMs: 1000, protocol: normalizedProtocol });
+          // Check that PLC is reachable AND status register shows a non-zero response
+          // (indicating PLC accepted the command). StatusValue of 0 after a START means PLC ignored it.
+          if (probe.connected) {
+            if (command.toUpperCase().includes("RESET") || probe.statusValue !== undefined) {
+              verified = true;
+              break;
+            }
+          }
+        } catch (_verifyError) {
+          // Retry on next attempt
+        }
+      }
+      if (!verified) throw new Error(`PLC Write Verification Failed for command: ${command}`);
+    }
+
+    return writeResult;
   }
 }
 

@@ -26,6 +26,10 @@ const Part = sequelize.define("Part", {
     type: DataTypes.STRING,
     allowNull: true,
   },
+  last_validation_result: {
+    type: DataTypes.STRING, // WAITING, PASSED, FAILED, DUPLICATE, BLOCKED
+    allowNull: true,
+  },
   is_rework: {
     type: DataTypes.BOOLEAN,
     defaultValue: false,

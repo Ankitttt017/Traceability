@@ -6,6 +6,57 @@ const DEFAULT_CONNECT_TIMEOUT_MS = Number(process.env.PLC_CONNECT_TIMEOUT_MS || 
 const DEFAULT_START_ACK_TIMEOUT_MS = Number(process.env.PLC_START_ACK_TIMEOUT_MS || 3000);
 const DEFAULT_END_ACK_TIMEOUT_MS = Number(process.env.PLC_END_ACK_TIMEOUT_MS || 120000);
 const DEFAULT_MODBUS_POLL_INTERVAL_MS = Number(process.env.PLC_MODBUS_POLL_INTERVAL_MS || 150);
+const DEFAULT_SIGNAL_HOLD_MS = Math.max(Number(process.env.PLC_SIGNAL_HOLD_MS || 700), 100);
+const STRICT_START_ACK_REQUIRED = String(process.env.PLC_STRICT_START_ACK_REQUIRED || "true").trim().toLowerCase() !== "false";
+
+function resolveTimingConfig(machine = {}) {
+  let snapshot = {};
+  try {
+    snapshot = typeof machine?.plc_registers === "string" ? JSON.parse(machine.plc_registers) : machine?.plc_registers || {};
+  } catch (_error) {
+    snapshot = {};
+  }
+  return {
+    signalHoldMs: Math.max(Number(snapshot?.signalHoldMs || snapshot?.plcSignalHoldMs || DEFAULT_SIGNAL_HOLD_MS), 100),
+    pollIntervalMs: Math.max(Number(snapshot?.pollIntervalMs || snapshot?.plcPollIntervalMs || DEFAULT_MODBUS_POLL_INTERVAL_MS), 50),
+    startAckTimeoutMs: Math.max(Number(snapshot?.startAckTimeoutMs || machine?.plc_start_ack_timeout_ms || DEFAULT_START_ACK_TIMEOUT_MS), 300),
+    endAckTimeoutMs: Math.max(Number(snapshot?.endAckTimeoutMs || machine?.plc_end_ack_timeout_ms || DEFAULT_END_ACK_TIMEOUT_MS), 1000),
+  };
+}
+
+function parseMachineSnapshot(machine = {}) {
+  try {
+    return typeof machine?.plc_registers === "string" ? JSON.parse(machine.plc_registers) : machine?.plc_registers || {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+
+
+function resolveBinAckConfig(machine = {}) {
+  let signalMap = [];
+  try {
+    signalMap = typeof machine?.plc_signal_map === "string" ? JSON.parse(machine.plc_signal_map) : machine?.plc_signal_map || [];
+  } catch (e) { signalMap = []; }
+
+  if (!Array.isArray(signalMap)) signalMap = [];
+
+  const found = signalMap.find(row => {
+    const s = String(row.signal || row.label || "").toUpperCase();
+    return s.includes("BIN") && (s.includes("ACK") || s.includes("DEP") || s.includes("KEEP") || s.includes("PLACE"));
+  });
+
+  if (found && Number.isFinite(Number(found.register))) {
+    return {
+      enabled: true,
+      register: normalizeModbusRegisterAddress(found.register),
+      value: Number(found.value ?? 1),
+      label: found.signal || found.label || "BIN_ACK"
+    };
+  }
+  return { enabled: false };
+}
 
 function normalizeModbusRegisterAddress(register) {
   const n = Number(register);
@@ -55,13 +106,13 @@ function buildWriteMultipleRegistersFrame(transactionId, unitId, startRegister, 
   const frame = Buffer.alloc(6 + 1 + 1 + 2 + 2 + 1 + byteCount);
   let offset = 0;
   frame.writeUInt16BE(transactionId, offset); offset += 2;  // Transaction ID
-  frame.writeUInt16BE(0, offset);             offset += 2;  // Protocol ID
+  frame.writeUInt16BE(0, offset); offset += 2;  // Protocol ID
   frame.writeUInt16BE(7 + byteCount, offset); offset += 2;  // Length
-  frame.writeUInt8(unitId, offset);           offset += 1;  // Unit ID
-  frame.writeUInt8(0x10, offset);             offset += 1;  // FC16
+  frame.writeUInt8(unitId, offset); offset += 1;  // Unit ID
+  frame.writeUInt8(0x10, offset); offset += 1;  // FC16
   frame.writeUInt16BE(startRegister, offset); offset += 2;  // Start Address
-  frame.writeUInt16BE(regCount, offset);      offset += 2;  // Register Count
-  frame.writeUInt8(byteCount, offset);        offset += 1;  // Byte Count
+  frame.writeUInt16BE(regCount, offset); offset += 2;  // Register Count
+  frame.writeUInt8(byteCount, offset); offset += 1;  // Byte Count
   for (const val of values) {
     frame.writeUInt16BE(val & 0xffff, offset); offset += 2;
   }
@@ -149,6 +200,7 @@ async function sendAndReceivePacket(socket, frame, timeoutMs) {
 }
 
 async function handshake({ ip, port, partId, stationNo, machine }) {
+  const timing = resolveTimingConfig(machine);
   const unitId = Number(machine?.plc_unit_id || 1);
   const startRegister = normalizeModbusRegisterAddress(machine?.plc_start_register);
   const statusRegister = normalizeModbusRegisterAddress(machine?.plc_status_register);
@@ -165,15 +217,25 @@ async function handshake({ ip, port, partId, stationNo, machine }) {
       ? null
       : normalizeModbusRegisterAddress(machine.plc_reset_register);
   const startValue = Number(machine?.plc_start_value ?? 1);
-  const startedValue = Number(machine?.plc_started_value ?? 2);
-  const endOkValue = Number(machine?.plc_end_ok_value ?? 3);
-  const endNgValue = Number(machine?.plc_end_ng_value ?? 4);
+  const startedValue = Number(machine?.plc_started_value ?? 1); // RUNNING = 1
+  const endOkValue = Number(machine?.plc_end_ok_value ?? 2);    // END_OK = 2
+  const endNgValue = Number(machine?.plc_end_ng_value ?? 2);    // END_NG = 2
+  
+  // Resolve advanced register mappings with priority to top-level columns
+  const endOkRegister = machine?.plc_end_ok_register ? normalizeModbusRegisterAddress(machine.plc_end_ok_register) : statusRegister;
+  const endNgRegister = machine?.plc_end_ng_register ? normalizeModbusRegisterAddress(machine.plc_end_ng_register) : statusRegister;
+
+  console.log(`[PLC:CONFIG_LOADED] machineId=${machine.id} protocol=MODBUS_TCP`);
+  console.log(`[PLC:HANDSHAKE_MODE] ACK_DISABLED`);
+  console.log(`[PLC:SIGNALS_OK] START=${startRegister} RUNNING=${statusRegister} RESET=${resetRegister}`);
+  console.log(`[PLC:REGISTER_RESOLVE] start:${startRegister} status:${statusRegister} endOk:${endOkRegister} endNg:${endNgRegister}`);
 
   if (!Number.isFinite(startRegister) || !Number.isFinite(statusRegister)) {
     throw new Error("MODBUS registers missing (plc_start_register/plc_status_register)");
   }
 
   return withSocket({ ip, port, timeoutMs: DEFAULT_CONNECT_TIMEOUT_MS }, async (socket) => {
+    console.log(`[PLC:MAPPING] PROTOCOL=MODBUS_TCP START=${startRegister}:${startValue} RUNNING=${statusRegister} RESET=${resetRegister}`);
     let transactionId = 0;
     const nextTransactionId = () => {
       transactionId += 1;
@@ -198,11 +260,16 @@ async function handshake({ ip, port, partId, stationNo, machine }) {
     const waitForStatus = async (acceptedValues, timeoutMs) => {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
+        console.log("[PLC:DEBUG_STATUS]", {
+          protocol: "MODBUS_TCP",
+          address: statusRegister,
+          acceptedValues
+        });
         const status = await readRegister(statusRegister);
         if (acceptedValues.includes(status)) {
           return status;
         }
-        await sleep(DEFAULT_MODBUS_POLL_INTERVAL_MS);
+        await sleep(timing.pollIntervalMs);
       }
       throw new Error(`PLC Modbus status timeout (${acceptedValues.join(",")})`);
     };
@@ -212,14 +279,14 @@ async function handshake({ ip, port, partId, stationNo, machine }) {
       const startTime = Date.now();
       const hash32 = hashToRegisterValue(strValue);
       const [highWord, lowWord] = split32To16(hash32);
-      
+
       const frame = buildWriteMultipleRegistersFrame(nextTransactionId(), unitId, baseRegister, [highWord, lowWord]);
       const packet = await sendAndReceivePacket(socket, frame, DEFAULT_CONNECT_TIMEOUT_MS);
       parseModbusFC16WriteResponse(packet);
 
       const durationMs = Date.now() - startTime;
       console.log(
-        `[PLC:MODBUS] ${label} WRITE SUCCESS | hash32=${hash32} reg[${baseRegister}]=0x${highWord.toString(16).padStart(4,'0')} reg[${baseRegister+1}]=0x${lowWord.toString(16).padStart(4,'0')} | duration=${durationMs}ms`
+        `[PLC:MODBUS] ${label} WRITE SUCCESS | hash32=${hash32} (High: 0x${highWord.toString(16).padStart(4, '0')}, Low: 0x${lowWord.toString(16).padStart(4, '0')}) | duration=${durationMs}ms`
       );
 
       // Implementation DSC-5.1.2: Write Verification
@@ -243,30 +310,125 @@ async function handshake({ ip, port, partId, stationNo, machine }) {
         await writeHashRegisters(stationRegister, stationNo, "STATION_HASH");
       }
 
-      await writeRegister(startRegister, startValue);
+      const currentStart = await readRegister(startRegister);
+      if (currentStart !== startValue) {
+        await writeRegister(startRegister, startValue);
+      } else {
+        console.log(`[PLC:MODBUS] WRITE_SKIPPED register=${startRegister} already active (value=${currentStart})`);
+      }
       startCommandActive = true;
 
-      let firstStatus = await waitForStatus([startedValue, endOkValue, endNgValue], DEFAULT_START_ACK_TIMEOUT_MS);
+
+      // STEP 11 — Remove START ACK Logic
+      // Directly wait for RUNNING status (startedValue) on statusRegister.
+
+      // HOLD is fallback safety only.
+      await sleep(timing.signalHoldMs);
+
+      console.log("[PLC:DEBUG_STATUS] Waiting for RUNNING", {
+        protocol: "MODBUS_TCP",
+        address: statusRegister,
+        runningValue: startedValue,
+        endOkValue,
+        endNgValue
+      });
+
+      let firstStatus = await waitForStatus([startedValue, endOkValue, endNgValue], timing.startAckTimeoutMs);
       const startAck = { type: "ACK_START", partId, protocol: "MODBUS_TCP", value: firstStatus };
 
       let finalStatus = firstStatus;
-      if (firstStatus !== endOkValue && firstStatus !== endNgValue) {
-        finalStatus = await waitForStatus([endOkValue, endNgValue], DEFAULT_END_ACK_TIMEOUT_MS);
+      let finalAckType = "ACK_END_OK";
+
+      if (firstStatus === startedValue) {
+        console.log(`[PLC:RUNNING_DETECTED] machineId=${machine.id} value=${firstStatus}`);
+        
+        // Polling loop for END_OK or END_NG (supporting separate registers)
+        const endDeadline = Date.now() + timing.endAckTimeoutMs;
+        let detected = false;
+        while (Date.now() < endDeadline) {
+          // Check OK Register
+          const okVal = await readRegister(endOkRegister);
+          if (okVal === endOkValue) {
+            finalStatus = endOkValue;
+            finalAckType = "ACK_END_OK";
+            detected = true;
+            console.log(`[PLC:END_OK_DETECTED] machineId=${machine.id} reg=${endOkRegister} value=${okVal}`);
+            break;
+          }
+
+          // Check NG Register (if different)
+          const ngVal = endNgRegister === endOkRegister ? okVal : await readRegister(ngRegister);
+          if (ngVal === endNgValue) {
+            finalStatus = endNgValue;
+            finalAckType = "ACK_END_NG";
+            detected = true;
+            console.log(`[PLC:END_NG_DETECTED] machineId=${machine.id} reg=${endNgRegister} value=${ngVal}`);
+            break;
+          }
+
+          await sleep(timing.pollIntervalMs);
+        }
+
+        if (!detected) {
+          throw new Error(`PLC Modbus end status timeout (expected OK:${endOkValue} or NG:${endNgValue})`);
+        }
+      } else if (firstStatus === endOkValue) {
+        console.log(`[PLC:END_OK_DETECTED] machineId=${machine.id} value=${firstStatus}`);
+        finalAckType = "ACK_END_OK";
+      } else if (firstStatus === endNgValue) {
+        console.log(`[PLC:END_NG_DETECTED] machineId=${machine.id} value=${firstStatus}`);
+        finalAckType = "ACK_END_NG";
       }
 
-      await writeRegister(startRegister, 0);
-      startCommandActive = false;
+      // Point 21: Optional Bin Acknowledgement for NG Parts
+      if (finalAckType === "ACK_END_NG") {
+        const bin = resolveBinAckConfig(machine);
+        if (bin.enabled) {
+          console.log(`[PLC:MODBUS] WAITING_BIN_ACK on register ${bin.register} (expected ${bin.value})`);
+          const binDeadline = Date.now() + timing.endAckTimeoutMs;
+          let binAckReceived = false;
+          while (Date.now() < binDeadline) {
+            const val = await readRegister(bin.register);
+            if (val === bin.value) {
+              binAckReceived = true;
+              break;
+            }
+            await sleep(timing.pollIntervalMs);
+          }
+          if (!binAckReceived) {
+            console.warn(`[PLC:MODBUS] BIN_ACK timeout for register ${bin.register}`);
+          } else {
+            console.log(`[PLC:MODBUS] BIN_ACK received on register ${bin.register}`);
+          }
+        }
+      }
 
+      // STEP 7 — Verify Reset Sequence
       if (resetRegister !== null) {
+        const signalMap = parseMachineSignalMap(machine);
+        const resetSignal = signalMap.find(s => s.key === "RESET");
+        const resetValue = Number(machine?.plc_reset_value ?? 1);
+        const finalResetVal = Number(resetSignal?.value ?? resetValue ?? 1);
+
+        console.log(`[PLC:RESET_SENT] register=${resetRegister} value=${finalResetVal}`);
+        await writeRegister(resetRegister, finalResetVal);
+        await sleep(timing.signalHoldMs);
         await writeRegister(resetRegister, 0);
       }
 
+      console.log(`[PLC:HANDSHAKE_VALIDATION_SUCCESS] machineId=${machine.id}`);
+
+      console.log(`[PLC:START_CLEARED] register=${startRegister} value=0`);
+      await writeRegister(startRegister, 0);
+      startCommandActive = false;
+
       const endAck = {
-        type: finalStatus === endOkValue ? "ACK_END_OK" : "ACK_END_NG",
+        type: finalAckType,
         partId,
         protocol: "MODBUS_TCP",
         value: finalStatus,
       };
+
 
       return {
         ok: true,
@@ -290,10 +452,10 @@ async function probe({ ip, port, machine, timeoutMs }) {
   const unitId = Number(machine?.plc_unit_id || 1);
   const statusRegister = normalizeModbusRegisterAddress(machine?.plc_status_register);
   if (!Number.isFinite(statusRegister)) {
-  return withSocket({ ip, port, timeoutMs }, async () => ({
-    protocol: "MODBUS_TCP",
-    connected: true,
-  }));
+    return withSocket({ ip, port, timeoutMs }, async () => ({
+      protocol: "MODBUS_TCP",
+      connected: true,
+    }));
   }
 
   return withSocket({ ip, port, timeoutMs }, async (socket) => {
@@ -373,8 +535,8 @@ async function sendCommand({ ip, port, command, machine, partId, stationNo }) {
     normalized === "RESET_OPERATION"
       ? 0
       : normalized === "BLOCK_OPERATION"
-      ? Number(machine?.plc_block_value ?? 2)
-      : Number(machine?.plc_start_value ?? 1);
+        ? Number(machine?.plc_block_value ?? 2)
+        : Number(machine?.plc_start_value ?? 1);
 
   await withSocket({ ip, port, timeoutMs: DEFAULT_CONNECT_TIMEOUT_MS }, async (socket) => {
     let transactionId = 0;
@@ -396,7 +558,7 @@ async function sendCommand({ ip, port, command, machine, partId, stationNo }) {
       const hash32p = hashToRegisterValue(partId);
       const [phigh, plow] = split32To16(hash32p);
       const pBase = normalizeModbusRegisterAddress(machine.plc_part_register);
-      console.log(`[PLC:MODBUS] sendCommand PART_ID_HASH hash32=${hash32p} reg[${pBase}]=0x${phigh.toString(16)} reg[${pBase+1}]=0x${plow.toString(16)}`);
+      console.log(`[PLC:MODBUS] sendCommand PART_ID_HASH hash32=${hash32p} reg[${pBase}]=0x${phigh.toString(16)} reg[${pBase + 1}]=0x${plow.toString(16)}`);
       const pFrame = buildWriteMultipleRegistersFrame(nextTransactionId(), unitId, pBase, [phigh, plow]);
       const pPacket = await sendAndReceivePacket(socket, pFrame, DEFAULT_CONNECT_TIMEOUT_MS);
       parseModbusFC16WriteResponse(pPacket);
@@ -405,7 +567,7 @@ async function sendCommand({ ip, port, command, machine, partId, stationNo }) {
       const hash32s = hashToRegisterValue(stationNo);
       const [shigh, slow] = split32To16(hash32s);
       const sBase = normalizeModbusRegisterAddress(machine.plc_station_register);
-      console.log(`[PLC:MODBUS] sendCommand STATION_HASH hash32=${hash32s} reg[${sBase}]=0x${shigh.toString(16)} reg[${sBase+1}]=0x${slow.toString(16)}`);
+      console.log(`[PLC:MODBUS] sendCommand STATION_HASH hash32=${hash32s} reg[${sBase}]=0x${shigh.toString(16)} reg[${sBase + 1}]=0x${slow.toString(16)}`);
       const sFrame = buildWriteMultipleRegistersFrame(nextTransactionId(), unitId, sBase, [shigh, slow]);
       const sPacket = await sendAndReceivePacket(socket, sFrame, DEFAULT_CONNECT_TIMEOUT_MS);
       parseModbusFC16WriteResponse(sPacket);
@@ -431,3 +593,4 @@ module.exports = {
   reset,
   sendCommand,
 };
+

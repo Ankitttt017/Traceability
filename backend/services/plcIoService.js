@@ -1,6 +1,8 @@
 const net = require("net");
+const { acquireSocket, releaseSocket } = require("./plcProtocols/socketPool");
 
 const DEFAULT_TIMEOUT_MS = Math.max(Number(process.env.PLC_IO_TIMEOUT_MS || 2000), 300);
+const DEFAULT_WRITE_RETRY_COUNT = Math.max(Number(process.env.PLC_IO_WRITE_RETRY_COUNT || 2), 1);
 const DEFAULT_SLMP_FRAME_MODE = String(process.env.PLC_SLMP_FRAME_MODE || "AUTO")
   .trim()
   .toUpperCase();
@@ -38,32 +40,29 @@ function withTimeout(promise, timeoutMs, timeoutMessage) {
   ]);
 }
 
-function createSocketClient({ ip, port, timeoutMs = DEFAULT_TIMEOUT_MS }) {
-  return new Promise((resolve, reject) => {
-    const socket = new net.Socket();
-    let settled = false;
-
-    const done = (handler) => (value) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      handler(value);
-    };
-
-    socket.setTimeout(timeoutMs);
-    socket.once("error", done((error) => reject(error)));
-    socket.once("timeout", done(() => reject(new Error("PLC connect timeout"))));
-    socket.connect(
-      Number(port),
-      ip,
-      done(() => {
-        socket.setTimeout(0);
-        resolve(socket);
-      })
-    );
-  });
+function isTransientPlcError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    message.includes("timeout") ||
+    message.includes("econnreset") ||
+    message.includes("econnrefused") ||
+    message.includes("ehostunreach") ||
+    message.includes("socket hang up") ||
+    message.includes("write after end")
+  );
 }
+
+function isRetryableSlmpAttemptError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  if (!message) return false;
+  // Point 13: Only retry for transient timeout or connection errors
+  return (
+    message.includes("timeout") ||
+    isTransientPlcError(error)
+  );
+}
+
+// createSocketClient is replaced by acquireSocket from socketPool
 
 function buildReadHoldingFrame(transactionId, unitId, register, quantity) {
   const frame = Buffer.alloc(12);
@@ -215,37 +214,18 @@ function describeRoute(route) {
 }
 
 function getSlmpRouteCandidates() {
-  const base = getDefaultSlmpRoute();
-  // Keep a small prioritized list to avoid very long timeout cascades.
-  const candidates = [
-    base,
-    { ...base, plcNo: base.plcNo === 0xff ? 0 : 0xff },
-    { ...base, ioNo: base.ioNo === 0x03ff ? 0 : 0x03ff },
-    { ...base, stationNo: base.stationNo === 0 ? 1 : 0 },
-    {
-      networkNo: base.networkNo === 0 ? 1 : 0,
-      plcNo: base.plcNo === 0xff ? 0 : 0xff,
-      ioNo: base.ioNo === 0x03ff ? 0 : 0x03ff,
-      stationNo: base.stationNo === 0 ? 1 : 0,
-    },
-  ];
-
-  const dedup = [];
-  const seen = new Set();
-  for (const route of candidates) {
-    const key = routeKey(route);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    dedup.push(route);
-  }
-  return dedup;
+  // Use only the configured/default route to avoid cascading timeouts.
+  // Previous implementation tried 5 route variants × 2 frame modes = 10 combos,
+  // each with its own socket timeout, causing 20-40s total delay on failure.
+  return [getDefaultSlmpRoute()];
 }
 
 function getSlmpFrameModeCandidates(preferredMode) {
-  const preferred = normalizeSlmpFrameMode(preferredMode, normalizeSlmpFrameMode(DEFAULT_SLMP_FRAME_MODE, "AUTO"));
-  if (preferred === "ASCII") return ["ASCII", "BINARY"];
-  if (preferred === "BINARY") return ["BINARY", "ASCII"];
-  return ["ASCII", "BINARY"];
+  const preferred = normalizeSlmpFrameMode(preferredMode, "AUTO");
+  if (preferred === "ASCII") return ["ASCII"];
+  if (preferred === "BINARY") return ["BINARY"];
+  // If AUTO, try BINARY first then ASCII as fallback
+  return ["BINARY", "ASCII"];
 }
 
 function describeSlmpFrameMode(mode) {
@@ -460,22 +440,16 @@ async function sendAndReceivePacket(socket, frame, timeoutMs, options = {}) {
 }
 
 async function readModbusRegisters({ ip, port, unitId = 1, registers = [], timeoutMs = DEFAULT_TIMEOUT_MS }) {
-  if (!ip || !port) {
-    throw new Error("PLC IP and port are required");
-  }
+  if (!ip || !port) throw new Error("PLC IP and port are required");
 
   const registerList = normalizeRegisters(registers);
-  if (registerList.length === 0) {
-    return { values: {}, errors: [] };
-  }
+  if (registerList.length === 0) return { values: {}, errors: [] };
 
-  const socket = await createSocketClient({ ip, port, timeoutMs });
+  const lease = await acquireSocket({ ip, port, timeoutMs });
+  const socket = lease.socket;
   let transactionId = 0;
   const nextTransactionId = () => {
-    transactionId += 1;
-    if (transactionId > 65535) {
-      transactionId = 1;
-    }
+    transactionId = (transactionId + 1) % 65536 || 1;
     return transactionId;
   };
 
@@ -483,27 +457,43 @@ async function readModbusRegisters({ ip, port, unitId = 1, registers = [], timeo
   const errors = [];
 
   try {
-    for (const registerNo of registerList) {
-      try {
-        const protocolRegister = normalizeModbusRegisterAddress(registerNo);
-        const frame = buildReadHoldingFrame(nextTransactionId(), Number(unitId || 1), protocolRegister, 1);
-        const packet = await sendAndReceivePacket(socket, frame, timeoutMs);
-        values[registerNo] = parseModbusReadResponse(packet);
-      } catch (error) {
-        errors.push({
-          register: registerNo,
-          message: String(error.message || "Read failed"),
-        });
+    // Sort and group registers for batch reading (Point 7)
+    const sorted = [...new Set(registerList.map(Number))].sort((a, b) => a - b);
+    let i = 0;
+    while (i < sorted.length) {
+      const start = sorted[i];
+      let end = start;
+      let j = i + 1;
+      // Modbus typically allows 125 registers max in one read command
+      while (j < sorted.length && sorted[j] - start < 120 && (sorted[j] - end) < 10) {
+        end = sorted[j];
+        j++;
       }
+      const count = end - start + 1;
+      const protocolRegister = normalizeModbusRegisterAddress(start);
+      
+      try {
+        const frame = buildReadHoldingFrame(nextTransactionId(), Number(unitId || 1), protocolRegister, count);
+        const packet = await sendAndReceivePacket(socket, frame, timeoutMs);
+        const batchValues = parseModbusReadResponse(packet);
+        
+        for (let k = i; k < j; k++) {
+          const reg = sorted[k];
+          const offset = reg - start;
+          if (offset < batchValues.length) {
+            values[reg] = batchValues[offset];
+          }
+        }
+      } catch (error) {
+        for (let k = i; k < j; k++) {
+          errors.push({ register: sorted[k], message: error.message });
+        }
+      }
+      i = j;
     }
   } finally {
-    try {
-      socket.destroy();
-    } catch (_error) {
-      // noop
-    }
+    releaseSocket(lease);
   }
-
   return { values, errors };
 }
 
@@ -514,6 +504,7 @@ async function writeModbusRegister({
   register,
   value,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  retryCount = DEFAULT_WRITE_RETRY_COUNT,
 }) {
   const registerNo = Number(register);
   const registerValue = Number(value);
@@ -527,36 +518,50 @@ async function writeModbusRegister({
     throw new Error("Valid register value is required");
   }
 
-  const socket = await createSocketClient({ ip, port, timeoutMs });
-  let transactionId = 0;
-  const nextTransactionId = () => {
-    transactionId += 1;
-    if (transactionId > 65535) {
-      transactionId = 1;
-    }
-    return transactionId;
-  };
+  const attempts = Math.max(Number(retryCount || 1), 1);
+  const protocolRegister = normalizeModbusRegisterAddress(registerNo);
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const lease = await acquireSocket({ ip, port, timeoutMs });
+    const socket = lease.socket;
+    let transactionId = 0;
+    const nextTransactionId = () => {
+      transactionId += 1;
+      if (transactionId > 65535) {
+        transactionId = 1;
+      }
+      return transactionId;
+    };
 
-  try {
-    const protocolRegister = normalizeModbusRegisterAddress(registerNo);
-    const frame = buildWriteSingleRegisterFrame(
-      nextTransactionId(),
-      Number(unitId || 1),
-      protocolRegister,
-      Math.trunc(registerValue)
-    );
-    const packet = await sendAndReceivePacket(socket, frame, timeoutMs);
-    parseModbusWriteResponse(packet);
-  } finally {
     try {
-      socket.destroy();
-    } catch (_error) {
-      // noop
+      const frame = buildWriteSingleRegisterFrame(
+        nextTransactionId(),
+        Number(unitId || 1),
+        protocolRegister,
+        Math.trunc(registerValue)
+      );
+      const packet = await sendAndReceivePacket(socket, frame, timeoutMs);
+      parseModbusWriteResponse(packet);
+      lastError = null;
+      break;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isTransientPlcError(error)) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(150 * attempt, 500)));
+    } finally {
+        releaseSocket(lease);
     }
+  }
+  if (lastError) {
+    throw lastError;
   }
 
   return {
     register: Math.trunc(registerNo),
+    protocolRegister: Math.trunc(protocolRegister),
+    unitId: Number(unitId || 1),
     value: Math.trunc(registerValue),
   };
 }
@@ -565,15 +570,12 @@ async function probeTcpEndpoint({ ip, port, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   if (!ip || !port) {
     throw new Error("PLC IP and port are required");
   }
-  const socket = await createSocketClient({ ip, port, timeoutMs });
+  const lease = await acquireSocket({ ip, port, timeoutMs });
+  const socket = lease.socket;
   try {
     return { connected: true };
   } finally {
-    try {
-      socket.destroy();
-    } catch (_error) {
-      // noop
-    }
+      releaseSocket(lease);
   }
 }
 
@@ -612,12 +614,21 @@ async function readSlmpRegisters({
 
   const routes = getSlmpRouteCandidates();
   const frameModes = getSlmpFrameModeCandidates(frameMode);
-  const routeProbeTimeoutMs = Math.min(Math.max(timeoutMs, 300), 900);
-  const registerReadTimeoutMs = Math.min(Math.max(timeoutMs, 300), 1200);
+  // Use bounded per-operation timeouts to prevent cascading delays
+  const perAttemptTimeoutMs = Math.min(Math.max(timeoutMs, 300), 2000);
+  // Overall deadline to prevent total time from exceeding caller's expectations
+  const overallDeadline = Date.now() + Math.max(timeoutMs * 2, 6000);
   let lastError = null;
   for (const frameMode of frameModes) {
+    // Check overall deadline before each frame mode attempt
+    if (Date.now() >= overallDeadline) break;
     for (const route of routes) {
-      const socket = await createSocketClient({ ip, port, timeoutMs });
+      // Check overall deadline before each route attempt
+      if (Date.now() >= overallDeadline) break;
+      const remainingMs = Math.max(overallDeadline - Date.now(), 500);
+      const connectTimeoutMs = Math.min(perAttemptTimeoutMs, remainingMs);
+      const lease = await acquireSocket({ ip, port, timeoutMs: connectTimeoutMs });
+      const socket = lease.socket;
       const values = {};
       const errors = [];
       try {
@@ -627,44 +638,78 @@ async function readSlmpRegisters({
           device: probeRow.device,
           address: probeRow.register,
           count: 1,
-          timeoutMs: routeProbeTimeoutMs,
+          timeoutMs: Math.min(perAttemptTimeoutMs, Math.max(overallDeadline - Date.now(), 300)),
           route: { ...route, frameMode },
         });
 
+        // Sort and group registers for batch reading (Point 7)
+        const deviceGroups = {};
         for (const row of unique) {
-          try {
-            const out = await readSlmpWords(socket, {
-              device: row.device,
-              address: row.register,
-              count: 1,
-              timeoutMs: registerReadTimeoutMs,
-              route: { ...route, frameMode },
-            });
-            values[row.register] = out[0];
-          } catch (error) {
-            errors.push({
-              register: row.register,
-              device: row.device,
-              frameMode,
-              message: String(error.message || "Read failed"),
-            });
+          if (!deviceGroups[row.device]) deviceGroups[row.device] = [];
+          deviceGroups[row.device].push(row.register);
+        }
+
+        for (const device in deviceGroups) {
+          const sorted = deviceGroups[device].sort((a, b) => a - b);
+          let i = 0;
+          while (i < sorted.length) {
+            const start = sorted[i];
+            let end = start;
+            let j = i + 1;
+            // Batch contiguous registers (gap up to 10 allowed for SLMP efficiency)
+            while (j < sorted.length && sorted[j] - start < 100 && (sorted[j] - end) < 10) {
+              end = sorted[j];
+              j++;
+            }
+            const count = end - start + 1;
+
+            if (Date.now() >= overallDeadline) {
+              for (let k = i; k < j; k++) {
+                errors.push({ register: sorted[k], device, frameMode, message: "Deadline exceeded" });
+              }
+              i = j;
+              continue;
+            }
+
+            try {
+              const batchValues = await readSlmpWords(socket, {
+                device,
+                address: start,
+                count,
+                timeoutMs: Math.min(perAttemptTimeoutMs, Math.max(overallDeadline - Date.now(), 300)),
+                route: { ...route, frameMode },
+              });
+              
+              // Map batch results back to individual registers
+              for (let k = i; k < j; k++) {
+                const reg = sorted[k];
+                const offset = reg - start;
+                if (offset < batchValues.length) {
+                  values[reg] = batchValues[offset];
+                }
+              }
+            } catch (error) {
+              for (let k = i; k < j; k++) {
+                errors.push({
+                  register: sorted[k],
+                  device,
+                  frameMode,
+                  message: String(error.message || "Read failed"),
+                });
+              }
+            }
+            i = j;
           }
         }
         // If we got at least one value, treat route/mode as valid and return.
         if (Object.keys(values).length > 0 || errors.length === 0) return { values, errors };
         lastError = new Error(errors[0]?.message || "SLMP read failed");
-        const isTimeout = /timeout|invalid slmp/i.test(String(lastError.message || ""));
-        if (!isTimeout) return { values, errors };
+        if (!isRetryableSlmpAttemptError(lastError)) return { values, errors };
       } catch (error) {
         lastError = error;
-        const isTimeout = /timeout|invalid slmp/i.test(String(error.message || ""));
-        if (!isTimeout) throw error;
+        if (!isRetryableSlmpAttemptError(error)) throw error;
       } finally {
-        try {
-          socket.destroy();
-        } catch (_error) {
-          // noop
-        }
+          releaseSocket(lease);
       }
     }
   }
@@ -675,7 +720,16 @@ async function readSlmpRegisters({
   );
 }
 
-async function writeSlmpRegister({ ip, port, register, value, device = "D", timeoutMs = DEFAULT_TIMEOUT_MS, frameMode }) {
+async function writeSlmpRegister({
+  ip,
+  port,
+  register,
+  value,
+  device = "D",
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  frameMode,
+  retryCount = DEFAULT_WRITE_RETRY_COUNT,
+}) {
   const registerNo = Number(register);
   const registerValue = Number(value);
   if (!ip || !port) throw new Error("PLC IP and port are required");
@@ -688,34 +742,44 @@ async function writeSlmpRegister({ ip, port, register, value, device = "D", time
   let lastError = null;
   let usedRoute = null;
   let usedFrameMode = null;
-  for (const mode of frameModes) {
-    for (const route of routes) {
-      const socket = await createSocketClient({ ip, port, timeoutMs });
-      try {
-        await writeSlmpWords(socket, {
-          device: slmpDevice,
-          address: Math.trunc(registerNo),
-          values: [Math.trunc(registerValue)],
-          timeoutMs,
-          route: { ...route, frameMode: mode },
-        });
-        usedRoute = route;
-        usedFrameMode = mode;
-        lastError = null;
-        break;
-      } catch (error) {
-        lastError = error;
-        const isTimeout = /timeout|invalid slmp/i.test(String(error.message || ""));
-        if (!isTimeout) throw error;
-      } finally {
+  const attempts = Math.max(Number(retryCount || 1), 1);
+  // Overall deadline: prevent total cascading time from exceeding expectations
+  const overallDeadline = Date.now() + Math.max(timeoutMs * attempts * 2, 8000);
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (Date.now() >= overallDeadline) break;
+    for (const mode of frameModes) {
+      if (Date.now() >= overallDeadline) break;
+      for (const route of routes) {
+        if (Date.now() >= overallDeadline) break;
+        const remainingMs = Math.max(overallDeadline - Date.now(), 500);
+        const connectTimeoutMs = Math.min(timeoutMs, remainingMs);
+        const lease = await acquireSocket({ ip, port, timeoutMs: connectTimeoutMs });
+        const socket = lease.socket;
         try {
-          socket.destroy();
-        } catch (_error) {
-          // noop
+          await writeSlmpWords(socket, {
+            device: slmpDevice,
+            address: Math.trunc(registerNo),
+            values: [Math.trunc(registerValue)],
+            timeoutMs: Math.min(timeoutMs, Math.max(overallDeadline - Date.now(), 500)),
+            route: { ...route, frameMode: mode },
+          });
+          usedRoute = route;
+          usedFrameMode = mode;
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = error;
+          if (!isRetryableSlmpAttemptError(error)) throw error;
+        } finally {
+            releaseSocket(lease);
         }
       }
+      if (usedRoute) break;
     }
     if (usedRoute) break;
+    if (attempt < attempts) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(150 * attempt, 500)));
+    }
   }
   if (!usedRoute) {
     const routeDesc = routes.map(describeRoute).join(" | ");

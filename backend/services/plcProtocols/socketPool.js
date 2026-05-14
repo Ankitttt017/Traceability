@@ -1,9 +1,11 @@
 const net = require("net");
+const plcSocketManager = require("../plcSocketManager");
 
-const POOL_ENABLED = ["1", "true", "yes", "on"].includes(
-  String(process.env.PLC_SOCKET_POOL_ENABLED || "").trim().toLowerCase()
+const POOL_ENABLED = !["0", "false", "no", "off"].includes(
+  String(process.env.PLC_SOCKET_POOL_ENABLED || "true").trim().toLowerCase()
 );
 const DEFAULT_IDLE_MS = Math.max(Number(process.env.PLC_SOCKET_IDLE_MS || 10000), 1000);
+const DEFAULT_LEASE_TIMEOUT_MS = Math.max(Number(process.env.PLC_SOCKET_LEASE_TIMEOUT_MS || 15000), 1000);
 
 const pool = new Map();
 
@@ -45,32 +47,74 @@ function attachSocketLifecycle(key, socket) {
   socket.once("error", cleanup);
 }
 
+const waiters = new Map(); // key -> [resolve]
+
 async function acquireSocket({ ip, port, timeoutMs }) {
+  const key = `${ip}:${port}`;
+  const startTime = Date.now();
+  const deadline = startTime + (timeoutMs || DEFAULT_LEASE_TIMEOUT_MS);
+
   if (!POOL_ENABLED) {
     const socket = await createSocketClient({ ip, port, timeoutMs });
     return { socket, pooled: false, key: null };
   }
 
-  const key = `${ip}:${port}`;
-  const existing = pool.get(key);
-  if (existing && existing.socket && !existing.socket.destroyed && !existing.inUse) {
-    existing.inUse = true;
-    return { socket: existing.socket, pooled: true, key };
-  }
+  while (true) {
+    const existing = pool.get(key);
+    
+    if (existing) {
+      if (existing.socket && !existing.socket.destroyed && !existing.inUse) {
+        existing.inUse = true;
+        existing.lastUsedAt = Date.now();
+        return { socket: existing.socket, pooled: true, key };
+      }
+      
+      // If destroyed, remove and continue to create new
+      if (existing.socket?.destroyed) {
+        pool.delete(key);
+      } else {
+        // Socket is in use, must wait
+        if (Date.now() >= deadline) {
+          throw new Error(`Timeout waiting for PLC connection lease (${key})`);
+        }
+        
+        if (!waiters.has(key)) waiters.set(key, []);
+        await new Promise(resolve => {
+          const timeout = setTimeout(resolve, 100); // Check every 100ms or when notified
+          waiters.get(key).push(() => {
+            clearTimeout(timeout);
+            resolve();
+          });
+        });
+        continue;
+      }
+    }
 
-  const socket = await createSocketClient({ ip, port, timeoutMs });
-  pool.set(key, {
-    socket,
-    inUse: true,
-    lastUsedAt: Date.now(),
-  });
-  attachSocketLifecycle(key, socket);
-  return { socket, pooled: true, key };
+    // No existing socket or it was destroyed, create a new one
+    try {
+      const qDepth = waiters.get(key)?.length || 0;
+      console.log(`[PLC:SocketPool] Creating new connection for ${key} (waiters: ${qDepth})`);
+      const socket = await createSocketClient({ ip, port, timeoutMs: Math.max(300, deadline - Date.now()) });
+      pool.set(key, {
+        socket,
+        inUse: true,
+        lastUsedAt: Date.now(),
+      });
+      attachSocketLifecycle(key, socket);
+      return { socket, pooled: true, key };
+    } catch (error) {
+      // Notify next waiter if connection failed
+      const list = waiters.get(key);
+      if (list && list.length > 0) list.shift()();
+      throw error;
+    }
+  }
 }
 
 function releaseSocket({ socket, pooled, key }) {
   if (!pooled) {
     try {
+      socket.removeAllListeners();
       socket.destroy();
     } catch (_error) {
       // noop
@@ -79,23 +123,40 @@ function releaseSocket({ socket, pooled, key }) {
   }
 
   const entry = pool.get(key);
-  if (!entry || entry.socket !== socket || socket.destroyed) {
-    try {
-      socket.destroy();
-    } catch (_error) {
-      // noop
-    }
-    if (entry && entry.socket === socket) {
-      pool.delete(key);
-    }
+  if (!entry || entry.socket !== socket) {
+    // If it's not the current entry, just destroy it
+    try { 
+      socket.removeAllListeners();
+      socket.destroy(); 
+    } catch(e) {}
     return;
+  }
+
+  // Cleanup listeners before returning to pool to prevent MaxListenersExceededWarning
+  try {
+    socket.removeAllListeners("data");
+    socket.removeAllListeners("error");
+    socket.removeAllListeners("timeout");
+  } catch (e) {
+    console.warn(`[PLC:SocketPool] Error cleaning up listeners for ${key}:`, e.message);
   }
 
   entry.inUse = false;
   entry.lastUsedAt = Date.now();
+  
+  // Notify next waiter
+  const list = waiters.get(key);
+  if (list && list.length > 0) {
+    const next = list.shift();
+    if (next) next();
+  }
 }
 
 async function withSocket({ ip, port, timeoutMs }, fn) {
+  // Always use ephemeral sockets to prevent data interleaving.
+  // Persistent sockets (plcSocketManager) must NOT be shared across
+  // multi-step SLMP exchanges (handshake, probe) because concurrent
+  // operations on the same socket corrupt the protocol framing.
   const lease = await acquireSocket({ ip, port, timeoutMs });
   try {
     return await fn(lease.socket);
@@ -131,4 +192,6 @@ if (POOL_ENABLED) {
 
 module.exports = {
   withSocket,
+  acquireSocket,
+  releaseSocket,
 };

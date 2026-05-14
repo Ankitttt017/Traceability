@@ -2,9 +2,9 @@ const net = require("net");
 const Machine = require("../models/Machine");
 const { emitRealtime } = require("./realtimeService");
 
-const HEARTBEAT_INTERVAL_MS = Math.max(Number(process.env.PLC_HEARTBEAT_INTERVAL_MS || 5000), 1000);
-const HEARTBEAT_TIMEOUT_MS = Math.max(Number(process.env.PLC_HEARTBEAT_TIMEOUT_MS || 1200), 300);
-const HEARTBEAT_STALE_DEFAULT_MS = Math.max(Number(process.env.PLC_HEARTBEAT_STALE_MS || 5000), 1000);
+const HEARTBEAT_INTERVAL_MS = Math.max(Number(process.env.PLC_HEARTBEAT_INTERVAL_MS || 15000), 1000);
+const HEARTBEAT_TIMEOUT_MS = Math.max(Number(process.env.PLC_HEARTBEAT_TIMEOUT_MS || 3000), 300);
+const HEARTBEAT_STALE_DEFAULT_MS = Math.max(Number(process.env.PLC_HEARTBEAT_STALE_MS || 30000), 1000);
 
 let timerRef = null;
 let inFlight = false;

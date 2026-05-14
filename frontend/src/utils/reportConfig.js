@@ -17,15 +17,25 @@ export const DEFAULT_REPORT_CONFIG = {
   showDate: true,
   showShift: true,
   showMachine: true,
+  reportAccentColor: "#1A3A7C",
+  reportHeaderBgColor: "#EAF0F8",
   columns: [
+    { id: "srNo", label: "SR NO", enabled: true },
     { id: "partId", label: "Part Serial No", enabled: true },
-    { id: "machineName", label: "Machine Name", enabled: true },
-    { id: "stationNo", label: "Station", enabled: true },
-    { id: "status", label: "Result (OK/NG)", enabled: true },
-    { id: "shiftCode", label: "Shift", enabled: true },
     { id: "createdAt", label: "Timestamp", enabled: true },
-    { id: "operationNo", label: "Operation No", enabled: false },
-    { id: "lineName", label: "Line", enabled: false },
+    { id: "shiftCode", label: "Shift", enabled: true },
+    { id: "operationNo", label: "Operation No", enabled: true },
+    { id: "machineName", label: "Machine Name", enabled: true },
+    { id: "modelCode", label: "Model Code", enabled: true },
+    { id: "qrFormatName", label: "Model Name", enabled: true },
+    { id: "status", label: "Result (OK/NG)", enabled: true },
+    { id: "reason", label: "Reason", enabled: true },
+    { id: "lineName", label: "Line No", enabled: true },
+    { id: "cycleTime", label: "Cycle Time (s)", enabled: true },
+    { id: "stationNo", label: "Station", enabled: false },
+    { id: "result", label: "Raw Result", enabled: false },
+    { id: "plcStatus", label: "PLC Status", enabled: false },
+    { id: "operatorId", label: "Operator ID", enabled: false },
   ],
 };
 
@@ -128,4 +138,3 @@ export function prependCsvReportHeader(csvBody, options = {}) {
 
   return `${header}\n${String(csvBody || "").trimStart()}`;
 }
-

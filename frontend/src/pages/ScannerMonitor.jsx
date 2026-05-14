@@ -152,7 +152,7 @@ const PingModal = ({ scanner, onClose }) => {
       setResult({
         success:  Boolean(res?.reachable),
         message:  res?.reachable
-          ? `Scanner responded successfully. TCP connection on port ${scanner.scannerPort || 9001} is active.`
+          ? `Scanner responded successfully. TCP connection on port ${scanner.scannerPort || "unspecified"} is active.`
           : `No response from ${scanner.scannerIp}. Check IP address and cable connection.`,
         latency: Date.now() - t0,
       });
@@ -224,7 +224,7 @@ const PingModal = ({ scanner, onClose }) => {
           }}>
             {[
               { label: "IP Address", value: scanner.scannerIp || "—",     mono: true  },
-              { label: "Port",       value: scanner.scannerPort || 9001,   mono: true  },
+              { label: "Port",       value: scanner.scannerPort || "—",   mono: true  },
               { label: "Machine",    value: scanner.mappedMachine
                   ? formatMachineLabel(scanner.mappedMachine) : "Not linked", mono: false },
             ].map((f, i) => (
@@ -249,7 +249,7 @@ const PingModal = ({ scanner, onClose }) => {
           <p style={{ fontSize: 12, color: C.txt("muted"), lineHeight: 1.6, marginBottom: 18 }}>
             This will send a TCP ping to the scanner at{" "}
             <span style={{ fontFamily: "'DM Mono',monospace", color: C.steel(), fontWeight: 700 }}>
-              {scanner.scannerIp}:{scanner.scannerPort || 9001}
+              {scanner.scannerIp}{scanner.scannerPort ? `:${scanner.scannerPort}` : ""}
             </span>{" "}
             to check if it is reachable on the network.
           </p>
@@ -591,9 +591,11 @@ const ScannerMonitor = () => {
                           fontWeight: 700, color: C.steel(),
                         }}>
                           {row.scannerIp || "—"}
-                          <span style={{ color: C.txt("muted"), fontWeight: 400 }}>
-                            :{row.scannerPort || 9001}
-                          </span>
+                          {row.scannerPort && (
+                            <span style={{ color: C.txt("muted"), fontWeight: 400 }}>
+                              :{row.scannerPort}
+                            </span>
+                          )}
                         </span>
                       </td>
 
@@ -687,4 +689,3 @@ const ScannerMonitor = () => {
 };
 
 export default ScannerMonitor;
-

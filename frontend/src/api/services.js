@@ -1,5 +1,6 @@
 import apiClient from "./client";
 import { ENDPOINTS } from "./endpoints";
+import { loadReportConfig } from "../utils/reportConfig";
 
 export const authApi = {
   login: async (payload) => {
@@ -33,6 +34,10 @@ export const machineApi = {
     const { data } = await apiClient.patch(ENDPOINTS.machineTarget(id), payload);
     return data;
   },
+  testConnection: async (payload, config = {}) => {
+    const { data } = await apiClient.post(`${ENDPOINTS.machines}/test-connection`, payload, config);
+    return data;
+  },
   testPlc: async (payload, config = {}) => {
     const { data } = await apiClient.post(ENDPOINTS.machineTestPlc, payload, config);
     return data;
@@ -43,6 +48,10 @@ export const machineApi = {
   },
   sendPlcCommand: async (payload, config = {}) => {
     const { data } = await apiClient.post(ENDPOINTS.machinePlcCommand, payload, config);
+    return data;
+  },
+  readPlcValue: async (payload, config = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.machineReadPlcValue, payload, config);
     return data;
   },
   writePlcValue: async (payload, config = {}) => {
@@ -169,6 +178,10 @@ export const traceabilityApi = {
     const { data } = await apiClient.get(ENDPOINTS.traceability.operations);
     return data;
   },
+  processFlow: async (params) => {
+    const { data } = await apiClient.get(ENDPOINTS.traceability.processFlow, { params });
+    return data;
+  },
   partCatalog: async (params) => {
     const { data } = await apiClient.get(ENDPOINTS.traceability.parts, { params });
     return data;
@@ -253,6 +266,10 @@ export const traceabilityApi = {
     const { data } = await apiClient.post(ENDPOINTS.traceability.resetOperation, payload);
     return data;
   },
+  deletePart: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.traceability.deletePart, payload);
+    return data;
+  },
   bypass: async (payload) => {
     const { data } = await apiClient.post(ENDPOINTS.traceability.bypass, payload);
     return data;
@@ -273,8 +290,37 @@ export const dashboardApi = {
     return data;
   },
   exportReport: async (params) => {
-    const { data } = await apiClient.get(ENDPOINTS.dashboard.exportReport, {
-      params,
+    const { data } = await apiClient.post(ENDPOINTS.dashboard.exportFullReport, {
+      filters: params || {},
+      reportConfig: loadReportConfig(),
+    }, {
+      responseType: "blob",
+    });
+    return data;
+  },
+  exportFullReport: async (params) => {
+    const { data } = await apiClient.post(ENDPOINTS.dashboard.exportFullReport, {
+      filters: params || {},
+      reportConfig: loadReportConfig(),
+    }, {
+      responseType: "blob",
+    });
+    return data;
+  },
+  exportPartsReport: async (params) => {
+    const { data } = await apiClient.post(ENDPOINTS.dashboard.exportPartsReport, {
+      filters: params || {},
+      reportConfig: loadReportConfig(),
+    }, {
+      responseType: "blob",
+    });
+    return data;
+  },
+  exportAuditReport: async (params) => {
+    const { data } = await apiClient.post(ENDPOINTS.dashboard.exportAuditReport, {
+      filters: params || {},
+      reportConfig: loadReportConfig(),
+    }, {
       responseType: "blob",
     });
     return data;
@@ -389,6 +435,80 @@ export const alarmApi = {
   },
   resolveAll: async () => {
     const { data } = await apiClient.post(ENDPOINTS.alarms.resolveAll);
+    return data;
+  },
+};
+
+export const industrialApi = {
+  health: async () => {
+    const { data } = await apiClient.get(ENDPOINTS.industrial.health);
+    return data;
+  },
+  metrics: async () => {
+    const { data } = await apiClient.get(ENDPOINTS.industrial.metrics);
+    return data;
+  },
+  watchdog: async () => {
+    const { data } = await apiClient.get(ENDPOINTS.industrial.watchdog);
+    return data;
+  },
+  sockets: async () => {
+    const { data } = await apiClient.get(ENDPOINTS.industrial.sockets);
+    return data;
+  },
+  queues: async () => {
+    const { data } = await apiClient.get(ENDPOINTS.industrial.queues);
+    return data;
+  },
+  timelineByOperation: async (operationId) => {
+    const { data } = await apiClient.get(ENDPOINTS.industrial.timelineByOperation(operationId));
+    return data;
+  },
+  queryTimelines: async (params = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.industrial.timelines, { params });
+    return data;
+  },
+};
+
+export const reportApi = {
+  getData: async (params) => {
+    const { data } = await apiClient.get(ENDPOINTS.reports.data, { params });
+    return data;
+  },
+  exportFull: async (params, reportConfig) => {
+    const { data } = await apiClient.post(ENDPOINTS.reports.exportFull, {
+      filters: params || {},
+      reportConfig: reportConfig || loadReportConfig(),
+    }, {
+      responseType: "blob",
+    });
+    return data;
+  },
+  exportNG: async (params, reportConfig) => {
+    const { data } = await apiClient.post(ENDPOINTS.reports.exportNG, {
+      filters: params || {},
+      reportConfig: reportConfig || loadReportConfig(),
+    }, {
+      responseType: "blob",
+    });
+    return data;
+  },
+  exportParts: async (params, reportConfig) => {
+    const { data } = await apiClient.post(ENDPOINTS.reports.exportParts, {
+      filters: params || {},
+      reportConfig: reportConfig || loadReportConfig(),
+    }, {
+      responseType: "blob",
+    });
+    return data;
+  },
+  exportAudit: async (params, reportConfig) => {
+    const { data } = await apiClient.post(ENDPOINTS.reports.exportAudit, {
+      filters: params || {},
+      reportConfig: reportConfig || loadReportConfig(),
+    }, {
+      responseType: "blob",
+    });
     return data;
   },
 };

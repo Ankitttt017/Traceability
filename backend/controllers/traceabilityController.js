@@ -1,4 +1,5 @@
 const { Op, fn, col } = require("sequelize");
+const ExcelJS = require("exceljs");
 const Part = require("../models/Part");
 const Machine = require("../models/Machine");
 const Scanner = require("../models/Scanner");
@@ -6,8 +7,13 @@ const OperationLog = require("../models/OperationLog");
 const ProductionLog = require("../models/ProductionLog");
 const ReworkLog = require("../models/ReworkLog");
 const Shift = require("../models/Shift");
+const QrFormatRule = require("../models/QrFormatRule");
+const MachineRuntimeState = require("../models/MachineRuntimeState");
 const { saveScan } = require("../services/scanService");
-const { executePlcHandshake, getPlcCircuitSnapshot } = require("../services/plcCommunicationService");
+const { getPlcCircuitSnapshot } = require("../services/plcCommunicationService");
+const plcHandshakeEngine = require("../services/plcHandshakeEngine");
+const scannerConnectionManager = require("../services/scannerConnectionManager");
+const plcConnectionManager = require("../services/plcConnectionManager");
 const {
   readModbusRegisters,
   readSlmpRegisters,
@@ -20,9 +26,10 @@ const { getScannerHealthSnapshot } = require("../services/scannerHealthService")
 const { getScannerConnectionSnapshot } = require("../services/scannerConnectionService");
 const { emitRealtime } = require("../services/realtimeService");
 const { tryAcquireMachineLock, clearMachineLock } = require("../services/machineLockService");
+const { finalizeCycleAfterPlc } = require("../services/cycleFinalizationService");
+const { TIMELINE_EVENTS, recordTimelineEvent } = require("../services/operationTimelineService");
 const {
   getStationFeatureConfig,
-  isPlcConfirmationEnabled,
   normalizePlcPartCount,
 } = require("../services/stationFeatureService");
 const {
@@ -38,7 +45,13 @@ const IO_SNAPSHOT_CACHE_MAX_AGE_MS = Math.max(
   Number(process.env.IO_SNAPSHOT_CACHE_MAX_AGE_MS || IO_SNAPSHOT_MIN_INTERVAL_MS * 2),
   IO_SNAPSHOT_MIN_INTERVAL_MS
 );
+const IO_PLC_DISCONNECT_FAILURE_THRESHOLD = Math.max(
+  Number(process.env.IO_PLC_DISCONNECT_FAILURE_THRESHOLD || 3),
+  1
+);
 const ioSnapshotCache = new Map();
+const ioSnapshotInFlight = new Map();
+const ioPlcConnectionStability = new Map();
 
 function normalizeStation(value) {
   return String(value || "")
@@ -52,6 +65,63 @@ function getMachineOperationStage(machine) {
 
 function getIoSnapshotCacheKey(machineId, plcIp) {
   return `${Number(machineId) || 0}:${normalizeIp(plcIp || "")}`;
+}
+
+function getInstantPlcConnected(plcConnection = {}) {
+  const protocol = toUpper(plcConnection.protocol || "TCP_TEXT");
+  if (protocol === "TCP_TEXT") {
+    return Boolean(plcConnection.transportConnected);
+  }
+  return Boolean(plcConnection.transportConnected || plcConnection.readConnected);
+}
+
+function applyPlcConnectionStability(machineId, plcConnection = {}) {
+  const key = Number(machineId || 0);
+  const instantConnected = getInstantPlcConnected(plcConnection);
+
+  if (!key) {
+    return {
+      connected: instantConnected,
+      instantConnected,
+      failureCount: instantConnected ? 0 : 1,
+      holdActive: false,
+    };
+  }
+
+  const previous =
+    ioPlcConnectionStability.get(key) || {
+      connected: false,
+      failureCount: 0,
+    };
+
+  let nextConnected = previous.connected;
+  let failureCount = previous.failureCount;
+
+  if (instantConnected) {
+    nextConnected = true;
+    failureCount = 0;
+  } else {
+    failureCount = Math.max(0, Number(previous.failureCount || 0)) + 1;
+    if (failureCount >= IO_PLC_DISCONNECT_FAILURE_THRESHOLD) {
+      nextConnected = false;
+    }
+  }
+
+  ioPlcConnectionStability.set(key, {
+    connected: nextConnected,
+    failureCount,
+    updatedAtMs: Date.now(),
+  });
+
+  return {
+    connected: nextConnected,
+    instantConnected,
+    failureCount,
+    holdActive:
+      !instantConnected &&
+      nextConnected &&
+      failureCount < IO_PLC_DISCONNECT_FAILURE_THRESHOLD,
+  };
 }
 
 function uniqueStages(stages) {
@@ -70,6 +140,29 @@ function uniqueStages(stages) {
 function toIntegerOrNull(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? Math.trunc(numeric) : null;
+}
+
+function parseRegisterToken(rawValue, fallbackDevice = null) {
+  const text = String(rawValue ?? "").trim().toUpperCase();
+  if (!text) {
+    return { register: null, device: fallbackDevice };
+  }
+  const direct = Number(text);
+  if (Number.isFinite(direct)) {
+    return { register: Math.trunc(direct), device: fallbackDevice };
+  }
+  const match = text.match(/^([A-Z]+)?\s*(\d+)$/);
+  if (!match) {
+    return { register: null, device: fallbackDevice };
+  }
+  const register = Number(match[2]);
+  if (!Number.isFinite(register)) {
+    return { register: null, device: fallbackDevice };
+  }
+  return {
+    register: Math.trunc(register),
+    device: String(match[1] || fallbackDevice || "").trim().toUpperCase() || fallbackDevice,
+  };
 }
 
 function toUpper(value) {
@@ -107,22 +200,8 @@ function evaluateSignalState(signalKey, value, machine, latestPlcStatus) {
   const resetValue = toIntegerOrNull(machine?.plc_reset_value) ?? 9;
 
   if (value === null || value === undefined) {
-    if (signalKey === "TRIGGER" && latestPlcStatus === "STARTED") {
-      return { status: "RUNNING", tone: "warn" };
-    }
-    if (signalKey === "INTERLOCK") {
-      if (latestPlcStatus === "ENDED_OK") {
-        return { status: "PASS", tone: "good" };
-      }
-      if (latestPlcStatus === "ENDED_NG" || latestPlcStatus === "INTERLOCKED") {
-        return { status: "FAIL", tone: "error" };
-      }
-      if (latestPlcStatus === "STARTED" || latestPlcStatus === "PENDING") {
-        return { status: "IN_PROGRESS", tone: "warn" };
-      }
-      if (latestPlcStatus === "PLC_COMM_ERROR") {
-        return { status: "COMM_ERROR", tone: "error" };
-      }
+    if (latestPlcStatus === "PLC_COMM_ERROR") {
+      return { status: "COMM_ERROR", tone: "error" };
     }
     return { status: "NO_DATA", tone: "muted" };
   }
@@ -209,12 +288,16 @@ function parseMachineHandshakeMap(machine) {
     const snapshot = typeof machine.plc_registers === "string" ? JSON.parse(machine.plc_registers) : machine.plc_registers;
     const rows = Array.isArray(snapshot?.handshakeMap) ? snapshot.handshakeMap : [];
     return rows
-      .map((row) => ({
-        signal: String(row?.signal || row?.label || "").trim(),
-        register: toIntegerOrNull(row?.register ?? row?.registerNo ?? row?.address),
-        direction: normalizeHandshakeDirectionToSignalDirection(row?.direction),
-        meaning: String(row?.meaning || row?.purpose || row?.description || "").trim() || null,
-      }))
+      .map((row) => {
+        const parsedRegister = parseRegisterToken(row?.register ?? row?.registerNo ?? row?.address, null);
+        return {
+          signal: String(row?.signal || row?.label || "").trim(),
+          register: parsedRegister.register,
+          device: parsedRegister.device,
+          direction: normalizeHandshakeDirectionToSignalDirection(row?.direction),
+          meaning: String(row?.meaning || row?.purpose || row?.description || "").trim() || null,
+        };
+      })
       .filter((row) => row.signal && row.register !== null);
   } catch (_error) {
     return [];
@@ -258,91 +341,77 @@ function getDefaultIoSignals(machine) {
   ];
 }
 
-function appendCustomHandshakeSignals(machine, rows = []) {
-  const output = Array.isArray(rows) ? [...rows] : [];
-  const existingKeys = new Set(output.map((row) => toUpper(row?.key)));
-  const handshakeRows = parseMachineHandshakeMap(machine);
-  for (const row of handshakeRows) {
-    const signalToken = toUpper(row.signal).replace(/[^A-Z0-9]+/g, "_");
-    if (!signalToken) {
-      continue;
-    }
-    const key = `HS_${signalToken}`;
-    if (existingKeys.has(key)) continue;
-    existingKeys.add(key);
-    output.push({
-      key,
-      label: row.signal,
-      register: row.register,
-      device: null,
-      direction: row.direction,
-      writable: row.direction !== "PLC -> PC",
-      description: row.meaning || "Configured handshake signal",
-    });
-  }
-  return output;
-}
-
 function parseMachineSignalMap(machine) {
-  const raw = machine?.plc_signal_map;
-  if (!raw) {
-    return appendCustomHandshakeSignals(machine, getDefaultIoSignals(machine));
-  }
+  const normalized = [];
+  const seen = new Set();
+  const seenRegisters = new Set();
 
+  const addSignal = (row, deduplicateRegister = false) => {
+    if (seen.has(row.key)) return;
+    const regNo = toIntegerOrNull(row.register);
+    if (deduplicateRegister && regNo !== null && seenRegisters.has(regNo)) return;
+    seen.add(row.key);
+    if (regNo !== null) seenRegisters.add(regNo);
+    normalized.push(row);
+  };
+
+  // 1. Core Map (plc_signal_map)
+  const raw = machine?.plc_signal_map;
   let parsed = raw;
   if (typeof raw === "string") {
-    try {
-      parsed = JSON.parse(raw);
-    } catch (_error) {
-      return appendCustomHandshakeSignals(machine, getDefaultIoSignals(machine));
-    }
+    try { parsed = JSON.parse(raw); } catch (e) { }
   }
-
   const source = Array.isArray(parsed)
     ? parsed
     : parsed && typeof parsed === "object"
-    ? Object.entries(parsed).map(([key, value]) => ({ key, ...(value || {}) }))
-    : [];
-  if (source.length === 0) {
-    return appendCustomHandshakeSignals(machine, getDefaultIoSignals(machine));
-  }
+      ? Object.entries(parsed).map(([key, value]) => ({ key, ...(value || {}) }))
+      : [];
 
-  const normalized = [];
-  const seen = new Set();
   for (const row of source) {
     const key = toUpper(row?.key || row?.signal || row?.name);
-    if (!key || seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-
+    if (!key) continue;
     const direction = normalizeSignalDirection(
       row?.direction,
       ["TRIGGER", "RESET"].includes(key) ? "PC -> PLC" : "PLC -> PC"
     );
-    normalized.push({
+    const explicitDevice = String(row?.device || "").trim().toUpperCase() || null;
+    const parsedRegister = parseRegisterToken(row?.register ?? row?.registerNo ?? row?.address, explicitDevice);
+    addSignal({
       key,
       label: String(row?.label || key).trim() || key,
-      register: toIntegerOrNull(row?.register ?? row?.registerNo ?? row?.address),
-      device: String(row?.device || "").trim().toUpperCase() || null,
+      register: parsedRegister.register,
+      device: parsedRegister.device || explicitDevice,
       direction,
       writable: row?.writable === undefined ? direction !== "PLC -> PC" : Boolean(row.writable),
       description: String(row?.description || "").trim() || "Configured signal mapping",
     });
   }
 
-  if (normalized.length === 0) {
-    return appendCustomHandshakeSignals(machine, getDefaultIoSignals(machine));
+  // 2. Handshake Map (plc_handshake_map)
+  const handshakeRows = parseMachineHandshakeMap(machine);
+  for (const row of handshakeRows) {
+    const signalToken = toUpper(row.signal).replace(/[^A-Z0-9]+/g, "_");
+    if (!signalToken) continue;
+    const key = `HS_${signalToken}`;
+    addSignal({
+      key,
+      label: row.signal,
+      register: row.register,
+      device: row.device || null,
+      direction: row.direction,
+      writable: row.direction !== "PLC -> PC",
+      description: row.meaning || "Configured handshake signal",
+    });
   }
 
-  // Ensure core handshake signals always exist even if custom map omitted them.
+  // 3. Fallback Defaults (getDefaultIoSignals)
+  // Ensure core signals exist, but do not override custom mappings!
   const defaults = getDefaultIoSignals(machine);
   for (const def of defaults) {
-    if (!seen.has(def.key)) {
-      normalized.push(def);
-    }
+    addSignal(def, true);
   }
-  return appendCustomHandshakeSignals(machine, normalized);
+
+  return normalized;
 }
 
 function buildIoSignalRows(machine, registerValues, latestPlcStatus) {
@@ -489,14 +558,85 @@ function getQualitySummaryFromOperationLogs(rows) {
   };
 }
 
+function isInProgressPlcStatus(value) {
+  const normalized = toUpper(value);
+  return normalized === "STARTED" || normalized === "PENDING";
+}
+
+function resolveCurrentOperationForMachine(logs, machine) {
+  if (!Array.isArray(logs) || logs.length === 0 || !machine) {
+    return null;
+  }
+
+  if (!Boolean(machine.is_running)) {
+    return null;
+  }
+
+  const runningPartId = String(machine.running_part_id || "").trim();
+  const runningStation = normalizeStation(machine.running_station_no);
+  return (
+    logs.find((row) => {
+      if (!isInProgressPlcStatus(row?.plc_status)) {
+        return false;
+      }
+      if (runningPartId && String(row?.part_id || "").trim() !== runningPartId) {
+        return false;
+      }
+      if (runningStation) {
+        const rowStation = normalizeStation(row?.station_no || row?.operation_no);
+        if (rowStation !== runningStation) {
+          return false;
+        }
+      }
+      return true;
+    }) || null
+  );
+}
+
 async function getLatestOperationLog(partId, stationNo) {
-  return OperationLog.findOne({
+  const station = normalizeStation(stationNo);
+  const logs = await OperationLog.findAll({
     where: {
       part_id: partId,
-      station_no: normalizeStation(stationNo),
+      station_no: station,
     },
     order: [["createdAt", "DESC"]],
   });
+
+  if (!logs.length) return null;
+
+  // Prioritize quality outcomes (PASS/NG) over administrative blocks (DUPLICATE/SEQUENCE)
+  const success = logs.find(l => ["ENDED_OK", "PASSED", "OK"].includes(toUpper(l.plc_status)) || ["PASS", "OK"].includes(toUpper(l.result)));
+  const ng = logs.find(l => ["ENDED_NG", "NG"].includes(toUpper(l.plc_status)) || ["FAIL", "NG"].includes(toUpper(l.result)));
+
+  return success || ng || logs[0];
+}
+
+async function safeRecordTimeline({
+  operationId,
+  partId,
+  machineId,
+  stationNo,
+  eventType,
+  eventData = {},
+  durationFromStartMs = null,
+}) {
+  if (!operationId || !eventType) {
+    return;
+  }
+  try {
+    await recordTimelineEvent({
+      operationId,
+      partId: partId || null,
+      machineId: machineId || null,
+      stationNo: stationNo || null,
+      eventType,
+      eventData,
+      durationFromStartMs,
+    });
+  } catch (_error) {
+    // Timeline persistence is best-effort; never break cycle flow.
+  }
 }
 
 function emitOperatorPopup(type, payload) {
@@ -524,17 +664,19 @@ async function buildScannerHealth(scanner, machineId) {
   }
 
   const connectionSnapshot = await getScannerConnectionSnapshot(scanner.scanner_ip).catch(() => null);
+  const connectionConnected = Boolean(connectionSnapshot?.connected);
 
   const byIpHealth = getScannerHealthSnapshot({ scannerIp: scanner.scanner_ip });
   if (byIpHealth) {
+    const connected = Boolean(byIpHealth.connected) || connectionConnected;
     return {
       ...byIpHealth,
       scannerId: byIpHealth.scannerId || scanner.id,
       scannerName: byIpHealth.scannerName || scanner.scanner_name,
       machineId: byIpHealth.machineId || machineId || null,
-      connected: Boolean(connectionSnapshot?.connected ?? byIpHealth.connected),
-      status: String(connectionSnapshot?.status || byIpHealth.status || "DISCONNECTED").toUpperCase(),
-      connectedAt: connectionSnapshot?.connectedAt || null,
+      connected,
+      status: connected ? "CONNECTED" : "DISCONNECTED",
+      connectedAt: byIpHealth.lastSeenAt || connectionSnapshot?.connectedAt || null,
       lastDataAt: connectionSnapshot?.lastDataAt || byIpHealth.lastSeenAt || null,
       source: connectionSnapshot?.source || "HEARTBEAT",
     };
@@ -548,14 +690,15 @@ async function buildScannerHealth(scanner, machineId) {
       null;
 
     if (match) {
+      const connected = Boolean(match.connected) || connectionConnected;
       return {
         ...match,
         scannerId: match.scannerId || scanner.id,
         scannerName: match.scannerName || scanner.scanner_name,
         machineId: match.machineId || machineId || null,
-        connected: Boolean(connectionSnapshot?.connected ?? match.connected),
-        status: String(connectionSnapshot?.status || match.status || "DISCONNECTED").toUpperCase(),
-        connectedAt: connectionSnapshot?.connectedAt || null,
+        connected,
+        status: connected ? "CONNECTED" : "DISCONNECTED",
+        connectedAt: match.lastSeenAt || connectionSnapshot?.connectedAt || null,
         lastDataAt: connectionSnapshot?.lastDataAt || match.lastSeenAt || null,
         source: connectionSnapshot?.source || "HEARTBEAT",
       };
@@ -596,6 +739,23 @@ function mapScanDecisionToPopupType(scanResult) {
     return "INFO";
   }
   return "ERROR";
+}
+
+function getBlockedPopupMessage(scanResult = {}) {
+  const reason = String(scanResult?.reason || "").trim().toUpperCase();
+  const message = scanResult?.message || "";
+
+  if (reason === "PREVIOUS_STATION_NOT_COMPLETED") {
+    return `Station sequence skipped! Please complete operation at ${scanResult.expectedStation || "the previous station"} first.`;
+  }
+  if (reason === "DUPLICATE_SCAN" || reason === "DUPLICATE_SCAN_IN_FLIGHT" || reason === "ALREADY_COMPLETED") {
+    return `This part has already completed the ${scanResult.stationNo || "current"} operation. Duplicate scan detected.`;
+  }
+  // If it's a validation error, prefer the dynamic error message passed from the backend
+  if (reason === "VALIDATION_ERROR" && message) {
+    return message;
+  }
+  return message || reason || "BLOCKED";
 }
 
 function hasRejectionBinConfirmation(payload = {}) {
@@ -660,21 +820,21 @@ function getMachineSpcConfig(machine) {
     : [];
   const payloadResultNgValues = Array.isArray(source.payloadResultNgValues)
     ? source.payloadResultNgValues
-        .map((entry) => String(entry || "").trim().toUpperCase())
-        .filter(Boolean)
-        .slice(0, 20)
+      .map((entry) => String(entry || "").trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 20)
     : ["NG", "FAIL", "0"];
   const plcResultOkValues = Array.isArray(source.plcResultOkValues)
     ? source.plcResultOkValues
-        .map((entry) => String(entry || "").trim().toUpperCase())
-        .filter(Boolean)
-        .slice(0, 20)
+      .map((entry) => String(entry || "").trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 20)
     : ["1", "3", "OK", "PASS"];
   const plcResultNgValues = Array.isArray(source.plcResultNgValues)
     ? source.plcResultNgValues
-        .map((entry) => String(entry || "").trim().toUpperCase())
-        .filter(Boolean)
-        .slice(0, 20)
+      .map((entry) => String(entry || "").trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 20)
     : ["0", "2", "NG", "FAIL"];
   return {
     enabled: source.enabled === true,
@@ -803,8 +963,8 @@ async function sendQualityCheckAckToPlc(machine, spcConfig, finalResult) {
     finalResult === "NG"
       ? spcConfig.plcAckNgValue
       : finalResult === "OK"
-      ? spcConfig.plcAckOkValue
-      : spcConfig.plcAckErrorValue;
+        ? spcConfig.plcAckOkValue
+        : spcConfig.plcAckErrorValue;
   if (protocol === "MODBUS_TCP") {
     await writeModbusRegister({
       ip,
@@ -973,32 +1133,46 @@ async function markOperationCommunicationError({ operationLogId, partId, station
 }
 
 async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId, releaseLock = true }) {
-  const plcIp = machine.plc_ip || machine.machine_ip;
-  const plcPort = machine.plc_port || machine.machine_port;
-
+  let plcCycleCompleted = false;
   try {
-    await executePlcHandshake({
-      ip: plcIp,
-      port: plcPort,
+    await safeRecordTimeline({
+      operationId: operationLogId,
+      partId,
+      machineId: machine.id,
+      stationNo,
+      eventType: TIMELINE_EVENTS.START_SENT,
+      eventData: { source: "traceabilityController.startPlcFlow" },
+    });
+
+    await plcHandshakeEngine.executeCycle({
+      machine,
       partId,
       stationNo,
-      machineId: machine.id,
-      machine,
-      onAckStart: async () => {
+      operationLogId,
+      onStarted: async () => {
         await markOperationStarted(operationLogId, machine.id);
+        await safeRecordTimeline({
+          operationId: operationLogId,
+          partId,
+          machineId: machine.id,
+          stationNo,
+          eventType: TIMELINE_EVENTS.RUNNING,
+        });
         emitOperatorPopup("INFO", {
           partId,
           stationNo,
           machineId: machine.id,
           machineName: machine.machine_name,
-          status: "STARTED",
+          qrStatus: "PASSED",
+          operationStatus: "RUNNING",
+          status: "RUNNING",
           plcStatus: "STARTED",
-          qrResult: "PASS",
-          message: "PLC start acknowledged",
+          message: "PLC cycle running",
         });
+        emitRealtime("PLC_RUNNING", { partId, machineId: machine.id, stationNo });
         emitRealtime("dashboard_refresh", { reason: "PLC_START_ACK" });
       },
-      onAckEndOk: async () => {
+      onEndedOk: async () => {
         await markOperationEndedOk({
           operationLogId,
           partId,
@@ -1006,19 +1180,29 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId
           machineId: machine.id,
           userId,
         });
+        plcCycleCompleted = true;
+        await safeRecordTimeline({
+          operationId: operationLogId,
+          partId,
+          machineId: machine.id,
+          stationNo,
+          eventType: TIMELINE_EVENTS.COMPLETED_OK,
+        });
         emitOperatorPopup("SUCCESS", {
           partId,
           stationNo,
           machineId: machine.id,
           machineName: machine.machine_name,
+          qrStatus: "PASSED",
+          operationStatus: "PASSED",
           status: "ENDED_OK",
           plcStatus: "ENDED_OK",
-          qrResult: "PASS",
           message: "Operation Passed",
         });
+        emitRealtime("PLC_COMPLETED_OK", { partId, machineId: machine.id, stationNo });
         emitRealtime("dashboard_refresh", { reason: "PLC_END_OK" });
       },
-      onAckEndNg: async () => {
+      onEndedNg: async () => {
         await markOperationEndedNg({
           operationLogId,
           partId,
@@ -1027,19 +1211,29 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId
           userId,
           reason: "PLC_END_NG",
         });
+        plcCycleCompleted = true;
+        await safeRecordTimeline({
+          operationId: operationLogId,
+          partId,
+          machineId: machine.id,
+          stationNo,
+          eventType: TIMELINE_EVENTS.COMPLETED_NG,
+        });
         emitOperatorPopup("ERROR", {
           partId,
           stationNo,
           machineId: machine.id,
           machineName: machine.machine_name,
+          qrStatus: "PASSED",
+          operationStatus: "FAILED",
           status: "ENDED_NG",
           plcStatus: "ENDED_NG",
-          qrResult: "PASS",
           message: "Operation Failed (NG)",
         });
+        emitRealtime("PLC_COMPLETED_NG", { partId, machineId: machine.id, stationNo });
         emitRealtime("dashboard_refresh", { reason: "PLC_END_NG" });
       },
-      onFailure: async (error) => {
+      onError: async (error) => {
         await markOperationCommunicationError({
           operationLogId,
           partId,
@@ -1047,14 +1241,25 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId
           machineId: machine.id,
           reason: `PLC_TIMEOUT_${String(error.message || "").slice(0, 120)}`,
         });
+        await safeRecordTimeline({
+          operationId: operationLogId,
+          partId,
+          machineId: machine.id,
+          stationNo,
+          eventType: String(error?.message || "").toUpperCase().includes("TIMEOUT")
+            ? TIMELINE_EVENTS.PLC_TIMEOUT
+            : TIMELINE_EVENTS.PLC_ERROR,
+          eventData: { error: String(error?.message || "PLC communication failure") },
+        });
         emitOperatorPopup("WARNING", {
           partId,
           stationNo,
           machineId: machine.id,
           machineName: machine.machine_name,
+          qrStatus: "PASSED",
+          operationStatus: "PLC_TIMEOUT",
           status: "PLC_COMM_ERROR",
           plcStatus: "PLC_COMM_ERROR",
-          qrResult: "PASS",
           message: "PLC communication issue. Use Reset Operation, then scan again.",
         });
         emitRealtime("dashboard_refresh", { reason: "PLC_COMM_ERROR" });
@@ -1062,7 +1267,25 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId
     });
   } finally {
     if (releaseLock) {
-      await clearMachineLock(machine.id);
+      if (plcCycleCompleted) {
+        const finalize = await finalizeCycleAfterPlc({ machine });
+        if (!finalize.success) {
+          emitOperatorPopup("WARNING", {
+            partId,
+            stationNo,
+            machineId: machine.id,
+            machineName: machine.machine_name,
+            status: "RECOVERING",
+            plcStatus: "RECOVERING",
+            qrResult: "PASS",
+            reason: finalize.reason || "RESET_VALIDATION_FAILED",
+            message: "Cycle ended but reset validation failed. Manual recovery may be required.",
+          });
+        }
+      } else {
+        await clearMachineLock(machine.id);
+        await plcHandshakeEngine.markIdle(machine.id);
+      }
     }
   }
 }
@@ -1087,7 +1310,20 @@ async function startPlcBatchFlow({ batchItems, stationNo, machine, userId }) {
       }
     }
   } finally {
-    await clearMachineLock(machine.id);
+    const finalize = await finalizeCycleAfterPlc({ machine });
+    if (!finalize.success) {
+      emitOperatorPopup("WARNING", {
+        partId: batchItems[batchItems.length - 1]?.partId || null,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "RECOVERING",
+        plcStatus: "RECOVERING",
+        qrResult: "PASS",
+        reason: finalize.reason || "RESET_VALIDATION_FAILED",
+        message: "Batch ended but reset validation failed. Manual recovery may be required.",
+      });
+    }
   }
 }
 
@@ -1097,53 +1333,29 @@ async function handleStationPlcFlow({
   stationNo,
   partId,
   userId,
-  plcConfirmationRequired,
   requiredPlcPartCount,
 }) {
   if (response.decision !== "ALLOW" || !response.operationLogId) {
-    return;
-  }
-
-  if (!plcConfirmationRequired) {
-    const lock = await tryAcquireMachineLock({
-      machineId: machine.id,
-      partId,
-      stationNo,
-    });
-
-    if (!lock.acquired) {
-      await rollbackPendingOperation({
+    if (response.operationLogId) {
+      await safeRecordTimeline({
+        operationId: response.operationLogId,
         partId,
-        operationLogId: response.operationLogId,
+        machineId: machine.id,
+        stationNo,
+        eventType: TIMELINE_EVENTS.INTERLOCKED,
+        eventData: {
+          reason: response.reason || "REJECTED_SCAN",
+          message: getBlockedPopupMessage(response),
+        },
       });
-      response.decision = "BLOCK";
-      response.reason = "MACHINE_RUNNING";
-      response.message = lock.runningPartId
-        ? `Machine busy. Current part ${lock.runningPartId} is in operation.`
-        : "Machine busy with another cycle. Retry after current operation completes.";
-      response.operationLogId = null;
-      response.lock = {
-        runningPartId: lock.runningPartId || null,
-        runningStationNo: lock.runningStationNo || null,
-        runningStartedAt: lock.runningStartedAt || null,
-      };
-      return;
     }
-
-    await markOperationEndedOk({
-      operationLogId: response.operationLogId,
-      partId,
-      stationNo,
-      machineId: machine.id,
-      userId,
-    });
-    await clearMachineLock(machine.id);
-    emitRealtime("dashboard_refresh", { reason: "PLC_CONFIRMATION_SKIPPED" });
-    response.plcHandshake = "SKIPPED";
-    response.operationStatus = "ENDED_OK";
-    response.message = "QR verified. PLC confirmation skipped as per station settings. Marked OK.";
+    // Rule: Send interlock signal for duplicates or invalid sequences
+    plcHandshakeEngine.signalInterlock(machine.id, response.reason || "REJECTED_SCAN")
+      .catch(err => console.error("[PLC:INTERLOCK_TRIGGER_FAILED]", err.message));
     return;
   }
+
+  // Direct mode: No WAITING_PLC_END block anymore
 
   if (requiredPlcPartCount <= 1) {
     const lock = await tryAcquireMachineLock({
@@ -1271,17 +1483,23 @@ exports.getPlcHealth = async (req, res) => {
     const health = machineId ? getPlcHealthSnapshot(machineId) : getPlcHealthSnapshot();
     const circuits = getPlcCircuitSnapshot();
 
+    const queue = plcConnectionManager.getQueueSnapshot();
     if (machineId) {
       const machineCircuit = circuits.find((entry) => entry.key === `machine:${machineId}`) || null;
+      const machine = await Machine.findByPk(machineId);
+      const endpointKey = machine ? `${String(machine.plc_ip || machine.machine_ip || "").trim()}:${Number(machine.plc_port || machine.machine_port || 0)}` : null;
+      const queueEntry = endpointKey ? queue.find((q) => q.endpointKey === endpointKey) || null : null;
       return res.json({
         health: health || null,
         circuit: machineCircuit,
+        queue: queueEntry,
       });
     }
 
     res.json({
       health,
       circuits,
+      queue,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1340,11 +1558,15 @@ exports.getLiveMachineState = async (req, res) => {
       limit: 20,
     });
 
-    const current = logs.find((row) => row.plc_status === "STARTED" || row.plc_status === "PENDING") || null;
+    const current = resolveCurrentOperationForMachine(logs, machine);
     const lastEvent = logs[0] || null;
     const plcHealth = getPlcHealthSnapshot(machine.id);
     const plcCircuit = getPlcCircuitSnapshot().find((entry) => entry.key === `machine:${machine.id}`) || null;
-    const scannerHealth = await buildScannerHealth(scanner, machine.id);
+    const scannerHealth = scannerConnectionManager.getStableSnapshot({
+      machineId: machine.id,
+      scannerIp: scanner?.scanner_ip
+    }) || (await buildScannerHealth(scanner, machine.id));
+    const machineState = plcHandshakeEngine.getState(machine.id);
 
     res.json({
       machine: {
@@ -1367,39 +1589,41 @@ exports.getLiveMachineState = async (req, res) => {
       },
       plcHealth: plcHealth || null,
       plcCircuit,
+      plcQueue: plcConnectionManager.getQueueSnapshot(),
       scanner: scanner
         ? {
-            id: scanner.id,
-            scannerName: scanner.scanner_name,
-            scannerIp: scanner.scanner_ip,
-            scannerPort: scanner.scanner_port,
-            isActive: scanner.is_active,
-          }
+          id: scanner.id,
+          scannerName: scanner.scanner_name,
+          scannerIp: scanner.scanner_ip,
+          scannerPort: scanner.scanner_port,
+          isActive: scanner.is_active,
+        }
         : null,
       scannerHealth,
+      machineState,
       current: current
         ? {
-            operationLogId: current.id,
-            partId: current.part_id,
-            plcStatus: current.plc_status,
-            result: current.result,
-            interlockReason: current.interlock_reason,
-            isBypassed: current.is_bypassed,
-            bypassReason: current.bypass_reason,
-            createdAt: current.createdAt,
-          }
+          operationLogId: current.id,
+          partId: current.part_id,
+          plcStatus: current.plc_status,
+          result: current.result,
+          interlockReason: current.interlock_reason,
+          isBypassed: current.is_bypassed,
+          bypassReason: current.bypass_reason,
+          createdAt: current.createdAt,
+        }
         : null,
       lastEvent: lastEvent
         ? {
-            operationLogId: lastEvent.id,
-            partId: lastEvent.part_id,
-            plcStatus: lastEvent.plc_status,
-            result: lastEvent.result,
-            interlockReason: lastEvent.interlock_reason,
-            isBypassed: lastEvent.is_bypassed,
-            bypassReason: lastEvent.bypass_reason,
-            createdAt: lastEvent.createdAt,
-          }
+          operationLogId: lastEvent.id,
+          partId: lastEvent.part_id,
+          plcStatus: lastEvent.plc_status,
+          result: lastEvent.result,
+          interlockReason: lastEvent.interlock_reason,
+          isBypassed: lastEvent.is_bypassed,
+          bypassReason: lastEvent.bypass_reason,
+          createdAt: lastEvent.createdAt,
+        }
         : null,
       recent: logs.map((row) => ({
         id: row.id,
@@ -1411,6 +1635,7 @@ exports.getLiveMachineState = async (req, res) => {
         bypassReason: row.bypass_reason,
         createdAt: row.createdAt,
       })),
+      stationSettings: await getStationFeatureConfig(stationNo).catch(() => null),
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1457,212 +1682,230 @@ exports.getIoSnapshot = async (req, res) => {
       }
     }
 
-    const stationNo = getMachineOperationStage(machine);
-    const [latestLog, scanner] = await Promise.all([
-      OperationLog.findOne({
-        where: stationNo
-          ? { machine_id: machine.id, station_no: stationNo }
-          : { machine_id: machine.id },
-        order: [["createdAt", "DESC"]],
-      }),
-      Scanner.findOne({
-        where: {
-          mapped_machine_id: machine.id,
-          is_active: true,
+    if (!bypassCache && ioSnapshotInFlight.has(cacheKey)) {
+      const sharedPayload = await ioSnapshotInFlight.get(cacheKey);
+      return res.json({
+        ...sharedPayload,
+        monitorPolicy: {
+          ...(sharedPayload.monitorPolicy || {}),
+          servedFromCache: false,
+          inFlightShared: true,
         },
-        order: [["updatedAt", "DESC"]],
-      }),
-    ]);
+      });
+    }
 
-    const protocol = toUpper(machine.plc_protocol || "TCP_TEXT");
-    const plcIp = machine.plc_ip || machine.machine_ip || null;
-    const plcPort = toIntegerOrNull(machine.plc_port || machine.machine_port);
-    const plcUnitId = toIntegerOrNull(machine.plc_unit_id) || 1;
-    const timeoutMs = toIntegerOrNull(machine.plc_test_timeout_ms) || 2000;
-    const signalMapEntries = parseMachineSignalMap(machine);
-    const registerList = signalMapEntries
-      .map((entry) => toIntegerOrNull(entry.register))
-      .filter((entry, index, array) => entry !== null && array.indexOf(entry) === index);
-    const slmpDefaultDevice = String(machine.plc_slmp_device || "D").trim().toUpperCase() || "D";
-    const slmpRegisterSpecs = registerList.map((registerNo) => {
-      const mapped = signalMapEntries.find((entry) => toIntegerOrNull(entry.register) === registerNo);
-      return {
-        register: registerNo,
-        device: String(mapped?.device || slmpDefaultDevice).trim().toUpperCase() || slmpDefaultDevice,
+    const snapshotPromise = (async () => {
+
+      const stationNo = getMachineOperationStage(machine);
+      const [latestLog, scanner] = await Promise.all([
+        OperationLog.findOne({
+          where: stationNo
+            ? { machine_id: machine.id, station_no: stationNo }
+            : { machine_id: machine.id },
+          order: [["createdAt", "DESC"]],
+        }),
+        Scanner.findOne({
+          where: {
+            mapped_machine_id: machine.id,
+            is_active: true,
+          },
+          order: [["updatedAt", "DESC"]],
+        }),
+      ]);
+
+      const protocol = toUpper(machine.plc_protocol || "TCP_TEXT");
+      const plcIp = machine.plc_ip || machine.machine_ip || null;
+      const plcPort = toIntegerOrNull(machine.plc_port || machine.machine_port);
+      const plcUnitId = toIntegerOrNull(machine.plc_unit_id) || 1;
+      const timeoutMs = toIntegerOrNull(machine.plc_test_timeout_ms) || 2000;
+      const signalMapEntries = parseMachineSignalMap(machine);
+      const registerList = signalMapEntries
+        .map((entry) => toIntegerOrNull(entry.register))
+        .filter((entry, index, array) => entry !== null && array.indexOf(entry) === index);
+      const slmpDefaultDevice = String(machine.plc_slmp_device || "D").trim().toUpperCase() || "D";
+      const slmpRegisterSpecs = registerList.map((registerNo) => {
+        const mapped = signalMapEntries.find((entry) => toIntegerOrNull(entry.register) === registerNo);
+        return {
+          register: registerNo,
+          device: String(mapped?.device || slmpDefaultDevice).trim().toUpperCase() || slmpDefaultDevice,
+        };
+      });
+
+      const errors = [];
+      const registerValues = {};
+      const checkedAt = new Date().toISOString();
+      const plcConnection = {
+        connected: false,
+        transportConnected: false,
+        readConnected: false,
+        protocol,
+        checkedAt,
+        error: null,
+        transportError: null,
+        readError: null,
       };
-    });
 
-    const errors = [];
-    const registerValues = {};
-    const checkedAt = new Date().toISOString();
-    const plcConnection = {
-      connected: false,
-      transportConnected: false,
-      readConnected: false,
-      protocol,
-      checkedAt,
-      error: null,
-      transportError: null,
-      readError: null,
-    };
+      if (!plcIp || !plcPort) {
+        plcConnection.error = "PLC endpoint missing on machine configuration";
+        errors.push(plcConnection.error);
+      } else {
+        try {
+          await probeTcpEndpoint({
+            ip: plcIp,
+            port: plcPort,
+            timeoutMs: Math.min(timeoutMs, 2000),
+          });
+          plcConnection.transportConnected = true;
+        } catch (error) {
+          const message = withPlcConnectivityHint(String(error.message || "Unable to connect to PLC endpoint"), {
+            ip: plcIp,
+            port: plcPort,
+            protocol,
+          });
+          plcConnection.transportError = message;
+          plcConnection.error = message;
+          errors.push(message);
+        }
+      }
 
-    if (!plcIp || !plcPort) {
-      plcConnection.error = "PLC endpoint missing on machine configuration";
-      errors.push(plcConnection.error);
-    } else {
-      try {
-        await probeTcpEndpoint({
-          ip: plcIp,
-          port: plcPort,
-          timeoutMs: Math.min(timeoutMs, 2000),
-        });
-        plcConnection.transportConnected = true;
-      } catch (error) {
-        const message = withPlcConnectivityHint(String(error.message || "Unable to connect to PLC endpoint"), {
+      if (plcIp && plcPort && protocol === "MODBUS_TCP") {
+        if (registerList.length === 0) {
+          const message = "No Modbus register mapped on this machine";
+          errors.push(message);
+          plcConnection.readError = message;
+          if (!plcConnection.error) {
+            plcConnection.error = message;
+          }
+        } else {
+          try {
+            const readResult = await readModbusRegisters({
+              ip: plcIp,
+              port: plcPort,
+              unitId: plcUnitId,
+              registers: registerList,
+              timeoutMs,
+            });
+            plcConnection.readConnected = true;
+            for (const [registerNo, value] of Object.entries(readResult.values || {})) {
+              registerValues[Number(registerNo)] = value;
+            }
+            if (Array.isArray(readResult.errors) && readResult.errors.length > 0) {
+              for (const row of readResult.errors) {
+                errors.push(
+                  `Register ${row.register}: ${row.message}`
+                );
+              }
+            }
+          } catch (error) {
+            const message = withPlcConnectivityHint(String(error.message || "Unable to read PLC register values"), {
+              ip: plcIp,
+              port: plcPort,
+              protocol,
+            });
+            plcConnection.readError = message;
+            plcConnection.error = message;
+            errors.push(message);
+          }
+        }
+      } else if (plcIp && plcPort && protocol === "SLMP") {
+        if (registerList.length === 0) {
+          const message = "No SLMP register mapped on this machine";
+          errors.push(message);
+          plcConnection.readError = message;
+          if (!plcConnection.error) {
+            plcConnection.error = message;
+          }
+        } else {
+          try {
+            let slmpFrameMode = "AUTO";
+            try {
+              const parsed = machine?.plc_registers ? JSON.parse(machine.plc_registers) : null;
+              const rawMode = String(parsed?.slmpFrameMode ?? parsed?.slmpFrame ?? parsed?.frameMode ?? "").trim().toUpperCase();
+              if (["ASCII", "BINARY", "AUTO"].includes(rawMode)) slmpFrameMode = rawMode;
+            } catch (_error) {
+              // keep AUTO
+            }
+            const readResult = await readSlmpRegisters({
+              ip: plcIp,
+              port: plcPort,
+              registers: slmpRegisterSpecs,
+              timeoutMs,
+              defaultDevice: slmpDefaultDevice,
+              frameMode: slmpFrameMode,
+            });
+            plcConnection.readConnected = true;
+            for (const [registerNo, value] of Object.entries(readResult.values || {})) {
+              registerValues[Number(registerNo)] = value;
+            }
+            if (Array.isArray(readResult.errors) && readResult.errors.length > 0) {
+              for (const row of readResult.errors) {
+                errors.push(`Register ${row.device || slmpDefaultDevice}${row.register}: ${row.message}`);
+              }
+            }
+          } catch (error) {
+            const message = withPlcConnectivityHint(String(error.message || "Unable to read SLMP register values"), {
+              ip: plcIp,
+              port: plcPort,
+              protocol,
+            });
+            plcConnection.readError = message;
+            plcConnection.error = message;
+            errors.push(message);
+          }
+        }
+      }
+
+      const stableState = applyPlcConnectionStability(machine.id, plcConnection);
+      plcConnection.connected = stableState.connected;
+      plcConnection.instantConnected = stableState.instantConnected;
+      plcConnection.failureCount = stableState.failureCount;
+      plcConnection.holdActive = stableState.holdActive;
+
+      const latestPlcStatus = toUpper(latestLog?.plc_status);
+      const rows = buildIoSignalRows(machine, registerValues, latestPlcStatus);
+      const plcHealth = getPlcHealthSnapshot(machine.id) || null;
+      const plcCircuit = getPlcCircuitSnapshot().find((entry) => entry.key === `machine:${machine.id}`) || null;
+      const scannerHealth = scannerConnectionManager.getStableSnapshot({ machineId: machine.id })
+        || (await buildScannerHealth(scanner, machine.id));
+      const machineState = plcHandshakeEngine.getState(machine.id);
+
+      const payload = {
+        snapshotAt: checkedAt,
+        machine: {
+          id: machine.id,
+          machineName: machine.machine_name,
+          lineName: machine.line_name,
+          sequenceNo: machine.sequence_no,
+          operationNo: machine.operation_no,
+          stationNo,
+          isRunning: Boolean(machine.is_running),
+          runningPartId: machine.running_part_id || null,
+          runningStationNo: machine.running_station_no || null,
+          runningStartedAt: machine.running_started_at || null,
+        },
+        plc: {
           ip: plcIp,
           port: plcPort,
           protocol,
-        });
-        plcConnection.transportError = message;
-        plcConnection.error = message;
-        errors.push(message);
-      }
-    }
-
-    if (plcIp && plcPort && protocol === "MODBUS_TCP") {
-      if (registerList.length === 0) {
-        const message = "No Modbus register mapped on this machine";
-        errors.push(message);
-        plcConnection.readError = message;
-        if (!plcConnection.error) {
-          plcConnection.error = message;
-        }
-      } else {
-        try {
-          const readResult = await readModbusRegisters({
-            ip: plcIp,
-            port: plcPort,
-            unitId: plcUnitId,
-            registers: registerList,
-            timeoutMs,
-          });
-          plcConnection.readConnected = true;
-          for (const [registerNo, value] of Object.entries(readResult.values || {})) {
-            registerValues[Number(registerNo)] = value;
-          }
-          if (Array.isArray(readResult.errors) && readResult.errors.length > 0) {
-            for (const row of readResult.errors) {
-              errors.push(
-                `Register ${row.register}: ${row.message}`
-              );
-            }
-          }
-        } catch (error) {
-          const message = withPlcConnectivityHint(String(error.message || "Unable to read PLC register values"), {
-            ip: plcIp,
-            port: plcPort,
-            protocol,
-          });
-          plcConnection.readError = message;
-          plcConnection.error = message;
-          errors.push(message);
-        }
-      }
-    } else if (plcIp && plcPort && protocol === "SLMP") {
-      if (registerList.length === 0) {
-        const message = "No SLMP register mapped on this machine";
-        errors.push(message);
-        plcConnection.readError = message;
-        if (!plcConnection.error) {
-          plcConnection.error = message;
-        }
-      } else {
-        try {
-          let slmpFrameMode = "AUTO";
-          try {
-            const parsed = machine?.plc_registers ? JSON.parse(machine.plc_registers) : null;
-            const rawMode = String(parsed?.slmpFrameMode ?? parsed?.slmpFrame ?? parsed?.frameMode ?? "").trim().toUpperCase();
-            if (["ASCII", "BINARY", "AUTO"].includes(rawMode)) slmpFrameMode = rawMode;
-          } catch (_error) {
-            // keep AUTO
-          }
-          const readResult = await readSlmpRegisters({
-            ip: plcIp,
-            port: plcPort,
-            registers: slmpRegisterSpecs,
-            timeoutMs,
-            defaultDevice: slmpDefaultDevice,
-            frameMode: slmpFrameMode,
-          });
-          plcConnection.readConnected = true;
-          for (const [registerNo, value] of Object.entries(readResult.values || {})) {
-            registerValues[Number(registerNo)] = value;
-          }
-          if (Array.isArray(readResult.errors) && readResult.errors.length > 0) {
-            for (const row of readResult.errors) {
-              errors.push(`Register ${row.device || slmpDefaultDevice}${row.register}: ${row.message}`);
-            }
-          }
-        } catch (error) {
-          const message = withPlcConnectivityHint(String(error.message || "Unable to read SLMP register values"), {
-            ip: plcIp,
-            port: plcPort,
-            protocol,
-          });
-          plcConnection.readError = message;
-          plcConnection.error = message;
-          errors.push(message);
-        }
-      }
-    }
-
-    plcConnection.connected = Boolean(
-      protocol === "TCP_TEXT"
-        ? plcConnection.transportConnected
-        : plcConnection.transportConnected || plcConnection.readConnected
-    );
-
-    const latestPlcStatus = toUpper(latestLog?.plc_status);
-    const rows = buildIoSignalRows(machine, registerValues, latestPlcStatus);
-    const plcHealth = getPlcHealthSnapshot(machine.id) || null;
-    const plcCircuit = getPlcCircuitSnapshot().find((entry) => entry.key === `machine:${machine.id}`) || null;
-    const scannerHealth = await buildScannerHealth(scanner, machine.id);
-
-    const payload = {
-      snapshotAt: checkedAt,
-      machine: {
-        id: machine.id,
-        machineName: machine.machine_name,
-        lineName: machine.line_name,
-        sequenceNo: machine.sequence_no,
-        operationNo: machine.operation_no,
-        stationNo,
-        isRunning: Boolean(machine.is_running),
-        runningPartId: machine.running_part_id || null,
-        runningStationNo: machine.running_station_no || null,
-        runningStartedAt: machine.running_started_at || null,
-      },
-      plc: {
-        ip: plcIp,
-        port: plcPort,
-        protocol,
-        unitId: plcUnitId,
-      },
-      plcConnection,
-      plcHealth,
-      plcCircuit,
-      scanner: scanner
-        ? {
+          unitId: plcUnitId,
+        },
+        plcConnection,
+        plcHealth,
+        plcCircuit,
+        plcQueue: plcConnectionManager.getQueueSnapshot(),
+        scanner: scanner
+          ? {
             id: scanner.id,
             scannerName: scanner.scanner_name,
             scannerIp: scanner.scanner_ip,
             scannerPort: scanner.scanner_port,
             isActive: scanner.is_active,
           }
-        : null,
-      scannerHealth,
-      latestOperation: latestLog
-        ? {
+          : null,
+        scannerHealth,
+        machineState,
+        latestOperation: latestLog
+          ? {
             operationLogId: latestLog.id,
             partId: latestLog.part_id,
             plcStatus: latestLog.plc_status,
@@ -1670,19 +1913,29 @@ exports.getIoSnapshot = async (req, res) => {
             interlockReason: latestLog.interlock_reason,
             createdAt: latestLog.createdAt,
           }
-        : null,
-      rows,
-      errors,
-      monitorPolicy: {
-        minIntervalMs: IO_SNAPSHOT_MIN_INTERVAL_MS,
-        cacheMaxAgeMs: IO_SNAPSHOT_CACHE_MAX_AGE_MS,
-        servedFromCache: false,
-        throttled: false,
-        cacheAgeMs: 0,
-      },
-    };
+          : null,
+        rows,
+        errors,
+        monitorPolicy: {
+          minIntervalMs: IO_SNAPSHOT_MIN_INTERVAL_MS,
+          cacheMaxAgeMs: IO_SNAPSHOT_CACHE_MAX_AGE_MS,
+          servedFromCache: false,
+          throttled: false,
+          cacheAgeMs: 0,
+        },
+      };
+      return payload;
+    })();
+
+    ioSnapshotInFlight.set(cacheKey, snapshotPromise);
+    snapshotPromise.finally(() => {
+      if (ioSnapshotInFlight.get(cacheKey) === snapshotPromise) {
+        ioSnapshotInFlight.delete(cacheKey);
+      }
+    });
+    const payload = await snapshotPromise;
     ioSnapshotCache.set(cacheKey, { payload, savedAtMs: Date.now() });
-    res.json(payload);
+    return res.json(payload);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1710,7 +1963,22 @@ exports.getPartJourney = async (req, res) => {
     ]);
 
     if (!part && logs.length === 0) {
-      return res.status(404).json({ error: "Part not found" });
+      return res.json({
+        part: {
+          part_id: partId,
+          status: "NOT_FOUND",
+          current_station: null,
+          current_operation: null,
+        },
+        sequence: sequenceData.sequence || [],
+        expectedNextStation: sequenceData.sequence?.[0] || null,
+        journey: [],
+        stationTimeline: [],
+        interlockHistory: [],
+        auditTrail: [],
+        reworkHistory: [],
+        notFound: true,
+      });
     }
 
     const machineIds = uniqueStages(
@@ -1724,9 +1992,9 @@ exports.getPartJourney = async (req, res) => {
     const machineRows =
       machineIds.length > 0
         ? await Machine.findAll({
-            where: { id: { [Op.in]: machineIds } },
-            attributes: ["id", "machine_name", "operation_no", "sequence_no"],
-          })
+          where: { id: { [Op.in]: machineIds } },
+          attributes: ["id", "machine_name", "operation_no", "sequence_no"],
+        })
         : [];
 
     const machineMap = machineRows.reduce((acc, machine) => {
@@ -1768,8 +2036,8 @@ exports.getPartJourney = async (req, res) => {
       !part || part.status === "COMPLETED"
         ? null
         : currentIndex < 0
-        ? sequenceData.sequence[0] || null
-        : sequenceData.sequence[currentIndex + 1] || null;
+          ? sequenceData.sequence[0] || null
+          : sequenceData.sequence[currentIndex + 1] || null;
 
     const stationTimeline = knownStations.map((stationNo, idx) => {
       const attempts = (logsByStation[stationNo] || []).map((row) => ({
@@ -1858,56 +2126,168 @@ exports.getPartCatalog = async (req, res) => {
   try {
     const search = String(req.query.search || "").trim();
     const limit = Math.min(Math.max(Number(req.query.limit || 120), 1), 400);
+    const { from, to } = getDateRangeFromQuery(req.query);
+    const statusFilter = String(req.query.status || "").trim().toUpperCase();
+    const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
+    const lineNameFilter = normalizeLineName(req.query.lineName);
+    const stationFilter = normalizeStation(req.query.stationNo);
+    const machineIdFilter = Number(req.query.machineId || 0) || null;
+    const operatorIdFilter = Number(req.query.operatorId || 0) || null;
+    const partIdFilter = String(req.query.partId || "").trim();
 
-    const where = search
-      ? {
-          part_id: {
-            [Op.like]: `%${search}%`,
-          },
+    const partWhere = {};
+    if (search) {
+      partWhere.part_id = { [Op.like]: `%${search}%` };
+    }
+    if (partIdFilter) {
+      partWhere.part_id = { [Op.like]: `%${partIdFilter}%` };
+    }
+    if (statusFilter && ["IN_PROGRESS", "COMPLETED", "NG", "INTERLOCKED", "REWORK"].includes(statusFilter)) {
+      partWhere.status = statusFilter;
+    }
+
+    let scopedMachineIds = null;
+    if (machineIdFilter) {
+      scopedMachineIds = [machineIdFilter];
+    } else if (lineNameFilter) {
+      const machines = await Machine.findAll({
+        where: { line_name: lineNameFilter },
+        attributes: ["id"],
+        raw: true,
+      });
+      scopedMachineIds = machines.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+      if (scopedMachineIds.length === 0) {
+        return res.json([]);
+      }
+    }
+
+    const operationWhere = {
+      createdAt: {
+        [Op.gte]: from,
+        [Op.lte]: to,
+      },
+    };
+    if (scopedMachineIds && scopedMachineIds.length > 0) {
+      operationWhere.machine_id = { [Op.in]: scopedMachineIds };
+    }
+    if (stationFilter) {
+      operationWhere.station_no = stationFilter;
+    }
+    if (operatorIdFilter) {
+      operationWhere.user_id = operatorIdFilter;
+    }
+
+    const hasOperationLevelFilter =
+      Boolean(req.query.dateFrom || req.query.dateTo || shiftCodeFilter || scopedMachineIds || stationFilter || operatorIdFilter);
+
+    let scopedPartIds = null;
+    if (hasOperationLevelFilter) {
+      const scopedLogs = await OperationLog.findAll({
+        where: operationWhere,
+        attributes: ["part_id", "createdAt"],
+        order: [["createdAt", "DESC"]],
+        raw: true,
+        limit: 6000,
+      });
+      const shifts = shiftCodeFilter ? await getActiveShiftDefinitions() : [];
+      const filteredScopedLogs = shiftCodeFilter ? applyShiftFilter(scopedLogs, shiftCodeFilter, shifts) : scopedLogs;
+      scopedPartIds = uniqueStages(filteredScopedLogs.map((row) => String(row.part_id || "").trim()).filter(Boolean));
+      if (scopedPartIds.length === 0) {
+        return res.json([]);
+      }
+      partWhere.part_id = partWhere.part_id
+        ? {
+          [Op.and]: [partWhere.part_id, { [Op.in]: scopedPartIds }],
         }
-      : undefined;
+        : { [Op.in]: scopedPartIds };
+    }
 
     const parts = await Part.findAll({
-      where,
+      where: Object.keys(partWhere).length ? partWhere : undefined,
       order: [["updatedAt", "DESC"]],
       limit,
     });
-
     if (!parts.length) {
       return res.json([]);
     }
 
     const partIds = parts.map((part) => part.part_id);
-    const logs = await OperationLog.findAll({
-      where: { part_id: { [Op.in]: partIds } },
+    const logRows = await OperationLog.findAll({
+      where: {
+        part_id: { [Op.in]: partIds },
+      },
       order: [["createdAt", "DESC"]],
+      raw: true,
+      limit: 8000,
     });
 
+    const machineIds = uniqueStages(logRows.map((row) => String(row.machine_id || "")).filter(Boolean))
+      .map((entry) => Number(entry))
+      .filter((entry) => Number.isFinite(entry));
+    const machineRows = machineIds.length
+      ? await Machine.findAll({
+        where: { id: { [Op.in]: machineIds } },
+        attributes: ["id", "machine_name", "line_name", "operation_no"],
+        raw: true,
+      })
+      : [];
+    const machineMap = machineRows.reduce((acc, row) => {
+      acc[row.id] = row;
+      return acc;
+    }, {});
+
     const latestByPart = new Map();
-    for (const row of logs) {
+    for (const row of logRows) {
+      const machine = machineMap[row.machine_id] || null;
+      if (lineNameFilter && machine && String(machine.line_name || "").trim() !== lineNameFilter) {
+        continue;
+      }
+      if (stationFilter && normalizeStation(row.station_no || row.operation_no) !== stationFilter) {
+        continue;
+      }
       if (!latestByPart.has(row.part_id)) {
         latestByPart.set(row.part_id, row);
       }
     }
 
-    const response = parts.map((part) => {
-      const latest = latestByPart.get(part.part_id);
-      return {
-        partId: part.part_id,
-        status: part.status,
-        currentStation: part.current_station,
-        currentOperation: part.current_operation,
-        isInterlocked: Boolean(part.is_interlocked),
-        interlockReason: part.interlock_reason,
-        isRework: Boolean(part.is_rework),
-        qrFormatName: part.qr_format_name,
-        updatedAt: part.updatedAt,
-        latestStatus: latest?.plc_status || null,
-        latestResult: latest?.result || null,
-        latestStation: normalizeStation(latest?.station_no || latest?.operation_no),
-        latestAt: latest?.createdAt || null,
-      };
-    });
+    let shifts = [];
+    if (shiftCodeFilter) {
+      shifts = await getActiveShiftDefinitions();
+    }
+
+    const response = parts
+      .map((part) => {
+        const latest = latestByPart.get(part.part_id);
+        const machine = latest ? machineMap[latest.machine_id] || null : null;
+        return {
+          partId: part.part_id,
+          status: part.status,
+          currentStation: part.current_station,
+          currentOperation: part.current_operation,
+          isInterlocked: Boolean(part.is_interlocked),
+          interlockReason: part.interlock_reason,
+          isRework: Boolean(part.is_rework),
+          qrFormatName: part.qr_format_name,
+          updatedAt: part.updatedAt,
+          latestStatus: latest?.plc_status || null,
+          latestResult: latest?.result || null,
+          latestStation: normalizeStation(latest?.station_no || latest?.operation_no),
+          latestAt: latest?.createdAt || null,
+          machineId: latest?.machine_id || null,
+          machineName: machine?.machine_name || null,
+          lineName: machine?.line_name || null,
+          operatorId: latest?.user_id || null,
+        };
+      })
+      .filter((row) => {
+        if (shiftCodeFilter && row.latestAt) {
+          return resolveShiftCodeForDate(row.latestAt, shifts) === shiftCodeFilter;
+        }
+        if (shiftCodeFilter && !row.latestAt) {
+          return false;
+        }
+        return true;
+      });
 
     res.json(response);
   } catch (error) {
@@ -1976,7 +2356,7 @@ exports.getMachineStationStats = async (req, res) => {
       .sort((a, b) => String(a.hour).localeCompare(String(b.hour)))
       .slice(-12);
 
-    const current = logs.find((row) => row.plc_status === "STARTED" || row.plc_status === "PENDING") || null;
+    const current = resolveCurrentOperationForMachine(logs, machine);
     const lastEvent = logs[0] || null;
     const recentParts = logs.slice(0, 10).map((row) => ({
       id: row.id,
@@ -2007,35 +2387,35 @@ exports.getMachineStationStats = async (req, res) => {
       plcCircuit,
       scanner: scanner
         ? {
-            id: scanner.id,
-            scannerName: scanner.scanner_name,
-            scannerIp: scanner.scanner_ip,
-            scannerPort: scanner.scanner_port,
-            isActive: scanner.is_active,
-          }
+          id: scanner.id,
+          scannerName: scanner.scanner_name,
+          scannerIp: scanner.scanner_ip,
+          scannerPort: scanner.scanner_port,
+          isActive: scanner.is_active,
+        }
         : null,
       scannerHealth,
       summary,
       trend,
       current: current
         ? {
-            operationLogId: current.id,
-            partId: current.part_id,
-            plcStatus: current.plc_status,
-            result: current.result,
-            interlockReason: current.interlock_reason,
-            createdAt: current.createdAt,
-          }
+          operationLogId: current.id,
+          partId: current.part_id,
+          plcStatus: current.plc_status,
+          result: current.result,
+          interlockReason: current.interlock_reason,
+          createdAt: current.createdAt,
+        }
         : null,
       lastEvent: lastEvent
         ? {
-            operationLogId: lastEvent.id,
-            partId: lastEvent.part_id,
-            plcStatus: lastEvent.plc_status,
-            result: lastEvent.result,
-            interlockReason: lastEvent.interlock_reason,
-            createdAt: lastEvent.createdAt,
-          }
+          operationLogId: lastEvent.id,
+          partId: lastEvent.part_id,
+          plcStatus: lastEvent.plc_status,
+          result: lastEvent.result,
+          interlockReason: lastEvent.interlock_reason,
+          createdAt: lastEvent.createdAt,
+        }
         : null,
       recentParts,
     });
@@ -2088,7 +2468,7 @@ exports.processScan = async (req, res) => {
     }
     const hasSpcResultInput = Boolean(
       spcConfig.enabled &&
-        (spcConfig.mode === "PLC_REGISTER" ? plcQualityResult?.result : spcResultInput)
+      (spcConfig.mode === "PLC_REGISTER" ? plcQualityResult?.result : spcResultInput)
     );
     const hasManualResultInput = Boolean(resultInput);
     const qualityPayload = extractQualityPayload(req.body, machine);
@@ -2113,29 +2493,29 @@ exports.processScan = async (req, res) => {
     const spcResolvedResult = spcConfig.mode === "PLC_REGISTER"
       ? plcQualityResult?.result || null
       : hasSpcResultInput
-      ? spcResultIsNg
-        ? "NG"
-        : "OK"
-      : null;
+        ? spcResultIsNg
+          ? "NG"
+          : "OK"
+        : null;
     const finalResult = rejectionBinConfirmed
       ? "NG"
       : spcResolvedResult
-      ? spcResolvedResult
-      : hasManualResultInput
-      ? resultInput
-      : "OK";
+        ? spcResolvedResult
+        : hasManualResultInput
+          ? resultInput
+          : "OK";
     const ngReason = rejectionBinConfirmed ? "REJECTION_BIN_CONFIRMED" : undefined;
     const resultSource = rejectionBinConfirmed
       ? "PLC_REJECTION_BIN"
       : spcResolvedResult
-      ? spcConfig.mode === "PLC_REGISTER"
-        ? "QUALITY_CHECK_PLC_REGISTER"
-        : "QUALITY_CHECK_IP_PAYLOAD"
-      : manualResultEnabled
-      ? "MANUAL_OK_NG"
-      : hasManualResultInput
-      ? "PLC_PAYLOAD"
-      : "DEFAULT_OK";
+        ? spcConfig.mode === "PLC_REGISTER"
+          ? "QUALITY_CHECK_PLC_REGISTER"
+          : "QUALITY_CHECK_IP_PAYLOAD"
+        : manualResultEnabled
+          ? "MANUAL_OK_NG"
+          : hasManualResultInput
+            ? "PLC_PAYLOAD"
+            : "DEFAULT_OK";
     const machineBypassEnabled = isMachineBypassEnabled(machine.id);
     const bypassState = machineBypassEnabled ? getMachineBypass(machine.id) : null;
     const response = await saveScan(normalizedPartId, normalizedStation, finalResult, machine.id, req.user?.id, {
@@ -2144,26 +2524,45 @@ exports.processScan = async (req, res) => {
       resultInput: spcConfig.mode === "PLC_REGISTER"
         ? normalizeQualityToken(plcQualityResult?.token || plcQualityResult?.rawValue || finalResult)
         : hasSpcResultInput
-        ? spcResultInput
-        : hasManualResultInput
-        ? resultInput
-        : finalResult,
+          ? spcResultInput
+          : hasManualResultInput
+            ? resultInput
+            : finalResult,
       qualityPayload,
       skipInterlockValidation: machineBypassEnabled,
       skipDuplicateValidation: machineBypassEnabled,
       skipSequenceValidation: machineBypassEnabled,
     });
+    if (response?.decision === "ALLOW" && response?.operationLogId) {
+      await safeRecordTimeline({
+        operationId: response.operationLogId,
+        partId: normalizedPartId,
+        machineId: machine.id,
+        stationNo: normalizedStation,
+        eventType: TIMELINE_EVENTS.SCANNED,
+        eventData: {
+          resultSource,
+          machineBypassEnabled,
+        },
+      });
+      await safeRecordTimeline({
+        operationId: response.operationLogId,
+        partId: normalizedPartId,
+        machineId: machine.id,
+        stationNo: normalizedStation,
+        eventType: TIMELINE_EVENTS.VALIDATED,
+        eventData: {
+          stationFeatures,
+          spcMode: spcConfig.mode,
+        },
+      });
+    }
     const qualityAck = await sendQualityCheckAckToPlc(machine, spcConfig, finalResult).catch((error) => ({
       ok: false,
       error: error.message,
     }));
 
-    const plcConfirmationRequired = machineBypassEnabled
-      ? false
-      : await isPlcConfirmationEnabled(normalizedStation);
-    const requiredPlcPartCount = plcConfirmationRequired
-      ? normalizePlcPartCount(stationFeatures.plcPartCount)
-      : 1;
+    const requiredPlcPartCount = normalizePlcPartCount(stationFeatures.plcPartCount || 1);
 
     await handleStationPlcFlow({
       response,
@@ -2171,31 +2570,36 @@ exports.processScan = async (req, res) => {
       stationNo: normalizedStation,
       partId: normalizedPartId,
       userId: req.user?.id,
-      plcConfirmationRequired,
       requiredPlcPartCount,
     });
 
-    const qrStatus = response.decision === "ALLOW" || response.reason === "MACHINE_RUNNING" ? "PASS" : "FAIL";
-    const operationStatus = response.operationStatus || (response.decision === "ALLOW" ? "PENDING" : "WAIT");
-    const popupType =
-      response.decision === "ALLOW" && operationStatus === "ENDED_OK" ? "SUCCESS" : mapScanDecisionToPopupType(response);
-    emitOperatorPopup(popupType, {
+    const qrStatus = response.qrStatus || (response.decision === "ALLOW" ? "PASSED" : "FAILED");
+    const operationStatus = response.operationStatus || (response.decision === "ALLOW" ? "WAITING" : "BLOCKED");
+
+    emitOperatorPopup(response.decision === "ALLOW" ? "INFO" : "ERROR", {
       partId: normalizedPartId,
       stationNo: normalizedStation,
       machineId: machine.id,
       machineName: machine.machine_name,
-      status: operationStatus,
-      plcStatus: operationStatus,
-      qrResult: qrStatus,
+      qrStatus,
+      operationStatus,
+      status: response.decision === "ALLOW" ? "SCANNED" : "BLOCKED",
+      plcStatus: response.decision === "ALLOW" ? "WAITING_PLC" : "BLOCKED",
       reason: response.reason || null,
       expectedStation: response.expectedStation || null,
-      qrReason: response.reason || null,
-      message: response.message || response.reason || "Scan processed",
+      message: response.decision === "ALLOW"
+        ? `QR PASS - Starting ${normalizedStation}`
+        : getBlockedPopupMessage(response),
     });
+
+    if (response.decision === "ALLOW") {
+      emitRealtime("QR_VALIDATED", { partId: normalizedPartId, machineId: machine.id, stationNo: normalizedStation });
+    } else if (response.reason === "DUPLICATE_SCAN") {
+      emitRealtime("DUPLICATE_SCAN_BLOCKED", { partId: normalizedPartId, machineId: machine.id, stationNo: normalizedStation });
+    }
 
     response.qrStatus = qrStatus;
     response.operationStatus = operationStatus;
-    response.plcConfirmationRequired = plcConfirmationRequired;
     response.plcPartCountRequired = requiredPlcPartCount;
     response.resultSource = resultSource;
     response.manualResultEnabled = manualResultEnabled;
@@ -2257,7 +2661,7 @@ exports.verifyScanForOperator = async (req, res) => {
     }
     const hasSpcResultInput = Boolean(
       spcConfig.enabled &&
-        (spcConfig.mode === "PLC_REGISTER" ? plcQualityResult?.result : spcResultInput)
+      (spcConfig.mode === "PLC_REGISTER" ? plcQualityResult?.result : spcResultInput)
     );
     const hasManualResultInput = Boolean(resultInput);
     const qualityPayload = extractQualityPayload(req.body, machine);
@@ -2272,29 +2676,29 @@ exports.verifyScanForOperator = async (req, res) => {
     const spcResolvedResult = spcConfig.mode === "PLC_REGISTER"
       ? plcQualityResult?.result || null
       : hasSpcResultInput
-      ? spcResultIsNg
-        ? "NG"
-        : "OK"
-      : null;
+        ? spcResultIsNg
+          ? "NG"
+          : "OK"
+        : null;
     const finalResult = rejectionBinConfirmed
       ? "NG"
       : spcResolvedResult
-      ? spcResolvedResult
-      : hasManualResultInput
-      ? resultInput
-      : "OK";
+        ? spcResolvedResult
+        : hasManualResultInput
+          ? resultInput
+          : "OK";
     const ngReason = rejectionBinConfirmed ? "REJECTION_BIN_CONFIRMED" : undefined;
     const resultSource = rejectionBinConfirmed
       ? "PLC_REJECTION_BIN"
       : spcResolvedResult
-      ? spcConfig.mode === "PLC_REGISTER"
-        ? "QUALITY_CHECK_PLC_REGISTER"
-        : "QUALITY_CHECK_IP_PAYLOAD"
-      : manualResultEnabled
-      ? "MANUAL_OK_NG"
-      : hasManualResultInput
-      ? "PLC_PAYLOAD"
-      : "DEFAULT_OK";
+        ? spcConfig.mode === "PLC_REGISTER"
+          ? "QUALITY_CHECK_PLC_REGISTER"
+          : "QUALITY_CHECK_IP_PAYLOAD"
+        : manualResultEnabled
+          ? "MANUAL_OK_NG"
+          : hasManualResultInput
+            ? "PLC_PAYLOAD"
+            : "DEFAULT_OK";
     const machineBypassEnabled = isMachineBypassEnabled(machine.id);
     const bypassState = machineBypassEnabled ? getMachineBypass(machine.id) : null;
     const response = await saveScan(normalizedPartId, stationNo, finalResult, machine.id, req.user?.id, {
@@ -2303,25 +2707,44 @@ exports.verifyScanForOperator = async (req, res) => {
       resultInput: spcConfig.mode === "PLC_REGISTER"
         ? normalizeQualityToken(plcQualityResult?.token || plcQualityResult?.rawValue || finalResult)
         : hasSpcResultInput
-        ? spcResultInput
-        : hasManualResultInput
-        ? resultInput
-        : finalResult,
+          ? spcResultInput
+          : hasManualResultInput
+            ? resultInput
+            : finalResult,
       qualityPayload,
       skipInterlockValidation: machineBypassEnabled,
       skipDuplicateValidation: machineBypassEnabled,
       skipSequenceValidation: machineBypassEnabled,
     });
+    if (response?.decision === "ALLOW" && response?.operationLogId) {
+      await safeRecordTimeline({
+        operationId: response.operationLogId,
+        partId: normalizedPartId,
+        machineId: machine.id,
+        stationNo,
+        eventType: TIMELINE_EVENTS.SCANNED,
+        eventData: {
+          resultSource,
+          machineBypassEnabled,
+        },
+      });
+      await safeRecordTimeline({
+        operationId: response.operationLogId,
+        partId: normalizedPartId,
+        machineId: machine.id,
+        stationNo,
+        eventType: TIMELINE_EVENTS.VALIDATED,
+        eventData: {
+          stationFeatures,
+          spcMode: spcConfig.mode,
+        },
+      });
+    }
     const qualityAck = await sendQualityCheckAckToPlc(machine, spcConfig, finalResult).catch((error) => ({
       ok: false,
       error: error.message,
     }));
-    const plcConfirmationRequired = machineBypassEnabled
-      ? false
-      : await isPlcConfirmationEnabled(stationNo);
-    const requiredPlcPartCount = plcConfirmationRequired
-      ? normalizePlcPartCount(stationFeatures.plcPartCount)
-      : 1;
+    const requiredPlcPartCount = normalizePlcPartCount(stationFeatures.plcPartCount || 1);
 
     await handleStationPlcFlow({
       response,
@@ -2329,31 +2752,30 @@ exports.verifyScanForOperator = async (req, res) => {
       stationNo,
       partId: normalizedPartId,
       userId: req.user?.id,
-      plcConfirmationRequired,
       requiredPlcPartCount,
     });
 
-    const qrStatus = response.decision === "ALLOW" || response.reason === "MACHINE_RUNNING" ? "PASS" : "FAIL";
+    const qrStatus = response.decision === "ALLOW" ? "PASS" : "FAIL";
     const operationStatus = response.operationStatus || (response.decision === "ALLOW" ? "PENDING" : "WAIT");
     const popupType =
       response.decision === "ALLOW" && operationStatus === "ENDED_OK" ? "SUCCESS" : mapScanDecisionToPopupType(response);
+    const popupMessage = response.decision === "ALLOW" ? (response.message || "Scan processed") : getBlockedPopupMessage(response);
     emitOperatorPopup(popupType, {
       partId: normalizedPartId,
       stationNo,
       machineId: machine.id,
       machineName: machine.machine_name,
-      status: operationStatus,
-      plcStatus: operationStatus,
+      status: response.decision === "ALLOW" ? operationStatus : "BLOCKED",
+      plcStatus: response.decision === "ALLOW" ? operationStatus : "BLOCKED",
       qrResult: qrStatus,
       reason: response.reason || null,
       expectedStation: response.expectedStation || null,
       qrReason: response.reason || null,
-      message: response.message || response.reason || "Scan processed",
+      message: popupMessage,
     });
 
     response.qrStatus = qrStatus;
     response.operationStatus = operationStatus;
-    response.plcConfirmationRequired = plcConfirmationRequired;
     response.plcPartCountRequired = requiredPlcPartCount;
     response.resultSource = resultSource;
     response.manualResultEnabled = manualResultEnabled;
@@ -2657,7 +3079,8 @@ exports.resetOperation = async (req, res) => {
     await part.save();
 
     if (opLog.machine_id) {
-      await clearMachineLock(opLog.machine_id);
+      // Rule: RESET must HARD RESET runtime + FSM + listeners + QR state
+      await plcHandshakeEngine.hardReset(opLog.machine_id);
     }
 
     emitOperatorPopup("INFO", {
@@ -2685,6 +3108,51 @@ exports.resetOperation = async (req, res) => {
   }
 };
 
+async function purgePartTraceabilityData(partId) {
+  const normalizedPartId = String(partId || "").trim();
+  const [part, opRows, prodRows, reworkRows] = await Promise.all([
+    Part.findOne({ where: { part_id: normalizedPartId } }),
+    OperationLog.findAll({
+      where: { part_id: normalizedPartId },
+      attributes: ["id", "machine_id"],
+      raw: true,
+    }),
+    ProductionLog.findAll({
+      where: { part_id: normalizedPartId },
+      attributes: ["id", "machine_id"],
+      raw: true,
+    }),
+    ReworkLog.findAll({
+      where: { part_id: normalizedPartId },
+      attributes: ["id"],
+      raw: true,
+    }),
+  ]);
+
+  if (!part && opRows.length === 0 && prodRows.length === 0 && reworkRows.length === 0) {
+    return null;
+  }
+
+  await Promise.all([
+    OperationLog.destroy({ where: { part_id: normalizedPartId } }),
+    ProductionLog.destroy({ where: { part_id: normalizedPartId } }),
+    ReworkLog.destroy({ where: { part_id: normalizedPartId } }),
+    Part.destroy({ where: { part_id: normalizedPartId } }),
+  ]);
+
+  const machineIds = [...new Set([...opRows, ...prodRows].map((row) => Number(row.machine_id)).filter(Number.isFinite))];
+  if (machineIds.length > 0) {
+    await Promise.all(machineIds.map((machineId) => clearMachineLock(machineId)));
+  }
+
+  return {
+    operationLogs: opRows.length,
+    productionLogs: prodRows.length,
+    reworkLogs: reworkRows.length,
+    machineLocksCleared: machineIds.length,
+  };
+}
+
 exports.resetStationOperation = async (req, res) => {
   try {
     const partId = String(req.body.partId || "").trim();
@@ -2693,6 +3161,27 @@ exports.resetStationOperation = async (req, res) => {
 
     if (!partId || !targetStation) {
       return res.status(400).json({ error: "partId and stationNo are required" });
+    }
+
+    if (targetStation === "ALL") {
+      const purgeSummary = await purgePartTraceabilityData(partId);
+      if (!purgeSummary) {
+        return res.status(404).json({ error: "Part not found" });
+      }
+
+      emitOperatorPopup("WARNING", {
+        partId,
+        status: "PART_DELETED",
+        message: `Part ${partId} removed from traceability records`,
+      });
+      emitRealtime("dashboard_refresh", { reason: "PART_DELETED", partId });
+
+      return res.json({
+        message: "Part deleted successfully",
+        partId,
+        deleted: purgeSummary,
+        reason: reason || "Manual full deletion",
+      });
     }
 
     const [part, sequenceData] = await Promise.all([Part.findOne({ where: { part_id: partId } }), getActiveMachineSequenceData()]);
@@ -2770,6 +3259,37 @@ exports.resetStationOperation = async (req, res) => {
       previousStation,
       deletedLogs: operationLogIdsToDelete.length,
       status: part.status,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.deletePartTraceability = async (req, res) => {
+  try {
+    const partId = String(req.body.partId || req.body.part_id || req.params.partId || "").trim();
+    const reason = String(req.body.reason || "").trim();
+    if (!partId) {
+      return res.status(400).json({ error: "partId is required" });
+    }
+
+    const purgeSummary = await purgePartTraceabilityData(partId);
+    if (!purgeSummary) {
+      return res.status(404).json({ error: "Part not found" });
+    }
+
+    emitOperatorPopup("WARNING", {
+      partId,
+      status: "PART_DELETED",
+      message: `Part ${partId} removed from traceability records`,
+    });
+    emitRealtime("dashboard_refresh", { reason: "PART_DELETED", partId });
+
+    res.json({
+      message: "Part deleted successfully",
+      partId,
+      deleted: purgeSummary,
+      reason: reason || "Manual deletion",
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -2927,10 +3447,132 @@ exports.getOperationSequence = async (_req, res) => {
   }
 };
 
+exports.getProcessFlow = async (req, res) => {
+  try {
+    const lineNameFilter = normalizeLineName(req.query.lineName);
+    const machineWhere = {
+      is_active: true,
+      ...(lineNameFilter ? { line_name: lineNameFilter } : {}),
+    };
+    const machines = await Machine.findAll({
+      where: machineWhere,
+      order: [["line_name", "ASC"], ["sequence_no", "ASC"]],
+      attributes: ["id", "machine_name", "line_name", "operation_no", "sequence_no", "is_running", "running_part_id"],
+      raw: true,
+    });
+    if (!machines.length) {
+      return res.json({
+        generatedAt: new Date().toISOString(),
+        lines: [],
+        availableLines: [],
+      });
+    }
+
+    const machineIds = machines.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+    const [runtimeRows, operationRows] = await Promise.all([
+      MachineRuntimeState.findAll({
+        where: { machine_id: { [Op.in]: machineIds } },
+        attributes: ["machine_id", "current_state", "is_locked", "updatedAt"],
+        raw: true,
+      }),
+      OperationLog.findAll({
+        where: { machine_id: { [Op.in]: machineIds } },
+        attributes: ["machine_id", "plc_status", "result", "interlock_reason", "createdAt"],
+        order: [["createdAt", "DESC"]],
+        raw: true,
+        limit: Math.max(machineIds.length * 20, 200),
+      }),
+    ]);
+
+    const runtimeMap = runtimeRows.reduce((acc, row) => {
+      acc[row.machine_id] = row;
+      return acc;
+    }, {});
+    const latestOperationByMachine = new Map();
+    for (const row of operationRows) {
+      if (!latestOperationByMachine.has(row.machine_id)) {
+        latestOperationByMachine.set(row.machine_id, row);
+      }
+    }
+
+    const statusForMachine = (machine) => {
+      const runtime = runtimeMap[machine.id] || null;
+      const latest = latestOperationByMachine.get(machine.id) || null;
+      const plcStatus = String(latest?.plc_status || "").trim().toUpperCase();
+      const result = String(latest?.result || "").trim().toUpperCase();
+      const runtimeState = String(runtime?.current_state || "").trim().toUpperCase();
+
+      if (Boolean(machine.is_running) || ["RUNNING", "WAITING_END", "START_SENT", "WAITING_RUNNING"].includes(runtimeState)) {
+        return "RUNNING";
+      }
+      if (plcStatus === "INTERLOCKED" || runtime?.is_locked) {
+        return "BLOCKED";
+      }
+      if (plcStatus === "ENDED_OK" && result === "OK") {
+        return "PASSED";
+      }
+      if (plcStatus === "ENDED_NG" || result === "NG" || plcStatus === "PLC_COMM_ERROR") {
+        return "FAILED";
+      }
+      return "IDLE";
+    };
+
+    const lineMap = new Map();
+    for (const machine of machines) {
+      const lineName = String(machine.line_name || "UNASSIGNED").trim() || "UNASSIGNED";
+      if (!lineMap.has(lineName)) {
+        lineMap.set(lineName, []);
+      }
+      const status = statusForMachine(machine);
+      lineMap.get(lineName).push({
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        stationNo: normalizeStation(machine.operation_no),
+        sequenceNo: Number(machine.sequence_no || 0),
+        status,
+        activePartId: machine.running_part_id || null,
+        runtimeState: runtimeMap[machine.id]?.current_state || null,
+        interlockReason: latestOperationByMachine.get(machine.id)?.interlock_reason || null,
+        lastUpdatedAt:
+          runtimeMap[machine.id]?.updatedAt ||
+          latestOperationByMachine.get(machine.id)?.createdAt ||
+          null,
+      });
+    }
+
+    const lines = Array.from(lineMap.entries())
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+      .map(([lineName, nodes]) => {
+        const sortedNodes = [...nodes].sort((a, b) => Number(a.sequenceNo || 0) - Number(b.sequenceNo || 0));
+        const connections = sortedNodes.slice(0, -1).map((node, index) => ({
+          fromMachineId: node.machineId,
+          toMachineId: sortedNodes[index + 1].machineId,
+          fromStation: node.stationNo,
+          toStation: sortedNodes[index + 1].stationNo,
+        }));
+        return {
+          lineName,
+          nodes: sortedNodes,
+          connections,
+        };
+      });
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      availableLines: lines.map((line) => line.lineName),
+      lines,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 function getDateRangeFromQuery(query) {
   const now = new Date();
-  const from = query.dateFrom ? new Date(query.dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const to = query.dateTo ? new Date(query.dateTo) : now;
+  const fromCandidate = query?.dateFrom ? new Date(query.dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const toCandidate = query?.dateTo ? new Date(query.dateTo) : now;
+  const from = Number.isNaN(fromCandidate.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : fromCandidate;
+  const to = Number.isNaN(toCandidate.getTime()) ? now : toCandidate;
   return { from, to };
 }
 
@@ -2994,39 +3636,119 @@ function formatHourBucket(dateValue) {
   return `${y}-${m}-${d} ${h}:00`;
 }
 
+function normalizeLineName(value) {
+  const normalized = String(value || "").trim();
+  return normalized || null;
+}
+
+function buildMachineUniqKey(machine = {}) {
+  return String(machine.machine_number || `${machine.machine_name || ""}|${machine.line_name || ""}|${machine.operation_no || ""}`)
+    .trim()
+    .toUpperCase();
+}
+
+function dedupeMachines(rows = []) {
+  const map = new Map();
+  for (const row of rows) {
+    const key = buildMachineUniqKey(row);
+    if (!key) {
+      continue;
+    }
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, row);
+      continue;
+    }
+    const existingUpdatedAt = new Date(existing.updatedAt || 0).getTime();
+    const candidateUpdatedAt = new Date(row.updatedAt || 0).getTime();
+    if (candidateUpdatedAt >= existingUpdatedAt) {
+      map.set(key, row);
+    }
+  }
+  return Array.from(map.values());
+}
+
+function toCsvField(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  const text = String(value);
+  if (!/[",\n]/.test(text)) {
+    return text;
+  }
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function formatReportTimestamp(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toISOString().replace("T", " ").slice(0, 19);
+}
+
+function buildReportFileTimestamp(now = new Date()) {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  return `${y}${m}${d}_${hh}${mm}`;
+}
+
 exports.getDashboardSummary = async (req, res) => {
   try {
     const { from, to } = getDateRangeFromQuery(req.query);
-    const logWhere = { createdAt: { [Op.gte]: from, [Op.lte]: to } };
+    const lineNameFilter = normalizeLineName(req.query.lineName);
+    const machineIdFilter = Number(req.query.machineId || 0) || null;
     const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
+    const machineWhere = {};
+    if (lineNameFilter) {
+      machineWhere.line_name = lineNameFilter;
+    }
 
-    const [machineTotal, machineActive, partCounts, interlockedCount, reworkCount, recentRows, qualityRows, shifts] =
-      await Promise.all([
-        Machine.count(),
-        Machine.count({ where: { is_active: true } }),
-        Part.findAll({
-          attributes: ["status", [fn("COUNT", col("id")), "count"]],
-          group: ["status"],
-          raw: true,
-        }),
-        Part.count({ where: { status: "INTERLOCKED" } }),
-        Part.count({ where: { is_rework: true } }),
-        ProductionLog.findAll({
-          where: logWhere,
-          order: [["createdAt", "DESC"]],
-          limit: 250,
-          raw: true,
-        }),
-        ProductionLog.findAll({
-          where: logWhere,
-          attributes: ["status", "createdAt"],
-          raw: true,
-        }),
-        getActiveShiftDefinitions(),
-      ]);
+    const machineRows = await Machine.findAll({
+      where: Object.keys(machineWhere).length > 0 ? machineWhere : undefined,
+      attributes: ["id", "machine_name", "operation_no", "line_name", "machine_number", "is_active", "updatedAt"],
+      raw: true,
+    });
+    const uniqueMachines = dedupeMachines(machineRows);
+    const scopedMachineIds = uniqueMachines
+      .filter((row) => row.is_active !== false)
+      .map((row) => Number(row.id))
+      .filter((id) => Number.isFinite(id) && id > 0);
+    const filteredMachineIds = machineIdFilter ? [machineIdFilter] : scopedMachineIds;
+
+    const logWhere = {
+      createdAt: { [Op.gte]: from, [Op.lte]: to },
+      ...(filteredMachineIds.length > 0 ? { machine_id: { [Op.in]: filteredMachineIds } } : {}),
+    };
+
+    const [partCounts, recentRows, qualityRows, shifts] = await Promise.all([
+      Part.findAll({
+        attributes: ["status", [fn("COUNT", col("id")), "count"]],
+        group: ["status"],
+        raw: true,
+      }),
+      OperationLog.findAll({
+        where: logWhere,
+        order: [["createdAt", "DESC"]],
+        limit: 50,
+        raw: true,
+      }),
+      ProductionLog.findAll({
+        where: logWhere,
+        attributes: ["status", "createdAt", "machine_id"],
+        raw: true,
+      }),
+      getActiveShiftDefinitions(),
+    ]);
 
     const filteredQualityRows = applyShiftFilter(qualityRows, shiftCodeFilter, shifts);
-    const filteredRecentRows = applyShiftFilter(recentRows, shiftCodeFilter, shifts).slice(0, 10);
+    const filteredRecentRows = applyShiftFilter(recentRows, shiftCodeFilter, shifts).slice(0, 20);
     const okLogs = filteredQualityRows.filter((row) => row.status === "OK").length;
     const ngLogs = filteredQualityRows.filter((row) => row.status === "NG").length;
 
@@ -3054,11 +3776,42 @@ exports.getDashboardSummary = async (req, res) => {
       }
     }
 
+    const machineMap = uniqueMachines.reduce((acc, row) => {
+      acc[row.id] = row;
+      return acc;
+    }, {});
+
+    const recentScans = filteredRecentRows.map((row) => {
+      const machine = machineMap[row.machine_id] || {};
+      const start = row.plc_start_time || row.plc_start_at || row.createdAt;
+      const end = row.plc_end_time || row.plc_end_at || null;
+      let cycleTime = null;
+      if (start && end) {
+        cycleTime = Math.max(0, (new Date(end).getTime() - new Date(start).getTime()) / 1000).toFixed(1);
+      }
+      return {
+        partId: row.part_id,
+        stationNo: row.station_no || machine.operation_no || null,
+        station: row.station_no || machine.operation_no || null,
+        machine: machine.machine_name || null,
+        lineName: machine.line_name || null,
+        result: row.result || (["STARTED", "PENDING"].includes(String(row.plc_status).toUpperCase()) ? "WIP" : row.plc_status),
+        plcStatus: row.plc_status,
+        cycleTime,
+        timestamp: row.createdAt,
+      };
+    });
+
+    const interlockedCount = Number(statusMap.INTERLOCKED || 0);
+    const reworkCount = Number(statusMap.REWORK || 0);
+    const activeCount = uniqueMachines.filter((row) => row.is_active !== false).length;
+    const availableLines = uniqueStages(uniqueMachines.map((row) => String(row.line_name || "").trim()).filter(Boolean));
+
     res.json({
       machines: {
-        total: machineTotal,
-        active: machineActive,
-        inactive: Math.max(machineTotal - machineActive, 0),
+        total: uniqueMachines.length,
+        active: activeCount,
+        inactive: Math.max(uniqueMachines.length - activeCount, 0),
       },
       parts: {
         inProgress: statusMap.IN_PROGRESS || 0,
@@ -3070,6 +3823,7 @@ exports.getDashboardSummary = async (req, res) => {
       quality: {
         ok: okLogs,
         ng: ngLogs,
+        interlocked: interlockedCount,
       },
       shiftProduction,
       availableShifts: shifts.map((shift) => ({
@@ -3078,7 +3832,8 @@ exports.getDashboardSummary = async (req, res) => {
         startTime: normalizeTimeValue(shift.start_time, { includeSeconds: true }),
         endTime: normalizeTimeValue(shift.end_time, { includeSeconds: true }),
       })),
-      recentScans: filteredRecentRows,
+      availableLines,
+      recentScans,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -3088,10 +3843,29 @@ exports.getDashboardSummary = async (req, res) => {
 exports.getDashboardTrends = async (req, res) => {
   try {
     const { from, to } = getDateRangeFromQuery(req.query);
+    const lineNameFilter = normalizeLineName(req.query.lineName);
+    const machineIdFilter = Number(req.query.machineId || 0) || null;
     const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
+    const machineWhere = {};
+    if (lineNameFilter) {
+      machineWhere.line_name = lineNameFilter;
+    }
+    const machineRows = await Machine.findAll({
+      where: Object.keys(machineWhere).length ? machineWhere : undefined,
+      attributes: ["id", "machine_number", "machine_name", "line_name", "operation_no", "updatedAt", "is_active"],
+      raw: true,
+    });
+    const uniqueMachines = dedupeMachines(machineRows).filter((row) => row.is_active !== false);
+    const scopedIds = machineIdFilter
+      ? [machineIdFilter]
+      : uniqueMachines.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+
     const [rows, shifts] = await Promise.all([
       ProductionLog.findAll({
-        where: { createdAt: { [Op.gte]: from, [Op.lte]: to } },
+        where: {
+          createdAt: { [Op.gte]: from, [Op.lte]: to },
+          ...(scopedIds.length ? { machine_id: { [Op.in]: scopedIds } } : {}),
+        },
         attributes: ["status", "createdAt"],
         raw: true,
       }),
@@ -3102,13 +3876,14 @@ exports.getDashboardTrends = async (req, res) => {
     const map = filteredRows.reduce((acc, row) => {
       const key = formatHourBucket(row.createdAt);
       if (!acc[key]) {
-        acc[key] = { hour: key, ok: 0, ng: 0 };
+        acc[key] = { hour: key, ok: 0, ng: 0, total: 0 };
       }
       if (row.status === "OK") {
         acc[key].ok += 1;
       } else {
         acc[key].ng += 1;
       }
+      acc[key].total += 1;
       return acc;
     }, {});
 
@@ -3124,8 +3899,27 @@ exports.getDashboardReport = async (req, res) => {
   try {
     const { from, to } = getDateRangeFromQuery(req.query);
     const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
+    const lineNameFilter = normalizeLineName(req.query.lineName);
+    const stationNoFilter = normalizeStation(req.query.stationNo);
+    const operatorIdFilter = Number(req.query.operatorId || 0) || null;
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const pageSize = Math.min(Math.max(Number(req.query.pageSize || 100), 1), 500);
+
+    const machineWhere = {
+      is_active: true,
+      ...(lineNameFilter ? { line_name: lineNameFilter } : {}),
+    };
+    const allMachineRowsRaw = await Machine.findAll({
+      where: machineWhere,
+      attributes: ["id", "machine_name", "line_name", "operation_no", "sequence_no", "daily_target_qty", "is_active", "machine_number", "updatedAt"],
+      order: [["sequence_no", "ASC"], ["updatedAt", "DESC"]],
+      raw: true,
+    });
+    const machineRows = dedupeMachines(allMachineRowsRaw);
+    const machineIdScope = machineRows.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
     const productionWhere = {
       createdAt: { [Op.gte]: from, [Op.lte]: to },
+      ...(machineIdScope.length ? { machine_id: { [Op.in]: machineIdScope } } : {}),
     };
 
     if (req.query.machineId) {
@@ -3138,43 +3932,41 @@ exports.getDashboardReport = async (req, res) => {
       productionWhere.status = String(req.query.status).toUpperCase();
     }
 
-    const [productionRows, operationRows, machineRows, interlocks, reworkCount, partHistory, shifts] = await Promise.all([
+    const operationWhere = {
+      createdAt: { [Op.gte]: from, [Op.lte]: to },
+      ...(machineIdScope.length ? { machine_id: { [Op.in]: machineIdScope } } : {}),
+      ...(req.query.machineId ? { machine_id: Number(req.query.machineId) } : {}),
+      ...(req.query.partId ? { part_id: req.query.partId } : {}),
+      ...(stationNoFilter ? { station_no: stationNoFilter } : {}),
+      ...(operatorIdFilter ? { user_id: operatorIdFilter } : {}),
+    };
+
+    const [productionRows, operationRows, interlocks, reworkCount, shifts] = await Promise.all([
       ProductionLog.findAll({
         where: productionWhere,
         attributes: ["id", "part_id", "machine_id", "status", "createdAt"],
         raw: true,
       }),
       OperationLog.findAll({
-        where: {
-          createdAt: { [Op.gte]: from, [Op.lte]: to },
-          ...(req.query.machineId ? { machine_id: Number(req.query.machineId) } : {}),
-          ...(req.query.partId ? { part_id: req.query.partId } : {}),
-        },
-        attributes: ["id", "part_id", "machine_id", "station_no", "operation_no", "plc_status", "result", "createdAt"],
-        raw: true,
-      }),
-      Machine.findAll({
-        attributes: ["id", "machine_name", "line_name", "operation_no", "sequence_no", "daily_target_qty", "is_active"],
-        order: [["sequence_no", "ASC"]],
+        where: operationWhere,
+        attributes: ["id", "part_id", "machine_id", "station_no", "operation_no", "plc_status", "result", "user_id", "interlock_reason", "plc_start_time", "plc_start_at", "plc_end_time", "plc_end_at", "createdAt"],
         raw: true,
       }),
       OperationLog.findAll({
         where: {
           interlock_reason: { [Op.ne]: null },
           createdAt: { [Op.gte]: from, [Op.lte]: to },
+          ...(machineIdScope.length ? { machine_id: { [Op.in]: machineIdScope } } : {}),
         },
         order: [["createdAt", "DESC"]],
         limit: 100,
+        raw: true,
       }),
       ReworkLog.count({
-        where: { createdAt: { [Op.gte]: from, [Op.lte]: to } },
+        where: {
+          createdAt: { [Op.gte]: from, [Op.lte]: to },
+        },
       }),
-      req.query.partId
-        ? OperationLog.findAll({
-            where: { part_id: req.query.partId },
-            order: [["createdAt", "ASC"]],
-          })
-        : [],
       getActiveShiftDefinitions(),
     ]);
 
@@ -3194,6 +3986,10 @@ exports.getDashboardReport = async (req, res) => {
     }, {});
     const machineWise = Object.values(machineWiseMap);
 
+    const machineRowMapById = machineRows.reduce((acc, machine) => {
+      acc[machine.id] = machine;
+      return acc;
+    }, {});
     const machineMetaById = machineRows.reduce((acc, machine) => {
       acc[machine.id] = {
         machineId: machine.id,
@@ -3246,13 +4042,13 @@ exports.getDashboardReport = async (req, res) => {
 
       if (plcStatus === "ENDED_OK" && result === "OK") {
         machineCardMap[machineId].okCount += 1;
-      } else if (plcStatus === "ENDED_NG" && result === "NG") {
+      } else if (plcStatus === "ENDED_NG" || result === "NG") {
         machineCardMap[machineId].ngCount += 1;
-      } else if (plcStatus === "INTERLOCKED") {
+      } else if (plcStatus === "INTERLOCKED" || plcStatus === "BLOCKED") {
         machineCardMap[machineId].interlockedCount += 1;
       } else if (plcStatus === "PLC_COMM_ERROR") {
         machineCardMap[machineId].commErrorCount += 1;
-      } else if (plcStatus === "PENDING" || plcStatus === "STARTED") {
+      } else if (["PENDING", "STARTED", "RUNNING", "IN_PROGRESS", "START_SENT", "WAITING_RUNNING", "WAITING_END"].includes(plcStatus)) {
         machineCardMap[machineId].inProgressCount += 1;
       }
     }
@@ -3327,7 +4123,12 @@ exports.getDashboardReport = async (req, res) => {
     const hourlyMap = filteredRows.reduce((acc, row) => {
       const key = formatHourBucket(row.createdAt);
       if (!acc[key]) {
-        acc[key] = { hour: key, total: 0 };
+        acc[key] = { hour: key, ok: 0, ng: 0, total: 0 };
+      }
+      if (String(row.status || "").toUpperCase() === "OK") {
+        acc[key].ok += 1;
+      } else {
+        acc[key].ng += 1;
       }
       acc[key].total += 1;
       return acc;
@@ -3353,6 +4154,53 @@ exports.getDashboardReport = async (req, res) => {
       }
     }
 
+    const partHistory = [...filteredOperationRows]
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    const historyTotal = partHistory.length;
+    const historyStart = (page - 1) * pageSize;
+    const pagedHistory = partHistory.slice(historyStart, historyStart + pageSize);
+
+    const partsList = partHistory.slice(0, 3000).map((row) => {
+      const machine = machineMetaById[Number(row.machine_id)] || machineRowMapById[Number(row.machine_id)] || {};
+      const plcStatus = String(row.plc_status || "").trim().toUpperCase();
+      const result = String(row.result || "").trim().toUpperCase();
+      let statusLabel = "IDLE";
+      if (plcStatus === "INTERLOCKED" || plcStatus === "PLC_COMM_ERROR") {
+        statusLabel = "BLOCKED";
+      } else if (plcStatus === "ENDED_OK" && result === "OK") {
+        statusLabel = "PASSED";
+      } else if (plcStatus === "ENDED_NG" || result === "NG") {
+        statusLabel = "FAILED";
+      } else if (["STARTED", "PENDING", "IN_PROGRESS"].includes(plcStatus)) {
+        statusLabel = "RUNNING";
+      }
+
+      const start = row.plc_start_time || row.plc_start_at || row.createdAt;
+      const end = row.plc_end_time || row.plc_end_at || null;
+      let cycleTime = null;
+      if (start && end) {
+        cycleTime = Math.max(0, (new Date(end).getTime() - new Date(start).getTime()) / 1000).toFixed(1);
+      }
+
+      return {
+        id: row.id,
+        partId: row.part_id,
+        machineId: row.machine_id,
+        machineName: machine.machineName || machine.machine_name || null,
+        lineName: machine.lineName || machine.line_name || null,
+        stationNo: normalizeStation(row.station_no || row.operation_no),
+        operationNo: row.operation_no || null,
+        result,
+        status: statusLabel,
+        reason: row.interlock_reason || null,
+        interlockReason: row.interlock_reason || null,
+        cycleTime,
+        createdAt: row.createdAt,
+      };
+    });
+
+    const availableLines = uniqueStages(machineRows.map((row) => String(row.line_name || "").trim()).filter(Boolean));
+
     res.json({
       filters: {
         from,
@@ -3361,6 +4209,9 @@ exports.getDashboardReport = async (req, res) => {
         partId: req.query.partId || null,
         status: req.query.status || null,
         shiftCode: shiftCodeFilter,
+        lineName: lineNameFilter,
+        stationNo: stationNoFilter || null,
+        operatorId: operatorIdFilter || null,
       },
       machineWise,
       machineCards,
@@ -3369,7 +4220,14 @@ exports.getDashboardReport = async (req, res) => {
       shiftProduction,
       interlockHistory: interlocks,
       reworkCount,
-      partJourney: partHistory,
+      partJourney: pagedHistory,
+      partJourneyPagination: {
+        page,
+        pageSize,
+        total: historyTotal,
+      },
+      partsList,
+      availableLines,
       availableShifts: shifts.map((shift) => ({
         shiftCode: shift.shift_code,
         shiftName: shift.shift_name,
@@ -3382,54 +4240,471 @@ exports.getDashboardReport = async (req, res) => {
   }
 };
 
-exports.exportDashboardReportCsv = async (req, res) => {
-  try {
-    const { from, to } = getDateRangeFromQuery(req.query);
-    const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
-    const where = {
-      createdAt: { [Op.gte]: from, [Op.lte]: to },
-    };
-    if (req.query.machineId) {
-      where.machine_id = Number(req.query.machineId);
-    }
-    if (req.query.partId) {
-      where.part_id = req.query.partId;
-    }
-    if (req.query.status) {
-      where.status = String(req.query.status).toUpperCase();
-    }
+const DEFAULT_REPORT_COLUMNS = [
+  { id: "partId", label: "Part Serial No", enabled: true },
+  { id: "createdAt", label: "Timestamp", enabled: true },
+  { id: "shiftCode", label: "Shift", enabled: true },
+  { id: "operationNo", label: "Operation No", enabled: true },
+  { id: "machineName", label: "Machine Name", enabled: true },
+  { id: "modelCode", label: "Model Code", enabled: true },
+  { id: "qrFormatName", label: "Model Name", enabled: true },
+  { id: "status", label: "Result (OK/NG)", enabled: true },
+  { id: "reason", label: "Reason", enabled: true },
+  { id: "lineName", label: "Line No", enabled: true },
+  { id: "operatorId", label: "Operator ID", enabled: false },
+  { id: "cycleTime", label: "Cycle Time (s)", enabled: false },
+  { id: "plcStatus", label: "PLC Status", enabled: false },
+];
 
-    const [rows, shifts] = await Promise.all([
-      ProductionLog.findAll({
-        where,
-        order: [["createdAt", "DESC"]],
-        raw: true,
-      }),
-      getActiveShiftDefinitions(),
-    ]);
-
-    const filteredRows = applyShiftFilter(rows, shiftCodeFilter, shifts);
-
-    const header = "id,part_id,machine_id,status,shift_code,ng_reason,createdAt";
-    const body = filteredRows
-      .map((row) =>
-        [
-          row.id,
-          row.part_id,
-          row.machine_id,
-          row.status,
-          resolveShiftCodeForDate(row.createdAt, shifts),
-          row.ng_reason || "",
-          row.createdAt,
-        ].join(",")
-      )
-      .join("\n");
-    const csv = `${header}\n${body}`;
-
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", "attachment; filename=traceability_report.csv");
-    res.send(csv);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+const DEFAULT_EXPORT_REPORT_CONFIG = {
+  companyName: "Traceability System",
+  plantName: "-",
+  projectTitle: "Production Traceability",
+  reportTitle: "Production Report",
+  logoUrl: "",
+  headerLine1: "Production Traceability Report",
+  headerLine2: "Industrial Analytics",
+  footerText: "Confidential - Internal Use Only",
+  location: "-",
+  preparedBy: "",
+  approvedBy: "",
+  department: "Production",
+  showLogo: true,
+  showDate: true,
+  showShift: true,
+  showMachine: true,
+  columns: DEFAULT_REPORT_COLUMNS,
 };
+
+function normalizeReportColumns(rawColumns) {
+  const defaultsById = new Map(DEFAULT_REPORT_COLUMNS.map((row) => [row.id, row]));
+  const used = new Set();
+  const merged = [];
+  const incoming = Array.isArray(rawColumns) ? rawColumns : [];
+
+  for (const column of incoming) {
+    if (!column || typeof column !== "object") continue;
+    const id = String(column.id || "").trim();
+    if (!id || used.has(id)) continue;
+    const base = defaultsById.get(id);
+    if (!base) continue;
+    used.add(id);
+    merged.push({
+      id,
+      label: String(column.label || base.label || id),
+      enabled: column.enabled !== false,
+    });
+  }
+
+  for (const base of DEFAULT_REPORT_COLUMNS) {
+    if (used.has(base.id)) continue;
+    merged.push({ ...base });
+  }
+
+  return merged;
+}
+
+function normalizeExportReportConfig(rawConfig = {}) {
+  const source = rawConfig && typeof rawConfig === "object" ? rawConfig : {};
+  return {
+    ...DEFAULT_EXPORT_REPORT_CONFIG,
+    ...source,
+    columns: normalizeReportColumns(source.columns),
+  };
+}
+
+function getExportPayload(req) {
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const filters = body.filters && typeof body.filters === "object" ? body.filters : req.query || {};
+  const reportConfig = normalizeExportReportConfig(body.reportConfig || {});
+  return { filters, reportConfig };
+}
+
+function toDisplayDateTime(value) {
+  if (!value) return "-";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return String(value);
+  return dt.toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function normalizeResultToken(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function deriveOperationStatus(row) {
+  const plcStatus = normalizeResultToken(row?.plc_status);
+  const result = normalizeResultToken(row?.result);
+  if (result === "OK" || plcStatus === "ENDED_OK") return "OK";
+  if (result === "NG" || plcStatus === "ENDED_NG") return "NG";
+  return "";
+}
+
+function matchesStatusFilter(row, statusFilter) {
+  if (!statusFilter) return true;
+  const token = String(statusFilter || "").trim().toUpperCase();
+  if (!token) return true;
+  const values = [
+    normalizeResultToken(row.status),
+    normalizeResultToken(row.result),
+    normalizeResultToken(row.plcStatus),
+  ];
+  if (token === "WIP") return values.includes("RUNNING") || values.includes("PENDING") || values.includes("STARTED");
+  return values.includes(token);
+}
+
+async function getDashboardExportRows(filters) {
+  const query = filters && typeof filters === "object" ? filters : {};
+  const { from, to } = getDateRangeFromQuery(query);
+  const shiftCodeFilter = query?.shiftCode ? String(query.shiftCode).trim().toUpperCase() : null;
+  const lineNameFilter = normalizeLineName(query?.lineName);
+  const statusFilter = String(query?.status || "").trim().toUpperCase();
+  const operatorIdFilter = Number(query?.operatorId || 0) || null;
+  const operationWhere = {
+    createdAt: { [Op.gte]: from, [Op.lte]: to },
+  };
+
+  if (lineNameFilter) {
+    const lineMachines = await Machine.findAll({
+      where: { line_name: lineNameFilter, is_active: true },
+      attributes: ["id"],
+      raw: true,
+    });
+    const lineMachineIds = lineMachines.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+    if (!lineMachineIds.length) {
+      return [];
+    }
+    operationWhere.machine_id = { [Op.in]: lineMachineIds };
+  }
+
+  if (query?.machineId) {
+    operationWhere.machine_id = Number(query.machineId);
+  }
+  if (query?.partId) {
+    operationWhere.part_id = { [Op.like]: `%${String(query.partId).trim()}%` };
+  }
+  if (operatorIdFilter) {
+    operationWhere.user_id = operatorIdFilter;
+  }
+
+  const [operationRows, shifts] = await Promise.all([
+    OperationLog.findAll({
+      where: operationWhere,
+      order: [["createdAt", "DESC"]],
+      raw: true,
+    }),
+    getActiveShiftDefinitions(),
+  ]);
+
+  const shiftFilteredRows = applyShiftFilter(operationRows, shiftCodeFilter, shifts);
+  const machineIds = uniqueStages(shiftFilteredRows.map((row) => String(row.machine_id || "")).filter(Boolean))
+    .map((entry) => Number(entry))
+    .filter((entry) => Number.isFinite(entry));
+  const machineRows = machineIds.length
+    ? await Machine.findAll({
+      where: { id: { [Op.in]: machineIds } },
+      attributes: ["id", "machine_name", "line_name", "operation_no"],
+      raw: true,
+    })
+    : [];
+  const machineMap = machineRows.reduce((acc, row) => {
+    acc[row.id] = row;
+    return acc;
+  }, {});
+
+  const partIds = uniqueStages(shiftFilteredRows.map((row) => String(row.part_id || "").trim()).filter(Boolean));
+  const partRows = partIds.length
+    ? await Part.findAll({
+      where: { part_id: { [Op.in]: partIds } },
+      attributes: ["part_id", "qr_format_name"],
+      raw: true,
+    })
+    : [];
+  const partMap = partRows.reduce((acc, row) => {
+    acc[row.part_id] = row;
+    return acc;
+  }, {});
+  const qrFormatNames = uniqueStages(partRows.map((row) => String(row.qr_format_name || "").trim()).filter(Boolean));
+  const qrRuleRows = qrFormatNames.length
+    ? await QrFormatRule.findAll({
+      where: { format_name: { [Op.in]: qrFormatNames } },
+      attributes: ["format_name", "model_code"],
+      raw: true,
+    })
+    : [];
+  const modelByFormat = qrRuleRows.reduce((acc, row) => {
+    acc[String(row.format_name || "").trim()] = String(row.model_code || "").trim();
+    return acc;
+  }, {});
+
+  const mappedRows = shiftFilteredRows.map((row) => {
+    const machine = machineMap[row.machine_id] || {};
+    const part = partMap[row.part_id] || {};
+    const qrFormatName = String(part.qr_format_name || "").trim();
+    const modelCode = modelByFormat[qrFormatName] || "";
+    const status = deriveOperationStatus(row);
+    const result = normalizeResultToken(row.result);
+    const plcStatus = normalizeResultToken(row.plc_status);
+    const start = row.plc_start_time || row.plc_start_at || null;
+    const end = row.plc_end_time || row.plc_end_at || null;
+    const cycleTime = start && end
+      ? Number(Math.max(0, (new Date(end).getTime() - new Date(start).getTime()) / 1000).toFixed(1))
+      : null;
+
+    return {
+      partId: row.part_id || "",
+      modelCode,
+      qrFormatName,
+      machineName: machine.machine_name || "",
+      lineName: machine.line_name || "",
+      stationNo: row.station_no || machine.operation_no || "",
+      operationNo: row.operation_no || "",
+      shiftCode: resolveShiftCodeForDate(row.createdAt, shifts) || "",
+      status,
+      result,
+      plcStatus,
+      reason: row.interlock_reason || "",
+      operatorId: row.user_id || "",
+      cycleTime: cycleTime === null ? "" : cycleTime,
+      createdAt: formatReportTimestamp(row.createdAt),
+      createdAtRaw: row.createdAt,
+    };
+  });
+
+  return mappedRows.filter((row) => matchesStatusFilter(row, statusFilter));
+}
+
+function tryParseHexColor(colorValue, fallbackArgb) {
+  const value = String(colorValue || "").trim();
+  const match = value.match(/^#?([0-9a-fA-F]{6})$/);
+  if (!match) return fallbackArgb;
+  return `FF${match[1].toUpperCase()}`;
+}
+
+async function resolveLogoImageBase64(logoUrl) {
+  const input = String(logoUrl || "").trim();
+  if (!input) return null;
+  if (/^data:image\/(png|jpe?g);base64,/i.test(input)) {
+    return input;
+  }
+  if (!/^https?:\/\//i.test(input)) {
+    return null;
+  }
+  try {
+    const response = await fetch(input);
+    if (!response.ok) return null;
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.includes("image/")) return null;
+    const arrayBuffer = await response.arrayBuffer();
+    const binary = Buffer.from(arrayBuffer).toString("base64");
+    const type = contentType.includes("png") ? "png" : "jpeg";
+    return `data:image/${type};base64,${binary}`;
+  } catch {
+    return null;
+  }
+}
+
+function buildFilterSummaryRows(filters, rowsCount) {
+  const query = filters && typeof filters === "object" ? filters : {};
+  const selected = [
+    ["From", query.dateFrom ? toDisplayDateTime(query.dateFrom) : "-"],
+    ["To", query.dateTo ? toDisplayDateTime(query.dateTo) : "-"],
+    ["Line", query.lineName || "-"],
+    ["Machine", query.machineId || "-"],
+    ["Part", query.partId || "-"],
+    ["Status", query.status || "-"],
+    ["Shift", query.shiftCode || "-"],
+    ["Operator", query.operatorId || "-"],
+  ];
+  const selectedCount = selected.filter((row) => row[1] && row[1] !== "-").length;
+  const appliedText = selected
+    .filter((row) => row[1] && row[1] !== "-")
+    .map(([label, value]) => `${label}: ${value}`)
+    .join("  |  ");
+  return {
+    selected,
+    selectedCount,
+    rowsCount,
+    appliedText,
+  };
+}
+
+async function sendDashboardExcel(res, { rows, filters, reportConfig, sheetName, filePrefix }) {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet(sheetName);
+  const config = normalizeExportReportConfig(reportConfig || {});
+  const navColor = tryParseHexColor(config.reportAccentColor || "#1A3A7C", "FF1A3A7C");
+  const headerBgColor = tryParseHexColor(config.reportHeaderBgColor || "#EAF0F8", "FFEAF0F8");
+  const headerTextColor = "FFFFFFFF";
+  const borderColor = "FFD8DEE8";
+  const filterSummary = buildFilterSummaryRows(filters, rows.length);
+
+  const logoBase64 = config.showLogo ? await resolveLogoImageBase64(config.logoUrl) : null;
+  let rowPtr = 1;
+
+  if (logoBase64) {
+    const extMatch = logoBase64.match(/^data:image\/(png|jpe?g);base64,/i);
+    const extension = extMatch && extMatch[1].toLowerCase().startsWith("png") ? "png" : "jpeg";
+    const imageId = workbook.addImage({ base64: logoBase64, extension });
+    worksheet.addImage(imageId, { tl: { col: 0, row: 0 }, ext: { width: 170, height: 62 } });
+    worksheet.mergeCells("C1:I1");
+    worksheet.mergeCells("C2:I2");
+    worksheet.mergeCells("C3:I3");
+    worksheet.mergeCells("C4:I4");
+    worksheet.getCell("C1").value = config.headerLine1 || config.companyName;
+    worksheet.getCell("C2").value = config.headerLine2 || config.projectTitle;
+    worksheet.getCell("C3").value = config.reportTitle || "Production Report";
+    worksheet.getCell("C4").value = `Generated: ${toDisplayDateTime(new Date())}   |   Sign Date: ${toDisplayDateTime(new Date())}`;
+    rowPtr = 6;
+  } else {
+    worksheet.mergeCells("A1:I1");
+    worksheet.mergeCells("A2:I2");
+    worksheet.mergeCells("A3:I3");
+    worksheet.mergeCells("A4:I4");
+    worksheet.getCell("A1").value = config.headerLine1 || config.companyName;
+    worksheet.getCell("A2").value = config.headerLine2 || config.projectTitle;
+    worksheet.getCell("A3").value = config.reportTitle || "Production Report";
+    worksheet.getCell("A4").value = `Generated: ${toDisplayDateTime(new Date())}   |   Sign Date: ${toDisplayDateTime(new Date())}`;
+    rowPtr = 6;
+  }
+
+  ["A1", "A2", "A3", "A4", "C1", "C2", "C3", "C4"].forEach((ref) => {
+    const cell = worksheet.getCell(ref);
+    if (!cell.value) return;
+    cell.alignment = { vertical: "middle", horizontal: ref.endsWith("1") || ref.endsWith("3") ? "left" : "left" };
+    if (ref.endsWith("1")) cell.font = { bold: true, size: 14, color: { argb: navColor } };
+    else if (ref.endsWith("3")) cell.font = { bold: true, size: 13, color: { argb: "FF243A53" } };
+    else cell.font = { size: 10, color: { argb: "FF5B6574" } };
+  });
+
+  worksheet.getCell(`A${rowPtr}`).value = `Plant: ${config.plantName || "-"}   |   Department: ${config.department || "-"}   |   Location: ${config.location || "-"}`;
+  worksheet.mergeCells(`A${rowPtr}:I${rowPtr}`);
+  worksheet.getCell(`A${rowPtr}`).font = { size: 10, color: { argb: "FF415167" } };
+  rowPtr += 1;
+
+  const appliedFiltersText = filterSummary.appliedText || "No filters selected";
+  worksheet.getCell(`A${rowPtr}`).value = `Applied Filters (${filterSummary.selectedCount})  |  Rows: ${filterSummary.rowsCount}  |  ${appliedFiltersText}`;
+  worksheet.mergeCells(`A${rowPtr}:I${rowPtr}`);
+  worksheet.getCell(`A${rowPtr}`).font = { bold: true, size: 10, color: { argb: navColor } };
+  worksheet.getCell(`A${rowPtr}`).fill = { type: "pattern", pattern: "solid", fgColor: { argb: headerBgColor } };
+  rowPtr += 1;
+
+  rowPtr += 1;
+
+  const columnMeta = {
+    partId: { key: "partId", width: 22 },
+    modelCode: { key: "modelCode", width: 16 },
+    qrFormatName: { key: "qrFormatName", width: 20 },
+    machineName: { key: "machineName", width: 20 },
+    lineName: { key: "lineName", width: 14 },
+    stationNo: { key: "stationNo", width: 12 },
+    operationNo: { key: "operationNo", width: 13 },
+    shiftCode: { key: "shiftCode", width: 12 },
+    status: { key: "status", width: 12 },
+    result: { key: "result", width: 12 },
+    plcStatus: { key: "plcStatus", width: 15 },
+    reason: { key: "reason", width: 28 },
+    operatorId: { key: "operatorId", width: 12 },
+    cycleTime: { key: "cycleTime", width: 14 },
+    createdAt: { key: "createdAt", width: 21 },
+  };
+
+  const enabledColumns = config.columns.filter((column) => column.enabled !== false);
+  const normalizedColumns = (enabledColumns.length ? enabledColumns : DEFAULT_REPORT_COLUMNS.filter((row) => row.enabled)).map((column) => {
+    const meta = columnMeta[column.id] || { key: column.id, width: 18 };
+    return {
+      header: column.label || column.id,
+      key: meta.key,
+      width: meta.width,
+    };
+  });
+
+  worksheet.columns = normalizedColumns;
+  const headerRowNumber = rowPtr;
+  const headerRow = worksheet.getRow(headerRowNumber);
+  headerRow.values = normalizedColumns.map((column) => column.header);
+  headerRow.height = 22;
+  headerRow.font = { bold: true, color: { argb: headerTextColor }, size: 10 };
+  headerRow.alignment = { horizontal: "center", vertical: "middle" };
+  headerRow.eachCell((cell) => {
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: navColor } };
+    cell.border = {
+      top: { style: "thin", color: { argb: borderColor } },
+      left: { style: "thin", color: { argb: borderColor } },
+      bottom: { style: "thin", color: { argb: borderColor } },
+      right: { style: "thin", color: { argb: borderColor } },
+    };
+  });
+
+  const dataRows = rows.map((row) => {
+    const payload = {};
+    for (const column of normalizedColumns) {
+      payload[column.key] = row[column.key] ?? "";
+    }
+    return payload;
+  });
+  worksheet.addRows(dataRows);
+
+  const statusColumnIndex = normalizedColumns.findIndex((column) => column.key === "status") + 1;
+  for (let r = headerRowNumber + 1; r <= worksheet.rowCount; r += 1) {
+    const excelRow = worksheet.getRow(r);
+    if (statusColumnIndex > 0) {
+      const statusToken = normalizeResultToken(excelRow.getCell(statusColumnIndex)?.value);
+      if (statusToken === "OK") {
+        excelRow.getCell(statusColumnIndex).fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFEAF8EE" },
+        };
+      } else if (statusToken === "NG") {
+        excelRow.getCell(statusColumnIndex).fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFFDECEC" },
+        };
+      } else if (statusToken) {
+        excelRow.getCell(statusColumnIndex).fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFFFF7E8" },
+        };
+      }
+    }
+
+    excelRow.eachCell((cell) => {
+      cell.border = {
+        top: { style: "thin", color: { argb: borderColor } },
+        left: { style: "thin", color: { argb: borderColor } },
+        bottom: { style: "thin", color: { argb: borderColor } },
+        right: { style: "thin", color: { argb: borderColor } },
+      };
+      cell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
+    });
+  }
+
+  const footerRow = worksheet.rowCount + 2;
+  worksheet.getCell(`A${footerRow}`).value = config.footerText || "Confidential - Internal Use Only";
+  worksheet.getCell(`A${footerRow}`).font = { size: 10, italic: true, color: { argb: "FF66748A" } };
+  worksheet.mergeCells(`A${footerRow}:E${footerRow}`);
+  worksheet.getCell(`F${footerRow}`).value = `Prepared By: ${config.preparedBy || "-"}`;
+  worksheet.getCell(`G${footerRow}`).value = `Approved By: ${config.approvedBy || "-"}`;
+  worksheet.getCell(`H${footerRow}`).value = "Signed Date:";
+  worksheet.getCell(`I${footerRow}`).value = toDisplayDateTime(new Date());
+  worksheet.getCell(`H${footerRow}`).font = { bold: true, size: 10, color: { argb: "FF44566E" } };
+
+  worksheet.views = [{ state: "frozen", ySplit: headerRowNumber }];
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename=${filePrefix}_${buildReportFileTimestamp()}.xlsx`);
+  res.send(Buffer.from(buffer));
+}
+
+// Legacy export functions removed. Using reportController instead.
+

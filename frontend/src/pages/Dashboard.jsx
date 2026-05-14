@@ -4,7 +4,7 @@
 //  Clean professional language — no jargon
 //  Supports: Dark + Light via [data-theme] on <html>
 // ============================================================
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { io } from "socket.io-client";
 import {
   Download, RefreshCw, Filter, CheckCircle2, XCircle,
@@ -18,16 +18,15 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   BarChart, Bar, Legend,
 } from "recharts";
-import { dashboardApi, machineApi } from "../api/services";
+import { dashboardApi, machineApi, reportApi } from "../api/services";
 import ChartTooltip from "../components/charts/ChartTooltip";
 import axios from "axios";
 import { CHART_COLORS, chartAxisProps, chartGridProps } from "../constants/chartTheme";
-import { loadReportConfig, prependCsvReportHeader } from "../utils/reportConfig";
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
 const API_BASE   = import.meta.env.VITE_API_URL    || "http://localhost:4000/api";
 
-// ── Design tokens ─────────────────────────────────────────────────────────
+// —— Design tokens —————————————————————————————————————————————————————————————
 const DS = `
   @keyframes dbSpin    { to { transform:rotate(360deg) } }
   @keyframes dbFadeIn  { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
@@ -42,7 +41,9 @@ const DS = `
     --db-ng:    239,68,68;
     --db-wip:   249,115,22;
     --db-idle:  148,163,184;
+    --font-db:  "Inter", "Sora", "Outfit", system-ui, sans-serif;
   }
+  .db-font { font-family: var(--font-db); }
   [data-theme="light"]{
     --db-bg-base:    248,246,243;
     --db-bg-card:    255,255,255;
@@ -78,7 +79,7 @@ function injectDS() {
     document.documentElement.setAttribute("data-theme","dark");
 }
 
-// ── Color helpers ─────────────────────────────────────────────────────────
+// —— Color helpers —————————————————————————————————————————————————————————————
 const C = {
   navy:   (o=1) => `rgba(var(--db-navy),${o})`,
   steel:  (o=1) => `rgba(var(--db-steel),${o})`,
@@ -103,6 +104,25 @@ function downloadBlob(blob, filename) {
   a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
+function localDateTimeToIso(value) {
+  if (!value) return undefined;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toISOString();
+}
+
+function uniqueStages(rows = []) {
+  const seen = new Set();
+  const out = [];
+  for (const row of rows) {
+    const token = String(row || "").trim();
+    if (!token || seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+  }
+  return out;
+}
+
 const EMPTY_SUMMARY = {
   machines:{ total:0, active:0, inactive:0 },
   parts:{ inProgress:0, completed:0, ng:0, interlocked:0, rework:0 },
@@ -115,7 +135,7 @@ const EMPTY_REPORT = {
   interlockHistory:[], reworkCount:0, partJourney:[],
 };
 
-// ── OEE Radial Gauge ──────────────────────────────────────────────────────
+// —— OEE Radial Gauge ——————————————————————————————————————————————————————————
 const OeeGauge = ({ value=0, size=88, stroke=9 }) => {
   const pct   = Math.min(100, Math.max(0, value));
   const r     = (size-stroke)/2;
@@ -138,7 +158,7 @@ const OeeGauge = ({ value=0, size=88, stroke=9 }) => {
   );
 };
 
-// ── Status Badge ─────────────────────────────────────────────────────────
+// —— Status Badge ——————————————————————————————————————————————————————————————
 const Badge = ({ variant="idle", label }) => {
   const map = {
     ok:   { fg:C.ok(),   bg:C.ok(0.1),   bdr:C.ok(0.25)   },
@@ -157,9 +177,7 @@ const Badge = ({ variant="idle", label }) => {
   );
 };
 
-// ── Alarm Banner ──────────────────────────────────────────────────────────
-
-// ── KPI Card ─────────────────────────────────────────────────────────────
+// —— KPI Card ——————————————————————————————————————————————————————————————————
 const KpiCard = ({ label, value, icon:Icon, accent, sub }) => (
   <div style={{
     background:C.bg("card"),border:`1px solid ${C.bdr()}`,
@@ -171,19 +189,19 @@ const KpiCard = ({ label, value, icon:Icon, accent, sub }) => (
     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}>
       <p style={{fontSize:11,fontWeight:700,textTransform:"uppercase",
         letterSpacing:"0.07em",color:C.txt("muted"),lineHeight:1.3}}>{label}</p>
-      <div style={{width:30,height:30,borderRadius:8,
+      <div style={{width:26,height:26,borderRadius:8,
         background:`rgba(${accent?accent.replace(/rgba\(|,\d+\)|\)$/g,"").replace(/rgb\(|,\d+,\d+\)$/g,""):"var(--db-steel)"},0.1)`,
         display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-        <Icon size={14} color={accent||C.steel()}/>
+        <Icon size={13} color={accent||C.steel()}/>
       </div>
     </div>
-    <p style={{fontSize:30,fontWeight:800,color:C.txt("pri"),lineHeight:1,
+    <p style={{fontSize:28,fontWeight:800,color:C.txt("pri"),lineHeight:1,
       fontFamily:"'DM Mono',monospace",fontVariantNumeric:"tabular-nums"}}>{value}</p>
     {sub && <p style={{fontSize:11,color:C.txt("muted")}}>{sub}</p>}
   </div>
 );
 
-// ── Machine KPI Card ─────────────────────────────────────────────────────
+// —— Machine KPI Card ——————————————————————————————————————————————————————————
 const MachineCard = ({ row, plcOnline=true, nowMs=0 }) => {
   const acc   = Number(row.accuracy||0);
   const color = acc>=85 ? C.ok() : acc>=60 ? C.amber() : C.ng();
@@ -202,15 +220,15 @@ const MachineCard = ({ row, plcOnline=true, nowMs=0 }) => {
       onMouseEnter={e=>{e.currentTarget.style.borderColor=C.steel(0.5);e.currentTarget.style.boxShadow=SHADOW_MD;}}
       onMouseLeave={e=>{e.currentTarget.style.borderColor=C.bdr();e.currentTarget.style.boxShadow=SHADOW;}}
     >
-      {/* PLC dot */}
-      <div style={{position:"absolute",top:14,right:14,display:"flex",alignItems:"center",gap:5}}>
-        <span style={{fontSize:9,fontWeight:700,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.06em"}}>PLC</span>
-        <div style={{position:"relative",width:8,height:8}}>
-          <div style={{position:"absolute",inset:0,borderRadius:"50%",
-            background:plcOnline?C.ok():C.ng(),
-            animation:plcOnline?"dbPing 1.8s ease-out infinite":"none",opacity:0.5}}/>
-          <div style={{width:8,height:8,borderRadius:"50%",
-            background:plcOnline?C.ok():C.ng()}}/>
+      {/* PLC Status Icon */}
+      <div style={{position:"absolute",top:14,right:14,display:"flex",alignItems:"center",gap:6}}
+        title={plcOnline ? "PLC Connection Active" : "PLC Connection Down"}>
+        <span style={{fontSize:8,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.08em"}}>PLC</span>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",
+          width:22,height:22,borderRadius:6,
+          background:plcOnline?C.ok(0.1):C.ng(0.1),
+          border:`1px solid ${plcOnline?C.ok(0.2):C.ng(0.2)}`}}>
+          {plcOnline ? <Wifi size={11} color={C.ok()}/> : <WifiOff size={11} color={C.ng()}/>}
         </div>
       </div>
 
@@ -268,7 +286,7 @@ const MachineCard = ({ row, plcOnline=true, nowMs=0 }) => {
   );
 };
 
-// ── Section header ────────────────────────────────────────────────────────
+// —— Section header ————————————————————————————————————————————————————————————
 const SectionHead = ({ title, right }) => (
   <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
     marginBottom:16,flexWrap:"wrap",gap:8}}>
@@ -278,7 +296,7 @@ const SectionHead = ({ title, right }) => (
   </div>
 );
 
-// ── Chart tooltip theme ───────────────────────────────────────────────────
+// —— Chart tooltip theme ———————————————————————————————————————————————————————
 const TooltipStyle = {
   contentStyle:{
     background:C.bg("card"),border:`1px solid ${C.bdr()}`,
@@ -289,9 +307,9 @@ const TooltipStyle = {
   itemStyle:{ color:C.txt("pri") },
 };
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 //  DASHBOARD
-// ═══════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 const Dashboard = () => {
   injectDS();
 
@@ -305,13 +323,15 @@ const Dashboard = () => {
   const [plcMap,       setPlcMap]       = useState({});
   const [nowMs,        setNowMs]        = useState(Date.now());
   const [filters,      setFilters]      = useState({
-    dateFrom:"", dateTo:"", machineId:"", partId:"", status:"", shiftCode:"",
+    dateFrom:"", dateTo:"", machineId:"", lineName:"", partId:"", status:"", shiftCode:"",
   });
+  const [dateDraft, setDateDraft] = useState({ from: "", to: "" });
 
   const query = useMemo(()=>({
-    dateFrom:   filters.dateFrom   || undefined,
-    dateTo:     filters.dateTo     || undefined,
+    dateFrom:   localDateTimeToIso(filters.dateFrom),
+    dateTo:     localDateTimeToIso(filters.dateTo),
     machineId:  filters.machineId  || undefined,
+    lineName:   filters.lineName   || undefined,
     partId:     filters.partId     || undefined,
     status:     filters.status     || undefined,
     shiftCode:  filters.shiftCode  || undefined,
@@ -359,16 +379,20 @@ const Dashboard = () => {
       const machine = machines.find((row) => Number(row.id) === selectedMachineId);
       return machine?.lineName ? `Line: ${machine.lineName}` : "Line: -";
     }
+    if (filters.lineName) {
+      return `Line: ${filters.lineName}`;
+    }
     const lines = [...new Set((machines || []).map((row) => String(row.lineName || "").trim()).filter(Boolean))];
     if (lines.length === 0) return "Line: All";
     if (lines.length === 1) return `Line: ${lines[0]}`;
     return `Line: All (${lines.length})`;
-  }, [filters.machineId, machines]);
+  }, [filters.machineId, filters.lineName, machines]);
 
   // Pie data
   const pieData = useMemo(()=>[
-    { name:"Pass", value:summary.quality?.ok||0  },
-    { name:"Fail", value:summary.quality?.ng||0  },
+    { name:"Pass",    value:summary.quality?.ok||0          },
+    { name:"Fail",    value:summary.quality?.ng||0          },
+    { name:"Blocked", value:summary.quality?.interlocked||0 },
   ],[summary.quality]);
 
   // Shift bar data
@@ -380,33 +404,21 @@ const Dashboard = () => {
   ,[report.shiftProduction]);
 
   const hasFilters = Object.values(filters).some(Boolean);
-  const exportPeriodLabel = useMemo(() => {
-    if (filters.dateFrom || filters.dateTo) {
-      return `${filters.dateFrom || "Start"} to ${filters.dateTo || "Now"}`;
-    }
-    return "Current dashboard filter";
-  }, [filters.dateFrom, filters.dateTo]);
+  const selectedFilterCount = useMemo(() => Object.values(filters).filter(Boolean).length, [filters]);
+  
   const handleExportReport = useCallback(async () => {
     try {
-      const rawBlob = await dashboardApi.exportReport(query);
-      const csvBody = await rawBlob.text();
-      const reportConfig = loadReportConfig();
-      const csv = prependCsvReportHeader(csvBody, {
-        config: reportConfig,
-        periodLabel: exportPeriodLabel,
-        generatedAt: new Date().toLocaleString("en-IN"),
-        reportTitle: `${reportConfig.reportTitle || "Production Report"} - Dashboard Export`,
-      });
+      const rawBlob = await reportApi.exportFull(query);
       downloadBlob(
-        new Blob([csv], { type: "text/csv;charset=utf-8" }),
-        `Dashboard_Report_${new Date().toISOString().slice(0, 10)}.csv`
+        rawBlob,
+        `Traceability_Report_${new Date().toISOString().slice(0, 10)}.xlsx`
       );
     } catch (e) {
       console.error("Dashboard export error", e);
     }
-  }, [query, exportPeriodLabel]);
+  }, [query]);
 
-  // ── Tabs config ──
+  // —— Tabs config ——
   const TABS = [
     { id:"overview",  label:"Overview",          icon:BarChart3  },
     { id:"machines",  label:"Machine KPIs",      icon:Cpu        },
@@ -418,9 +430,7 @@ const Dashboard = () => {
     <div style={{display:"flex",flexDirection:"column",gap:20,paddingBottom:32,
       animation:"dbFadeIn 0.3s ease"}}>
 
-      {/* ── Alarms ── */}
-
-      {/* ── Page Header ─────────────────────────────────────────────── */}
+      {/* —— Page Header ————————————————————————————————————————————————————————— */}
       <div style={{
         background:C.bg("card"),border:`1px solid ${C.bdr()}`,
         borderRadius:16,padding:"18px 20px",boxShadow:SHADOW,overflow:"hidden",
@@ -430,7 +440,6 @@ const Dashboard = () => {
 
         <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",
           flexWrap:"wrap",gap:12}}>
-          {/* Title */}
           <div style={{display:"flex",alignItems:"center",gap:14}}>
             <div style={{width:46,height:46,borderRadius:13,
               background:`linear-gradient(135deg,${C.navy()},${C.steel(0.8)})`,
@@ -440,7 +449,7 @@ const Dashboard = () => {
             </div>
             <div>
               <h1 style={{fontSize:18,fontWeight:800,color:C.txt("pri"),
-                letterSpacing:"-0.02em",lineHeight:1.2}}>
+                letterSpacing:"-0.02em",lineHeight:1.2, fontFamily:"var(--font-outfit)"}}>
                 Production Overview
               </h1>
               <div style={{display:"flex",alignItems:"center",gap:8,marginTop:4}}>
@@ -456,7 +465,6 @@ const Dashboard = () => {
             </div>
           </div>
 
-          {/* Actions */}
           <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
             <button onClick={()=>setShowFilters(f=>!f)}
               style={{
@@ -492,15 +500,13 @@ const Dashboard = () => {
               {loading?"Updating…":"Refresh"}
             </button>
 
-            <button
-              onClick={handleExportReport}
+            <button onClick={handleExportReport}
               style={{
                 display:"inline-flex",alignItems:"center",gap:7,
                 height:38,padding:"0 16px",borderRadius:9,
                 fontSize:12,fontWeight:800,cursor:"pointer",
                 background:C.amber(),border:"none",
-                color:C.navy(),
-                boxShadow:`0 3px 12px ${C.amber(0.3)}`,
+                color:C.navy(),boxShadow:`0 3px 12px ${C.amber(0.3)}`,
                 transition:"filter 0.15s",
               }}
               onMouseEnter={e=>e.currentTarget.style.filter="brightness(1.06)"}
@@ -510,129 +516,234 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* ── Filter bar ── */}
         {showFilters && (
           <div style={{
             marginTop:16,padding:"16px",borderRadius:12,
             background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
-            display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:10,
+            display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:12,
             animation:"dbFadeIn 0.2s ease",
           }}>
-            {/* Date filters */}
-            {[
-              { key:"dateFrom",  placeholder:"From date",     type:"date"   },
-              { key:"dateTo",    placeholder:"To date",       type:"date"   },
-            ].map(f=>(
-              <input key={f.key} type={f.type}
-                placeholder={f.placeholder}
-                value={filters[f.key]}
-                onChange={e=>setFilters(prev=>({...prev,[f.key]:e.target.value}))}
+            <div style={{display:"flex", flexDirection:"column", gap:5}}>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>From Date/Time</label>
+              <input
+                type="datetime-local"
+                value={dateDraft.from}
+                onChange={e => setDateDraft(prev => ({ ...prev, from: e.target.value }))}
                 style={{
                   height:36,padding:"0 12px",
                   background:C.bg("input"),
                   border:`1px solid ${C.bdr()}`,
                   borderRadius:8,fontSize:12,
                   color:C.txt("pri"),outline:"none",
-                  fontFamily:"'DM Sans',sans-serif",
+                  fontFamily:"var(--font-db)",
                 }}
               />
-            ))}
-
-            {/* Machine dropdown */}
-            <select
-              value={filters.machineId}
-              onChange={e=>setFilters(prev=>({...prev,machineId:e.target.value}))}
-              style={{
-                height:36,padding:"0 12px",
-                background:C.bg("input"),
-                border:`1px solid ${C.bdr()}`,
-                borderRadius:8,fontSize:12,
-                color:C.txt("pri"),outline:"none",
-                fontFamily:"'DM Sans',sans-serif",
-                minWidth:140,cursor:"pointer",
-                appearance:"auto",
-              }}>
-              <option value="">All Machines</option>
-              {machines.map(m=>(
-                <option key={m.id} value={m.id}>{m.machineName}</option>
-              ))}
-            </select>
-
-            {/* Part serial */}
-            <input
-              type="text"
-              placeholder="Part serial"
-              value={filters.partId}
-              onChange={e=>setFilters(prev=>({...prev,partId:e.target.value}))}
-              style={{
-                height:36,padding:"0 12px",
-                background:C.bg("input"),
-                border:`1px solid ${C.bdr()}`,
-                borderRadius:8,fontSize:12,
-                color:C.txt("pri"),outline:"none",
-                fontFamily:"'DM Sans',sans-serif",
-              }}
-            />
-
-            {/* Status dropdown */}
-            <select
-              value={filters.status}
-              onChange={e=>setFilters(prev=>({...prev,status:e.target.value}))}
-              style={{
-                height:36,padding:"0 12px",
-                background:C.bg("input"),
-                border:`1px solid ${C.bdr()}`,
-                borderRadius:8,fontSize:12,
-                color:C.txt("pri"),outline:"none",
-                fontFamily:"'DM Sans',sans-serif",
-                minWidth:120,cursor:"pointer",
-                appearance:"auto",
-              }}>
-              <option value="">All Status</option>
-              <option value="OK">Pass (OK)</option>
-              <option value="NG">Fail (NG)</option>
-              <option value="WIP">In Progress</option>
-              <option value="INTERLOCKED">Interlocked</option>
-            </select>
-
-            {/* Shift dropdown */}
-            <select
-              value={filters.shiftCode}
-              onChange={e=>setFilters(prev=>({...prev,shiftCode:e.target.value}))}
-              style={{
-                height:36,padding:"0 12px",
-                background:C.bg("input"),
-                border:`1px solid ${C.bdr()}`,
-                borderRadius:8,fontSize:12,
-                color:C.txt("pri"),outline:"none",
-                fontFamily:"'DM Sans',sans-serif",
-                minWidth:120,cursor:"pointer",
-                appearance:"auto",
-              }}>
-              <option value="">All Shifts</option>
-              {(summary.availableShifts||["SHIFT_A","SHIFT_B","SHIFT_C"]).map(s=>(
-                <option key={typeof s === 'string' ? s : s.shiftCode} value={typeof s === 'string' ? s : s.shiftCode}>
-                  {typeof s === 'string' ? s.replace("_"," ") : (s.shiftName || s.shiftCode)}
-                </option>
-              ))}
-            </select>
-
-            {hasFilters && (
-              <button onClick={()=>setFilters({dateFrom:"",dateTo:"",machineId:"",partId:"",status:"",shiftCode:""})}
-                style={{height:36,padding:"0 14px",borderRadius:8,
-                  background:C.ng(0.08),border:`1px solid ${C.ng(0.25)}`,
-                  color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer"}}>
-                Clear Filters
+            </div>
+            <div style={{display:"flex", flexDirection:"column", gap:5}}>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>To Date/Time</label>
+              <input
+                type="datetime-local"
+                value={dateDraft.to}
+                onChange={e => setDateDraft(prev => ({ ...prev, to: e.target.value }))}
+                style={{
+                  height:36,padding:"0 12px",
+                  background:C.bg("input"),
+                  border:`1px solid ${C.bdr()}`,
+                  borderRadius:8,fontSize:12,
+                  color:C.txt("pri"),outline:"none",
+                  fontFamily:"var(--font-db)",
+                }}
+              />
+            </div>
+            <div style={{display:"flex", alignItems:"flex-end"}}>
+              <button
+                onClick={() => setFilters(prev => ({ ...prev, dateFrom: dateDraft.from, dateTo: dateDraft.to }))}
+                style={{
+                  height:36,width:"100%",borderRadius:8,
+                  background:C.ok(0.12),border:`1px solid ${C.ok(0.35)}`,
+                  color:C.ok(),fontSize:12,fontWeight:800,cursor:"pointer",
+                }}
+              >
+                Apply Date Filter
               </button>
-            )}
+            </div>
+
+            <div style={{display:"flex", flexDirection:"column", gap:5}}>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Production Line</label>
+              <select
+                value={filters.lineName}
+                onChange={e=>setFilters(prev=>({...prev,lineName:e.target.value,machineId:""}))}
+                style={{
+                  height:36,padding:"0 12px",
+                  background:C.bg("input"),
+                  border:`1px solid ${C.bdr()}`,
+                  borderRadius:8,fontSize:12,
+                  color:C.txt("pri"),outline:"none",
+                  fontFamily:"var(--font-db)",
+                  cursor:"pointer",
+                  appearance:"auto",
+                }}>
+                <option value="">All Lines</option>
+                {uniqueStages((summary.availableLines || []).map((line) => String(line || "").trim()).filter(Boolean)).map((line)=>(
+                  <option key={line} value={line}>{line}</option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{display:"flex", flexDirection:"column", gap:5}}>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Machine Name</label>
+              <select
+                value={filters.machineId}
+                onChange={e=>setFilters(prev=>({...prev,machineId:e.target.value}))}
+                style={{
+                  height:36,padding:"0 12px",
+                  background:C.bg("input"),
+                  border:`1px solid ${C.bdr()}`,
+                  borderRadius:8,fontSize:12,
+                  color:C.txt("pri"),outline:"none",
+                  fontFamily:"var(--font-db)",
+                  cursor:"pointer",
+                  appearance:"auto",
+                }}>
+                <option value="">All Machines</option>
+                {machines
+                  .filter((m) => !filters.lineName || String(m.lineName || "").trim() === filters.lineName)
+                  .map(m=>(
+                  <option key={m.id} value={m.id}>{m.machineName}</option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{display:"flex", flexDirection:"column", gap:5}}>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Part Serial No</label>
+              <input
+                type="text"
+                placeholder="Search serial..."
+                value={filters.partId}
+                onChange={e=>setFilters(prev=>({...prev,partId:e.target.value}))}
+                style={{
+                  height:36,padding:"0 12px",
+                  background:C.bg("input"),
+                  border:`1px solid ${C.bdr()}`,
+                  borderRadius:8,fontSize:12,
+                  color:C.txt("pri"),outline:"none",
+                  fontFamily:"var(--font-db)",
+                }}
+              />
+            </div>
+
+            <div style={{display:"flex", flexDirection:"column", gap:5}}>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Result Status</label>
+              <select
+                value={filters.status}
+                onChange={e=>setFilters(prev=>({...prev,status:e.target.value}))}
+                style={{
+                  height:36,padding:"0 12px",
+                  background:C.bg("input"),
+                  border:`1px solid ${C.bdr()}`,
+                  borderRadius:8,fontSize:12,
+                  color:C.txt("pri"),outline:"none",
+                  fontFamily:"var(--font-db)",
+                  cursor:"pointer",
+                  appearance:"auto",
+                }}>
+                <option value="">All Status</option>
+                <option value="OK">Pass (OK)</option>
+                <option value="NG">Fail (NG)</option>
+                <option value="WIP">In Progress</option>
+                <option value="INTERLOCKED">Interlocked</option>
+              </select>
+            </div>
+
+            <div style={{display:"flex", flexDirection:"column", gap:5}}>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Shift</label>
+              <select
+                value={filters.shiftCode}
+                onChange={e=>setFilters(prev=>({...prev,shiftCode:e.target.value}))}
+                style={{
+                  height:36,padding:"0 12px",
+                  background:C.bg("input"),
+                  border:`1px solid ${C.bdr()}`,
+                  borderRadius:8,fontSize:12,
+                  color:C.txt("pri"),outline:"none",
+                  fontFamily:"var(--font-db)",
+                  cursor:"pointer",
+                  appearance:"auto",
+                }}>
+                <option value="">All Shifts</option>
+                {(summary.availableShifts||["SHIFT_A","SHIFT_B","SHIFT_C"]).map(s=>(
+                  <option key={typeof s === 'string' ? s : s.shiftCode} value={typeof s === 'string' ? s : s.shiftCode}>
+                    {typeof s === 'string' ? s.replace("_"," ") : (s.shiftName || s.shiftCode)}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         )}
       </div>
 
-      {/* ── KPI Row ────────────────────────────────────────────────────── */}
+      {/* --- Filter Summary Bar --- */}
+      {hasFilters && (
+        <div style={{
+          background: C.bg("surf"),
+          border: `1px solid ${C.navy(0.2)}`,
+          borderRadius: 12,
+          padding: "10px 16px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          animation: "dbFadeIn 0.3s ease",
+          boxShadow: "inset 0 1px 3px rgba(0,0,0,0.05)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{
+              background: C.navy(),
+              color: "#fff",
+              padding: "4px 10px",
+              borderRadius: 6,
+              fontSize: 10,
+              fontWeight: 800,
+              textTransform: "uppercase",
+              letterSpacing: "0.05em"
+            }}>
+              Active Filters
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {filters.dateFrom && <Badge variant="idle" label={`From: ${new Date(filters.dateFrom).toLocaleString()}`} />}
+              {filters.dateTo && <Badge variant="idle" label={`To: ${new Date(filters.dateTo).toLocaleString()}`} />}
+              {filters.lineName && <Badge variant="idle" label={`Line: ${filters.lineName}`} />}
+              {filters.machineId && <Badge variant="idle" label={`Machine: ${machines.find(m => String(m.id) === String(filters.machineId))?.machineName || filters.machineId}`} />}
+              {filters.partId && <Badge variant="idle" label={`Part: ${filters.partId}`} />}
+              {filters.status && <Badge variant={filters.status === "OK" ? "ok" : filters.status === "NG" ? "ng" : "wip"} label={`Status: ${filters.status}`} />}
+              {filters.shiftCode && <Badge variant="idle" label={`Shift: ${filters.shiftCode}`} />}
+            </div>
+          </div>
+          <button 
+            onClick={() => {
+              setFilters({dateFrom:"",dateTo:"",machineId:"",lineName:"",partId:"",status:"",shiftCode:""});
+              setDateDraft({ from: "", to: "" });
+            }}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: C.ng(),
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 4
+            }}
+          >
+            <X size={14} /> Clear All
+          </button>
+        </div>
+      )}
+
+      {/* —— KPI Row —————————————————————————————————————————————————————————————— */}
       <div style={{display:"grid",
         gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
-        <KpiCard label="Total Machines"   value={summary.machines.total}          icon={Cpu}          accent={C.steel()}  sub={`${summary.machines.active} active`}/>
+        <KpiCard label="Active Machines"  value={summary.machines.active}         icon={Cpu}          accent={C.steel()}  sub={`Out of ${summary.machines.total} total machines`}/>
         <KpiCard label="In Progress"      value={summary.parts.inProgress}         icon={Zap}          accent={C.wip()}    sub="Parts being processed"/>
         <KpiCard label="Completed (Pass)" value={summary.parts.completed}          icon={CheckCircle2} accent={C.ok()}     sub="Total OK this period"/>
         <KpiCard label="Failed (NG)"      value={summary.quality?.ng||0}           icon={XCircle}      accent={C.ng()}     sub="Requires attention"/>
@@ -640,7 +751,7 @@ const Dashboard = () => {
         <KpiCard label="Pass Rate"        value={`${efficiency}%`}                 icon={TrendingUp}   accent={efficiency>=85?C.ok():efficiency>=60?C.amber():C.ng()} sub="Overall quality rate"/>
       </div>
 
-      {/* ── Tabs ───────────────────────────────────────────────────────── */}
+      {/* —— Tabs ————————————————————————————————————————————————————————————————————— */}
       <div style={{display:"flex",gap:6,padding:"6px",
         background:C.bg("card"),border:`1px solid ${C.bdr()}`,
         borderRadius:12,width:"fit-content",
@@ -667,29 +778,28 @@ const Dashboard = () => {
         })}
       </div>
 
-      {/* ── TAB: Overview ──────────────────────────────────────────────── */}
+      {/* —— TAB: Overview ———————————————————————————————————————————————————————————— */}
       {activeTab==="overview" && (
         <div style={{display:"flex",flexDirection:"column",gap:16}}>
 
-          {/* Row 1: donut + line chart */}
           <div style={{display:"grid",gridTemplateColumns:"300px 1fr",gap:16,
             flexWrap:"wrap"}}
             className="db-grid-responsive">
             <style>{`@media(max-width:900px){.db-grid-responsive{grid-template-columns:1fr!important}}`}</style>
 
-            {/* Pass/Fail donut */}
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
               <SectionHead title="Pass / Fail Split"/>
               <div style={{display:"flex",justifyContent:"center",marginBottom:16}}>
                 <div style={{position:"relative",width:160,height:160}}>
-                  <ResponsiveContainer width="100%" height="100%">
+                  <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                     <PieChart>
                       <Pie data={pieData} cx="50%" cy="50%"
                         innerRadius={50} outerRadius={75}
                         paddingAngle={3} dataKey="value" strokeWidth={0}>
                         <Cell fill={C.ok()} />
                         <Cell fill={C.ng()} />
+                        <Cell fill={C.amber()} />
                       </Pie>
                       <Tooltip {...TooltipStyle}/>
                     </PieChart>
@@ -702,24 +812,24 @@ const Dashboard = () => {
                   </div>
                 </div>
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
                 {[
-                  { label:"Pass", value:summary.quality?.ok||0, color:C.ok() },
-                  { label:"Fail", value:summary.quality?.ng||0, color:C.ng() },
+                  { label:"Pass",    value:summary.quality?.ok||0,          color:C.ok()    },
+                  { label:"Fail",    value:summary.quality?.ng||0,          color:C.ng()    },
+                  { label:"Blocked", value:summary.quality?.interlocked||0, color:C.amber() },
                 ].map(s=>(
                   <div key={s.label} style={{background:C.bg("surf"),
                     border:`1px solid ${C.bdr()}`,borderRadius:10,
-                    padding:"10px 12px",textAlign:"center"}}>
-                    <p style={{fontSize:22,fontWeight:800,color:s.color,
+                    padding:"10px 8px",textAlign:"center"}}>
+                    <p style={{fontSize:20,fontWeight:800,color:s.color,
                       fontFamily:"'DM Mono',monospace",lineHeight:1}}>{s.value}</p>
-                    <p style={{fontSize:10,color:C.txt("muted"),marginTop:4,fontWeight:700,
+                    <p style={{fontSize:9,color:C.txt("muted"),marginTop:4,fontWeight:700,
                       textTransform:"uppercase",letterSpacing:"0.07em"}}>{s.label}</p>
                   </div>
                 ))}
               </div>
             </div>
 
-            {/* Hourly production line chart */}
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
               <SectionHead title="Hourly Production"
@@ -768,12 +878,10 @@ const Dashboard = () => {
             </div>
           </div>
 
-          {/* Row 2: shift breakdown + recent scans */}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}
             className="db-grid-2">
             <style>{`@media(max-width:800px){.db-grid-2{grid-template-columns:1fr!important}}`}</style>
 
-            {/* Shift bar chart */}
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
               <SectionHead title="Production by Shift"/>
@@ -786,230 +894,78 @@ const Dashboard = () => {
                     <YAxis tick={{fontSize:11,fill:C.txt("muted")}}
                       axisLine={false} tickLine={false}/>
                     <Tooltip {...TooltipStyle}/>
-                    <Bar dataKey="OK" fill={C.ok()}    radius={[4,4,0,0]}/>
-                    <Bar dataKey="NG" fill={C.ng()}    radius={[4,4,0,0]}/>
+                    <Bar dataKey="OK" fill={C.ok()} radius={[4,4,0,0]} barSize={24}/>
+                    <Bar dataKey="NG" fill={C.ng()} radius={[4,4,0,0]} barSize={24}/>
                   </BarChart>
                 </ResponsiveContainer>
               </div>
             </div>
 
-            {/* Recent scans */}
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
-              borderRadius:14,overflow:"hidden",boxShadow:SHADOW}}>
-              <div style={{padding:"14px 16px",borderBottom:`1px solid ${C.bdr()}`,
-                background:C.bg("surf")}}>
-                <p style={{fontSize:11,fontWeight:800,textTransform:"uppercase",
-                  letterSpacing:"0.09em",color:C.txt("muted")}}>Recent Scans</p>
-              </div>
-              <div style={{maxHeight:220,overflowY:"auto"}}>
-                {(summary.recentScans||[]).length===0 ? (
-                  <div style={{padding:"32px 16px",textAlign:"center",
-                    color:C.txt("muted"),fontSize:12}}>No recent scans</div>
-                ) : (summary.recentScans||[]).slice(0,8).map((sc,i)=>(
-                  <div key={i} style={{
-                    display:"flex",alignItems:"center",justifyContent:"space-between",
-                    padding:"10px 16px",
-                    borderBottom: i<7 ? `1px solid ${C.bdr()}` : "none",
-                    background: i%2===1?C.bg("surf"):"transparent",
-                  }}>
-                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:11,
-                      fontWeight:700,color:C.txt("pri"),
-                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",
-                      maxWidth:140}}>{sc.partId||"—"}</span>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <span style={{fontSize:10,color:C.txt("muted"),
-                        fontFamily:"'DM Mono',monospace"}}>
-                        {sc.stationNo||"—"}
-                      </span>
-                      <Badge variant={sc.result==="OK"?"ok":sc.result==="NG"?"ng":"wip"}
-                        label={sc.result==="OK"?"Pass":sc.result==="NG"?"Fail":"In Progress"}/>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── TAB: Machine KPIs ──────────────────────────────────────────── */}
-      {activeTab==="machines" && (
-        <div>
-          <div style={{display:"grid",
-            gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:14}}>
-            {(report?.machineCards||[]).length===0 ? (
-              <div style={{padding:"48px 24px",textAlign:"center",
-                color:C.txt("muted"),fontSize:13}}>
-                <Cpu size={28} color={C.txt("muted")} style={{margin:"0 auto 12px"}}/>
-                <p>No machine data available</p>
-              </div>
-            ) : (report?.machineCards||[]).map(row=>(
-              <MachineCard key={row.machineId} row={row}
-                plcOnline={plcMap[row.machineId]!==false} nowMs={nowMs}/>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── TAB: OEE Analysis ──────────────────────────────────────────── */}
-      {activeTab==="oee" && (
-        <div style={{display:"grid",
-          gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:14}}>
-          {oeeData.length===0 ? (
-            <div style={{padding:"48px 24px",textAlign:"center",
-              color:C.txt("muted"),fontSize:13}}>
-              <Activity size={28} color={C.txt("muted")} style={{margin:"0 auto 12px"}}/>
-              <p>No OEE data available</p>
-            </div>
-          ) : oeeData.map((row,i)=>(
-            <div key={i} style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              {/* Header */}
-              <div style={{display:"flex",alignItems:"flex-start",
-                justifyContent:"space-between",marginBottom:16}}>
-                <div>
-                  <p style={{fontSize:14,fontWeight:800,color:C.txt("pri"),marginBottom:3}}>
-                    {row.machineName}
-                  </p>
-                  <p style={{fontSize:11,color:C.txt("muted")}}>{row.shiftCode}</p>
-                </div>
-                <div style={{width:32,height:32,borderRadius:9,
-                  background:C.steel(0.1),border:`1px solid ${C.steel(0.25)}`,
-                  display:"flex",alignItems:"center",justifyContent:"center"}}>
-                  <Activity size={15} color={C.steel()}/>
-                </div>
-              </div>
-
-              {/* Gauges */}
-              <div style={{display:"flex",alignItems:"center",
-                justifyContent:"space-around",marginBottom:16}}>
-                <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                  <OeeGauge value={row.oee} size={80} stroke={8}/>
-                  <span style={{fontSize:10,fontWeight:700,color:C.txt("muted"),
-                    textTransform:"uppercase",letterSpacing:"0.07em"}}>OEE</span>
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                  {[
-                    {label:"Quality",     value:row.quality},
-                    {label:"Performance", value:row.performance},
-                    {label:"Availability",value:row.availability},
-                  ].map(g=>(
-                    <div key={g.label} style={{display:"flex",alignItems:"center",gap:8}}>
-                      <OeeGauge value={g.value} size={44} stroke={5}/>
-                      <span style={{fontSize:10,fontWeight:600,color:C.txt("muted"),
-                        width:70}}>{g.label}</span>
+              <SectionHead title="Top Reject Reasons"/>
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {(report.recentScans||[]).filter(r=>r.result==="NG").slice(0,5).map((row,i)=>(
+                  <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                    padding:"10px 12px",background:C.bg("surf"),borderRadius:10,border:`1px solid ${C.bdr()}`}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <div style={{width:8,height:8,borderRadius:"50%",background:C.ng()}}/>
+                      <span style={{fontSize:12,fontWeight:700,color:C.txt("pri")}}>{row.reason || "Unknown Defect"}</span>
                     </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Footer stats */}
-              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,
-                paddingTop:12,borderTop:`1px solid ${C.bdr()}`}}>
-                {[
-                  {label:"Pass",     value:row.ok,              color:C.ok()  },
-                  {label:"Total",    value:row.total,            color:C.txt("pri")},
-                  {label:"Downtime", value:`${row.downtimeMinutes||0}m`, color:C.amber()},
-                ].map(s=>(
-                  <div key={s.label} style={{textAlign:"center"}}>
-                    <p style={{fontSize:15,fontWeight:800,color:s.color,
-                      fontFamily:"'DM Mono',monospace",lineHeight:1}}>{s.value}</p>
-                    <p style={{fontSize:9,fontWeight:700,color:C.txt("muted"),
-                      textTransform:"uppercase",letterSpacing:"0.07em",marginTop:3}}>{s.label}</p>
+                    <span style={{fontSize:10,fontWeight:800,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>
+                      {row.partId}
+                    </span>
                   </div>
                 ))}
+                {(report.recentScans||[]).filter(r=>r.result==="NG").length === 0 && (
+                  <p style={{fontSize:12, color:C.txt("muted"), textAlign:"center", py:10}}>No rejects found in this period.</p>
+                )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* —— TAB: Machines ——————————————————————————————————————————————————————————— */}
+      {activeTab==="machines" && (
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:16}}>
+          {report.machineCards.map((row)=>(
+            <MachineCard key={row.machineId} row={row} plcOnline={plcMap[row.machineId]!==false} nowMs={nowMs}/>
           ))}
         </div>
       )}
 
-      {/* ── TAB: Production History ─────────────────────────────────────── */}
+      {/* —— TAB: History ————————————————————————————————————————————————————————————— */}
       {activeTab==="history" && (
         <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
-          borderRadius:14,overflow:"hidden",boxShadow:SHADOW}}>
-          {/* Table header */}
-          <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.bdr()}`,
-            background:C.bg("surf"),display:"flex",
-            alignItems:"center",justifyContent:"space-between"}}>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <History size={15} color={C.steel()}/>
-              <p style={{fontSize:12,fontWeight:700,color:C.txt("pri")}}>
-                Production History
-              </p>
-            </div>
-            <div style={{display:"flex",alignItems:"center",gap:6}}>
-              <span style={{fontSize:11,color:C.txt("muted")}}>Records:</span>
-              <span style={{fontSize:11,fontWeight:700,color:C.txt("sec"),
-                fontFamily:"'DM Mono',monospace"}}>
-                {(report?.partJourney||[]).length}
-              </span>
-            </div>
+          borderRadius:14,boxShadow:SHADOW,overflow:"hidden"}}>
+          <div style={{padding:20,borderBottom:`1px solid ${C.bdr()}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <SectionHead title="Production History" />
+            <button onClick={handleExportReport} style={{fontSize:11, fontWeight:700, color:C.navy(), background:C.navy(0.05), border:`1px solid ${C.navy(0.1)}`, borderRadius:6, px:10, py:4}}>
+               Download Excel
+            </button>
           </div>
-
           <div style={{overflowX:"auto"}}>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <table style={{width:"100%",borderCollapse:"collapse"}}>
               <thead>
-                <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
-                  {["Part Serial","Machine","Station","Result","Timestamp"].map(h=>(
-                    <th key={h} style={{padding:"10px 16px",textAlign:"left",
-                      fontSize:10,fontWeight:800,textTransform:"uppercase",
-                      letterSpacing:"0.08em",color:C.txt("muted"),whiteSpace:"nowrap"}}>
-                      {h}
-                    </th>
+                <tr style={{background:C.bg("surf"),textAlign:"left"}}>
+                  {["Part Serial","Machine","Result","Reason","Cycle Time","Timestamp"].map(h=>(
+                    <th key={h} style={{padding:"12px 20px",fontSize:10,fontWeight:800,color:C.txt("muted"),
+                      textTransform:"uppercase",letterSpacing:"0.05em",borderBottom:`1px solid ${C.bdr()}`}}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {(report?.partJourney||[]).length===0 ? (
-                  <tr><td colSpan={5}>
-                    <div style={{padding:"48px 24px",textAlign:"center",
-                      color:C.txt("muted"),fontSize:12}}>
-                      No records found
-                    </div>
-                  </td></tr>
-                ) : (report?.partJourney||[]).slice(0,50).map((row,i)=>(
-                  <tr key={i} style={{
-                    borderBottom:`1px solid ${C.bdr()}`,
-                    background:i%2===1?C.bg("surf"):"transparent",
-                    transition:"background 0.1s",
-                  }}
-                    onMouseEnter={e=>e.currentTarget.style.background=C.steel(0.05)}
-                    onMouseLeave={e=>e.currentTarget.style.background=i%2===1?C.bg("surf"):"transparent"}
-                  >
-                    <td style={{padding:"10px 16px"}}>
-                      <span style={{fontFamily:"'DM Mono',monospace",fontSize:11,
-                        fontWeight:700,color:C.txt("pri")}}>
-                        {row.part_id||"—"}
-                      </span>
+                {(report.recentScans||[]).map((row,i)=>(
+                  <tr key={i} style={{borderBottom:`1px solid ${C.bdr(0.5)}`}}>
+                    <td style={{padding:"12px 20px",fontSize:12,fontWeight:700,color:C.txt("pri")}}>{row.partId}</td>
+                    <td style={{padding:"12px 20px",fontSize:12,color:C.txt("sec")}}>{row.machine}</td>
+                    <td style={{padding:"12px 20px"}}>
+                      <Badge variant={row.result==="OK"?"ok":row.result==="NG"?"ng":"wip"} label={row.result}/>
                     </td>
-                    <td style={{padding:"10px 16px"}}>
-                      <p style={{fontSize:12,fontWeight:600,color:C.txt("pri"),marginBottom:2}}>
-                        {row.machine_name||"—"}
-                      </p>
-                      <span style={{fontSize:10,color:C.txt("muted"),
-                        fontFamily:"'DM Mono',monospace"}}>
-                        {row.station||"—"}
-                      </span>
-                    </td>
-                    <td style={{padding:"10px 16px"}}>
-                      <span style={{fontFamily:"'DM Mono',monospace",fontSize:11,
-                        color:C.txt("sec")}}>
-                        {row.station||"—"}
-                      </span>
-                    </td>
-                    <td style={{padding:"10px 16px"}}>
-                      <Badge
-                        variant={row.status==="OK"?"ok":row.status==="NG"?"ng":"wip"}
-                        label={row.status==="OK"?"Pass":row.status==="NG"?"Fail":"In Progress"}
-                      />
-                    </td>
-                    <td style={{padding:"10px 16px"}}>
-                      <span style={{fontSize:11,color:C.txt("muted"),
-                        fontFamily:"'DM Mono',monospace"}}>
-                        {row.createdAt ? new Date(row.createdAt).toLocaleString() : "—"}
-                      </span>
-                    </td>
+                    <td style={{padding:"12px 20px",fontSize:12,color:C.ng()}}>{row.reason||"—"}</td>
+                    <td style={{padding:"12px 20px",fontSize:11,fontFamily:"'DM Mono',monospace"}}>{row.cycleTime?`${row.cycleTime}s`:"—"}</td>
+                    <td style={{padding:"12px 20px",fontSize:11,color:C.txt("muted")}}>{new Date(row.timestamp).toLocaleString()}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1017,10 +973,8 @@ const Dashboard = () => {
           </div>
         </div>
       )}
-
     </div>
   );
 };
 
 export default Dashboard;
-

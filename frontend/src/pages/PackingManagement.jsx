@@ -10,7 +10,10 @@ import {
   Database,
   ArrowRightCircle,
   Hash,
-  Activity
+  Activity,
+  Package,
+  TrendingUp,
+  CheckCircle
 } from "lucide-react";
 import { packingApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
@@ -142,12 +145,18 @@ const PackingManagement = () => {
     } finally { setGenerating(false); }
   };
 
-  return (
-    <div className="space-y-6 rise-in">
-      <GlobalPopup popup={popup} onClose={() => setPopup(null)} simple />
+  const getPreviewValue = useMemo(() => {
+    const prefix = settings.boxPrefix?.trim().toUpperCase() || "BOX";
+    const separator = settings.boxSeparator || "-";
+    const nextSerial = String(toPositiveInt(settings.nextSerial, 1)).padStart(toPositiveInt(settings.serialPadding, 4), '0');
+    return `${prefix}${separator}${nextSerial}`;
+  }, [settings.boxPrefix, settings.boxSeparator, settings.nextSerial, settings.serialPadding]);
 
-      {/* Header Section */}
-      {/* ── Header ── */}
+  return (
+    <div className="space-y-6 rise-in" style={{ fontFamily: "var(--font-outfit)" }}>
+      <GlobalPopup popup={popup} onClose={() => setPopup(null)} />
+
+      {/* Header matching Station Control */}
       <div className="db-header-card mb-6">
         <div className="db-header-gradient-bar" />
         <div className="db-header-inner">
@@ -160,152 +169,214 @@ const PackingManagement = () => {
               <p className="db-header-subtitle">Configure automated distribution & container mapping protocols</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button onClick={loadData} disabled={loading} className="db-secondary-btn">
-              <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> Sync
+          <div className="flex items-center gap-3">
+            <button onClick={loadData} disabled={loading} className="db-action-btn">
+              <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
             </button>
             <button onClick={saveSettings} disabled={saving} className="db-action-btn">
-              <Save size={14} /> Push Configuration
+              <Save size={14} /> Save Settings
             </button>
           </div>
         </div>
       </div>
 
-      {/* Stats Quick Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {[
-          { label: "Active Pipeline", val: stats.total, icon: Database, color: "text-primary", bg: "bg-primary/5" },
-          { label: "Pending Fulfillment", val: stats.open, icon: Activity, color: "text-primary", bg: "bg-primary/5" },
-          { label: "Validated Units", val: stats.closed, icon: PlusCircle, color: "text-emerald-400", bg: "bg-emerald-400/5" }
-        ].map((s, i) => (
-          <div key={i} className={`industrial-card p-6 flex items-center justify-between ${s.bg}`}>
+      {/* Compact Stats Cards */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="industrial-card p-3">
+          <div className="flex items-center justify-between">
             <div>
-              <p className="text-[10px] font-black text-text-muted uppercase tracking-widest mb-1">{s.label}</p>
-              <p className={`text-3xl font-black ${s.color} font-mono`}>{s.val}</p>
+              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">Total Boxes</p>
+              <p className="text-2xl font-black text-primary font-mono">{stats.total}</p>
             </div>
-            <s.icon className={`${s.color} opacity-40`} size={40} />
-          </div>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
-        {/* Settings Form */}
-        <div className="xl:col-span-8 industrial-card p-0 overflow-hidden">
-          <div className="px-6 py-5 border-b border-border bg-bg-dark/40 flex items-center gap-3">
-             <Hash size={18} className="text-primary" />
-             <h2 className="text-xs font-black text-text-main uppercase tracking-widest">Logic & Prefix Standards</h2>
-          </div>
-          <div className="p-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {[
-              { label: "Container Prefix", key: "boxPrefix", type: "text" },
-              { label: "Identity Separator", key: "boxSeparator", type: "text" },
-              { label: "Serial Padding", key: "serialPadding", type: "number" },
-              { label: "Sequence Counter", key: "nextSerial", type: "number" },
-              { label: "Unit Capacity", key: "defaultCapacity", type: "number" },
-              { label: "Label Prefix", key: "labelPrefix", type: "text" }
-            ].map(f => (
-              <div key={f.key} className="space-y-1.5">
-                <label className="text-[10px] font-black text-text-muted uppercase tracking-widest ml-1">{f.label}</label>
-                <input
-                  type={f.type}
-                  value={settings[f.key]}
-                  onChange={e => setSettings(p => ({ ...p, [f.key]: f.type === 'number' ? e.target.value : e.target.value.toUpperCase() }))}
-                  className="w-full h-11 bg-bg-dark border border-border rounded-xl px-4 font-mono text-sm text-text-main focus:border-primary focus:ring-1 focus:ring-primary/20 transition-all outline-none"
-                />
-              </div>
-            ))}
-          </div>
-          <div className="px-8 py-5 bg-bg-dark/40 border-t border-border flex items-center gap-3">
-             <div className="flex items-center gap-3 cursor-pointer group" onClick={() => setSettings(p => ({ ...p, autoCreateNextBox: !p.autoCreateNextBox }))}>
-                <div className={`w-10 h-6 rounded-full p-1 transition-colors ${settings.autoCreateNextBox ? 'bg-primary' : 'bg-border'}`}>
-                   <div className={`w-4 h-4 rounded-full bg-bg-card transition-transform ${settings.autoCreateNextBox ? 'translate-x-4' : ''}`} />
-                </div>
-                <span className="text-xs font-bold text-text-main group-hover:text-primary transition-colors">Continuous sequence auto-generation protocol</span>
-             </div>
+            <Database size={28} className="text-primary/30" />
           </div>
         </div>
-
-        {/* Live Preview Card */}
-        {/* <div className="xl:col-span-4 industrial-card p-6 space-y-6 border-t-4 border-t-primary">
-          <div>
-            <h2 className="text-xs font-black text-text-main uppercase tracking-widest mb-4 flex items-center gap-2">
-               <QrCode size={16} className="text-primary" /> Generation Preview
-            </h2>
-            <div className="bg-bg-dark border border-border rounded-2xl p-6 mb-6 shadow-inner text-center">
-               <p className="text-[10px] font-black text-text-muted uppercase tracking-widest mb-2">Next Logical Identity</p>
-               <p className="text-2xl font-black text-primary font-mono tracking-tighter mb-4">{settings.preview || "UNCONFIGURED"}</p>
-               <BarcodePreview value={settings.preview} />
+        
+        <div className="industrial-card p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">Open Boxes</p>
+              <p className="text-2xl font-black text-primary font-mono">{stats.open}</p>
             </div>
-            <button
-              onClick={generateNextBox}
-              disabled={generating}
-              className="w-full h-12 rounded-xl bg-accent text-on-strong font-black uppercase tracking-widest flex items-center justify-center gap-2 hover:brightness-110 shadow-lg shadow-accent/20 transition-all disabled:opacity-50"
-            >
-              <PlusCircle size={18} /> {generating ? "Mapping..." : "Manual Pulse Logic"}
-            </button>
-            <p className="mt-4 text-[10px] text-text-muted font-bold italic text-center">Force sequence advance will burn current ID.</p>
+            <Activity size={28} className="text-primary/30" />
           </div>
-        </div> */}
+        </div>
+        
+        <div className="industrial-card p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">Closed Boxes</p>
+              <p className="text-2xl font-black text-emerald-400 font-mono">{stats.closed}</p>
+            </div>
+            <CheckCircle size={28} className="text-emerald-400/30" />
+          </div>
+        </div>
+      </div>
+
+      {/* Settings Form - Full Width */}
+      <div className="industrial-card p-0 overflow-hidden">
+        <div className="px-5 py-3 border-b border-border bg-bg-dark/40 flex items-center gap-2">
+          <Hash size={14} className="text-primary" />
+          <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">Configuration Parameters</h2>
+        </div>
+        <div className="p-5 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+          <div className="space-y-1">
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Container Prefix</label>
+            <input
+              type="text"
+              value={settings.boxPrefix}
+              onChange={e => setSettings(p => ({ ...p, boxPrefix: e.target.value.toUpperCase() }))}
+              className="w-full h-9 bg-bg-dark border border-border rounded-lg px-3 font-mono text-sm text-text-main focus:border-primary focus:ring-1 focus:ring-primary/20 transition-all outline-none"
+            />
+          </div>
+          
+          <div className="space-y-1">
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Separator</label>
+            <input
+              type="text"
+              value={settings.boxSeparator}
+              onChange={e => setSettings(p => ({ ...p, boxSeparator: e.target.value }))}
+              className="w-full h-9 bg-bg-dark border border-border rounded-lg px-3 font-mono text-sm text-text-main focus:border-primary focus:ring-1 focus:ring-primary/20 transition-all outline-none"
+            />
+          </div>
+          
+          <div className="space-y-1">
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Serial Padding</label>
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={settings.serialPadding}
+              onChange={e => setSettings(p => ({ ...p, serialPadding: e.target.value }))}
+              className="w-full h-9 bg-bg-dark border border-border rounded-lg px-3 font-mono text-sm text-text-main focus:border-primary focus:ring-1 focus:ring-primary/20 transition-all outline-none"
+            />
+          </div>
+          
+          <div className="space-y-1">
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Next Serial</label>
+            <input
+              type="number"
+              min={1}
+              value={settings.nextSerial}
+              onChange={e => setSettings(p => ({ ...p, nextSerial: e.target.value }))}
+              className="w-full h-9 bg-bg-dark border border-border rounded-lg px-3 font-mono text-sm text-text-main focus:border-primary focus:ring-1 focus:ring-primary/20 transition-all outline-none"
+            />
+          </div>
+          
+          <div className="space-y-1">
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Default Capacity</label>
+            <input
+              type="number"
+              min={1}
+              max={500}
+              value={settings.defaultCapacity}
+              onChange={e => setSettings(p => ({ ...p, defaultCapacity: e.target.value }))}
+              className="w-full h-9 bg-bg-dark border border-border rounded-lg px-3 font-mono text-sm text-text-main focus:border-primary focus:ring-1 focus:ring-primary/20 transition-all outline-none"
+            />
+          </div>
+          
+          <div className="space-y-1">
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Label Prefix</label>
+            <input
+              type="text"
+              value={settings.labelPrefix}
+              onChange={e => setSettings(p => ({ ...p, labelPrefix: e.target.value.toUpperCase() }))}
+              className="w-full h-9 bg-bg-dark border border-border rounded-lg px-3 font-mono text-sm text-text-main focus:border-primary focus:ring-1 focus:ring-primary/20 transition-all outline-none"
+            />
+          </div>
+        </div>
+        
+        <div className="px-5 py-3 bg-bg-dark/40 border-t border-border flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 cursor-pointer group" onClick={() => setSettings(p => ({ ...p, autoCreateNextBox: !p.autoCreateNextBox }))}>
+              <div className={`w-8 h-4 rounded-full p-0.5 transition-colors ${settings.autoCreateNextBox ? 'bg-primary' : 'bg-border'}`}>
+                <div className={`w-3 h-3 rounded-full bg-white transition-transform ${settings.autoCreateNextBox ? 'translate-x-4' : ''}`} />
+              </div>
+              <span className="text-[10px] font-bold text-text-main group-hover:text-primary transition-colors">Auto-create next box</span>
+            </div>
+          </div>
+          
+          <button
+            onClick={generateNextBox}
+            disabled={generating}
+            className="h-9 px-4 rounded-lg bg-accent text-on-strong font-black uppercase tracking-wider flex items-center gap-2 hover:brightness-110 shadow-lg shadow-accent/20 transition-all disabled:opacity-50 text-[10px]"
+          >
+            <PlusCircle size={14} /> {generating ? "Generating..." : "Generate Box"}
+          </button>
+        </div>
       </div>
 
       {/* Box Registry Table */}
       <div className="industrial-card p-0 overflow-hidden">
-        <div className="px-6 py-5 border-b border-border bg-bg-dark/40 flex items-center justify-between">
+        <div className="px-5 py-3 border-b border-border bg-bg-dark/40 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Filter size={16} className="text-primary" />
-            <h2 className="text-xs font-black text-text-main uppercase tracking-widest">Identity Registry</h2>
+            <Package size={14} className="text-primary" />
+            <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">Box Registry</h2>
           </div>
           <select
             value={statusFilter}
             onChange={e => setStatusFilter(e.target.value)}
-            className="bg-bg-dark border border-border rounded-lg px-3 py-1.5 text-[10px] font-black text-text-main uppercase tracking-widest focus:outline-none focus:border-primary"
+            className="bg-bg-dark border border-border rounded-lg px-3 py-1.5 text-[9px] font-black text-text-main uppercase tracking-wider focus:outline-none focus:border-primary"
           >
-            <option value="ALL">All Nodes</option>
-            <option value="OPEN">Pending</option>
-            <option value="CLOSED">Sealed</option>
+            <option value="ALL">All Boxes</option>
+            <option value="OPEN">Open Only</option>
+            <option value="CLOSED">Closed Only</option>
           </select>
         </div>
+        
         <div className="overflow-x-auto">
           <table className="w-full text-left">
-            <thead className="bg-bg-dark/60 text-[9px] font-black text-text-muted uppercase tracking-widest border-b border-border">
+            <thead className="bg-bg-dark/60 text-[9px] font-black text-text-muted uppercase tracking-wider border-b border-border">
               <tr>
-                <th className="px-6 py-4">Serial</th>
-                <th className="px-6 py-4">Box Identity</th>
-                <th className="px-6 py-4">Capacity</th>
-                <th className="px-6 py-4">Packed</th>
-                <th className="px-6 py-4">Node Status</th>
-                <th className="px-6 py-4">Mapping Target</th>
-                <th className="px-6 py-4">Created At</th>
-                <th className="px-6 py-4">Action</th>
+                <th className="px-4 py-3">Serial</th>
+                <th className="px-4 py-3">Box ID</th>
+                <th className="px-4 py-3">Capacity</th>
+                <th className="px-4 py-3">Filled</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Label</th>
+                <th className="px-4 py-3">Created</th>
+                <th className="px-4 py-3"></th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-border/20 text-xs">
+            <tbody className="divide-y divide-border/20">
               {boxes.length === 0 ? (
-                <tr><td colSpan={8} className="px-6 py-12 text-center text-text-muted italic opacity-30">Registry is empty. Initialize logic above.</td></tr>
-              ) : boxes.map(r => (
-                <tr key={r.id} className="hover:bg-primary/5 transition-colors group">
-                  <td className="px-6 py-4 font-mono font-black text-text-muted">{r.serialNo}</td>
-                  <td className="px-6 py-4">
-                    <span className="font-black text-primary font-mono text-sm">{r.boxNumber}</span>
+                <tr>
+                  <td colSpan={8} className="px-4 py-16 text-center text-text-muted">
+                    <Package size={32} className="mx-auto opacity-20 mb-3" />
+                    <p className="text-xs font-medium">No boxes found</p>
+                    <p className="text-[10px] mt-1 opacity-60">Generate your first box using the button above</p>
                   </td>
-                  <td className="px-6 py-4 font-bold text-text-main">{r.capacity}</td>
-                  <td className="px-6 py-4">
-                     <div className="flex items-center gap-2">
-                        <div className="w-16 h-1 bg-border rounded-full overflow-hidden">
-                           <div className="h-full bg-primary" style={{ width: `${(r.packedCount/r.capacity)*100}%` }} />
-                        </div>
-                        <span className="font-mono font-bold">{r.packedCount}</span>
-                     </div>
+                </tr>
+              ) : boxes.map((box) => (
+                <tr key={box.id} className="hover:bg-primary/5 transition-colors group">
+                  <td className="px-4 py-3 font-mono font-black text-text-muted text-xs">{box.serialNo}</td>
+                  <td className="px-4 py-3">
+                    <span className="font-black text-primary font-mono text-sm">{box.boxNumber}</span>
                   </td>
-                  <td className="px-6 py-4">
-                    <span className={`px-2 py-1 rounded text-[9px] font-black uppercase border ${r.status?.toUpperCase() === 'CLOSED' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-primary/10 border-primary/20 text-primary'}`}>
-                      {r.status || "OPEN"}
+                  <td className="px-4 py-3 font-bold text-text-main text-xs">{box.capacity}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-16 h-1.5 bg-border rounded-full overflow-hidden">
+                        <div className="h-full bg-primary" style={{ width: `${(box.packedCount / box.capacity) * 100}%` }} />
+                      </div>
+                      <span className="font-mono font-bold text-xs">{box.packedCount}</span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`inline-flex px-2 py-0.5 rounded text-[9px] font-black uppercase border ${
+                      box.status?.toUpperCase() === 'CLOSED' 
+                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' 
+                        : 'bg-primary/10 border-primary/20 text-primary'
+                    }`}>
+                      {box.status || "OPEN"}
                     </span>
                   </td>
-                  <td className="px-6 py-4 font-mono text-text-muted italic">{r.labelCode || "—"}</td>
-                  <td className="px-6 py-4 text-text-muted font-mono whitespace-nowrap">{formatDateTime(r.createdAt)}</td>
-                  <td className="px-6 py-4">
-                     <button className="p-2 text-text-muted hover:text-primary transition-colors"><ArrowRightCircle size={18} /></button>
+                  <td className="px-4 py-3 font-mono text-text-muted text-xs">{box.labelCode || "—"}</td>
+                  <td className="px-4 py-3 text-text-muted font-mono text-xs whitespace-nowrap">{formatDateTime(box.createdAt)}</td>
+                  <td className="px-4 py-3">
+                    <button className="p-1.5 text-text-muted hover:text-primary transition-colors">
+                      <ArrowRightCircle size={14} />
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -318,4 +389,3 @@ const PackingManagement = () => {
 };
 
 export default PackingManagement;
-

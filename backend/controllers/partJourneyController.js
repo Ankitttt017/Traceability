@@ -4,6 +4,27 @@ const OperationLog = require("../models/OperationLog");
 const ProductionLog = require("../models/ProductionLog");
 const Part         = require("../models/Part");
 
+const NON_QUALITY_AUDIT_REASONS = new Set([
+  "DUPLICATE_SCAN",
+  "ALREADY_COMPLETED",
+  "PREVIOUS_STATION_NOT_COMPLETED",
+  "STATION_NOT_CONFIGURED",
+  "INVALID_QR_FORMAT",
+  "QR_RULE_CONFIG_ERROR",
+  "PART_INTERLOCKED",
+  "RESET_REQUIRED_AFTER_PLC_COMM_ERROR",
+  "INVALID_INPUT",
+]);
+
+function toUpper(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function isQualityOutcomeLog(log) {
+  const reason = String(log?.ng_reason || "").trim().toUpperCase();
+  return !NON_QUALITY_AUDIT_REASONS.has(reason);
+}
+
 /**
  * GET /api/parts/:partId/journey
  * Returns the full traceability timeline for a part — all stations,
@@ -20,7 +41,7 @@ async function getPartJourney(req, res) {
     const allMachines = await Machine.findAll({
       where: { is_active: true },
       order: [["sequence_no", "ASC"]],
-      attributes: ["id", "machine_name", "station_no", "operation_no", "sequence_no", "line_name"],
+      attributes: ["id", "machine_name", "operation_no", "sequence_no", "line_name"],
       raw: true,
     });
 
@@ -47,7 +68,8 @@ async function getPartJourney(req, res) {
       opByMachine.get(log.machine_id).push(log);
     }
     for (const log of prodLogs) {
-      // Most recent first — take first (latest) per machine
+      // Most recent first — take first quality-relevant verdict per machine.
+      if (!isQualityOutcomeLog(log)) continue;
       if (!prodByMachine.has(log.machine_id)) prodByMachine.set(log.machine_id, log);
     }
 
@@ -69,25 +91,41 @@ async function getPartJourney(req, res) {
       let completedAt    = null;
 
       if (ops.length > 0) {
+        // Separate quality outcomes from administrative blocks (audit logs)
+        const qualityLogs = ops.filter(isQualityOutcomeLog);
+        const qrSuccessLog = qualityLogs.find(l => ["PASS", "OK", "ALLOW"].includes(toUpper(l.result)));
+        const qrNgLog = qualityLogs.find(l => ["FAIL", "NG"].includes(toUpper(l.result)));
+        
+        const opSuccessLog = qualityLogs.find(l => ["ENDED_OK", "PASSED", "OK", "COMPLETED_OK"].includes(toUpper(l.plc_status)));
+        const opNgLog = qualityLogs.find(l => ["ENDED_NG", "NG", "FAILED", "COMPLETED_NG"].includes(toUpper(l.plc_status)));
+        
         const latest = ops[ops.length - 1];
+        const latestPlcSt = toUpper(latest.plc_status);
 
-        // QR Verification: based on result field
-        const qrResult = String(latest.result || "").toUpperCase();
-        if (["PASS", "OK", "ALLOW", "ACCEPT"].includes(qrResult)) qrVerification = "PASS";
-        else if (["FAIL", "NG", "BLOCK", "REJECT"].includes(qrResult)) qrVerification = "FAIL";
+        // QR Verification: based on quality logs
+        if (qrSuccessLog) qrVerification = "PASS";
+        else if (qrNgLog) qrVerification = "FAIL";
+        else if (["FAIL", "NG", "BLOCK", "REJECT"].includes(toUpper(latest.result))) qrVerification = "FAIL";
         else if (hasActivity) qrVerification = "RUN";
 
-        // Operation: from plc_status
-        const plcSt = String(latest.plc_status || "").toUpperCase();
-        if (["ENDED_OK", "PASSED"].includes(plcSt)) operation = "PASS";
-        else if (["ENDED_NG", "INTERLOCKED", "BLOCKED"].includes(plcSt)) operation = "FAIL";
-        else if (["STARTED", "PENDING", "IN_PROGRESS"].includes(plcSt)) operation = "RUN";
-        else if (["PLC_COMM_ERROR"].includes(plcSt)) operation = "FAIL";
+        // Operation: Prioritize Quality PASS > Quality FAIL > In Progress
+        if (opSuccessLog) operation = "PASS";
+        else if (opNgLog) operation = "FAIL";
+        else if (["STARTED", "IN_PROGRESS", "RUNNING"].includes(latestPlcSt)) operation = "RUN";
+        else if (["PLC_COMM_ERROR", "TIMEOUT"].includes(latestPlcSt)) operation = "COMM";
+        else if (["INTERLOCKED", "BLOCKED"].includes(latestPlcSt)) {
+            // Administrative block (not a quality NG)
+            operation = "WAIT"; 
+        }
+        else if (["PENDING", "WAITING", "RETRY", "RESET"].includes(latestPlcSt)) operation = "WAIT";
+        // Manual station fallback
+        else if (qrSuccessLog && (!latestPlcSt || latestPlcSt === "NONE" || latestPlcSt === "IDLE")) operation = "PASS";
 
-        // completedAt from plc_end_at or plc_end_time
-        if (latest.plc_end_at) completedAt = latest.plc_end_at;
-        else if (latest.plc_end_time) completedAt = latest.plc_end_time;
-        else if (latest.updatedAt && plcSt === "ENDED_OK") completedAt = latest.updatedAt;
+        // completedAt from best available log
+        const bestLog = opSuccessLog || opNgLog || qrSuccessLog || qrNgLog || (qualityLogs.length > 0 ? qualityLogs[qualityLogs.length - 1] : latest);
+        if (bestLog.plc_end_at) completedAt = bestLog.plc_end_at;
+        else if (bestLog.plc_end_time) completedAt = bestLog.plc_end_time;
+        else if (bestLog.updatedAt && toUpper(bestLog.plc_status) === "ENDED_OK") completedAt = bestLog.updatedAt;
       }
 
       // Quality Check: from ProductionLog verdict
@@ -97,26 +135,32 @@ async function getPartJourney(req, res) {
         if (!completedAt) completedAt = prod.createdAt;
       } else if (operation === "PASS") {
         qualityCheck   = "PASS";
-        rejectionConfirmation = "PASS";
       } else if (operation === "FAIL") {
         qualityCheck = "FAIL";
         rejectionConfirmation = "FAIL";
+      } else if (operation === "COMM") {
+        qualityCheck = "WAIT";
+        rejectionConfirmation = "PENDING";
       }
 
       // Station overall status
-      if (prod || operation === "PASS") {
+      if (qualityCheck === "FAIL" || operation === "FAIL" || operation === "COMM") {
+        stationStatus = "FAILED";
+      } else if (prod || (operation === "PASS" && qualityCheck === "PASS")) {
         stationStatus = "COMPLETED";
-      } else if (hasActivity && (operation === "RUN" || qrVerification === "RUN" || (qrVerification === "PASS" && operation === "WAIT"))) {
+      } else if (
+        hasActivity &&
+        (operation === "RUN" || qrVerification === "RUN" || (qrVerification === "PASS" && operation === "WAIT"))
+      ) {
         stationStatus = "IN_PROGRESS";
       } else if (hasActivity) {
-        // Has data but might be failed/incomplete
-        stationStatus = operation === "FAIL" ? "COMPLETED" : "IN_PROGRESS";
+        stationStatus = "PENDING";
       } else {
         stationStatus = "PENDING";
       }
 
       return {
-        stationNo:             machine.station_no   || machine.operation_no || `STATION_${idx + 1}`,
+        stationNo:             machine.operation_no || `STATION_${idx + 1}`,
         stationName:           machine.machine_name || `Operation ${idx + 1}`,
         lineName:              machine.line_name    || null,
         sequence:              machine.sequence_no  || (idx + 1),

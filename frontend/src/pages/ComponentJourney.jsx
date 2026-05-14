@@ -9,12 +9,14 @@
 // ============================================================
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
 import {
   AlertTriangle, CheckCircle2, Clock3, RefreshCw, RotateCcw,
   Search, X, XCircle, Activity, Layers, ChevronRight,
-  MapPin, Zap, Package, QrCode, Trash2, Eye, EyeOff,
+  MapPin, Zap, Package, QrCode, Trash2, Eye, EyeOff, Download,
 } from "lucide-react";
-import { stationSettingsApi, traceabilityApi } from "../api/services";
+import { machineApi, shiftApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
 import {
   getStationFeatureSettings, getStationFeatures, saveStationFeatureSettings,
@@ -155,20 +157,20 @@ function formatDate(v) {
 }
 function getStationMeta(status) {
   const s=String(status||"PENDING").toUpperCase();
-  if (["PASSED","ENDED_OK","COMPLETED"].includes(s))    return {variant:"ok",  label:"Pass",       icon:CheckCircle2};
-  if (["FAILED","INTERLOCKED","ENDED_NG","NG"].includes(s)) return {variant:"ng",  label:"Fail",       icon:XCircle};
-  if (["COMM_ERROR","PLC_COMM_ERROR"].includes(s))       return {variant:"wip", label:"Comm Error", icon:AlertTriangle};
-  if (["IN_PROGRESS","STARTED","PENDING","REWORK"].includes(s)) return {variant:"wip",label:"In Progress",icon:Clock3};
+  if (["PASSED","ENDED_OK","COMPLETED","COMPLETED_OK"].includes(s))    return {variant:"ok",  label:"Pass",       icon:CheckCircle2};
+  if (["FAILED","INTERLOCKED","ENDED_NG","NG","COMPLETED_NG"].includes(s)) return {variant:"ng",  label:"Fail",       icon:XCircle};
+  if (["COMM_ERROR","PLC_COMM_ERROR","PLC_TIMEOUT","TIMEOUT","PLC_ERROR","ACK_TIMEOUT","RUNNING_TIMEOUT","END_TIMEOUT","RESET_TIMEOUT"].includes(s)) return {variant:"ng", label:"Error", icon:AlertTriangle};
+  if (["RUNNING","IN_PROGRESS","STARTED","REWORK","WAITING_RUNNING","WAITING_END","START_SENT","VALIDATED","SCANNED","WAITING_ACK","ACK_RECEIVED"].includes(s)) return {variant:"wip",label:"In Progress",icon:Clock3};
   return {variant:"idle",label:"Waiting",icon:Clock3};
 }
 function getPartMeta(status) {
   const s=String(status||"").trim().toUpperCase();
-  if (s==="COMPLETED")                          return {label:"Pass",        variant:"ok"  };
-  if (["NG","INTERLOCKED","FAILED"].includes(s)) return {label:"Fail",        variant:"ng"  };
-  if (["IN_PROGRESS","REWORK"].includes(s))      return {label:"In Progress", variant:"wip" };
+  if (["COMPLETED", "PASSED", "COMPLETED_OK"].includes(s)) return {label:"Pass", variant:"ok"};
+  if (["NG", "INTERLOCKED", "FAILED", "COMPLETED_NG", "ENDED_NG"].includes(s)) return {label:"Fail", variant:"ng"};
+  if (["IN_PROGRESS", "REWORK", "RUNNING", "STARTED", "SCANNED", "VALIDATED", "START_SENT", "WAITING_ACK", "ACK_RECEIVED", "WAITING_RUNNING", "WAITING_END"].includes(s)) return {label:"In Progress", variant:"wip"};
+  if (["PLC_COMM_ERROR", "COMM_ERROR", "PLC_TIMEOUT", "PLC_ERROR"].includes(s)) return {label:"Error", variant:"ng"};
   return {label:"Waiting",variant:"idle"};
 }
-
 // ── Mini QR code SVG generator (no external lib needed) ───────────────────
 // Generates a simple visual QR-like pattern from the part ID string
 function generateQrPattern(text, size=80) {
@@ -319,18 +321,17 @@ const PartActionBtn = ({ icon, label, color, bgColor, borderColor, hoverBg, onCl
 const QrModal = ({ partId, onClose, onDeletePart }) => {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting,      setDeleting]      = useState(false);
+  const [deleteError,   setDeleteError]   = useState("");
 
   const handleDelete = async () => {
     setDeleting(true);
+    setDeleteError("");
     try {
-      await traceabilityApi.deletePart?.(partId)
-        || traceabilityApi.resetStation?.({partId, stationNo:"ALL", reason:"Full part deletion"});
+      await traceabilityApi.deletePart({ partId, reason: "Full part deletion" });
       onDeletePart(partId);
       onClose();
     } catch(e) {
-      // fallback — still close modal
-      onDeletePart(partId);
-      onClose();
+      setDeleteError(e.response?.data?.error || "Unable to remove part");
     } finally { setDeleting(false); }
   };
 
@@ -393,7 +394,7 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
 
           {/* Delete section */}
           {!confirmDelete ? (
-            <button onClick={()=>setConfirmDelete(true)}
+            <button onClick={() => { setDeleteError(""); setConfirmDelete(true); }}
               style={{display:"flex",alignItems:"center",gap:6,
                 fontSize:12,fontWeight:700,color:C.ng(),
                 background:C.ng(0.08),border:`1px solid ${C.ng(0.25)}`,
@@ -414,7 +415,7 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
                 all its station history from start to end. This cannot be undone.
               </p>
               <div style={{display:"flex",gap:8}}>
-                <Btn onClick={()=>setConfirmDelete(false)}
+                <Btn onClick={() => { setDeleteError(""); setConfirmDelete(false); }}
                   style={{flex:1,justifyContent:"center",padding:"8px 0"}}>
                   Cancel
                 </Btn>
@@ -424,6 +425,11 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
                   {deleting?"Removing…":"Yes, Remove"}
                 </Btn>
               </div>
+              {deleteError ? (
+                <p style={{marginTop:10,fontSize:11,color:C.ng(),lineHeight:1.4}}>
+                  {deleteError}
+                </p>
+              ) : null}
             </div>
           )}
         </div>
@@ -439,7 +445,20 @@ const ComponentJourney = () => {
   useEffect(()=>{ injectTheme(); injectKeyframes(); },[]);
 
   const [searchTerm,       setSearchTerm]       = useState("");
+  const [filters,          setFilters]          = useState({
+    dateFrom:"",
+    dateTo:"",
+    partId:"",
+    machineId:"",
+    stationNo:"",
+    status:"",
+    operatorId:"",
+    shiftCode:"",
+    lineName:"",
+  });
   const [parts,            setParts]            = useState([]);
+  const [machines,         setMachines]         = useState([]);
+  const [availableShifts,  setAvailableShifts]  = useState([]);
   const [selectedPartId,   setSelectedPartId]   = useState("");
   const [journeyData,      setJourneyData]      = useState(null);
   const [loading,          setLoading]          = useState(false);
@@ -465,6 +484,10 @@ const ComponentJourney = () => {
   const lastQrEventRef         = useRef({key:"",at:0});
 
   const selectedPart    = useMemo(()=>parts.find(e=>e.partId===selectedPartId)||null,[parts,selectedPartId]);
+  const lineOptions     = useMemo(
+    ()=>Array.from(new Set((machines||[]).map((row)=>String(row.lineName || "").trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b)),
+    [machines]
+  );
   const stationTimeline = useMemo(()=>journeyData?.stationTimeline||[],[journeyData?.stationTimeline]);
   const statusSummary   = useMemo(()=>stationTimeline.reduce((acc,st)=>{
     const s=String(st.stageState||"").toUpperCase();
@@ -477,12 +500,24 @@ const ComponentJourney = () => {
 
   // ── Data / socket logic (100% unchanged logic) ─────────────────────────
   const loadPartCatalog = useCallback(async(search)=>{
-    const rows=await traceabilityApi.partCatalog({search,limit:80});
+    const rows=await traceabilityApi.partCatalog({
+      search,
+      limit:80,
+      dateFrom: filters.dateFrom || undefined,
+      dateTo: filters.dateTo || undefined,
+      partId: filters.partId || undefined,
+      machineId: filters.machineId || undefined,
+      stationNo: filters.stationNo || undefined,
+      status: filters.status || undefined,
+      operatorId: filters.operatorId || undefined,
+      shiftCode: filters.shiftCode || undefined,
+      lineName: filters.lineName || undefined,
+    });
     setParts(rows||[]);
     if (!selectedPartId&&rows?.length) setSelectedPartId(rows[0].partId);
     if (selectedPartId&&!(rows||[]).some(e=>e.partId===selectedPartId))
       setSelectedPartId(rows?.[0]?.partId||"");
-  },[selectedPartId]);
+  },[selectedPartId, filters]);
 
   const loadJourney = useCallback(async(partId,showLoader=true)=>{
     if (!partId){setJourneyData(null);return;}
@@ -521,8 +556,10 @@ const ComponentJourney = () => {
     if (!rPartId) return;
     const rStatus=String(payload.currentStatus||payload.partStatus||payload.status||"").trim().toUpperCase();
     const resolved=["COMPLETED","IN_PROGRESS","NG","INTERLOCKED","REWORK"].includes(rStatus)?rStatus
-      :["ENDED_OK","STARTED","PENDING"].includes(rStatus)?"IN_PROGRESS"
-      :rStatus==="ENDED_NG"?"NG":"";
+      :rStatus==="ENDED_OK" || rStatus==="COMPLETED_OK"?"COMPLETED"
+      :rStatus==="STARTED" || rStatus==="RUNNING" || rStatus.startsWith("WAITING") || rStatus === "ACK_RECEIVED" || rStatus === "START_SENT"?"IN_PROGRESS"
+      :rStatus==="PENDING"?"PENDING"
+      :rStatus==="ENDED_NG" || rStatus==="COMPLETED_NG"?"NG":"";
     const rStation=String(payload.stationNo||payload.station_no||"").trim().toUpperCase();
     const rTimestamp=payload.timestamp||new Date().toISOString();
     setParts(prev=>{
@@ -558,6 +595,145 @@ const ComponentJourney = () => {
     catch(e){ setPopup({type:"ERROR",title:"Refresh Failed",message:e.response?.data?.error||"Unable to refresh"}); }
     finally { setRefreshing(false); }
   },[loadPartCatalog,searchTerm,refreshJourneyNow]);
+
+  const exportJourneyReport = useCallback(async () => {
+    const rows = (stationTimeline || []).map((station) => {
+      const latest = Array.isArray(station.attempts) && station.attempts.length > 0
+        ? station.attempts[station.attempts.length - 1]
+        : null;
+      return {
+        stationNo: station.stationNo || "",
+        stageState: station.stageState || "PENDING",
+        latestStatus: station.latestStatus || "",
+        latestResult: latest?.result || station.latestResult || "",
+        interlockReason: station.latestInterlockReason || latest?.interlockReason || "",
+        completedAt: station.latestAt || latest?.createdAt || "",
+      };
+    });
+    if (!rows.length) {
+      setPopup({ type:"WARNING", title:"No Data", message:"No part journey rows available for export." });
+      return;
+    }
+
+    try {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet("Traceability Report");
+
+      // Set column widths
+      sheet.columns = [
+        { header: "Part ID", key: "partId", width: 25 },
+        { header: "Station", key: "stationNo", width: 15 },
+        { header: "State", key: "stageState", width: 15 },
+        { header: "Latest Status", key: "latestStatus", width: 20 },
+        { header: "Result", key: "latestResult", width: 15 },
+        { header: "Remark", key: "interlockReason", width: 35 },
+        { header: "Timestamp", key: "completedAt", width: 25 }
+      ];
+
+      // Add Title
+      sheet.insertRow(1, ["Industrial Traceability System - Part Journey Report"]);
+      sheet.mergeCells("A1:G1");
+      const titleRow = sheet.getRow(1);
+      titleRow.font = { name: "Arial", family: 4, size: 16, bold: true, color: { argb: "FF1A3263" } };
+      titleRow.alignment = { horizontal: "center", vertical: "middle" };
+      titleRow.height = 30;
+
+      sheet.insertRow(2, [`Report Generated: ${new Date().toLocaleString()}`, "", "", "", "", "", `Total Stations: ${rows.length}`]);
+      sheet.mergeCells("A2:E2");
+      sheet.mergeCells("F2:G2");
+      const subTitleRow = sheet.getRow(2);
+      subTitleRow.font = { name: "Arial", size: 10, italic: true, color: { argb: "FF666666" } };
+      subTitleRow.getCell(6).alignment = { horizontal: "right" };
+      subTitleRow.height = 20;
+
+      sheet.insertRow(3, []); // Empty row
+
+      // Header Row Styling (now row 4)
+      const headerRow = sheet.getRow(4);
+      headerRow.values = ["Part ID", "Station", "State", "Latest Status", "Result", "Remark", "Timestamp"];
+      headerRow.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+      headerRow.alignment = { horizontal: "center", vertical: "middle" };
+      headerRow.height = 25;
+      
+      headerRow.eachCell((cell) => {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FF1A3263" } // Navy Blue
+        };
+        cell.border = {
+          top: { style: 'thin', color: { argb: "FFCCCCCC" } },
+          left: { style: 'thin', color: { argb: "FFCCCCCC" } },
+          bottom: { style: 'thin', color: { argb: "FFCCCCCC" } },
+          right: { style: 'thin', color: { argb: "FFCCCCCC" } }
+        };
+      });
+
+      // Add Data Rows
+      rows.forEach((row, index) => {
+        const dataRow = sheet.addRow({
+          partId: selectedPartId || "",
+          stationNo: row.stationNo,
+          stageState: row.stageState,
+          latestStatus: row.latestStatus,
+          latestResult: row.latestResult,
+          interlockReason: row.interlockReason,
+          completedAt: row.completedAt ? new Date(row.completedAt).toLocaleString() : ""
+        });
+
+        // Alternate row shading
+        if (index % 2 === 0) {
+          dataRow.eachCell(cell => {
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8F9FA" } };
+          });
+        }
+
+        // Apply borders and alignment to all cells
+        dataRow.eachCell((cell, colNumber) => {
+          cell.border = {
+            top: { style: 'thin', color: { argb: "FFEEEEEE" } },
+            left: { style: 'thin', color: { argb: "FFEEEEEE" } },
+            bottom: { style: 'thin', color: { argb: "FFEEEEEE" } },
+            right: { style: 'thin', color: { argb: "FFEEEEEE" } }
+          };
+          if (colNumber !== 6) { // Center everything except remarks
+            cell.alignment = { horizontal: "center", vertical: "middle" };
+          } else {
+            cell.alignment = { horizontal: "left", vertical: "middle", wrapText: true };
+          }
+        });
+
+        // Color coding for State (Column 3)
+        const stateCell = dataRow.getCell(3);
+        const state = String(row.stageState).toUpperCase();
+        if (state === "PASSED" || state === "COMPLETED") {
+          stateCell.font = { color: { argb: "FF15803D" }, bold: true }; // Green
+        } else if (state === "FAILED" || state === "NG") {
+          stateCell.font = { color: { argb: "FFDC2626" }, bold: true }; // Red
+        } else if (state === "IN_PROGRESS" || state === "RUN") {
+          stateCell.font = { color: { argb: "FFD97706" }, bold: true }; // Orange
+        }
+
+        // Color coding for Result (Column 5)
+        const resultCell = dataRow.getCell(5);
+        const result = String(row.latestResult).toUpperCase();
+        if (["PASS", "OK", "ALLOW"].includes(result)) {
+          resultCell.font = { color: { argb: "FF15803D" }, bold: true };
+        } else if (["FAIL", "NG", "BLOCK"].includes(result)) {
+          resultCell.font = { color: { argb: "FFDC2626" }, bold: true };
+        }
+      });
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const pad = (v) => String(v).padStart(2, "0");
+      const now = new Date();
+      const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+      saveAs(new Blob([buffer]), `Traceability_Report_${stamp}.xlsx`);
+
+    } catch (e) {
+      setPopup({ type:"ERROR", title:"Export Failed", message:"Failed to generate Excel file." });
+    }
+  }, [selectedPartId, stationTimeline]);
 
   const handleResetStation = useCallback((sNo)=>{
     if (!selectedPartId||!sNo) return;
@@ -645,7 +821,7 @@ const ComponentJourney = () => {
   useEffect(()=>{const t=setInterval(()=>loadPartCatalog(searchTermRef.current).catch(()=>{}),CATALOG_SYNC_INTERVAL);return()=>clearInterval(t);},[loadPartCatalog]);
   useEffect(()=>{
     const sync=async()=>{
-      try { const r=await stationSettingsApi.list(); if (r&&Object.keys(r).length>0){setStationSettings(r);saveStationFeatureSettings(r);return;} } catch {}
+      try { const r=await stationSettingsApi.list(); if (r&&Object.keys(r).length>0){setStationSettings(r);saveStationFeatureSettings(r);return;} } catch (_syncError) { void _syncError; }
       setStationSettings(getStationFeatureSettings());
     };
     sync();
@@ -653,6 +829,38 @@ const ComponentJourney = () => {
     window.addEventListener("focus",onFocus); window.addEventListener("storage",onStorage);
     return()=>{ window.removeEventListener("focus",onFocus); window.removeEventListener("storage",onStorage); };
   },[]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadFilterSources = async () => {
+      try {
+        const [machineRows, shifts] = await Promise.all([
+          machineApi.list(),
+          shiftApi.list().catch(() => []),
+        ]);
+        if (cancelled) return;
+        setMachines(machineRows || []);
+        setAvailableShifts(
+          (shifts || [])
+            .filter((row) => row?.isActive !== false)
+            .map((row) => ({
+              shiftCode: row.shiftCode || row.shift_code,
+              shiftName: row.shiftName || row.shift_name || row.shiftCode || row.shift_code,
+            }))
+        );
+      } catch (_error) {
+        void _error;
+        if (!cancelled) {
+          setMachines([]);
+          setAvailableShifts([]);
+        }
+      }
+    };
+    loadFilterSources();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ─────────────────────────────────────────────────────────────────────
   //  RENDER
@@ -749,10 +957,15 @@ const ComponentJourney = () => {
                 </p>
               </div>
             </div>
-            <Btn variant="ghost" onClick={handleRefresh} disabled={refreshing||loading} loading={refreshing}>
-              {!refreshing&&<RefreshCw size={13}/>}
-              {refreshing?"Refreshing…":"Refresh"}
-            </Btn>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <Btn variant="ghost" onClick={exportJourneyReport} disabled={!stationTimeline.length}>
+                <Download size={13}/> Export Report
+              </Btn>
+              <Btn variant="ghost" onClick={handleRefresh} disabled={refreshing||loading} loading={refreshing}>
+                {!refreshing&&<RefreshCw size={13}/>}
+                {refreshing?"Refreshing…":"Refresh"}
+              </Btn>
+            </div>
           </div>
 
           {/* Search bar */}
@@ -775,6 +988,86 @@ const ComponentJourney = () => {
                 onBlur={e=>{e.target.style.borderColor=C.border();e.target.style.boxShadow="none";}}
               />
             </div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:8,marginBottom:14}}>
+            <input
+              type="date"
+              value={filters.dateFrom}
+              onChange={(e)=>setFilters((prev)=>({...prev,dateFrom:e.target.value}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            />
+            <input
+              type="date"
+              value={filters.dateTo}
+              onChange={(e)=>setFilters((prev)=>({...prev,dateTo:e.target.value}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            />
+            <select
+              value={filters.lineName}
+              onChange={(e)=>setFilters((prev)=>({...prev,lineName:e.target.value,machineId:""}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            >
+              <option value="">All Lines</option>
+              {lineOptions.map((line)=><option key={line} value={line}>{line}</option>)}
+            </select>
+            <select
+              value={filters.machineId}
+              onChange={(e)=>setFilters((prev)=>({...prev,machineId:e.target.value}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            >
+              <option value="">All Machines</option>
+              {machines
+                .filter((machine)=>!filters.lineName || String(machine.lineName || "").trim() === filters.lineName)
+                .map((machine)=>(
+                  <option key={machine.id} value={machine.id}>{machine.machineName}</option>
+                ))}
+            </select>
+            <input
+              value={filters.stationNo}
+              onChange={(e)=>setFilters((prev)=>({...prev,stationNo:e.target.value.toUpperCase()}))}
+              placeholder="Station"
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            />
+            <select
+              value={filters.status}
+              onChange={(e)=>setFilters((prev)=>({...prev,status:e.target.value}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            >
+              <option value="">All Status</option>
+              <option value="IN_PROGRESS">RUNNING</option>
+              <option value="COMPLETED">PASSED</option>
+              <option value="NG">FAILED</option>
+              <option value="INTERLOCKED">BLOCKED</option>
+            </select>
+            <input
+              value={filters.operatorId}
+              onChange={(e)=>setFilters((prev)=>({...prev,operatorId:e.target.value}))}
+              placeholder="Operator ID"
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            />
+            <select
+              value={filters.shiftCode}
+              onChange={(e)=>setFilters((prev)=>({...prev,shiftCode:e.target.value}))}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            >
+              <option value="">All Shifts</option>
+              {availableShifts.map((shift)=>(
+                <option key={shift.shiftCode} value={shift.shiftCode}>{shift.shiftName}</option>
+              ))}
+            </select>
+            <input
+              value={filters.partId}
+              onChange={(e)=>setFilters((prev)=>({...prev,partId:e.target.value}))}
+              placeholder="Part ID"
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+            />
+            <button
+              onClick={()=>setFilters({dateFrom:"",dateTo:"",partId:"",machineId:"",stationNo:"",status:"",operatorId:"",shiftCode:"",lineName:""})}
+              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.ng(0.25)}`,background:C.ng(0.08),color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer"}}
+            >
+              Clear Filters
+            </button>
           </div>
 
           {/* 3 KPI stat cards — only shown when a part is selected */}
@@ -1129,4 +1422,3 @@ const ComponentJourney = () => {
 };
 
 export default ComponentJourney;
-

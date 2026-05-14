@@ -1,20 +1,40 @@
 // ReportConfiguration.jsx - Define report heading, branding & layout settings
-import { useState } from "react";
-import { FileText, Save, RefreshCw, Download, Settings, Type, Building2 } from "lucide-react";
+import { useRef, useState, useEffect } from "react";
+import { FileText, Save, RefreshCw, Download, Settings, Type, Building2, ShieldCheck, ClipboardCheck, AlertCircle } from "lucide-react";
 import toast from "react-hot-toast";
 import {
   DEFAULT_REPORT_CONFIG,
   loadReportConfig,
   saveReportConfig,
 } from "../utils/reportConfig";
-
+import { reportApi, machineApi } from "../api/services";
+import sidebarLogo from "../assets/images/logo.jpg";
 
 const inputCls = "w-full bg-bg-dark border border-border rounded-lg px-3 py-2.5 text-sm text-text-main outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/20 transition-all placeholder:text-text-muted/40";
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; document.body.appendChild(a);
+  a.click(); a.remove(); URL.revokeObjectURL(url);
+}
 
 const ReportConfiguration = () => {
   const [config, setConfig] = useState(() => loadReportConfig());
   const [saving, setSaving] = useState(false);
   const [activeSection, setActiveSection] = useState("branding");
+  const [exportLoading, setExportLoading] = useState(false);
+  const [machines, setMachines] = useState([]);
+  
+  const [filters, setFilters] = useState({
+    dateFrom: "", dateTo: "", machineId: "", lineName: "", shiftCode: ""
+  });
+
+  const logoFileInputRef = useRef(null);
+
+  useEffect(() => {
+    machineApi.list().then(m => setMachines(m || [])).catch(() => {});
+  }, []);
 
   const updateField = (key, value) => setConfig(p => ({ ...p, [key]: value }));
 
@@ -42,12 +62,80 @@ const ReportConfiguration = () => {
     toast.success("Configuration reset to defaults");
   };
 
+  const toDataUrl = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("Failed to read image"));
+      reader.readAsDataURL(file);
+    });
+
+  const handleBrowseLogo = async (event) => {
+    const file = event.target?.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast.error("Please select an image file");
+      return;
+    }
+    try {
+      const dataUrl = await toDataUrl(file);
+      updateField("logoUrl", dataUrl);
+      updateField("showLogo", true);
+      toast.success("Logo uploaded for reports");
+    } catch {
+      toast.error("Unable to read logo file");
+    } finally {
+      if (event.target) event.target.value = "";
+    }
+  };
+
+  const handleUseSidebarLogo = async () => {
+    try {
+      const response = await fetch(sidebarLogo);
+      const blob = await response.blob();
+      const dataUrl = await toDataUrl(blob);
+      updateField("logoUrl", dataUrl);
+      updateField("showLogo", true);
+      toast.success("Sidebar logo applied to reports");
+    } catch {
+      toast.error("Could not load sidebar logo");
+    }
+  };
+
+  const handleRunExport = async (type) => {
+    setExportLoading(true);
+    try {
+      let blob;
+      const ts = new Date().toISOString().slice(0,10);
+      if (type === "full") {
+        blob = await reportApi.exportFull(filters, config);
+        downloadBlob(blob, `Full_Report_${ts}.xlsx`);
+      } else if (type === "ng") {
+        blob = await reportApi.exportNG(filters, config);
+        downloadBlob(blob, `NG_Report_${ts}.xlsx`);
+      } else if (type === "parts") {
+        blob = await reportApi.exportParts(filters, config);
+        downloadBlob(blob, `Parts_Report_${ts}.xlsx`);
+      } else if (type === "audit") {
+        blob = await reportApi.exportAudit(filters, config);
+        downloadBlob(blob, `Audit_Report_${ts}.xlsx`);
+      }
+      toast.success(`${type.toUpperCase()} report generated`);
+    } catch (e) {
+      console.error(e);
+      toast.error("Export failed");
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
   const sections = [
     { id: "branding", label: "Branding", icon: Building2 },
     { id: "header", label: "Report Headers", icon: Type },
     { id: "footer", label: "Footer & Info", icon: FileText },
     { id: "columns", label: "Report Columns", icon: Settings },
-    { id: "preview", label: "Preview", icon: Download },
+    { id: "exporthub", label: "Export Hub", icon: Download },
+    { id: "preview", label: "Preview", icon: ShieldCheck },
   ];
 
   return (
@@ -119,9 +207,37 @@ const ReportConfiguration = () => {
                 <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Department</label>
                 <input value={config.department} onChange={e => updateField("department", e.target.value)} placeholder="e.g. Quality Engineering" className={inputCls} />
               </div>
-              <div>
-                <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Logo URL (optional)</label>
-                <input value={config.logoUrl} onChange={e => updateField("logoUrl", e.target.value)} placeholder="https://..." className={inputCls} />
+              <div className="md:col-span-2">
+                <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Logo Upload</label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    ref={logoFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleBrowseLogo}
+                    className="hidden"
+                  />
+                  <button type="button" onClick={() => logoFileInputRef.current?.click()} className="db-secondary-btn">
+                    Browse Logo
+                  </button>
+                  <button type="button" onClick={handleUseSidebarLogo} className="db-secondary-btn">
+                    Use Sidebar Logo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateField("logoUrl", "")}
+                    className="db-secondary-btn"
+                  >
+                    Remove Logo
+                  </button>
+                </div>
+                {config.logoUrl ? (
+                  <div className="mt-3 p-3 rounded-lg border border-border bg-bg-dark/30 inline-block">
+                    <img src={config.logoUrl} alt="Report logo preview" className="h-14 w-auto object-contain" />
+                  </div>
+                ) : (
+                  <p className="text-xs text-text-muted mt-2">No logo selected.</p>
+                )}
               </div>
             </div>
           )}
@@ -185,22 +301,134 @@ const ReportConfiguration = () => {
 
           {/* COLUMNS SECTION */}
           {activeSection === "columns" && (
-            <div className="space-y-4">
-              <p className="text-xs text-text-muted">Select which columns appear in downloaded reports (CSV/PDF).</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                {config.columns.map(col => (
-                  <div key={col.id}
-                    onClick={() => toggleColumn(col.id)}
-                    className={`p-4 rounded-xl border cursor-pointer transition-all ${col.enabled ? "bg-primary/10 border-primary/30 text-primary" : "bg-bg-dark/40 border-border text-text-muted hover:border-primary/20"}`}>
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-bold">{col.label}</span>
-                      <div className={`w-5 h-5 rounded-full flex items-center justify-center ${col.enabled ? "bg-primary text-on-strong" : "bg-border"}`}>
-                        {col.enabled && <span className="text-[10px]">OK</span>}
+            <div className="space-y-6">
+              <div className="p-4 bg-bg-dark/30 border border-border rounded-xl">
+                <h3 className="text-xs font-bold text-text-main uppercase tracking-widest mb-2 flex items-center gap-2">
+                  <Settings size={14} className="text-primary" /> Active Report Columns
+                </h3>
+                <p className="text-[11px] text-text-muted mb-4">Select the specific data fields to include in your industrial exports. Checked items will appear as columns in the Excel file.</p>
+                
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {config.columns.map(col => (
+                    <label key={col.id} 
+                      className={`flex items-center gap-3 p-3.5 rounded-xl border transition-all cursor-pointer group ${col.enabled ? "bg-primary/5 border-primary/30" : "bg-bg-dark/20 border-border hover:border-primary/20"}`}>
+                      <div className="relative flex items-center justify-center">
+                        <input 
+                          type="checkbox" 
+                          checked={col.enabled} 
+                          onChange={() => toggleColumn(col.id)}
+                          className="sr-only peer"
+                        />
+                        <div className="w-5 h-5 border-2 border-border rounded-md peer-checked:bg-primary peer-checked:border-primary transition-all flex items-center justify-center">
+                          {col.enabled && <div className="w-2 h-3 border-r-2 border-b-2 border-white rotate-45 -mt-0.5" />}
+                        </div>
                       </div>
-                    </div>
-                    <p className="text-[10px] mt-1 font-mono opacity-60">{col.id}</p>
+                      <div className="flex-1">
+                        <span className={`text-[13px] font-bold block transition-colors ${col.enabled ? "text-text-main" : "text-text-muted group-hover:text-text-main"}`}>
+                          {col.label}
+                        </span>
+                        <span className="text-[9px] font-mono opacity-50 uppercase tracking-tighter">{col.id}</span>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* EXPORT HUB SECTION */}
+          {activeSection === "exporthub" && (
+            <div className="space-y-6">
+              <div className="p-4 bg-blue-500/5 border border-blue-500/20 rounded-xl flex gap-3">
+                <AlertCircle className="text-blue-500 shrink-0" size={18} />
+                <p className="text-xs text-text-muted leading-relaxed">
+                  Consolidated reporting engine. Select your filters below and trigger high-conformance Excel exports.
+                  All reports adhere to the branding and column rules defined in the other tabs.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">From Date/Time</label>
+                  <input type="datetime-local" className={inputCls} value={filters.dateFrom} onChange={e => setFilters(f => ({ ...f, dateFrom: e.target.value }))} />
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">To Date/Time</label>
+                  <input type="datetime-local" className={inputCls} value={filters.dateTo} onChange={e => setFilters(f => ({ ...f, dateTo: e.target.value }))} />
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Shift</label>
+                  <select className={inputCls} value={filters.shiftCode} onChange={e => setFilters(f => ({ ...f, shiftCode: e.target.value }))}>
+                    <option value="">All Shifts</option>
+                    <option value="SHIFT_A">Shift A</option>
+                    <option value="SHIFT_B">Shift B</option>
+                    <option value="SHIFT_C">Shift C</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Line No</label>
+                  <select className={inputCls} value={filters.lineName} onChange={e => setFilters(f => ({ ...f, lineName: e.target.value, machineId: "" }))}>
+                    <option value="">All Lines</option>
+                    {[...new Set(machines.map(m => m.lineName).filter(Boolean))].map(l => (
+                      <option key={l} value={l}>{l}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Machine Name</label>
+                  <select className={inputCls} value={filters.machineId} onChange={e => setFilters(f => ({ ...f, machineId: e.target.value }))}>
+                    <option value="">All Machines</option>
+                    {machines.filter(m => !filters.lineName || m.lineName === filters.lineName).map(m => (
+                      <option key={m.id} value={m.id}>{m.machineName}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 pt-4">
+                <button disabled={exportLoading} onClick={() => handleRunExport("full")} 
+                  className="flex flex-col items-center gap-3 p-6 rounded-2xl bg-bg-dark/40 border border-border hover:border-primary/40 hover:bg-primary/5 transition-all group">
+                  <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center text-primary group-hover:scale-110 transition-transform">
+                    <ClipboardCheck size={24} />
                   </div>
-                ))}
+                  <div className="text-center">
+                    <p className="text-sm font-bold text-text-main">Full Report</p>
+                    <p className="text-[10px] text-text-muted mt-1">Complete production log</p>
+                  </div>
+                </button>
+
+                <button disabled={exportLoading} onClick={() => handleRunExport("ng")}
+                  className="flex flex-col items-center gap-3 p-6 rounded-2xl bg-bg-dark/40 border border-border hover:border-red-500/40 hover:bg-red-500/5 transition-all group">
+                  <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center text-red-500 group-hover:scale-110 transition-transform">
+                    <AlertCircle size={24} />
+                  </div>
+                  <div className="text-center">
+                    <p className="text-sm font-bold text-text-main">NG Report</p>
+                    <p className="text-[10px] text-text-muted mt-1">Rejected parts only</p>
+                  </div>
+                </button>
+
+                <button disabled={exportLoading} onClick={() => handleRunExport("parts")}
+                  className="flex flex-col items-center gap-3 p-6 rounded-2xl bg-bg-dark/40 border border-border hover:border-amber-500/40 hover:bg-amber-500/5 transition-all group">
+                  <div className="w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center text-amber-500 group-hover:scale-110 transition-transform">
+                    <Settings size={24} />
+                  </div>
+                  <div className="text-center">
+                    <p className="text-sm font-bold text-text-main">Parts Report</p>
+                    <p className="text-[10px] text-text-muted mt-1">Unique part journey</p>
+                  </div>
+                </button>
+
+                <button disabled={exportLoading} onClick={() => handleRunExport("audit")}
+                  className="flex flex-col items-center gap-3 p-6 rounded-2xl bg-bg-dark/40 border border-border hover:border-green-500/40 hover:bg-green-500/5 transition-all group">
+                  <div className="w-12 h-12 rounded-full bg-green-500/10 flex items-center justify-center text-green-500 group-hover:scale-110 transition-transform">
+                    <ShieldCheck size={24} />
+                  </div>
+                  <div className="text-center">
+                    <p className="text-sm font-bold text-text-main">Audit Report</p>
+                    <p className="text-[10px] text-text-muted mt-1">Conformance summary</p>
+                  </div>
+                </button>
               </div>
             </div>
           )}
@@ -260,4 +488,3 @@ const ReportConfiguration = () => {
 };
 
 export default ReportConfiguration;
-
