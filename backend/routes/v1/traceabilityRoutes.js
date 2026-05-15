@@ -21,6 +21,7 @@ router.post("/plc/operation/end", verifyToken, isAdminOrEngineerStrict, traceabi
 router.post("/traceability/rework", verifyToken, traceabilityController.reworkPart);
 router.post("/traceability/reset-interlock", verifyToken, traceabilityController.resetInterlock);
 router.post("/traceability/reset-operation", verifyToken, traceabilityController.resetOperation);
+router.post("/traceability/reset-plc-only", verifyToken, traceabilityController.resetPlcOnly);
 router.post("/traceability/reset-station", verifyToken, traceabilityController.resetStationOperation);
 router.post("/traceability/delete-part", verifyToken, traceabilityController.deletePartTraceability);
 router.post("/traceability/bypass", verifyToken, traceabilityController.bypassOperation);

@@ -269,7 +269,7 @@ const GlobalPopup = ({
     const fetchJourney = async () => {
       try {
         setLoading(true);
-        const res = await axios.get(`${API_BASE}/parts/${encodeURIComponent(partId)}/journey`, {
+        const res = await axios.get(`${API_BASE}/traceability/journey/${encodeURIComponent(partId)}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (isActive) setJourneyData(res.data);

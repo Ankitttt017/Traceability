@@ -42,6 +42,7 @@ export const ENDPOINTS = {
     resetInterlock: "/traceability/reset-interlock",
     resetStation: "/traceability/reset-station",
     resetOperation: "/traceability/reset-operation",
+    resetPlcOnly: "/traceability/reset-plc-only",
     deletePart: "/traceability/delete-part",
     bypass: "/traceability/bypass",
   },

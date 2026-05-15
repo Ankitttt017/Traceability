@@ -2057,16 +2057,28 @@ exports.getPartJourney = async (req, res) => {
       }));
 
       const latestAttempt = attempts[attempts.length - 1] || null;
+
+      // ── Bug fix: ENDED_OK / ENDED_NG ALWAYS win as terminal state.
+      // A duplicate-scan INTERLOCKED log must NOT override a completed station.
+      const endedOkAttempt  = attempts.find(a => a.plcStatus === "ENDED_OK");
+      const endedNgAttempt  = attempts.find(a => a.plcStatus === "ENDED_NG");
+      // Best attempt for display: prefer the actual production outcome
+      const productionAttempt = endedOkAttempt || endedNgAttempt || null;
+      // The attempt whose values we surface as "latest" (hide duplicate/interlocked noise)
+      const representativeAttempt = productionAttempt || latestAttempt;
+
       let stageState = "PENDING";
-      if (latestAttempt) {
-        if (latestAttempt.plcStatus === "ENDED_OK") {
-          stageState = "PASSED";
-        } else if (latestAttempt.plcStatus === "ENDED_NG") {
-          stageState = "FAILED";
-        } else if (latestAttempt.plcStatus === "PLC_COMM_ERROR") {
+      if (endedOkAttempt) {
+        stageState = "PASSED";
+      } else if (endedNgAttempt) {
+        stageState = "FAILED";
+      } else if (latestAttempt) {
+        if (latestAttempt.plcStatus === "PLC_COMM_ERROR") {
           stageState = "COMM_ERROR";
         } else if (latestAttempt.plcStatus === "INTERLOCKED") {
           stageState = "INTERLOCKED";
+        } else if (latestAttempt.plcStatus === "RESET") {
+          stageState = "PENDING";
         } else {
           stageState = "IN_PROGRESS";
         }
@@ -2074,15 +2086,27 @@ exports.getPartJourney = async (req, res) => {
         stageState = "NEXT";
       }
 
+      // ── Cycle timing: QR scan time → operation end time
+      // cycleStartTime = createdAt of the PENDING log (moment QR was scanned)
+      const pendingAttempt = attempts.find(a => a.plcStatus === "PENDING" || a.plcStatus === "STARTED");
+      const cycleStartTime  = pendingAttempt?.createdAt || productionAttempt?.createdAt || null;
+      const cycleEndTime    = productionAttempt?.plcEndTime || null;
+      const cycleDurationSec = (cycleStartTime && cycleEndTime)
+        ? Math.max(0, (new Date(cycleEndTime) - new Date(cycleStartTime)) / 1000)
+        : null;
+
       return {
         stationNo,
         sequenceIndex: idx + 1,
         stageState,
         isNextExpected: expectedNextStation === stationNo,
-        latestStatus: latestAttempt?.plcStatus || null,
-        latestResult: latestAttempt?.result || null,
-        latestInterlockReason: latestAttempt?.interlockReason || null,
-        latestAt: latestAttempt?.createdAt || null,
+        latestStatus: representativeAttempt?.plcStatus || null,
+        latestResult: representativeAttempt?.result || null,
+        latestInterlockReason: representativeAttempt?.interlockReason || null,
+        latestAt: representativeAttempt?.createdAt || null,
+        cycleStartTime,
+        cycleEndTime,
+        cycleDurationSec,
         attempts,
       };
     });
@@ -3105,6 +3129,69 @@ exports.resetOperation = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * resetPlcOnly — Operator View / Global Popup reset.
+ * Resets ONLY the PLC/FSM state for the machine at this station.
+ * Does NOT modify any Part or OperationLog records.
+ * This preserves the full part journey and all historical scan data.
+ */
+exports.resetPlcOnly = async (req, res) => {
+  try {
+    const partId       = String(req.body.partId || "").trim();
+    const targetStation = normalizeStation(req.body.stationNo || req.body.operationNo);
+    const machineId    = Number(req.body.machineId || 0) || null;
+
+    if (!targetStation && !machineId) {
+      return res.status(400).json({ error: "stationNo or machineId is required" });
+    }
+
+    // Resolve the machine for this station (used to target the PLC engine)
+    let resolvedMachineId = machineId;
+    if (!resolvedMachineId && targetStation) {
+      const machine = await Machine.findOne({
+        where: { operation_no: targetStation, is_active: true },
+        attributes: ["id"],
+      });
+      resolvedMachineId = machine?.id || null;
+    }
+
+    if (!resolvedMachineId) {
+      // If no machine found, still try via any recent op log for this part+station
+      if (partId && targetStation) {
+        const opLog = await getLatestOperationLog(partId, targetStation);
+        resolvedMachineId = opLog?.machine_id || null;
+      }
+    }
+
+    // Hard-reset only the PLC FSM — no DB changes to Part or OperationLog
+    if (resolvedMachineId) {
+      await plcHandshakeEngine.hardReset(resolvedMachineId);
+    }
+
+    // Emit a neutral wait-state popup so operator knows they can scan again
+    emitOperatorPopup("INFO", {
+      partId: partId || null,
+      stationNo: targetStation || null,
+      machineId: resolvedMachineId || null,
+      status: "WAIT",
+      plcStatus: "WAIT",
+      qrResult: "WAIT",
+      message: "PLC reset complete. Scan again to restart the cycle.",
+    });
+    emitRealtime("RESET_COMPLETED", { partId: partId || null, stationNo: targetStation || null, machineId: resolvedMachineId || null });
+    emitRealtime("dashboard_refresh", { reason: "PLC_ONLY_RESET" });
+
+    return res.json({
+      message: "PLC reset successful — part journey unchanged",
+      partId: partId || null,
+      stationNo: targetStation || null,
+      machineId: resolvedMachineId || null,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
   }
 };
 

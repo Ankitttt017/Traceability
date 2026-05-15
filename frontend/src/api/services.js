@@ -266,6 +266,10 @@ export const traceabilityApi = {
     const { data } = await apiClient.post(ENDPOINTS.traceability.resetOperation, payload);
     return data;
   },
+  resetPlcOnly: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.traceability.resetPlcOnly, payload);
+    return data;
+  },
   deletePart: async (payload) => {
     const { data } = await apiClient.post(ENDPOINTS.traceability.deletePart, payload);
     return data;

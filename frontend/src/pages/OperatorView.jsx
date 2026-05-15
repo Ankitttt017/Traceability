@@ -659,11 +659,13 @@ const OperatorView = () => {
   const handleResetOperation = useCallback(async (partId, stationNo, options = {}) => {
     const pid = normalizePartId(partId), sno = String(stationNo || "").trim().toUpperCase();
     if (!pid || !sno) return false;
-    const res = await traceabilityApi.resetOperation({ partId: pid, stationNo: sno });
+    // PLC-only reset: clears machine FSM without touching part journey records
+    const mId = String(selectedMachineIdRef.current || "");
+    await traceabilityApi.resetPlcOnly({ partId: pid, stationNo: sno, machineId: mId || undefined });
     const mk = selectedMachineIdRef.current;
     if (mk) { try { const c = JSON.parse(localStorage.getItem(QR_STORAGE_KEY) || "{}"); delete c[mk]; localStorage.setItem(QR_STORAGE_KEY, JSON.stringify(c)); } catch { } }
     setQrSignal(null); setQrFeed([]);
-    setPopup(null); // Auto-close any active error/info popups
+    setPopup(null);
     setLiveState(prev => prev ? { ...prev, machineState: { ...prev.machineState, state: "IDLE" }, current: null } : null);
     scheduleLiveRefresh(); return true;
   }, [mergePopupPayload, scheduleLiveRefresh]);

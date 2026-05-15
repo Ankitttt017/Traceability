@@ -68,13 +68,12 @@ async function getOeeMetrics(req, res) {
 
       const total  = logs.length;
       const ok     = logs.filter((l) => l.status === "OK").length;
-      const target = Number(machine.target_qty || 0);
+      
+      // Target based on daily target or calculated from CT+LT if available
+      const target = Number(machine.daily_target_qty || machine.target_qty || 0);
 
-      // Quality
+      // Quality: OK / Total
       const quality = total > 0 ? ok / total : 0;
-
-      // Performance
-      const performance = target > 0 ? Math.min(total / target, 1) : (total > 0 ? 1 : 0);
 
       // Availability — calculate downtime from scan gaps > 5 min
       const GAP_THRESHOLD_MS = 5 * 60_000;
@@ -83,7 +82,20 @@ async function getOeeMetrics(req, res) {
         const gap = new Date(logs[i].createdAt) - new Date(logs[i - 1].createdAt);
         if (gap > GAP_THRESHOLD_MS) downtimeMs += gap;
       }
-      const availability = shiftDurationMs > 0 ? Math.max(0, (shiftDurationMs - downtimeMs) / shiftDurationMs) : 1;
+      const operatingTimeMs = shiftDurationMs - downtimeMs;
+      const availability = shiftDurationMs > 0 ? Math.max(0, operatingTimeMs / shiftDurationMs) : 1;
+
+      // Performance: (Total Produced * Standard Cycle Time) / Operating Time
+      // Standard Cycle Time = cycle_time + loading_time
+      const standardCT = (Number(machine.cycle_time || 0) + Number(machine.loading_time || 0)) || 0;
+      let performance = 0;
+      if (standardCT > 0 && operatingTimeMs > 0) {
+        performance = (total * standardCT * 1000) / operatingTimeMs;
+      } else {
+        // Fallback to simple target ratio if CT is not set
+        performance = target > 0 ? total / target : (total > 0 ? 1 : 0);
+      }
+      performance = Math.min(performance, 1.2); // Cap at 120% for extreme outliers
 
       const oee = quality * performance * availability;
 

@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 //  ProductionCharts.jsx — IndusTrace Premium v4
 //  ✓ Download bar at TOP
 //  ✓ Tabs: Overview | Hourly | Machine | Shift | Parts List
@@ -284,7 +284,7 @@ const ProductionCharts=()=>{
 
   useEffect(()=>{loadData();},[loadData]);
 
-  const machineMap=useMemo(()=>new Map(machines.map(m=>[Number(m.id),m.machineName])),[machines]);
+  const machineMap=useMemo(()=>new Map(machines.map(m=>[Number(m.id),m])),[machines]);
   const lineContextLabel = useMemo(() => {
     const selectedMachineId = Number(filters.machineId || 0);
     if (selectedMachineId) {
@@ -1018,7 +1018,7 @@ const ProductionCharts=()=>{
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                   <thead>
                     <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
-                      {["#","Part Serial No.","Batch","Machine","Station","Result","Reason / Remark","Date & Time"].map(h=>(
+                      {["#","Part Serial No.","Batch","Machine","Station","Result","Cycle Time (s)","Reason / Remark","Date & Time"].map(h=>(
                         <th key={h} style={{padding:"9px 13px",textAlign:"left",fontSize:9,
                           fontWeight:800,textTransform:"uppercase",letterSpacing:"0.09em",
                           color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
@@ -1046,7 +1046,7 @@ const ProductionCharts=()=>{
                             {p.batchNo||p.batch||"—"}
                           </td>
                           <td style={{padding:"9px 13px",fontSize:11,color:C.txt("pri"),fontWeight:600}}>
-                            {p.machineName||machineMap.get(Number(p.machineId))||"—"}
+                            {p.machineName || machineMap.get(Number(p.machineId))?.machineName || "—"}
                           </td>
                           <td style={{padding:"9px 13px"}}>
                             <span style={{fontSize:10,fontFamily:"'DM Mono',monospace",
@@ -1056,6 +1056,37 @@ const ProductionCharts=()=>{
                           </td>
                           <td style={{padding:"9px 13px"}}>
                             <Bdg v={v} l={label}/>
+                          </td>
+                          <td style={{padding:"9px 13px"}}>
+                            <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                                <span style={{fontFamily:"'DM Mono',monospace",fontSize:11,fontWeight:700,
+                                  color:p.cycleTime ? C.txt("pri") : C.txt("muted")}}>
+                                  {p.cycleTime || "—"}
+                                </span>
+                                {p.cycleTime && (() => {
+                                  const m = machineMap.get(Number(p.machineId));
+                                  const std = (Number(m?.cycle_time || 0) + Number(m?.loading_time || 0));
+                                  if (std > 0) {
+                                    const diff = Number(p.cycleTime) - std;
+                                    const isSlow = diff > 2; // Tolerance 2s
+                                    return (
+                                      <span style={{fontSize:9,fontWeight:800,padding:"1px 4px",borderRadius:4,
+                                        background:isSlow ? C.ng(0.1) : C.ok(0.1),
+                                        color:isSlow ? C.ng() : C.ok()}}>
+                                        {isSlow ? `+${diff.toFixed(1)}s` : "Std"}
+                                      </span>
+                                    );
+                                  }
+                                  return null;
+                                })()}
+                              </div>
+                              {p.cycleTime && (
+                                <span style={{fontSize:9,color:C.txt("muted")}}>
+                                  sec
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td style={{padding:"9px 13px",fontSize:10,color:isNg?C.ng():C.txt("muted"),
                             maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>

@@ -162,7 +162,6 @@ async function generateIndustrialExcel(res, {
   const columns = [
     { header: "SR NO",           width: 8 },
     { header: "Part Serial No",  width: 28 },
-    { header: "Timestamp",       width: 24 },
     { header: "Shift",           width: 12 },
     { header: "Operation No",    width: 16 },
     { header: "Machine Name",    width: 22 },
@@ -170,6 +169,8 @@ async function generateIndustrialExcel(res, {
     { header: "Model Name",      width: 22 },
     { header: "Result",          width: 16 },
     { header: "Reason",          width: 34 },
+    { header: "Cycle Start",     width: 24 },
+    { header: "Cycle End",       width: 24 },
     { header: "Cycle Time (s)",  width: 16 },
     { header: "Line No",         width: 14 },
   ];
@@ -195,7 +196,6 @@ async function generateIndustrialExcel(res, {
     const values = [
       i + 1, // SR NO
       row.part_id      || row.partId      || "-",
-      formatIndustrialTimestamp(row.createdAt),
       row.shift_code   || row.shiftCode   || "A",
       row.operation_no || row.operationNo || "-",
       row.machineName  || "-",
@@ -203,6 +203,8 @@ async function generateIndustrialExcel(res, {
       row.qrFormatName || "-",
       status,
       row.interlock_reason || "-",
+      row.cycleStartTime || "-",
+      row.cycleEndTime   || "-",
       row.cycleTime    || "0.00",
       row.lineName     || "-",
     ];
@@ -216,8 +218,8 @@ async function generateIndustrialExcel(res, {
       worksheet.getRow(rowIndex).fill = { type: "pattern", pattern: "solid", fgColor: { argb: LTGRAY } };
     }
 
-    // Result cell color
-    const resultCell = worksheet.getCell(rowIndex, 9);
+    // Result cell color (Column 8 is "Result")
+    const resultCell = worksheet.getCell(rowIndex, 8);
     if (status === "OK") {
       resultCell.font = { bold: true, size: 9, color: { argb: "FF059669" } };
     } else if (status === "NG") {
@@ -237,7 +239,7 @@ async function generateIndustrialExcel(res, {
         left:   { style: "thin", color: { argb: BORDER } },
         right:  { style: "thin", color: { argb: BORDER } },
       };
-      if (ci !== 8 && (!cell.font || !cell.font.bold)) {
+      if (ci !== 7 && (!cell.font || !cell.font.bold)) { // Skip result cell as it already has styling
         cell.font = { size: 9 };
       }
       cell.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
@@ -248,11 +250,11 @@ async function generateIndustrialExcel(res, {
   worksheet.views = [{ state: "frozen", ySplit: tableHeaderRow }];
   worksheet.autoFilter = {
     from: { row: tableHeaderRow, column: 1 },
-    to:   { row: tableHeaderRow, column: 11 },
+    to:   { row: tableHeaderRow, column: 13 },
   };
 
   const footerRow = tableHeaderRow + rows.length + 2;
-  worksheet.mergeCells(`A${footerRow}:K${footerRow}`);
+  worksheet.mergeCells(`A${footerRow}:M${footerRow}`);
   const footer = worksheet.getCell(`A${footerRow}`);
   footer.value = `${reportConfig.footerText || "Industrial Document — Controlled Copy"}  ·  Records: ${rows.length}  ·  Exported: ${formatIndustrialTimestamp(new Date())}`;
   footer.font  = { italic: true, size: 8, color: { argb: GRAY } };
@@ -266,8 +268,5 @@ async function generateIndustrialExcel(res, {
   res.setHeader("Content-Length", buffer.byteLength);
   res.send(Buffer.from(buffer));
 }
-
-module.exports = { generateIndustrialExcel };
-
 
 module.exports = { generateIndustrialExcel };

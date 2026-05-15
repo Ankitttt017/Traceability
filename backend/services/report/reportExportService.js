@@ -82,8 +82,38 @@ async function fetchProductionData(filters = {}) {
     nest: true
   });
 
+  // ── Filter: only keep meaningful production logs ─────────────────────────
+  // Exclude: duplicate scans (INTERLOCKED + DUPLICATE_SCAN reason),
+  //          sequence errors (INTERLOCKED + PREVIOUS_STATION_NOT_COMPLETED),
+  //          QR format blocks, and RESET entries.
+  // Keep:    ENDED_OK, ENDED_NG, and any log that represents a real outcome.
+  const NON_PRODUCTION_REASONS = new Set([
+    "DUPLICATE_SCAN",
+    "ALREADY_SCANNED",
+    "PREVIOUS_STATION_NOT_COMPLETED",
+    "INVALID_QR_FORMAT",
+    "QR_RULE_CONFIG_ERROR",
+    "STATION_NOT_CONFIGURED",
+  ]);
+
+  const productionLogs = logs.filter((log) => {
+    const status = String(log.plc_status || "").trim().toUpperCase();
+    const reason = String(log.interlock_reason || "").trim().toUpperCase();
+
+    // Always exclude RESET status
+    if (status === "RESET") return false;
+
+    // Exclude INTERLOCKED logs caused by non-production reasons
+    if (status === "INTERLOCKED" && NON_PRODUCTION_REASONS.has(reason)) return false;
+
+    // If result is BLOCK (blocked before PLC start) — skip unless it's a meaningful NG
+    if (String(log.result || "").trim().toUpperCase() === "BLOCK") return false;
+
+    return true;
+  });
+
   // Fetch Part & QR Info (Flattening for performance)
-  const partIds = [...new Set(logs.map(l => l.part_id))];
+  const partIds = [...new Set(productionLogs.map(l => l.part_id))];
   const parts = await Part.findAll({
     where: { part_id: { [Op.in]: partIds } },
     attributes: ["part_id", "qr_format_name"],
@@ -101,8 +131,33 @@ async function fetchProductionData(filters = {}) {
     return acc;
   }, {});
 
+  // Deduplicate: per (part_id + operation_no) keep only the best outcome log.
+  // Priority: ENDED_OK > ENDED_NG > everything else.
+  const bestByPartStation = new Map();
+  for (const log of productionLogs) {
+    const key = `${log.part_id}||${log.operation_no || log.station_no}`;
+    const existing = bestByPartStation.get(key);
+    if (!existing) {
+      bestByPartStation.set(key, log);
+    } else {
+      const existStatus = String(existing.plc_status || "").toUpperCase();
+      const newStatus   = String(log.plc_status || "").toUpperCase();
+      // Prefer ENDED_OK; then ENDED_NG; then most recent
+      const rank = (s) => s === "ENDED_OK" ? 2 : s === "ENDED_NG" ? 1 : 0;
+      if (rank(newStatus) > rank(existStatus)) {
+        bestByPartStation.set(key, log);
+      } else if (rank(newStatus) === rank(existStatus)) {
+        // Same rank: keep the most recent
+        if (new Date(log.createdAt) > new Date(existing.createdAt)) {
+          bestByPartStation.set(key, log);
+        }
+      }
+    }
+  }
+  const deduplicatedLogs = [...bestByPartStation.values()];
+
   // Enrich & Standardize
-  const enriched = logs.map((log, index) => {
+  const enriched = deduplicatedLogs.map((log, index) => {
     const part = partMap[log.part_id] || {};
     const { status: industrialResult, category } = resolveIndustrialResult({
       result: log.result,
@@ -110,11 +165,14 @@ async function fetchProductionData(filters = {}) {
       interlock_reason: log.interlock_reason
     });
 
-    // Calculate Cycle Time if timestamps exist
+    // Cycle times: scan time (createdAt of PENDING = QR scan) → PLC end time
+    const cycleStartTime = log.plc_start_at || log.createdAt || null;
+    const cycleEndTime   = log.plc_end_at   || null;
+
     let cycleTime = log.cycle_time;
-    if (!cycleTime && log.plc_start_at && log.plc_end_at) {
-      const start = new Date(log.plc_start_at);
-      const end = new Date(log.plc_end_at);
+    if (!cycleTime && cycleStartTime && cycleEndTime) {
+      const start = new Date(cycleStartTime);
+      const end   = new Date(cycleEndTime);
       cycleTime = Math.max(0, (end.getTime() - start.getTime()) / 1000);
     }
 
@@ -128,7 +186,9 @@ async function fetchProductionData(filters = {}) {
       qrFormatName: part.qr_format_name || "-",
       modelCode:    qrMap[part.qr_format_name] || "-",
       shiftCode:    log.shift_code || "A",
-      cycleTime:    cycleTime ? cycleTime.toFixed(2) : "0.00",
+      cycleStartTime: cycleStartTime ? new Date(cycleStartTime).toLocaleString() : "-",
+      cycleEndTime:   cycleEndTime   ? new Date(cycleEndTime).toLocaleString()   : "-",
+      cycleTime:    cycleTime ? Number(cycleTime).toFixed(2) : "0.00",
       industrialResult,
       category
     };

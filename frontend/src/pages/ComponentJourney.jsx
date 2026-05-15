@@ -608,6 +608,9 @@ const ComponentJourney = () => {
         latestResult: latest?.result || station.latestResult || "",
         interlockReason: station.latestInterlockReason || latest?.interlockReason || "",
         completedAt: station.latestAt || latest?.createdAt || "",
+        cycleStartTime: station.cycleStartTime || "",
+        cycleEndTime: station.cycleEndTime || "",
+        cycleDuration: station.cycleDurationSec ? `${Number(station.cycleDurationSec).toFixed(2)}s` : "0.00s",
       };
     });
     if (!rows.length) {
@@ -627,6 +630,9 @@ const ComponentJourney = () => {
         { header: "Latest Status", key: "latestStatus", width: 20 },
         { header: "Result", key: "latestResult", width: 15 },
         { header: "Remark", key: "interlockReason", width: 35 },
+        { header: "Cycle Start", key: "cycleStartTime", width: 25 },
+        { header: "Cycle End", key: "cycleEndTime", width: 25 },
+        { header: "Duration", key: "cycleDuration", width: 15 },
         { header: "Timestamp", key: "completedAt", width: 25 }
       ];
 
@@ -650,7 +656,7 @@ const ComponentJourney = () => {
 
       // Header Row Styling (now row 4)
       const headerRow = sheet.getRow(4);
-      headerRow.values = ["Part ID", "Station", "State", "Latest Status", "Result", "Remark", "Timestamp"];
+      headerRow.values = ["Part ID", "Station", "State", "Latest Status", "Result", "Remark", "Cycle Start", "Cycle End", "Duration", "Timestamp"];
       headerRow.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
       headerRow.alignment = { horizontal: "center", vertical: "middle" };
       headerRow.height = 25;
@@ -678,6 +684,9 @@ const ComponentJourney = () => {
           latestStatus: row.latestStatus,
           latestResult: row.latestResult,
           interlockReason: row.interlockReason,
+          cycleStartTime: row.cycleStartTime ? new Date(row.cycleStartTime).toLocaleString() : "-",
+          cycleEndTime: row.cycleEndTime ? new Date(row.cycleEndTime).toLocaleString() : "-",
+          cycleDuration: row.cycleDuration,
           completedAt: row.completedAt ? new Date(row.completedAt).toLocaleString() : ""
         });
 
@@ -1340,8 +1349,26 @@ const ComponentJourney = () => {
                           </p>
                           <p style={{fontSize:11,color:C.txt("muted"),marginTop:2,
                             fontFamily:"'DM Mono',monospace"}}>
-                            {station.latestAt?`Last: ${formatTime(station.latestAt)}`:"Not started"}
+                            {station.latestAt ? `Last: ${formatTime(station.latestAt)}` : "Not started"}
                           </p>
+                          {station.cycleStartTime && (
+                            <div style={{display:"flex",gap:8,marginTop:4}}>
+                              <p style={{fontSize:10,color:C.txt("muted"),display:"flex",alignItems:"center",gap:3}}>
+                                <Clock3 size={10}/> Start: {formatTime(station.cycleStartTime)}
+                              </p>
+                              {station.cycleEndTime && (
+                                <p style={{fontSize:10,color:C.ok(),fontWeight:700,display:"flex",alignItems:"center",gap:3}}>
+                                  <CheckCircle2 size={10}/> End: {formatTime(station.cycleEndTime)}
+                                </p>
+                              )}
+                              {station.cycleDurationSec > 0 && (
+                                <span style={{fontSize:10,fontWeight:800,color:C.amber(),
+                                  background:C.amber(0.12),padding:"1px 5px",borderRadius:4}}>
+                                  {station.cycleDurationSec.toFixed(2)}s
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
 

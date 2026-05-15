@@ -83,12 +83,7 @@ const Sidebar = ({ onClose }) => {
         icon: LayoutDashboard,
         moduleKey: "dashboard",
       },
-      {
-        name: "Production Analytics",
-        path: APP_ROUTES.reports,
-        icon: BarChart3,
-        moduleKey: "dashboard",
-      },
+
       {
         name: "Operator View",
         path: APP_ROUTES.operatorView,
@@ -173,12 +168,7 @@ const Sidebar = ({ onClose }) => {
         icon: Regex,
         moduleKey: "qr_rules",
       },
-      {
-        name: "Report Config",
-        path: APP_ROUTES.masterReports,
-        icon: FileText,
-        moduleKey: "master_settings",
-      },
+
       {
         name: "Packing Management",
         path: APP_ROUTES.packingManagement,
