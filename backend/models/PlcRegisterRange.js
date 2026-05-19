@@ -52,6 +52,14 @@ const PlcRegisterRange = sequelize.define("PlcRegisterRange", {
     type: DataTypes.INTEGER,
     allowNull: true,
   },
+  plc_endpoint_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: {
+      model: "plc_endpoints",
+      key: "id",
+    },
+  },
 });
 
 module.exports = PlcRegisterRange;

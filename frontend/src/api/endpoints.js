@@ -10,11 +10,14 @@ export const ENDPOINTS = {
   machineResetPlc: "/machines/reset-plc",
   machinePlcCommand: "/machines/plc-command",
   machineReadPlcValue: "/machines/read-plc-value",
+  machineReadPlcRegisters: "/machines/read-plc-registers",
   machineWritePlcValue: "/machines/write-plc-value",
   plcConfig: {
     ranges: "/plc-config/ranges",
     rangeRegisters: (rangeId) => `/plc-config/ranges/${encodeURIComponent(rangeId)}/registers`,
     export: "/plc-config/export",
+    endpoints: "/plc-config/endpoints",
+    endpointTest: (id) => `/plc-config/endpoints/${encodeURIComponent(id)}/test`,
   },
   scanners: "/scanners",
   scannerConnections: "/scanners/connections",
@@ -45,6 +48,8 @@ export const ENDPOINTS = {
     resetPlcOnly: "/traceability/reset-plc-only",
     deletePart: "/traceability/delete-part",
     bypass: "/traceability/bypass",
+    submitManualResult: "/traceability/manual-result",
+    testPlcCycle: "/traceability/test-plc-cycle",
   },
   qrFormatRules: "/qr-format-rules",
   packing: {

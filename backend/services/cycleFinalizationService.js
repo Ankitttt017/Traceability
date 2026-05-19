@@ -69,11 +69,35 @@ async function readResetSignals(machine) {
   }
 
   if (protocol === "SLMP") {
+    let signalMap = [];
+    try {
+      signalMap = typeof machine?.plc_signal_map === "string" ? JSON.parse(machine.plc_signal_map) : machine?.plc_signal_map || [];
+    } catch (e) {
+      signalMap = [];
+    }
+    if (!Array.isArray(signalMap)) signalMap = [];
+
     const defaultDevice = String(machine?.plc_slmp_device || "D").trim().toUpperCase() || "D";
+    const mappedRegisters = registers.map((r) => {
+      let matched = signalMap.find(row => {
+        const parsedReg = Number(row.register ?? row.registerNo ?? row.address);
+        return parsedReg === r;
+      });
+      
+      if (!matched) {
+        if (r === startRegister) matched = signalMap.find(row => String(row.signal || row.key || "").trim().toUpperCase() === "START");
+        else if (r === statusRegister) matched = signalMap.find(row => String(row.signal || row.key || "").trim().toUpperCase() === "STATUS");
+        else if (r === resetRegister) matched = signalMap.find(row => String(row.signal || row.key || "").trim().toUpperCase() === "RESET");
+      }
+
+      const device = matched?.device ? String(matched.device).trim().toUpperCase() : defaultDevice;
+      return { register: r, device };
+    });
+
     const result = await readSlmpRegisters({
       ip,
       port,
-      registers: registers.map((register) => ({ register, device: defaultDevice })),
+      registers: mappedRegisters,
       defaultDevice,
       timeoutMs,
       frameMode: machine?.plc_slmp_frame_mode || "AUTO",

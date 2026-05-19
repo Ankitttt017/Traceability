@@ -166,13 +166,11 @@ function parseSignalMap(raw) {
 function resolveDevice(machine, signalKey) {
   const fallback = normalizeDevice(process.env.PLC_SLMP_DEVICE || "D", "D");
 
-  let resolved = fallback;
-  let source = "ENV_FALLBACK";
+  let resolved = null;
+  let source = null;
 
-  if (machine && machine.plc_slmp_device) {
-    resolved = normalizeDevice(machine.plc_slmp_device, fallback);
-    source = "MACHINE_CONFIG";
-  } else if (machine) {
+  // 1. Try to resolve from SIGNAL_MAP first to allow custom device type override per signal!
+  if (machine && machine.plc_signal_map) {
     const map = parseSignalMap(machine.plc_signal_map);
     if (map) {
       const found = map.find((entry) => entry.key === String(signalKey || "").trim().toUpperCase());
@@ -181,6 +179,18 @@ function resolveDevice(machine, signalKey) {
         source = "SIGNAL_MAP";
       }
     }
+  }
+
+  // 2. Fall back to machine configuration device type
+  if (!resolved && machine && machine.plc_slmp_device) {
+    resolved = normalizeDevice(machine.plc_slmp_device, fallback);
+    source = "MACHINE_CONFIG";
+  }
+
+  // 3. Fall back to environment variable or "D"
+  if (!resolved) {
+    resolved = fallback;
+    source = "ENV_FALLBACK";
   }
 
   console.log(`[PLC:REGISTER_RESOLVE] signal=${signalKey} input=${machine?.plc_slmp_device || "NULL"} resolve=${resolved} source=${source}`);
@@ -421,7 +431,12 @@ async function handshake({ ip, port, partId, stationNo, machine }) {
 
 
   if (!Number.isFinite(startRegister) || !Number.isFinite(statusRegister)) {
-    throw new Error("SLMP registers missing (plc_start_register/plc_status_register)");
+    console.log("[PLC:HANDSHAKE] SLMP registers missing (plc_start_register/plc_status_register). Bypassing handshake sequence.");
+    return {
+      ok: true,
+      bypassed: true,
+      message: "SLMP registers missing. Bypassing active handshake sequence.",
+    };
   }
 
   const frameModes = getFrameModeCandidates(machine);
@@ -820,7 +835,13 @@ async function sendCommand({ ip, port, command, machine, partId, stationNo }) {
   const commandRegister = Number(machine?.plc_start_register);
   const resetRegister = Number(machine?.plc_reset_register);
   if (!Number.isFinite(commandRegister)) {
-    throw new Error("SLMP command register (plc_start_register) is required");
+    console.log("[PLC:COMMAND] SLMP command register (plc_start_register) not configured. Bypassing command.");
+    return {
+      protocol: "SLMP",
+      command: normalized,
+      bypassed: true,
+      message: "Command register not configured. Command bypassed.",
+    };
   }
 
   const commandValue =

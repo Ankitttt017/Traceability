@@ -281,7 +281,35 @@ function parseSlmpResponse(packet, frameMode = "BINARY") {
   return packet.subarray(dataOffset, dataOffset + dataLength);
 }
 
-async function readSlmpWords(socket, { device, address, count, timeoutMs, route }) {
+async function readSlmpWords(socket, { device, address, count, timeoutMs, route, isAlignedWordRead }) {
+  const isBitDevice = ["M", "X", "Y", "L", "F", "V", "B"].includes(device);
+
+  if (isBitDevice && !isAlignedWordRead) {
+    const alignedStart = Math.floor(address / 16) * 16;
+    const alignedEnd = Math.floor((address + count - 1) / 16) * 16;
+    const alignedWordCount = (alignedEnd - alignedStart) / 16 + 1;
+
+    const alignedWords = await readSlmpWords(socket, {
+      device,
+      address: alignedStart,
+      count: alignedWordCount,
+      timeoutMs,
+      route,
+      isAlignedWordRead: true,
+    });
+
+    const bits = [];
+    for (let i = 0; i < count; i++) {
+      const bitAddr = address + i;
+      const wordAddr = Math.floor(bitAddr / 16) * 16;
+      const wordIndex = (wordAddr - alignedStart) / 16;
+      const bitOffset = bitAddr % 16;
+      const wordValue = alignedWords[wordIndex] || 0;
+      bits.push((wordValue >> bitOffset) & 1);
+    }
+    return bits;
+  }
+
   const deviceSpec = buildSlmpDeviceSpec(address, device);
   const points = Buffer.alloc(2);
   points.writeUInt16LE(count, 0);
@@ -303,7 +331,41 @@ async function readSlmpWords(socket, { device, address, count, timeoutMs, route 
   return values;
 }
 
-async function writeSlmpWords(socket, { device, address, values, timeoutMs, route }) {
+async function writeSlmpWords(socket, { device, address, values, timeoutMs, route, isAlignedWordWrite }) {
+  const isBitDevice = ["M", "X", "Y", "L", "F", "V", "B"].includes(device);
+
+  if (isBitDevice && !isAlignedWordWrite) {
+    const value = values[0] ? 1 : 0;
+    const alignedStart = Math.floor(address / 16) * 16;
+    const bitOffset = address % 16;
+
+    const alignedWords = await readSlmpWords(socket, {
+      device,
+      address: alignedStart,
+      count: 1,
+      timeoutMs,
+      route,
+      isAlignedWordRead: true,
+    });
+
+    let currentWord = alignedWords[0] || 0;
+
+    if (value === 1) {
+      currentWord |= (1 << bitOffset);
+    } else {
+      currentWord &= ~(1 << bitOffset);
+    }
+
+    return writeSlmpWords(socket, {
+      device,
+      address: alignedStart,
+      values: [currentWord],
+      timeoutMs,
+      route,
+      isAlignedWordWrite: true,
+    });
+  }
+
   const deviceSpec = buildSlmpDeviceSpec(address, device);
   const points = Buffer.alloc(2);
   points.writeUInt16LE(values.length, 0);
@@ -485,6 +547,9 @@ async function readModbusRegisters({ ip, port, unitId = 1, registers = [], timeo
           }
         }
       } catch (error) {
+        try {
+          socket.destroy();
+        } catch (_) {}
         for (let k = i; k < j; k++) {
           errors.push({ register: sorted[k], message: error.message });
         }
@@ -546,6 +611,9 @@ async function writeModbusRegister({
       break;
     } catch (error) {
       lastError = error;
+      try {
+        socket.destroy();
+      } catch (_) {}
       if (attempt >= attempts || !isTransientPlcError(error)) {
         throw error;
       }
@@ -702,11 +770,24 @@ async function readSlmpRegisters({
           }
         }
         // If we got at least one value, treat route/mode as valid and return.
-        if (Object.keys(values).length > 0 || errors.length === 0) return { values, errors };
+        if (Object.keys(values).length > 0 || errors.length === 0) {
+          if (Object.keys(values).length === 0 && errors.length > 0) {
+            try {
+              socket.destroy();
+            } catch (_) {}
+          }
+          return { values, errors };
+        }
+        try {
+          socket.destroy();
+        } catch (_) {}
         lastError = new Error(errors[0]?.message || "SLMP read failed");
         if (!isRetryableSlmpAttemptError(lastError)) return { values, errors };
       } catch (error) {
         lastError = error;
+        try {
+          socket.destroy();
+        } catch (_) {}
         if (!isRetryableSlmpAttemptError(error)) throw error;
       } finally {
           releaseSocket(lease);
@@ -715,8 +796,11 @@ async function readSlmpRegisters({
   }
   const routeDesc = routes.map(describeRoute).join(" | ");
   const modeDesc = frameModes.map(describeSlmpFrameMode).join(",");
+  const timeoutIndicator = String(lastError?.message || "").toLowerCase().includes("timeout") 
+    ? " — No PLC response. Verify: (1) Port 5000/5006 is correct for SLMP, (2) PLC service enabled, (3) Firewall allows access"
+    : " — PLC rejected request. Check: (1) Frame mode (BINARY/ASCII), (2) Route params, (3) Unit ID";
   throw new Error(
-    `${String(lastError?.message || "PLC packet timeout")} (tried SLMP frames: ${modeDesc}; routes: ${routeDesc})`
+    `Register read failed: ${String(lastError?.message || "PLC packet timeout")}${timeoutIndicator}`
   );
 }
 
@@ -769,6 +853,9 @@ async function writeSlmpRegister({
           break;
         } catch (error) {
           lastError = error;
+          try {
+            socket.destroy();
+          } catch (_) {}
           if (!isRetryableSlmpAttemptError(error)) throw error;
         } finally {
             releaseSocket(lease);
@@ -784,8 +871,11 @@ async function writeSlmpRegister({
   if (!usedRoute) {
     const routeDesc = routes.map(describeRoute).join(" | ");
     const modeDesc = frameModes.map(describeSlmpFrameMode).join(",");
+    const timeoutIndicator = String(lastError?.message || "").toLowerCase().includes("timeout") 
+      ? " — No PLC response. Verify: (1) Port 5000/5006 is correct for SLMP, (2) PLC service enabled, (3) Firewall allows access"
+      : " — PLC rejected request. Check: (1) Frame mode (BINARY/ASCII), (2) Route params, (3) Unit ID";
     throw new Error(
-      `${String(lastError?.message || "PLC packet timeout")} (tried SLMP frames: ${modeDesc}; routes: ${routeDesc})`
+      `Register write failed: ${String(lastError?.message || "PLC packet timeout")}${timeoutIndicator}`
     );
   }
 

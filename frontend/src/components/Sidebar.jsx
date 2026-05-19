@@ -61,7 +61,7 @@ const RicoIcon = () => (
 const Sidebar = ({ onClose }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [traceOpen, setTraceOpen] = useState(true);
-  const [orgOpen, setOrgOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const [roleAccessSettings, setRoleAccessSettings] = useState(() =>
     getRoleAccessSettings()
@@ -74,7 +74,7 @@ const Sidebar = ({ onClose }) => {
     if (onClose) onClose();
   }, [location.pathname]);
 
-  // ── TRACEABILITY ──────────────────────────
+  // ── TRACEABILITY OPERATIONAL PAGES ──────────
   const traceabilityNavigation = useMemo(
     () => [
       {
@@ -83,36 +83,11 @@ const Sidebar = ({ onClose }) => {
         icon: LayoutDashboard,
         moduleKey: "dashboard",
       },
-
       {
         name: "Operator View",
         path: APP_ROUTES.operatorView,
         icon: UserCog,
         moduleKey: "operator_view",
-      },
-      {
-        name: "I/O Monitor",
-        path: APP_ROUTES.ioMonitor,
-        icon: Activity,
-        moduleKey: "io_monitor",
-      },
-      {
-        name: "Scanner Monitor",
-        path: APP_ROUTES.scannerMonitor,
-        icon: Wifi,
-        moduleKey: "scanners",
-      },
-      {
-        name: "Part Journey",
-        path: APP_ROUTES.partJourney,
-        icon: Wrench,
-        moduleKey: "part_journey",
-      },
-      {
-        name: "Process Flow",
-        path: APP_ROUTES.processFlow,
-        icon: Route,
-        moduleKey: "process_flow",
       },
       {
         name: "Production",
@@ -126,18 +101,39 @@ const Sidebar = ({ onClose }) => {
         icon: Boxes,
         moduleKey: "packing",
       },
+      
       {
-        name: "Role Access",
-        path: APP_ROUTES.masterSettings,
-        icon: SlidersHorizontal,
-        moduleKey: "master_settings",
+        name: "Part Journey",
+        path: APP_ROUTES.partJourney,
+        icon: Wrench,
+        moduleKey: "part_journey",
       },
       {
-        name: "Station Controls",
-        path: APP_ROUTES.stationControls,
-        icon: Settings2,
-        moduleKey: "master_settings",
+        name: "Process Flow",
+        path: APP_ROUTES.processFlow,
+        icon: Route,
+        moduleKey: "process_flow",
       },
+      {
+        name: "I/O Monitor",
+        path: APP_ROUTES.ioMonitor,
+        icon: Activity,
+        moduleKey: "io_monitor",
+      },
+      {
+        name: "Scanner Monitor",
+        path: APP_ROUTES.scannerMonitor,
+        icon: Wifi,
+        moduleKey: "scanners",
+      },
+    ],
+    []
+  );
+
+  // ── SETTINGS & MASTER PAGES (SEQUENTIAL) ─────
+  const settingsNavigation = useMemo(
+    () => [
+
       {
         name: "Machine Manager",
         path: APP_ROUTES.machines,
@@ -157,78 +153,42 @@ const Sidebar = ({ onClose }) => {
         moduleKey: "scanners",
       },
       {
-        name: "Shift Manager",
-        path: APP_ROUTES.shifts,
-        icon: Clock3,
-        moduleKey: "shifts",
-      },
-      {
         name: "QR Manager",
         path: APP_ROUTES.qrRules,
         icon: Regex,
         moduleKey: "qr_rules",
       },
-
       {
         name: "Packing Management",
         path: APP_ROUTES.packingManagement,
         icon: Boxes,
         moduleKey: "packing_management",
       },
+     
+      {
+        name: "Station Controls",
+        path: APP_ROUTES.stationControls,
+        icon: Settings2,
+        moduleKey: "master_settings",
+      },
+       {
+        name: "Shift Manager",
+        path: APP_ROUTES.shifts,
+        icon: Clock3,
+        moduleKey: "shifts",
+      },
+      {
+        name: "Role Access",
+        path: APP_ROUTES.masterSettings,
+        icon: SlidersHorizontal,
+        moduleKey: "master_settings",
+      },
+
       {
         name: "User Management",
         path: APP_ROUTES.users,
         icon: Users,
         moduleKey: "users",
-      },
-    ],
-    []
-  );
-
-  // ── ORGANIZATION ──────────────────────────
-  const organizationNavigation = useMemo(
-    () => [
-      {
-        name: "Part Master",
-        path: APP_ROUTES.parts,
-        icon: Package,
-        moduleKey: "parts",
-      },
-      {
-        name: "Machine Master",
-        path: APP_ROUTES.machineMaster,
-        icon: Cpu,
-        moduleKey: "machines",
-      },
-      {
-        name: "Operation Master",
-        path: APP_ROUTES.operations,
-        icon: Wrench,
-        moduleKey: "operations",
-      },
-      {
-        name: "Line Master",
-        path: APP_ROUTES.lines,
-        icon: Activity,
-        moduleKey: "lines",
-      },
-      {
-        name: "Plant Master",
-        path: APP_ROUTES.plants,
-        icon: Factory,
-        moduleKey: "plants",
-      },
-      {
-        name: "Division Master",
-        path: APP_ROUTES.divisions,
-        icon: Boxes,
-        moduleKey: "divisions",
-      },
-      {
-        name: "Die Master",
-        path: APP_ROUTES.dies,
-        icon: Settings2,
-        moduleKey: "dies",
       },
     ],
     []
@@ -243,12 +203,12 @@ const Sidebar = ({ onClose }) => {
     [traceabilityNavigation, roleAccessSettings, userRole]
   );
 
-  const visibleOrgNavigation = useMemo(
+  const visibleSettingsNavigation = useMemo(
     () =>
-      organizationNavigation.filter((item) =>
+      settingsNavigation.filter((item) =>
         canAccessModule(userRole, item.moduleKey, roleAccessSettings)
       ),
-    [organizationNavigation, roleAccessSettings, userRole]
+    [settingsNavigation, roleAccessSettings, userRole]
   );
 
   // ── FETCH ROLE ACCESS ─────────────────────
@@ -305,7 +265,7 @@ const Sidebar = ({ onClose }) => {
         className={`w-full flex items-center justify-between px-2 py-2 rounded-xl transition-all
         ${
           isOpen
-            ? "bg-bg-hover text-primary"
+            ? "bg-bg-hover text-blue-400"
             : "text-text-muted hover:bg-bg-hover/60"
         }`}
       >
@@ -389,21 +349,6 @@ const Sidebar = ({ onClose }) => {
 
       {/* ── NAVIGATION ── */}
       <nav className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
-        {/* Organization */}
-        {renderSectionToggle(
-          "Organization",
-          SlidersHorizontal,
-          orgOpen,
-          () => setOrgOpen((p) => !p)
-        )}
-        {(orgOpen || collapsed) && (
-          <div className="space-y-0.5">
-            {visibleOrgNavigation.map((item) =>
-              renderNavItem(item, !collapsed)
-            )}
-          </div>
-        )}
-
         {/* Traceability */}
         {renderSectionToggle(
           "Traceability",
@@ -415,6 +360,25 @@ const Sidebar = ({ onClose }) => {
           <div className="space-y-0.5">
             {visibleTraceNavigation.map((item) =>
               renderNavItem(item, !collapsed)
+            )}
+            
+            {/* Nested Settings Dropdown inside Traceability */}
+            {visibleSettingsNavigation.length > 0 && (
+              <div className="mt-1">
+                {renderSectionToggle(
+                  "Settings",
+                  Settings2,
+                  settingsOpen,
+                  () => setSettingsOpen((p) => !p)
+                )}
+                {(settingsOpen || collapsed) && (
+                  <div className="space-y-0.5 mt-0.5">
+                    {visibleSettingsNavigation.map((item) =>
+                      renderNavItem(item, true)
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         )}

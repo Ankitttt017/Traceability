@@ -5,6 +5,7 @@
 //  ✓ Professional Navy/Steel/Amber/Linen theme
 //  ✓ Box grid visualization with smaller boxes
 //  ✓ Clickable QR icon in header opens modal
+//  ✓ Fully responsive design (mobile/tablet/desktop)
 // ============================================================
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
@@ -45,6 +46,18 @@ const DS = `
     --pk-txt-pri:232,226,219; --pk-txt-sec:120,160,190;
     --pk-txt-muted:84,119,146;
     --pk-bdr:84,119,146; --pk-bop:0.18;
+  }
+  @media (max-width: 768px) {
+    .pk-header-main { flex-direction: column !important; align-items: stretch !important; }
+    .pk-header-actions { justify-content: space-between !important; flex-wrap: wrap !important; }
+    .pk-box-grid { grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)) !important; gap: 6px !important; }
+    .pk-main-layout { grid-template-columns: 1fr !important; }
+    .pk-progress-strip { flex-direction: column !important; align-items: stretch !important; }
+    .pk-box-selector { width: 100%; justify-content: space-between !important; }
+  }
+  @media (max-width: 480px) {
+    .pk-box-grid { grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)) !important; gap: 4px !important; }
+    .pk-header-title h1 { font-size: 14px !important; }
   }
 `;
 let _pkDS=false;
@@ -230,7 +243,7 @@ const Card=({title,subtitle,icon:Icon,accent,right,children,noPad})=>(
     {(title||right)&&(
       <div style={{padding:"12px 17px",borderBottom:`1px solid ${C.bdr()}`,
         background:C.bg("surf"),display:"flex",alignItems:"center",
-        justifyContent:"space-between",gap:8}}>
+        justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
           {Icon&&<div style={{width:28,height:28,borderRadius:7,background:C.navy(0.1),
             border:`1px solid ${C.navy(0.18)}`,display:"flex",alignItems:"center",
@@ -372,18 +385,29 @@ const Packing=()=>{
 
   const handlePrint=()=>{printBoxLabel(displaySess,displayItems);};
 
-  const eff=displaySess?.createdAt
-    ?(displayItems.length/Math.max(1,(Date.now()-new Date(displaySess.createdAt).getTime())/60000)).toFixed(1)
-    :"—";
+  // Packing rate: parts packed per minute since session start
+  const eff = displaySess?.createdAt
+    ? (displayItems.length / Math.max(1, (Date.now() - new Date(displaySess.createdAt).getTime()) / 60000)).toFixed(1)
+    : "—";
 
-  // Calculate optimal box size based on capacity
+  // Calculate responsive box size based on capacity and screen width
   const getBoxSize = () => {
+    if (typeof window !== 'undefined') {
+      const width = window.innerWidth;
+      if (width <= 480) return capacity > 100 ? 36 : 42;
+      if (width <= 768) return capacity > 100 ? 44 : 52;
+    }
     if (capacity <= 36) return 72;
     if (capacity <= 64) return 58;
     if (capacity <= 100) return 48;
     return 42;
   };
-  const boxSize = getBoxSize();
+  const [boxSize, setBoxSize] = useState(getBoxSize());
+  useEffect(() => {
+    const handleResize = () => setBoxSize(getBoxSize());
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [capacity]);
 
   return(
     <div style={{display:"flex",flexDirection:"column",gap:18,paddingBottom:32,
@@ -625,7 +649,8 @@ const Packing=()=>{
       </div>
 
       {/* ══ MAIN CONTENT ════════════════════════════════════════════ */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 280px",gap:16,alignItems:"start"}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 280px",gap:16,alignItems:"start"}}
+        className="pk-main-layout">
 
         {/* ── Left: Box grid + ledger ──────────────────────────── */}
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -635,7 +660,7 @@ const Packing=()=>{
             borderRadius:12,padding:"12px 16px",boxShadow:SH}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
               marginBottom:8,flexWrap:"wrap",gap:8}}>
-              <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
                 <span style={{fontSize:13,fontWeight:700,color:C.txt("pri")}}>Box Fill Status</span>
                 <Badge v={progressPct>=90?"ok":progressPct>=50?"amber":"idle"}
                   l={`${filledCount} / ${capacity} packed`}/>
@@ -693,7 +718,8 @@ const Packing=()=>{
               </div>
             ):view==="grid"?(
               <div style={{padding:20}}>
-                <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fill,minmax(${boxSize}px,1fr))`,gap:8}}>
+                <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fill,minmax(${boxSize}px,1fr))`,gap:8}}
+                  className="pk-box-grid">
                   {Array.from({length:capacity},(_,i)=>{
                     const slotId=i+1;
                     const item=filledMap.get(slotId);
@@ -742,7 +768,7 @@ const Packing=()=>{
                   })}
                 </div>
                 <div style={{display:"flex",alignItems:"center",gap:16,marginTop:14,padding:"8px 0",
-                  borderTop:`1px solid ${C.bdr()}`,fontSize:10,color:C.txt("muted")}}>
+                  borderTop:`1px solid ${C.bdr()}`,fontSize:10,color:C.txt("muted"),flexWrap:"wrap"}}>
                   <div style={{display:"flex",alignItems:"center",gap:6}}>
                     <div style={{width:12,height:12,borderRadius:3,background:`linear-gradient(135deg,${C.ok(0.2)},${C.ok(0.08)})`,
                       border:`1.5px solid ${C.ok(0.45)}`}}/>
@@ -786,55 +812,50 @@ const Packing=()=>{
           </Card>
         </div>
 
-        {/* ── Right: QR code + label info ─────────────────────────────── */}
+        {/* ── Right Sidebar ──────────────────────────────────────── */}
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
-          <Card title="Box QR Code" subtitle="Scan to Verify" icon={QrCode} accent={C.amber()}>
-            {!displaySess?(
-              <div style={{padding:"32px 16px",textAlign:"center"}}>
-                <QrCode size={28} color={C.txt("muted")} style={{margin:"0 auto 10px"}}/>
-                <p style={{fontSize:12,color:C.txt("muted")}}>Select a box to see its QR code</p>
+          {/* Status Card */}
+          <Card title="Session Overview" subtitle="Packing Metrics" icon={Clock} accent={C.amber()}>
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:11,color:C.txt("muted")}}>Box Number</span>
+                <span style={{fontSize:12,fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.amber()}}>
+                  {displaySess?.boxNumber||"—"}
+                </span>
               </div>
-            ):(
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:12}}>
-                <div style={{background:"#ffffff",borderRadius:12,padding:12,
-                  border:`2px solid ${C.navy(0.2)}`,cursor:"pointer",
-                  transition:"transform .2s",":hover":{transform:"scale(1.02)"}}}
-                  onClick={()=>setShowQRModal(true)}>
-                  <QRCodeSVG value={displaySess.labelCode||displaySess.boxNumber} size={140} fgColor="#1a3263" bgColor="#ffffff"/>
-                  <p style={{fontFamily:"'DM Mono',monospace",fontSize:9,fontWeight:700,
-                    color:"#1a3263",textAlign:"center",marginTop:6,letterSpacing:"0.06em"}}>
-                    {displaySess.labelCode||displaySess.boxNumber}
-                  </p>
-                </div>
-
-                <div style={{width:"100%",display:"flex",flexDirection:"column",gap:6}}>
-                  {[
-                    {l:"Box ID", v:displaySess.boxNumber, mono:true},
-                    {l:"Status", v:displaySess.status||"OPEN", mono:false},
-                    {l:"Packed", v:`${filledCount} / ${capacity}`, mono:true},
-                    {l:"Created", v:fmtDT(displaySess.createdAt), mono:true},
-                  ].map(f=>(
-                    <div key={f.l} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.bdr()}`}}>
-                      <span style={{fontSize:10,color:C.txt("muted")}}>{f.l}</span>
-                      <span style={{fontSize:10,fontWeight:700,color:C.txt("pri"),fontFamily:f.mono?"'DM Mono',monospace":"inherit"}}>{f.v||"—"}</span>
-                    </div>
-                  ))}
-                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"5px 0"}}>
-                    <span style={{fontSize:10,color:C.txt("muted")}}>Pack Rate</span>
-                    <span style={{fontSize:10,fontWeight:700,color:C.steel(),fontFamily:"'DM Mono',monospace"}}>{eff} p/min</span>
-                  </div>
-                </div>
-
-                <button onClick={handlePrint} style={{width:"100%",height:38,background:C.amber(),
-                  border:"none",borderRadius:9,fontSize:11,fontWeight:800,cursor:"pointer",
-                  color:C.navy(),display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-                  boxShadow:`0 3px 12px ${C.amber(0.3)}`,transition:"filter .15s"}}
-                  onMouseEnter={e=>e.currentTarget.style.filter="brightness(1.08)"}
-                  onMouseLeave={e=>e.currentTarget.style.filter="none"}>
-                  <Printer size={13}/> Print Label
-                </button>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:11,color:C.txt("muted")}}>Status</span>
+                <Badge v={displaySess?.status==="CLOSED"?"ok":"wip"} l={displaySess?.status||"OPEN"} pulse={!!activeSession}/>
               </div>
-            )}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:11,color:C.txt("muted")}}>Packing Rate</span>
+                <span style={{fontSize:12,fontWeight:700,color:C.ok()}}>{eff} pcs/min</span>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:11,color:C.txt("muted")}}>Created</span>
+                <span style={{fontSize:10,fontFamily:"'DM Mono',monospace",color:C.txt("sec")}}>{fmtDT(displaySess?.createdAt)}</span>
+              </div>
+            </div>
+          </Card>
+
+          {/* Quick Actions Card */}
+          <Card title="Quick Actions" subtitle="Utilities" icon={Zap} accent={C.steel()}>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              <button onClick={handlePrint} disabled={!displaySess}
+                style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
+                  padding:"8px 12px",borderRadius:9,fontSize:11,fontWeight:700,
+                  background:displaySess?C.bg("surf"):C.idle(0.05),border:`1px solid ${C.bdr()}`,
+                  cursor:displaySess?"pointer":"not-allowed",color:C.txt(displaySess?"pri":"muted")}}>
+                <Printer size={14}/> Print Box Label
+              </button>
+              <button onClick={()=>displaySess&&setShowQRModal(true)} disabled={!displaySess}
+                style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
+                  padding:"8px 12px",borderRadius:9,fontSize:11,fontWeight:700,
+                  background:displaySess?C.bg("surf"):C.idle(0.05),border:`1px solid ${C.bdr()}`,
+                  cursor:displaySess?"pointer":"not-allowed",color:C.txt(displaySess?"pri":"muted")}}>
+                <Eye size={14}/> View QR Code
+              </button>
+            </div>
           </Card>
         </div>
       </div>

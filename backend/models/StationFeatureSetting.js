@@ -42,7 +42,7 @@ const StationFeatureSetting = sequelize.define("StationFeatureSetting", {
     defaultValue: false,
   },
   config: {
-    type: DataTypes.JSON,
+    type: DataTypes.TEXT,
     allowNull: true,
   },
   updated_by: {

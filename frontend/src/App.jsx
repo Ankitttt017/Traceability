@@ -22,7 +22,6 @@ import MasterSettingsDashboard from "./pages/MasterSettingsDashboard";
 import StationControls from "./pages/StationControls";
 import PlcConfiguration from "./pages/PlcConfiguration";
 import IoMonitor from "./pages/IoMonitor";
-import OrganizationStub from "./pages/OrganizationStub";
 import { getUserRole, isAuthenticated } from "./utils/authStorage";
 import { APP_ROUTES } from "./constants/routes";
 import { canAccessModule, getRoleAccessSettings } from "./utils/roleAccess";
@@ -44,13 +43,6 @@ const MODULE_REDIRECT_ORDER = [
   { moduleKey: "io_monitor", path: APP_ROUTES.ioMonitor },
   { moduleKey: "part_journey", path: APP_ROUTES.partJourney },
   { moduleKey: "process_flow", path: APP_ROUTES.processFlow },
-  { moduleKey: "parts", path: APP_ROUTES.parts },
-  { moduleKey: "machines", path: APP_ROUTES.machineMaster },
-  { moduleKey: "operations", path: APP_ROUTES.operations },
-  { moduleKey: "lines", path: APP_ROUTES.lines },
-  { moduleKey: "plants", path: APP_ROUTES.plants },
-  { moduleKey: "divisions", path: APP_ROUTES.divisions },
-  { moduleKey: "dies", path: APP_ROUTES.dies },
   { moduleKey: "master_settings", path: APP_ROUTES.masterSettings },
   { moduleKey: "machines", path: APP_ROUTES.machines },
   { moduleKey: "plc_config", path: APP_ROUTES.plcConfig },
@@ -289,62 +281,7 @@ function App() {
                 </ModuleRoute>
               }
             />
-            <Route
-              path={APP_ROUTES.parts.slice(1)}
-              element={
-                <ModuleRoute moduleKey="parts">
-                  <OrganizationStub title="Part Master" />
-                </ModuleRoute>
-              }
-            />
-            <Route
-              path={APP_ROUTES.machineMaster.slice(1)}
-              element={
-                <ModuleRoute moduleKey="machines">
-                  <OrganizationStub title="Machine Master" />
-                </ModuleRoute>
-              }
-            />
-            <Route
-              path={APP_ROUTES.operations.slice(1)}
-              element={
-                <ModuleRoute moduleKey="operations">
-                  <OrganizationStub title="Operation Master" />
-                </ModuleRoute>
-              }
-            />
-            <Route
-              path={APP_ROUTES.lines.slice(1)}
-              element={
-                <ModuleRoute moduleKey="lines">
-                  <OrganizationStub title="Line Master" />
-                </ModuleRoute>
-              }
-            />
-            <Route
-              path={APP_ROUTES.plants.slice(1)}
-              element={
-                <ModuleRoute moduleKey="plants">
-                  <OrganizationStub title="Plant Master" />
-                </ModuleRoute>
-              }
-            />
-            <Route
-              path={APP_ROUTES.divisions.slice(1)}
-              element={
-                <ModuleRoute moduleKey="divisions">
-                  <OrganizationStub title="Division Master" />
-                </ModuleRoute>
-              }
-            />
-            <Route
-              path={APP_ROUTES.dies.slice(1)}
-              element={
-                <ModuleRoute moduleKey="dies">
-                  <OrganizationStub title="Die Master" />
-                </ModuleRoute>
-              }
-            />
+
           </Route>
         </Routes>
       </Router>

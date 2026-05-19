@@ -54,6 +54,10 @@ export const machineApi = {
     const { data } = await apiClient.post(ENDPOINTS.machineReadPlcValue, payload, config);
     return data;
   },
+  readPlcRegisters: async (payload, config = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.machineReadPlcRegisters, payload, config);
+    return data;
+  },
   writePlcValue: async (payload, config = {}) => {
     const { data } = await apiClient.post(ENDPOINTS.machineWritePlcValue, payload, config);
     return data;
@@ -85,6 +89,26 @@ export const plcConfigApi = {
   },
   exportPlan: async () => {
     const { data } = await apiClient.get(ENDPOINTS.plcConfig.export, { responseType: "blob" });
+    return data;
+  },
+  // Endpoint APIs
+  listEndpoints: async () => {
+    const { data } = await apiClient.get(ENDPOINTS.plcConfig.endpoints);
+    return data;
+  },
+  createEndpoint: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.plcConfig.endpoints, payload);
+    return data;
+  },
+  updateEndpoint: async (id, payload) => {
+    const { data } = await apiClient.put(`${ENDPOINTS.plcConfig.endpoints}/${id}`, payload);
+    return data;
+  },
+  deleteEndpoint: async (id) => {
+    await apiClient.delete(`${ENDPOINTS.plcConfig.endpoints}/${id}`);
+  },
+  testEndpoint: async (id) => {
+    const { data } = await apiClient.post(ENDPOINTS.plcConfig.endpointTest(id));
     return data;
   },
 };
@@ -276,6 +300,14 @@ export const traceabilityApi = {
   },
   bypass: async (payload) => {
     const { data } = await apiClient.post(ENDPOINTS.traceability.bypass, payload);
+    return data;
+  },
+  submitManualResult: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.traceability.submitManualResult, payload);
+    return data;
+  },
+  testPlcCycle: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.traceability.testPlcCycle, payload);
     return data;
   },
 };

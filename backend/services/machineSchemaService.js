@@ -97,6 +97,7 @@ async function ensurePerformanceColumnsExist() {
   if (!tableRows?.[0]?.table_id) return;
 
   const columnsToAdd = [
+    { name: "machine_type", type: "NVARCHAR(50)", defaultValue: "'HPDC'" },
     { name: "cycle_time", type: "INT", defaultValue: "0" },
     { name: "loading_time", type: "INT", defaultValue: "0" },
     { name: "plc_block_register", type: "INT", defaultValue: "NULL" },
@@ -222,9 +223,83 @@ async function ensureTraceabilityColumnsExist() {
   }
 }
 
+async function ensureScannerColumnsExist() {
+  const isMssql = typeof sequelize.getDialect === "function" && sequelize.getDialect() === "mssql";
+  if (!isMssql) return;
+
+  const [tableRows] = await sequelize.query(
+    "SELECT OBJECT_ID(N'dbo.Scanners', N'U') AS table_id;"
+  );
+  if (!tableRows?.[0]?.table_id) return;
+
+  try {
+    await sequelize.query(`
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.columns 
+        WHERE object_id = OBJECT_ID(N'dbo.Scanners') 
+        AND name = N'is_simulation'
+      )
+      BEGIN
+        ALTER TABLE [dbo].[Scanners] ADD [is_simulation] BIT;
+      END
+    `);
+
+    await sequelize.query(`
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.default_constraints 
+        WHERE parent_object_id = OBJECT_ID(N'dbo.Scanners') 
+        AND name = N'DF_Scanners_is_simulation'
+      )
+      BEGIN
+        ALTER TABLE [dbo].[Scanners] ADD CONSTRAINT [DF_Scanners_is_simulation] DEFAULT 0 FOR [is_simulation];
+        UPDATE [dbo].[Scanners] SET [is_simulation] = 0 WHERE [is_simulation] IS NULL;
+      END
+    `);
+  } catch (err) {
+    if (err.message && !err.message.includes("already exists")) {
+      console.warn(`[SchemaService] Note: Column is_simulation check/add skipped in Scanners.`);
+    }
+  }
+}
+
+async function ensurePlcLinkColumnsExist() {
+  const isMssql = typeof sequelize.getDialect === "function" && sequelize.getDialect() === "mssql";
+  if (!isMssql) return;
+
+  const [machineTable] = await sequelize.query("SELECT OBJECT_ID(N'dbo.Machines', N'U') AS table_id;");
+  if (machineTable?.[0]?.table_id) {
+    await sequelize.query(`
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.columns
+        WHERE object_id = OBJECT_ID(N'dbo.Machines')
+          AND name = N'plc_endpoint_id'
+      )
+      BEGIN
+        ALTER TABLE [dbo].[Machines] ADD [plc_endpoint_id] INT NULL;
+      END
+    `);
+  }
+
+  const [rangeTable] = await sequelize.query("SELECT OBJECT_ID(N'dbo.PlcRegisterRanges', N'U') AS table_id;");
+  if (rangeTable?.[0]?.table_id) {
+    await sequelize.query(`
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.columns
+        WHERE object_id = OBJECT_ID(N'dbo.PlcRegisterRanges')
+          AND name = N'plc_endpoint_id'
+      )
+      BEGIN
+        ALTER TABLE [dbo].[PlcRegisterRanges] ADD [plc_endpoint_id] INT NULL;
+      END
+    `);
+  }
+}
+
 module.exports = {
   ensureMachineQrScannerUniqueness,
   ensurePerformanceColumnsExist,
   ensureTraceabilityColumnsExist,
+  ensureScannerColumnsExist,
+  ensurePlcLinkColumnsExist,
   FILTERED_QR_SCANNER_INDEX,
 };

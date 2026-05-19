@@ -25,5 +25,7 @@ router.post("/traceability/reset-plc-only", verifyToken, traceabilityController.
 router.post("/traceability/reset-station", verifyToken, traceabilityController.resetStationOperation);
 router.post("/traceability/delete-part", verifyToken, traceabilityController.deletePartTraceability);
 router.post("/traceability/bypass", verifyToken, traceabilityController.bypassOperation);
+router.post("/traceability/test-plc-cycle", verifyToken, traceabilityController.testPlcCycle);
+router.post("/traceability/manual-result", verifyToken, traceabilityController.submitManualResult);
 
 module.exports = router;

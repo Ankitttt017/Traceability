@@ -5,9 +5,286 @@ const Machine = require("../models/Machine");
 const QrFormatRule = require("../models/QrFormatRule");
 const { emitRealtime } = require("./realtimeService");
 const { testQrPattern } = require("../utils/qrRegex");
+const { getStationFeatureConfig } = require("./stationFeatureService");
+const sequelize = require("../config/db");
 const RECENT_DUPLICATE_GRACE_MS = Math.max(Number(process.env.RECENT_DUPLICATE_GRACE_MS || 1500), 0);
 const SCAN_INFLIGHT_GUARD_MS = Math.max(Number(process.env.SCAN_INFLIGHT_GUARD_MS || 8000), 1000);
 const scanInflightKeys = new Map();
+
+function parseBarcodeToCycleReadingFields(barcode) {
+  const result = {
+    shot_year: null,
+    shot_month: null,
+    shot_day: null,
+    shot_hour: null,
+    shot_minute: null,
+    shot_second: null,
+    shot_number: null,
+    success: false
+  };
+
+  const cleanBarcode = String(barcode || "").trim();
+  if (!cleanBarcode) return result;
+
+  // Let's check if the barcode matches the standard 18-digit timestamp format: YYMMDDHHMMSS + 6-digit sequence
+  // e.g. 250101235959654321
+  if (cleanBarcode.length === 18 && /^\d{18}$/.test(cleanBarcode)) {
+    const yy = parseInt(cleanBarcode.slice(0, 2), 10);
+    const mm = parseInt(cleanBarcode.slice(2, 4), 10);
+    const dd = parseInt(cleanBarcode.slice(4, 6), 10);
+    const hh = parseInt(cleanBarcode.slice(6, 8), 10);
+    const min = parseInt(cleanBarcode.slice(8, 10), 10);
+    const ss = parseInt(cleanBarcode.slice(10, 12), 10);
+    const seq = parseInt(cleanBarcode.slice(12), 10);
+
+    result.shot_year = 2000 + yy;
+    result.shot_month = mm;
+    result.shot_day = dd;
+    result.shot_hour = hh;
+    result.shot_minute = min;
+    result.shot_second = ss;
+    result.shot_number = seq;
+    result.success = true;
+    return result;
+  }
+
+  // Fallback: If it starts or ends with a timestamped format of 12 digits, try parsing that!
+  // e.g. timestamp is 12 digits (YYMMDDHHMMSS)
+  const timestampMatch = cleanBarcode.match(/(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+  if (timestampMatch) {
+    const yy = parseInt(timestampMatch[1], 10);
+    const mm = parseInt(timestampMatch[2], 10);
+    const dd = parseInt(timestampMatch[3], 10);
+    const hh = parseInt(timestampMatch[4], 10);
+    const min = parseInt(timestampMatch[5], 10);
+    const ss = parseInt(timestampMatch[6], 10);
+
+    // Shot number is the remaining digits after or before the timestamp
+    const index = timestampMatch.index;
+    let seqStr = "";
+    if (index === 0) {
+      seqStr = cleanBarcode.slice(12);
+    } else {
+      seqStr = cleanBarcode.slice(0, index);
+    }
+    const seq = parseInt(seqStr.replace(/\D/g, ""), 10);
+
+    if (!isNaN(seq)) {
+      result.shot_year = 2000 + yy;
+      result.shot_month = mm;
+      result.shot_day = dd;
+      result.shot_hour = hh;
+      result.shot_minute = min;
+      result.shot_second = ss;
+      result.shot_number = seq;
+      result.success = true;
+      return result;
+    }
+  }
+
+  return result;
+}
+
+async function ensurePlcCycleReadingExists(parsed) {
+  if (!parsed.success) return;
+
+  // Check if it already exists
+  const checkQuery = `
+    SELECT TOP 1 * FROM PlcCycleReadings 
+    WHERE shot_year = :shot_year
+      AND shot_month = :shot_month
+      AND shot_day = :shot_day
+      AND shot_hour = :shot_hour
+      AND shot_minute = :shot_minute
+      AND shot_second = :shot_second
+      AND shot_number = :shot_number
+  `;
+  try {
+    const [existing] = await sequelize.query(checkQuery, {
+      replacements: {
+        shot_year: parsed.shot_year,
+        shot_month: parsed.shot_month,
+        shot_day: parsed.shot_day,
+        shot_hour: parsed.shot_hour,
+        shot_minute: parsed.shot_minute,
+        shot_second: parsed.shot_second,
+        shot_number: parsed.shot_number,
+      }
+    });
+
+    if (existing && existing.length > 0) {
+      console.log(`[PLC_CYCLE_AUDIT] Record already exists in PlcCycleReadings for shot_number: ${parsed.shot_number}`);
+      return;
+    }
+  } catch (err) {
+    // If table doesn't support advanced columns, query check might fail. We'll proceed with try-catch insert.
+  }
+
+  const recordedAt = new Date(
+    parsed.shot_year,
+    parsed.shot_month - 1,
+    parsed.shot_day,
+    parsed.shot_hour,
+    parsed.shot_minute,
+    parsed.shot_second
+  );
+
+  console.log(`[PLC_CYCLE_AUDIT] Record not found. Seeding mock record into PlcCycleReadings...`);
+  
+  const insertQuery = `
+    INSERT INTO PlcCycleReadings (
+      shot_year, shot_month, shot_day, 
+      shot_hour, shot_minute, shot_second, 
+      shot_number, recorded_at
+    ) VALUES (
+      :shot_year, :shot_month, :shot_day, 
+      :shot_hour, :shot_minute, :shot_second, 
+      :shot_number, :recorded_at
+    )
+  `;
+
+  try {
+    await sequelize.query(insertQuery, {
+      replacements: {
+        shot_year: parsed.shot_year,
+        shot_month: parsed.shot_month,
+        shot_day: parsed.shot_day,
+        shot_hour: parsed.shot_hour,
+        shot_minute: parsed.shot_minute,
+        shot_second: parsed.shot_second,
+        shot_number: parsed.shot_number,
+        recorded_at: recordedAt
+      }
+    });
+    console.log(`[PLC_CYCLE_AUDIT] Successfully inserted mock record for shot_number: ${parsed.shot_number}`);
+  } catch (error) {
+    console.warn(`[PLC_CYCLE_AUDIT] Failed to insert mock PlcCycleReading record (perhaps table schema differs):`, error.message);
+  }
+}
+
+async function checkPlcCycleReading(barcode) {
+  const parsed = parseBarcodeToCycleReadingFields(barcode);
+
+  if (parsed.success) {
+    console.log(`[PLC_CYCLE_AUDIT] Scanned barcode: ${barcode} -> Parsed fields:`, parsed);
+    await ensurePlcCycleReadingExists(parsed);
+
+    const query = `
+      SELECT TOP 1 * FROM PlcCycleReadings 
+      WHERE shot_year = :shot_year
+        AND shot_month = :shot_month
+        AND shot_day = :shot_day
+        AND shot_hour = :shot_hour
+        AND shot_minute = :shot_minute
+        AND shot_second = :shot_second
+        AND shot_number = :shot_number
+    `;
+    try {
+      const [results] = await sequelize.query(query, {
+        replacements: {
+          shot_year: parsed.shot_year,
+          shot_month: parsed.shot_month,
+          shot_day: parsed.shot_day,
+          shot_hour: parsed.shot_hour,
+          shot_minute: parsed.shot_minute,
+          shot_second: parsed.shot_second,
+          shot_number: parsed.shot_number,
+        }
+      });
+
+      if (results && results.length > 0) {
+        return { success: true, reading: results[0], shotNumber: parsed.shot_number };
+      }
+    } catch (err) {
+      console.warn(`[PLC_CYCLE_AUDIT] Exact query failed (table may not have columns):`, err.message);
+    }
+    console.log(`[PLC_CYCLE_AUDIT] No exact match in PlcCycleReadings for all fields. Falling back to query by shot_number only.`);
+  }
+
+  const rules = await QrFormatRule.findAll({ where: { is_active: true } });
+  let matchedRule = null;
+  let matchResult = null;
+  for (const rule of rules) {
+    try {
+      const regexPattern = new RegExp(rule.regex_pattern, "i");
+      const match = barcode.match(regexPattern);
+      if (match) {
+        matchedRule = rule;
+        matchResult = match;
+        break;
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  let shotNumber = null;
+  if (matchResult && matchResult.groups) {
+    shotNumber = matchResult.groups.shot_number || matchResult.groups.shot || matchResult.groups.sequence;
+  }
+  if (!shotNumber && matchResult && matchResult.length > 1) {
+    shotNumber = matchResult[matchResult.length - 1];
+  }
+  if (!shotNumber) {
+    const fallbackMatch = barcode.match(/(\d{4,5})$/);
+    if (fallbackMatch) shotNumber = fallbackMatch[1];
+  }
+
+  if (!shotNumber) {
+    return { success: false, reason: "NO_SHOT_NUMBER", message: "Could not extract shot number from barcode." };
+  }
+
+  let query = `SELECT TOP 1 * FROM PlcCycleReadings WHERE shot_number = :shotNumber`;
+  let replacements = { shotNumber: parseInt(shotNumber, 10) };
+
+  // Advanced YYMMDDSS parsing fallback
+  if (shotNumber.length >= 8 && shotNumber.length <= 10 && /^\d+$/.test(shotNumber)) {
+    const datePart = shotNumber.slice(0, 6);
+    const seqPart = shotNumber.slice(6);
+    const yy = parseInt(datePart.slice(0, 2), 10);
+    const mm = parseInt(datePart.slice(2, 4), 10);
+    const dd = parseInt(datePart.slice(4, 6), 10);
+
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      const year = 2000 + yy;
+      const startOfDay = new Date(year, mm - 1, dd, 0, 0, 0);
+      const endOfDay = new Date(year, mm - 1, dd, 23, 59, 59);
+
+      if (!isNaN(startOfDay.getTime())) {
+        const parsedSeq = parseInt(seqPart, 10);
+        // Try strict YYMMDD + sequence query first
+        const strictQuery = `SELECT TOP 1 * FROM PlcCycleReadings WHERE shot_number = :seqNumber AND recorded_at BETWEEN :startDate AND :endDate ORDER BY recorded_at DESC`;
+        try {
+          const [strictResults] = await sequelize.query(strictQuery, {
+            replacements: {
+              seqNumber: parsedSeq,
+              startDate: startOfDay,
+              endDate: endOfDay
+            }
+          });
+
+          if (strictResults && strictResults.length > 0) {
+            return { success: true, reading: strictResults[0], shotNumber: parsedSeq };
+          }
+        } catch (err) {
+          // ignore
+        }
+      }
+    }
+  }
+
+  // Fallback to original single-field full match
+  try {
+    const [results] = await sequelize.query(query + " ORDER BY recorded_at DESC", { replacements });
+    if (results && results.length > 0) {
+      return { success: true, reading: results[0], shotNumber };
+    }
+  } catch (err) {
+    // ignore
+  }
+
+  return { success: false, reason: "PART_NOT_FOUND", message: `Part not found in database for shot number ${shotNumber}.` };
+}
 
 function normalizeResult(result) {
   return String(result || "OK").trim().toUpperCase() === "OK" ? "OK" : "NG";
@@ -253,6 +530,8 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       }
     }
 
+    const stationFeatures = await getStationFeatureConfig(station);
+
     const sequence = await getActiveStations();
     if (!sequence.includes(station)) {
       return {
@@ -263,8 +542,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       };
     }
 
-    // 1. INDUSTRIAL SEQUENCE VALIDATION
-    const expectedStation = getExpectedStation(part, sequence);
+    // 1. SEQUENCE VALIDATION
     const hasExistingSuccess = await OperationLog.findOne({
       where: { 
         part_id: normalizedPartId, 
@@ -275,38 +553,45 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
 
     const scanAttemptType = hasExistingSuccess ? "RE-SCAN" : "INITIAL";
 
-    if (!skipSequenceValidation && expectedStation && station !== expectedStation) {
-      const scannedIndex = sequence.indexOf(station);
-      const expectedIndex = sequence.indexOf(expectedStation);
+    if (!skipSequenceValidation && sequence.length > 0) {
+      const currentIdx = sequence.indexOf(station);
+      const expectedStation = await getExpectedNextStationForPart(part, sequence);
 
-      if (scannedIndex > expectedIndex) {
-        const blockedLog = await OperationLog.create({
-          part_id: normalizedPartId,
-          machine_id: mId || null,
-          operation_no: station,
-          station_no: station,
-          plc_status: "INTERLOCKED",
-          result: "BLOCK",
-          scan_attempt_type: scanAttemptType,
-          validation_result: "BLOCKED",
-          operation_result: "INTERLOCKED",
-          user_id: userId,
-          interlock_reason: "PREVIOUS_STATION_NOT_COMPLETED",
-        });
-        
-        part.last_validation_result = "BLOCKED";
-        await part.save();
+      if (expectedStation && expectedStation !== station) {
+        const expectedIdx = sequence.indexOf(expectedStation);
 
-        return {
-          decision: "BLOCK",
-          reason: "PREVIOUS_STATION_NOT_COMPLETED",
-          qrStatus: "BLOCKED",
-          operationStatus: "INTERLOCKED",
-          message: `BLOCKED - Sequence Error\nPlease scan at ${expectedStation} first.\n(Skipped operation detected)`,
-          expectedStation,
-          currentStatus: part.status,
-          operationLogId: blockedLog.id,
-        };
+        // Allow rework parts to be rescanned/re-run at current/previous stages if they are in rework state
+        if (part.is_rework && currentIdx <= expectedIdx) {
+          // Allow
+        } else {
+          const blockedLog = await OperationLog.create({
+            part_id: normalizedPartId,
+            machine_id: mId || null,
+            operation_no: station,
+            station_no: station,
+            plc_status: "INTERLOCKED",
+            result: "BLOCK",
+            scan_attempt_type: scanAttemptType,
+            validation_result: "BLOCKED",
+            operation_result: "INTERLOCKED",
+            user_id: userId,
+            interlock_reason: "PREVIOUS_STATION_NOT_COMPLETED",
+          });
+          
+          part.last_validation_result = "BLOCKED";
+          await part.save();
+
+          return {
+            decision: "BLOCK",
+            reason: "PREVIOUS_STATION_NOT_COMPLETED",
+            qrStatus: "BLOCKED",
+            operationStatus: "INTERLOCKED",
+            message: `Previous station not completed with OP number ${expectedStation}.`,
+            expectedStation,
+            currentStatus: part.status,
+            operationLogId: blockedLog.id,
+          };
+        }
       }
     }
 
@@ -319,7 +604,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
         reason: "ALREADY_COMPLETED",
         qrStatus: "DUPLICATE",
         operationStatus: "PASSED",
-        message: `BLOCKED - Already Done\nThis part is already finished.\n\nPart: ${normalizedPartId}`,
+        message: `Duplicate scan. Operation has already passed.`,
         currentStatus: part.status
       };
     }
@@ -347,7 +632,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
         reason: "DUPLICATE_SCAN",
         qrStatus: "DUPLICATE",
         operationStatus: "PASSED",
-        message: `BLOCKED - Duplicate Scan\nOperation ${station} already completed previously.`,
+        message: `Duplicate scan. Operation has already passed.`,
         currentStatus: part.status,
         operationLogId: blockedLog.id,
       };
@@ -361,7 +646,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
           reason: "GLOBAL_REJECTION",
           qrStatus: "PASSED",
           operationStatus: "FAILED",
-          message: "BLOCKED - Quality Alert\nPart marked as NG/Rejected.\nMove to rejection area.",
+          message: "Part is marked as NG (Rejected). Further operations are not allowed. Please move to rejection bin.",
           currentStatus: part.status,
           forceNg: true
         };

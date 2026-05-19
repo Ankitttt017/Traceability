@@ -190,7 +190,8 @@ async function fetchProductionData(filters = {}) {
       cycleEndTime:   cycleEndTime   ? new Date(cycleEndTime).toLocaleString()   : "-",
       cycleTime:    cycleTime ? Number(cycleTime).toFixed(2) : "0.00",
       industrialResult,
-      category
+      category,
+      reason: log.interlock_reason || "-"
     };
   });
 

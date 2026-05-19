@@ -100,14 +100,19 @@ function resolveRangePayload(body = {}, existingRow = null) {
   if (rangeInput) {
     const match = rangeInput.match(RANGE_INPUT_REGEX);
     if (!match) {
-      throw new Error("rangeInput format should be like 100-10");
+      throw new Error("rangeInput format should be like 100-200");
     }
-    rangeStart = toInt(match[1]);
-    rangeSize = toInt(match[2]);
+    const startVal = toInt(match[1]);
+    const endVal = toInt(match[2]);
+    if (endVal < startVal) {
+      throw new Error("End register must be greater than or equal to start register");
+    }
+    rangeStart = startVal;
+    rangeSize = endVal - startVal + 1;
   }
 
   if (rangeStart === null || rangeSize === null) {
-    throw new Error("rangeStart and rangeSize are required");
+    throw new Error("rangeStart and rangeEnd are required");
   }
   if (rangeStart < 0) {
     throw new Error("rangeStart must be >= 0");
@@ -167,7 +172,7 @@ function toRangeResponse(row, usage = {}) {
     rangeStart: row.range_start,
     rangeSize: row.range_size,
     rangeEnd: row.range_end,
-    rangeInput: `${row.range_start}-${row.range_size}`,
+    rangeInput: `${row.range_start}-${row.range_end}`,
     status: row.status || "ACTIVE",
     defaultRegisters,
     notes: row.notes,
@@ -197,10 +202,12 @@ function getMachineRegisterUsageRows(machine) {
   }, []);
 }
 
-async function ensureNoOverlap({ rangeStart, rangeEnd, excludeId = null }) {
+async function ensureNoOverlap({ rangeStart, rangeEnd, plcIp = null, plcPort = null, excludeId = null }) {
   const conflict = await PlcRegisterRange.findOne({
     where: {
       ...(excludeId ? { id: { [Op.ne]: excludeId } } : {}),
+      plc_ip: plcIp || null,
+      plc_port: plcPort || null,
       range_start: { [Op.lte]: rangeEnd },
       range_end: { [Op.gte]: rangeStart },
     },
@@ -278,6 +285,8 @@ exports.createRange = async (req, res) => {
     await ensureNoOverlap({
       rangeStart: payload.range_start,
       rangeEnd: payload.range_end,
+      plcIp: payload.plc_ip,
+      plcPort: payload.plc_port,
     });
 
     const row = await PlcRegisterRange.create(payload);
@@ -310,6 +319,8 @@ exports.updateRange = async (req, res) => {
     await ensureNoOverlap({
       rangeStart: payload.range_start,
       rangeEnd: payload.range_end,
+      plcIp: payload.plc_ip,
+      plcPort: payload.plc_port,
       excludeId: id,
     });
 

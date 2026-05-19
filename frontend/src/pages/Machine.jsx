@@ -1,1402 +1,1210 @@
+// MachinePage.jsx — Professional MES Machine Registry
+// Redesigned: dynamic register mapping, signal sequencing, data register ranges
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Cpu, Plus, Save, Trash2, Edit, RefreshCw, Search,
-  X, Network, Activity, Settings,
-  Layout, Database, ChevronRight, Info, AlertTriangle, Eye,
-  CheckCircle2, XCircle, ShieldOff, ShieldCheck,
-  ArrowDownUp, ArrowDown, ArrowUp, Hash, FlaskConical, Zap,
-  ToggleLeft, ToggleRight, Download, Copy, Wand2, RotateCcw,
-  ScanLine, GitBranch, Cpu as CpuIcon, Pencil,
-  CheckSquare, Package, Wrench, Tag, Camera, Gauge, Eye as EyeIcon,
-  ListChecks, ChevronDown, ChevronUp, Layers, Radio, Signal,
-  ClipboardList, FileDown, ClipboardCopy, Sparkles, RefreshCcw,
-  Globe, FileCode, FileSearch,
+  Cpu, Plus, Save, Trash2, Edit, RefreshCw, Search, X,
+  Network, Settings, Layout, Database, ChevronRight, Info,
+  AlertTriangle, Eye, CheckCircle2, XCircle, ShieldOff, ShieldCheck,
+  ArrowUp, ArrowDown, ArrowDownUp, GripVertical, Copy, Download,
+  Zap, Layers, Signal, Activity, Hash, ToggleLeft, ToggleRight,
+  TableProperties, ScanLine, Gauge, FlaskConical,
 } from "lucide-react";
-import * as LucideIcons from "lucide-react"; // Fallback for dynamic icon resolution if needed
 import toast from "react-hot-toast";
 import ConfirmModal from "../components/ConfirmModal";
 import { machineApi, plcConfigApi, stationSettingsApi, traceabilityApi } from "../api/services";
-import {
-  MACHINE_MODBUS_TUNING_FIELD_CONFIG,
-  MACHINE_REGISTER_ROLE_FIELDS,
-} from "../utils/machineFields";
-import { loadReportConfig } from "../utils/reportConfig";
-import { DEFAULT_STATION_FEATURES, normalizeStationKey } from "../utils/stationSettings";
 
-/* ─── helpers ──────────────────────────────────────────────── */
-function toFormValue(v, fallback = "") {
-  if (v === null || v === undefined) return fallback;
-  return String(v);
-}
-function toNullableNumber(v) {
-  if (v === "" || v === null || v === undefined) return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-function toNumberWithDefault(v, fallback) {
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const PROTOCOLS = [
+  { value: "TCP_TEXT",   label: "Generic TCP Text",      port: 9001 },
+  { value: "MODBUS_TCP", label: "Modbus TCP",             port: 502  },
+  { value: "SLMP",       label: "SLMP (Mitsubishi)",      port: 5000 },
+];
+
+const DEVICES = ["D", "W", "R", "M", "ZR", "X", "Y"];
+
+const DATA_TYPES = ["INT16", "UINT16", "INT32", "UINT32", "FLOAT32", "BOOL", "STRING"];
+
+const MACHINE_TYPES = [
+  { value: "HPDC",    label: "HPDC / Die Cast Machine" },
+  { value: "CMM",     label: "CMM / Gauge / Measurement" },
+  { value: "ASSEMBLY",label: "Assembly Station"          },
+  { value: "PRESS",   label: "Press / Forming"           },
+  { value: "LASER",   label: "Laser / Marking"           },
+  { value: "LEAK",    label: "Leak Test Machine"         },
+  { value: "VISION",  label: "Vision / Camera System"   },
+  { value: "ROBOT",   label: "Robot / Extractor"         },
+  { value: "OTHER",   label: "Other"                     },
+];
+
+// Default handshake signals — user can modify freely
+const DEFAULT_HANDSHAKE = [
+  { id: "hs1", seq: 1, signal: "Start",          direction: "WRITE", device: "D", register: "", value: "1",  meaning: "Send 1 to start cycle",          category: "control",  required: true  },
+  { id: "hs2", seq: 2, signal: "Block/Interlock", direction: "WRITE", device: "D", register: "", value: "2",  meaning: "Send 2 to block/hold cycle",      category: "control",  required: true  },
+  { id: "hs3", seq: 3, signal: "Running",         direction: "READ",  device: "D", register: "", value: "2",  meaning: "PLC returns 2 when running",       category: "feedback", required: true  },
+  { id: "hs4", seq: 4, signal: "End OK",          direction: "READ",  device: "D", register: "", value: "3",  meaning: "PLC returns 3 on cycle OK",        category: "feedback", required: true  },
+  { id: "hs5", seq: 5, signal: "End NG",          direction: "READ",  device: "D", register: "", value: "4",  meaning: "PLC returns 4 on cycle NG",        category: "feedback", required: true  },
+  { id: "hs6", seq: 6, signal: "Reset",           direction: "WRITE", device: "D", register: "", value: "9",  meaning: "Send 9 to reset machine state",    category: "control",  required: true  },
+  { id: "hs7", seq: 7, signal: "Bypass",          direction: "BOTH",  device: "D", register: "", value: "1",  meaning: "Bypass enable/status register",    category: "bypass",   required: false },
+];
+
+const SIGNAL_CATEGORIES = [
+  { id: "control",   label: "Control",     color: "#185FA5", bg: "#dbeafe" },
+  { id: "feedback",  label: "Feedback",    color: "#15803d", bg: "#dcfce7" },
+  { id: "bypass",    label: "Bypass",      color: "#b45309", bg: "#fef3c7" },
+  { id: "rejection", label: "Rejection",   color: "#dc2626", bg: "#fee2e2" },
+  { id: "quality",   label: "Quality",     color: "#0f766e", bg: "#ccfbf1" },
+  { id: "custom",    label: "Custom",      color: "#7c3aed", bg: "#ede9fe" },
+];
+
+// ─── Design tokens ────────────────────────────────────────────────────────────
+
+const C = {
+  bg:      "#f8fafc",
+  card:    "#ffffff",
+  muted:   "#f1f5f9",
+  border:  "#e2e8f0",
+  text:    "#0f172a",
+  sec:     "#475569",
+  hint:    "#94a3b8",
+  blue:    "#185FA5",
+  blueLt:  "#dbeafe",
+  blueBd:  "#bfdbfe",
+  green:   "#15803d",
+  greenLt: "#dcfce7",
+  greenBd: "#86efac",
+  red:     "#dc2626",
+  redLt:   "#fee2e2",
+  redBd:   "#fca5a5",
+  amber:   "#b45309",
+  amberLt: "#fef3c7",
+  amberBd: "#fcd34d",
+  teal:    "#0f766e",
+  tealLt:  "#ccfbf1",
+  tealBd:  "#5eead4",
+};
+
+const SPC_MODE_FIELDS = {
+  IP_PUSH: {
+    label1: "Source IP / Endpoint",
+    placeholder1: "192.168.1.50",
+    label2: "Port",
+    placeholder2: "5000",
+    type2: "number",
+    label3: "Result key in payload",
+    placeholder3: "RESULT",
+    label4: "NG values",
+    placeholder4: "NG, FAIL, 0",
+    hint3: "JSON key in the payload that contains the result",
+    hint4: "Comma-separated values that mean NG/fail",
+  },
+  PLC_REGISTER: {
+    label1: "PLC IP Address",
+    placeholder1: "192.168.1.100",
+    label2: "Port",
+    placeholder2: "502",
+    type2: "number",
+    label3: "Quality Register",
+    placeholder3: "2065",
+    label4: "NG Register Value",
+    placeholder4: "2",
+    hint3: "PLC register address where quality result is stored",
+    hint4: "Register value that signifies NG (e.g. 2)",
+  },
+  HTTP_API: {
+    label1: "API Endpoint URL",
+    placeholder1: "http://192.168.1.50/api/quality",
+    label2: "Poll Interval (sec)",
+    placeholder2: "5",
+    type2: "number",
+    label3: "JSON Result Key",
+    placeholder3: "RESULT",
+    label4: "NG Values",
+    placeholder4: "NG, FAIL, 0",
+    hint3: "Key name in JSON response containing result",
+    hint4: "Values representing NG/failure",
+  },
+  FOLDER: {
+    label1: "Folder Path",
+    placeholder1: "C:\\QualityData",
+    label2: "File Extension",
+    placeholder2: ".json",
+    type2: "text",
+    label3: "Result key / pattern",
+    placeholder3: "RESULT",
+    label4: "NG Values",
+    placeholder4: "NG, FAIL, 0",
+    hint3: "Result key inside the written files",
+    hint4: "Values representing NG/failure",
+  },
+};
+
+// ─── Small helpers ────────────────────────────────────────────────────────────
+
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+const toNum = (v, fallback = null) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
-}
-function normalizeProtocol(value, fallback = "TCP_TEXT") {
-  const n = String(value || "").trim().toUpperCase();
-  if (!n) return fallback;
-  if (n === "MODBUS") return "MODBUS_TCP";
-  if (["TCP", "TEXT"].includes(n)) return "TCP_TEXT";
-  return n;
-}
-function normalizeDirectionLabel(direction) {
-  const v = String(direction || "").trim().toUpperCase();
-  if (v === "PC -> PLC" || v === "PC_TO_PLC" || v === "PC->PLC" || v === "WRITE") return "WRITE  SW->PLC";
-  if (v === "PLC -> PC" || v === "PLC_TO_PC" || v === "PLC->PC" || v === "READ") return "READ   PLC->SW";
-  if (v === "BIDIRECTIONAL" || v === "BOTH") return "BOTH   PLC<->SW";
-  return "READ   PLC->SW";
-}
-function toRegNumberText(value) {
-  if (value === null || value === undefined || value === "") return "";
-  const n = Number(value);
-  return Number.isFinite(n) ? String(Math.trunc(n)) : "";
-}
-function escapeLine(value) {
-  return String(value || "").replace(/\r?\n/g, " ").trim();
-}
-function csvEscape(value) {
-  const text = String(value ?? "");
-  if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
-  return text;
-}
-function createHandshakeRow(overrides = {}) {
-  return {
-    id: `HS_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    signal: "", direction: "READ", register: "", value: "", meaning: "",
-    required: true, category: "handshake",
-    ...overrides,
-  };
-}
-
-/* ─── Signal categories ─────────────────────────────────────── */
-const SIGNAL_CATEGORIES = [
-  { id: "handshake", label: "Handshake", color: "blue", desc: "Core PLC cycle control signals" },
-  { id: "bypass", label: "Bypass", color: "amber", desc: "Bypass/interlock override registers" },
-  { id: "rejection", label: "Rejection Bin", color: "red", desc: "Rejection bin open/close/status" },
-  { id: "result", label: "Result / Quality", color: "green", desc: "Quality result and ACK registers" },
-  { id: "live", label: "Live Data", color: "teal", desc: "Monitoring-only registers" },
-];
-
-function buildDefaultHandshakeRows(cfg = {}) {
-  return [
-    createHandshakeRow({ signal: "Start", direction: "WRITE", register: toFormValue(cfg.startRegister, ""), value: toFormValue(cfg.startValue, "1"), meaning: "Start machine cycle", required: true, category: "handshake" }),
-    createHandshakeRow({ signal: "Block / Interlock", direction: "WRITE", register: toFormValue(cfg.blockRegister, ""), value: toFormValue(cfg.blockValue, "2"), meaning: "Block cycle on NG / duplicate / interlock", required: true, category: "handshake" }),
-    createHandshakeRow({ signal: "Running", direction: "READ", register: toFormValue(cfg.runningRegister, ""), value: toFormValue(cfg.startedValue, "2"), meaning: "Machine is running", required: true, category: "handshake" }),
-    createHandshakeRow({ signal: "End OK", direction: "READ", register: toFormValue(cfg.endOkRegister, ""), value: toFormValue(cfg.endOkValue, "3"), meaning: "Cycle completed OK", required: true, category: "handshake" }),
-    createHandshakeRow({ signal: "End NG", direction: "READ", register: toFormValue(cfg.endNgRegister, ""), value: toFormValue(cfg.endNgValue, "4"), meaning: "Cycle completed NG", required: true, category: "handshake" }),
-    createHandshakeRow({ signal: "Reset", direction: "WRITE", register: toFormValue(cfg.resetRegister, ""), value: toFormValue(cfg.resetValue, "9"), meaning: "Reset/clear machine state", required: true, category: "handshake" }),
-    createHandshakeRow({ signal: "Bypass", direction: "BOTH", register: toFormValue(cfg.bypassRegister, ""), value: "1", meaning: "Bypass Enable (Write) and Status (Read)", required: false, category: "bypass" }),
-    createHandshakeRow({ signal: "Rejection Bin", direction: "WRITE", register: "", value: "1", meaning: "Write 1 to open rejection bin", required: false, category: "rejection" }),
-  ];
-}
-
-function normalizeHandshakeRows(rows, cfg = {}) {
-  if (!Array.isArray(rows)) return buildDefaultHandshakeRows(cfg);
-  if (rows.length === 0) return [];
-  return rows.map((row) => createHandshakeRow({
-    id: row?.id || row?.key || undefined,
-    signal: toFormValue(row?.signal ?? row?.label, ""),
-    direction: String(row?.direction || "READ").toUpperCase(),
-    register: toFormValue(row?.register, ""),
-    value: toFormValue(row?.value, ""),
-    meaning: toFormValue(row?.meaning ?? row?.purpose ?? row?.description, ""),
-    required: row?.required === undefined ? true : Boolean(row.required),
-    category: row?.category || "handshake",
-  }));
-}
-
-function getHandshakeSignalGroup(signal) {
-  const normalized = String(signal || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
-  if (normalized === "START") return "START_GROUP";
-  if (normalized === "BLOCK_INTERLOCK") return "BLOCK_GROUP";
-  if (normalized === "RUNNING") return "RUNNING_GROUP";
-  if (normalized === "END_OK") return "END_OK_GROUP";
-  if (normalized === "END_NG") return "END_NG_GROUP";
-  if (normalized === "RESET") return "RESET_GROUP";
-  if (["CONFIRMATION", "CONFIRM", "ACK", "ACKNOWLEDGE", "ACKNOWLEDGEMENT"].includes(normalized)) return "CONFIRMATION_GROUP";
-  if (["BYPASS_ENABLE", "BYPASS", "BYPASS_STATUS"].includes(normalized)) return "BYPASS_GROUP";
-  if (["REJECTION_BIN", "REJECTION_BIN_OPEN", "REJECTION"].includes(normalized)) return "REJECTION_GROUP";
-  if (["REJECTION_BIN_STATUS", "BIN_FULL"].includes(normalized)) return "REJECTION_GROUP";
-  return `CUSTOM_${normalized || "UNNAMED"}`;
-}
-
-function normalizeStandardHandshakeSignalKey(signal) {
-  const normalized = String(signal || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
-  if (normalized === "START") return "START";
-  if (["BLOCK", "BLOCK_INTERLOCK", "INTERLOCK"].includes(normalized)) return "BLOCK_INTERLOCK";
-  if (["RUNNING", "STARTED"].includes(normalized)) return "RUNNING";
-  if (["END_OK", "OK_END", "ENDED_OK"].includes(normalized)) return "END_OK";
-  if (["END_NG", "NG_END", "ENDED_NG"].includes(normalized)) return "END_NG";
-  if (normalized === "RESET") return "RESET";
-  if (["CONFIRMATION", "CONFIRM", "ACK", "ACKNOWLEDGE"].includes(normalized)) return "CONFIRMATION";
-  return null;
-}
-
-const FAMILIES = {
-  CONTROL: ["START", "INTERLOCK", "BLOCK_INTERLOCK", "START_SENT", "WAITING_ACK", "START REGISTER", "BLOCK REGISTER", "INTERLOCK REGISTER"],
-  FEEDBACK: ["RUNNING", "END_OK", "END_NG", "COMPLETE", "WAITING_END", "RUNNING REGISTER", "END OK REGISTER", "END NG REGISTER", "COMPLETE REGISTER"],
-  BYPASS: ["BYPASS", "BYPASS ENABLE", "BYPASS STATUS", "BYPASS REGISTER"],
-  REJECTION: ["REJECTION BIN", "REJECTION BIN STATUS", "REJECTION BIN REGISTER", "BIN OPEN", "BIN STATUS"],
-  RESET: ["RESET", "CLEAR", "RESET REGISTER", "RESET SIGNAL"]
 };
 
-const getFamily = (label) => {
-  const s = String(label || "").toUpperCase().replace(/[^A-Z]/g, "");
-  if (s.includes("START")) return "CONTROL";
-  if (s.includes("BLOCK") || s.includes("INTERLOCK") || s.includes("HOLD")) return "CONTROL";
-  if (s.includes("RUNNING") || s.includes("COMPLETE") || s.includes("STARTED") || s.includes("PROGRESS")) return "FEEDBACK";
-  if (s.includes("ENDOK") || s.includes("ENDEDOK") || s.includes("FINISHOK")) return "FEEDBACK";
-  if (s.includes("ENDNG") || s.includes("ENDEDNG") || s.includes("FINISHNG")) return "FEEDBACK";
-  if (s.includes("BYPASS")) return "BYPASS";
-  if (s.includes("REJECTION") || s.includes("BIN") || s.includes("SCRAP")) return "REJECTION";
-  if (s.includes("RESET") || s.includes("CLEAR")) return "RESET";
-  return `RAW_${s}`;
-};
+const catColor = (cat) =>
+  SIGNAL_CATEGORIES.find((c) => c.id === cat) || SIGNAL_CATEGORIES[5];
 
-const isCompatible = (labelA, labelB) => {
-  if (labelA === labelB) return true;
-  const famA = getFamily(labelA);
-  const famB = getFamily(labelB);
-  if (famA.startsWith("RAW_") || famB.startsWith("RAW_")) return false;
-  return famA === famB;
-};
-
-const STANDARD_HANDSHAKE_SIGNAL_META = {
-  START: { signal: "Start", direction: "WRITE", registerKey: "startRegister", valueKey: "startValue", defaultValue: "1", defaultMeaning: "Start machine cycle" },
-  BLOCK_INTERLOCK: { signal: "Block / Interlock", direction: "WRITE", registerKey: "blockRegister", valueKey: "blockValue", defaultValue: "2", defaultMeaning: "Block cycle on NG / duplicate / interlock" },
-  RUNNING: { signal: "Running", direction: "READ", registerKey: "runningRegister", valueKey: "startedValue", defaultValue: "2", defaultMeaning: "Machine is running" },
-  END_OK: { signal: "End OK", direction: "READ", registerKey: "endOkRegister", valueKey: "endOkValue", defaultValue: "3", defaultMeaning: "Cycle completed OK" },
-  END_NG: { signal: "End NG", direction: "READ", registerKey: "endNgRegister", valueKey: "endNgValue", defaultValue: "4", defaultMeaning: "Cycle completed NG" },
-  RESET: { signal: "Reset", direction: "WRITE", registerKey: "resetRegister", valueKey: "resetValue", defaultValue: "9", defaultMeaning: "Reset/clear machine state" },
-  CONFIRMATION: { signal: "Confirmation", direction: "BOTH", registerKey: "heartbeatRegister", valueKey: null, defaultValue: "1", defaultMeaning: "Confirmation" },
-  HEARTBEAT: { signal: "Heartbeat", direction: "BOTH", registerKey: null, valueKey: null, defaultValue: "1", defaultMeaning: "Heartbeat" },
-  BYPASS: { signal: "Bypass", direction: "BOTH", registerKey: "bypassRegister", valueKey: null, defaultValue: "1", defaultMeaning: "Bypass Enable (Write) & Status (Read)" },
-  REJECTION_BIN: { signal: "Rejection Bin", direction: "WRITE", registerKey: null, valueKey: "1", defaultValue: "1", defaultMeaning: "Open rejection bin" },
-  REJECTION_BIN_STATUS: { signal: "Rejection Bin Status", direction: "READ", registerKey: null, valueKey: "1", defaultValue: "1", defaultMeaning: "Rejection bin status" },
-};
-const REQUIRED_HANDSHAKE_KEYS = ["START", "RUNNING", "END_OK", "END_NG", "RESET"];
-
-function syncStandardHandshakeRowsWithCore(rows, cfg = {}) {
-  const nextRows = normalizeHandshakeRows(rows, cfg);
-  return nextRows.map((row) => {
-    const key = normalizeStandardHandshakeSignalKey(row?.signal);
-    if (!key) return row;
-    const meta = STANDARD_HANDSHAKE_SIGNAL_META[key];
-    if (!meta) return row;
-    const synced = { ...row };
-    if (meta.registerKey) synced.register = toFormValue(cfg?.[meta.registerKey], row?.register ?? "");
-    if (meta.valueKey) synced.value = toFormValue(cfg?.[meta.valueKey], row?.value ?? meta.defaultValue ?? "");
-    return createHandshakeRow(synced);
-  });
-}
-
-function applyStandardHandshakeRowToCoreCfg(cfg = {}, row = {}) {
-  const key = normalizeStandardHandshakeSignalKey(row?.signal);
-  if (!key) return { ...cfg };
-  const meta = STANDARD_HANDSHAKE_SIGNAL_META[key];
-  if (!meta) return { ...cfg };
-  const nextCfg = { ...cfg };
-  if (meta.registerKey) nextCfg[meta.registerKey] = toFormValue(row?.register, nextCfg?.[meta.registerKey] ?? "");
-  if (meta.valueKey) nextCfg[meta.valueKey] = toFormValue(row?.value, nextCfg?.[meta.valueKey] ?? meta.defaultValue ?? "");
-  return nextCfg;
-}
-
-function getHandshakeRegisterEntries(cfg = {}) {
-  return normalizeHandshakeRows(cfg?.handshakeMap, cfg).map((row, index) => ({
-    register: toWholeNumberOrNull(row?.register),
-    direction: String(row?.direction || "READ").trim().toUpperCase(),
-    value: toWholeNumberOrNull(row?.value),
-    signal: String(row?.signal || "").trim(),
-    group: getHandshakeSignalGroup(row?.signal),
-    label: `Handshake ${String(row?.signal || `Row ${index + 1}`).trim() || `Row ${index + 1}`}`,
-  }));
-}
-
-function getHandshakeOccupancyEntries(cfg = {}) {
-  const entries = [];
-  const seen = new Set();
-  const rows = getHandshakeRegisterEntries(cfg);
-  for (const row of rows) {
-    if (row.register === null) continue;
-    const token = `${row.group}:${row.register}`;
-    if (seen.has(token)) continue;
-    seen.add(token);
-    entries.push({ register: row.register, label: row.label });
-  }
-  return entries;
-}
-
-const SLMP_DOUBLE_WORD_KEYS = new Set(["partRegister", "stationRegister"]);
-
-function toWholeNumberOrNull(value) {
-  if (value === null || value === undefined || value === "") return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.trunc(n) : null;
-}
-function getRegisterSpanWords(registerKey, protocol) {
-  if (String(protocol || "").toUpperCase() !== "SLMP") return 1;
-  return SLMP_DOUBLE_WORD_KEYS.has(String(registerKey || "")) ? 2 : 1;
-}
-function expandRegisterWindow(registerNo, registerKey, protocol) {
-  const base = toWholeNumberOrNull(registerNo);
-  if (base === null) return [];
-  const width = getRegisterSpanWords(registerKey, protocol);
-  return Array.from({ length: width }, (_, index) => base + index);
-}
-function getConfigOccupiedRegisters(cfg = {}, protocol = "MODBUS_TCP", excludeKey = null) {
-  const occupied = new Set();
-  for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
-    if (excludeKey && field.key === excludeKey) continue;
-    const words = expandRegisterWindow(cfg?.[field.key], field.key, protocol);
-    words.forEach((w) => occupied.add(w));
-  }
-  return occupied;
-}
-function getAuxiliaryRegisterEntries(source = {}) {
-  const entries = [];
-  const signalRows = Array.isArray(source?.plcSignalMap) ? source.plcSignalMap : [];
-  signalRows.forEach((row, index) => {
-    const register = toWholeNumberOrNull(row?.register);
-    if (register === null) return;
-    const label = String(row?.label || row?.key || `Live Register ${index + 1}`).trim();
-    entries.push({ register, label: label || `Live Register ${index + 1}` });
-  });
-  const spc = source?.spcConfig || {};
-  const isSpcPlcMode = Boolean(spc?.enabled) && String(spc?.mode || "").toUpperCase() === "PLC_REGISTER";
-  if (isSpcPlcMode) {
-    const resultRegister = toWholeNumberOrNull(spc?.plcResultRegister);
-    if (resultRegister !== null) entries.push({ register: resultRegister, label: "SPC Result Register" });
-    const ackRegister = toWholeNumberOrNull(spc?.plcAckRegister);
-    if (ackRegister !== null) entries.push({ register: ackRegister, label: "SPC ACK Register" });
-  }
-  return entries;
-}
-function getMachineOccupiedRegisterWords(machine = {}, protocol = "MODBUS_TCP") {
-  const occupied = new Map();
-  const cfg = machine?.plcConfig || {};
-  for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
-    const words = expandRegisterWindow(cfg?.[field.key], field.key, protocol);
-    words.forEach((word) => { if (!occupied.has(word)) occupied.set(word, field.label); });
-  }
-  getAuxiliaryRegisterEntries(machine).forEach((entry) => {
-    expandRegisterWindow(entry.register, null, protocol).forEach((word) => { if (!occupied.has(word)) occupied.set(word, entry.label); });
-  });
-  getHandshakeOccupancyEntries(cfg).forEach((entry) => {
-    expandRegisterWindow(entry.register, null, protocol).forEach((word) => { if (!occupied.has(word)) occupied.set(word, entry.label); });
-  });
-  return occupied;
-}
-
-function normalizeSpcConfigForForm(raw = {}) {
-  const source = raw && typeof raw === "object" ? raw : {};
-  const plcOkValues = Array.isArray(source.plcResultOkValues) ? source.plcResultOkValues : String(source.plcResultOkValues || "").split(/[,\n;|]/).map((e) => e.trim()).filter(Boolean);
-  const plcNgValues = Array.isArray(source.plcResultNgValues) ? source.plcResultNgValues : String(source.plcResultNgValues || "").split(/[,\n;|]/).map((e) => e.trim()).filter(Boolean);
-  const qualityKeys = Array.isArray(source.qualityPayloadKeys) ? source.qualityPayloadKeys : String(source.qualityPayloadKeys || "").split(/[,\n;|]/).map((e) => e.trim()).filter(Boolean);
-  const ngValues = Array.isArray(source.payloadResultNgValues) ? source.payloadResultNgValues : String(source.payloadResultNgValues || "").split(/[,\n;|]/).map((e) => e.trim()).filter(Boolean);
-  
-  return {
-    enabled: source.enabled === true,
-    mode: String(source.mode || "IP_PUSH").toUpperCase(),
-    activeProtocols: Array.isArray(source.activeProtocols) ? source.activeProtocols : [String(source.mode || "IP_PUSH").toUpperCase()],
-    priority: Array.isArray(source.priority) ? source.priority : ["HTTP_API", "PLC_REGISTER", "IP_PUSH", "FOLDER", "FTP_FILE"],
-    
-    // Core acquisition settings
-    sourceIp: String(source.sourceIp || ""), 
-    sourcePort: toFormValue(source.sourcePort, ""),
-    payloadResultKey: String(source.payloadResultKey || "RESULT"),
-    payloadResultNgValues: ngValues.join(", "),
-    qualityPayloadKeys: qualityKeys.join(", "),
-
-    // Reliability & Parser (Requirement 2 & 5)
-    retryCount: toFormValue(source.retryCount ?? 3, "3"),
-    retryDelayMs: toFormValue(source.retryDelayMs ?? 1000, "1000"),
-    timeoutMs: toFormValue(source.timeoutMs ?? 5000, "5000"),
-    parserType: String(source.parserType || "JSON").toUpperCase(),
-
-    // Dynamic Register Mapping (Requirement 21)
-    dynamicRegisters: Array.isArray(source.dynamicRegisters) ? source.dynamicRegisters : [],
-
-    // Folder Watcher Config (Requirement 1)
-    folderConfig: {
-      path: String(source.folderConfig?.path || ""),
-      pattern: String(source.folderConfig?.pattern || "*.*"),
-      parser: String(source.folderConfig?.parser || "JSON").toUpperCase(),
-      deleteAfterRead: source.folderConfig?.deleteAfterRead !== false
-    },
-
-    // Legacy/Standard fields
-    plcResultRegister: toFormValue(source.plcResultRegister ?? source.resultRegister, ""),
-    plcResultDevice: String(source.plcResultDevice || source.resultDevice || "D").toUpperCase(),
-    plcResultOkValues: plcOkValues.join(", "), 
-    plcResultNgValues: plcNgValues.join(", "),
-    plcAckEnabled: source.plcAckEnabled !== false,
-    plcAckRegister: toFormValue(source.plcAckRegister ?? source.ackRegister, ""),
-    plcAckDevice: String(source.plcAckDevice || source.ackDevice || "D").toUpperCase(),
-    plcAckOkValue: toFormValue(source.plcAckOkValue ?? source.ackOkValue ?? "101", "101"),
-    plcAckNgValue: toFormValue(source.plcAckNgValue ?? source.ackNgValue ?? "102", "102"),
-    plcAckErrorValue: toFormValue(source.plcAckErrorValue ?? source.ackErrorValue ?? "199", "199"),
-  };
-}
-
-function createEmptyForm() {
-  const plcConfig = {
-    rangeId: "", startRegister: "", statusRegister: "", blockRegister: "", runningRegister: "",
-    endOkRegister: "", endNgRegister: "", partRegister: "", stationRegister: "", resetRegister: "",
-    heartbeatRegister: "", bypassRegister: "", startValue: "1", startedValue: "2",
-    endOkValue: "3", endNgValue: "4", blockValue: "2", resetValue: "9",
-  };
-  return {
-    machineName: "", lineName: "", sequenceNo: "", operationNo: "", cycleTime: "0",
-    loadingTime: "0", dailyTargetQty: "0", plcIp: "", plcPort: "", plcProtocol: "TCP_TEXT",
-    plcRangeId: "", plcSlmpDevice: "D", plcSlmpFrameMode: "AUTO", status: "ACTIVE",
-    plcConfig: { ...plcConfig, handshakeMap: buildDefaultHandshakeRows(plcConfig) },
-    plcSignalMap: [], spcConfig: normalizeSpcConfigForForm({}),
-  };
-}
-
-function buildFormFromMachine(m) {
-  const cfg = m.plcConfig || {};
-  const plcRangeId = cfg.rangeId ?? m.plcRangeId ?? "";
-  const spcConfig = normalizeSpcConfigForForm(m.spcConfig || m.plcConfig?.spcConfig || {});
-  const baseCfg = {
-    startRegister: cfg.startRegister ?? m.plcStartRegister,
-    statusRegister: cfg.statusRegister ?? cfg.runningRegister ?? m.plcStatusRegister ?? m.plcRunningRegister,
-    blockRegister: cfg.blockRegister ?? m.plcBlockRegister,
-    runningRegister: cfg.runningRegister ?? m.plcRunningRegister,
-    endOkRegister: cfg.endOkRegister ?? m.plcEndOkRegister,
-    endNgRegister: cfg.endNgRegister ?? m.plcEndNgRegister,
-    resetRegister: cfg.resetRegister ?? m.plcResetRegister,
-    heartbeatRegister: cfg.heartbeatRegister ?? m.plcHeartbeatRegister,
-    bypassRegister: cfg.bypassRegister ?? m.plcBypassRegister,
-    startValue: cfg.startValue ?? m.plcStartValue,
-    startedValue: cfg.startedValue ?? m.plcStartedValue,
-    endOkValue: cfg.endOkValue ?? m.plcEndOkValue,
-    endNgValue: cfg.endNgValue ?? m.plcEndNgValue,
-    blockValue: cfg.blockValue ?? m.plcBlockValue,
-    resetValue: cfg.resetValue ?? m.plcResetValue,
-  };
-  const syncedHandshakeMap = syncStandardHandshakeRowsWithCore(
-    normalizeHandshakeRows(cfg.handshakeMap, baseCfg), baseCfg
-  );
-  return {
-    machineName: m.machineName || "", lineName: m.lineName || "",
-    sequenceNo: toFormValue(m.sequenceNo, ""), operationNo: m.operationNo || "",
-    cycleTime: toFormValue(m.cycleTime, "0"), loadingTime: toFormValue(m.loadingTime, "0"),
-    dailyTargetQty: toFormValue(m.dailyTargetQty, "0"),
-    plcIp: m.plcIp || "", plcPort: toFormValue(m.plcPort, ""),
-    plcProtocol: m.plcProtocol || "TCP_TEXT", plcRangeId: toFormValue(plcRangeId, ""),
-    plcSlmpDevice: m.plcSlmpDevice || "D",
-    plcSlmpFrameMode: m.plcSlmpFrameMode || m.plcConfig?.slmpFrameMode || "AUTO",
-    status: m.status || "ACTIVE",
-    plcConfig: {
-      rangeId: toFormValue(plcRangeId, ""),
-      startRegister: toFormValue(cfg.startRegister ?? m.plcStartRegister, ""),
-      blockRegister: toFormValue(cfg.blockRegister ?? m.plcBlockRegister, ""),
-      statusRegister: toFormValue(cfg.statusRegister ?? cfg.runningRegister ?? m.plcStatusRegister ?? m.plcRunningRegister, ""),
-      runningRegister: toFormValue(cfg.runningRegister ?? m.plcRunningRegister, ""),
-      endOkRegister: toFormValue(cfg.endOkRegister ?? m.plcEndOkRegister, ""),
-      endNgRegister: toFormValue(cfg.endNgRegister ?? m.plcEndNgRegister, ""),
-      partRegister: toFormValue(cfg.partRegister ?? m.plcPartRegister, ""),
-      stationRegister: toFormValue(cfg.stationRegister ?? m.plcStationRegister, ""),
-      resetRegister: toFormValue(cfg.resetRegister ?? m.plcResetRegister, ""),
-      heartbeatRegister: toFormValue(cfg.heartbeatRegister ?? m.plcHeartbeatRegister, ""),
-      bypassRegister: toFormValue(cfg.bypassRegister ?? m.plcBypassRegister, ""),
-      startValue: toFormValue(cfg.startValue ?? m.plcStartValue, "1"),
-      startedValue: toFormValue(cfg.startedValue ?? m.plcStartedValue, "2"),
-      endOkValue: toFormValue(cfg.endOkValue ?? m.plcEndOkValue, "3"),
-      endNgValue: toFormValue(cfg.endNgValue ?? m.plcEndNgValue, "4"),
-      blockValue: toFormValue(cfg.blockValue ?? m.plcBlockValue, "2"),
-      resetValue: toFormValue(cfg.resetValue ?? m.plcResetValue, "9"),
-      handshakeMap: syncedHandshakeMap,
-    },
-    plcSignalMap: m.plcSignalMap || [], spcConfig,
-  };
-}
-
-function toSubmitPayload(f) {
-  const plcIp = String(f.plcIp || "").trim();
-  const plcPort = toNullableNumber(f.plcPort);
-  const plcRangeId = toNullableNumber(f.plcRangeId);
-  const cfg = { ...(f.plcConfig || {}) };
-  const normalizedRows = normalizeHandshakeRows(cfg.handshakeMap, cfg);
-  let mergedCfg = { ...cfg };
-  for (const row of normalizedRows) {
-    mergedCfg = applyStandardHandshakeRowToCoreCfg(mergedCfg, row);
-  }
-  const syncedRows = syncStandardHandshakeRowsWithCore(normalizedRows, mergedCfg);
-  const plcConfig = {
-    rangeId: plcRangeId,
-    startRegister: toNullableNumber(mergedCfg.startRegister),
-    statusRegister: toNullableNumber(mergedCfg.runningRegister ?? mergedCfg.statusRegister),
-    blockRegister: toNullableNumber(mergedCfg.blockRegister),
-    runningRegister: toNullableNumber(mergedCfg.runningRegister),
-    endOkRegister: toNullableNumber(mergedCfg.endOkRegister),
-    endNgRegister: toNullableNumber(mergedCfg.endNgRegister),
-    partRegister: toNullableNumber(mergedCfg.partRegister),
-    stationRegister: toNullableNumber(mergedCfg.stationRegister),
-    resetRegister: toNullableNumber(mergedCfg.resetRegister),
-    heartbeatRegister: toNullableNumber(mergedCfg.heartbeatRegister),
-    bypassRegister: toNullableNumber(mergedCfg.bypassRegister),
-    startValue: toNumberWithDefault(mergedCfg.startValue, 1),
-    startedValue: toNumberWithDefault(mergedCfg.startedValue, 2),
-    endOkValue: toNumberWithDefault(mergedCfg.endOkValue, 3),
-    endNgValue: toNumberWithDefault(mergedCfg.endNgValue, 4),
-    blockValue: toNumberWithDefault(mergedCfg.blockValue, 2),
-    resetValue: toNumberWithDefault(mergedCfg.resetValue, 9),
-    handshakeMap: syncedRows.map((row) => ({
-      id: row.id || null,
-      signal: String(row.signal || "").trim(),
-      direction: String(row.direction || "READ").trim().toUpperCase(),
-      register: toNullableNumber(row.register),
-      value: toNullableNumber(row.value),
-      meaning: String(row.meaning || "").trim(),
-      required: row.required !== false,
-      category: row.category || "handshake",
-    })).filter((row) => row.signal || row.register !== null),
-    slmpFrameMode: String(f.plcSlmpFrameMode || "AUTO").trim().toUpperCase(),
-  };
-  const rawSpc = f.spcConfig || {};
-  const payloadResultNgValues = String(rawSpc.payloadResultNgValues || "").split(/[,\n;|]/).map((e) => e.trim().toUpperCase()).filter(Boolean).slice(0, 20);
-  const qualityPayloadKeys = String(rawSpc.qualityPayloadKeys || "").split(/[,\n;|]/).map((e) => e.trim()).filter(Boolean).slice(0, 40);
-  const spcConfig = {
-    enabled: rawSpc.enabled === true,
-    mode: String(rawSpc.mode || "IP_PUSH").trim().toUpperCase(),
-    activeProtocols: rawSpc.activeProtocols || [String(rawSpc.mode || "IP_PUSH").toUpperCase()],
-    priority: rawSpc.priority || ["HTTP_API", "PLC_REGISTER", "IP_PUSH", "FOLDER", "FTP_FILE"],
-    
-    sourceIp: String(rawSpc.sourceIp || "").trim() || null,
-    sourcePort: toNullableNumber(rawSpc.sourcePort),
-    payloadResultKey: String(rawSpc.payloadResultKey || "RESULT").trim() || "RESULT",
-    payloadResultNgValues, 
-    qualityPayloadKeys,
-
-    // Reliability & Parser
-    retryCount: toNullableNumber(rawSpc.retryCount) ?? 3,
-    retryDelayMs: toNullableNumber(rawSpc.retryDelayMs) ?? 1000,
-    timeoutMs: toNullableNumber(rawSpc.timeoutMs) ?? 5000,
-    parserType: rawSpc.parserType || "JSON",
-
-    // Dynamic Registers
-    dynamicRegisters: (rawSpc.dynamicRegisters || []).map(r => ({
-      name: String(r.name || "").trim(),
-      register: toNullableNumber(r.register),
-      device: String(r.device || "D").toUpperCase(),
-      type: String(r.type || "INT16").toUpperCase(),
-      scale: parseFloat(r.scale) || 1.0,
-      unit: String(r.unit || "").trim()
-    })).filter(r => r.name && r.register !== null),
-
-    // Folder Watcher
-    folderConfig: {
-      path: String(rawSpc.folderConfig?.path || "").trim(),
-      pattern: String(rawSpc.folderConfig?.pattern || "*.*").trim(),
-      parser: String(rawSpc.folderConfig?.parser || "JSON").toUpperCase(),
-      deleteAfterRead: rawSpc.folderConfig?.deleteAfterRead !== false
-    },
-
-    plcResultRegister: toNullableNumber(rawSpc.plcResultRegister),
-    plcResultDevice: String(rawSpc.plcResultDevice || "D").trim().toUpperCase() || "D",
-    plcResultOkValues: String(rawSpc.plcResultOkValues || "").split(/[,\n;|]/).map((e) => e.trim().toUpperCase()).filter(Boolean).slice(0, 20),
-    plcResultNgValues: String(rawSpc.plcResultNgValues || "").split(/[,\n;|]/).map((e) => e.trim().toUpperCase()).filter(Boolean).slice(0, 20),
-    plcAckEnabled: rawSpc.enabled === true,
-    plcAckRegister: toNullableNumber(rawSpc.plcAckRegister),
-    plcAckDevice: String(rawSpc.plcAckDevice || "D").trim().toUpperCase() || "D",
-    plcAckOkValue: toNumberWithDefault(rawSpc.plcAckOkValue, 101),
-    plcAckNgValue: toNumberWithDefault(rawSpc.plcAckNgValue, 102),
-    plcAckErrorValue: toNumberWithDefault(rawSpc.plcAckErrorValue, 199),
-  };
-  return {
-    machineName: String(f.machineName || "").trim(), lineName: String(f.lineName || "").trim(),
-    sequenceNo: toNullableNumber(f.sequenceNo), operationNo: String(f.operationNo || "").trim().toUpperCase(),
-    cycleTime: Math.max(toNullableNumber(f.cycleTime) ?? 0, 0),
-    loadingTime: Math.max(toNullableNumber(f.loadingTime) ?? 0, 0),
-    dailyTargetQty: Math.max(toNullableNumber(f.dailyTargetQty) ?? 0, 0),
-    plcIp, plcPort, plcProtocol: f.plcProtocol, plcRangeId,
-    plcStatusRegister: plcConfig.statusRegister ?? plcConfig.runningRegister,
-    plcConfig, plcBlockValue: plcConfig.blockValue,
-    plcSlmpDevice: String(f.plcSlmpDevice || "").trim().toUpperCase() || null,
-    plcSlmpFrameMode: plcConfig.slmpFrameMode,
-    status: f.status || "ACTIVE",
-    machineIp: plcIp, machinePort: plcPort,
-    plcSignalMap: f.plcSignalMap || [], spcConfig,
-  };
-}
-
-const FORM_TABS = [
-  { id: "general", label: "Identity", icon: Layout },
-  { id: "network", label: "Network & PLC", icon: Network },
-  { id: "tuning", label: "Mapping & Tuning", icon: Settings },
-  { id: "live", label: "Station Control", icon: Zap },
-];
-
-const HANDSHAKE_GROUP_CORE_KEY_MAP = {
-  START_GROUP: "startRegister", BLOCK_GROUP: "blockRegister", RUNNING_GROUP: "runningRegister",
-  END_OK_GROUP: "endOkRegister", END_NG_GROUP: "endNgRegister", RESET_GROUP: "resetRegister",
-};
-
-/* ─── Design tokens ─────────────────────────────────────────── */
-const T = {
-  navy: "#0f172a", navyMid: "#1e293b", navyLight: "#334155",
-  slate: "#475569", slateLight: "#64748b",
-  border: "#cbd5e1", borderLight: "#e2e8f0",
-  bg: "#f8fafc", bgCard: "#ffffff", bgMuted: "#f1f5f9",
-  text: "#0f172a", textSec: "#334155", textMuted: "#64748b",
-  blue: "#1d4ed8", blueMid: "#2563eb", blueLight: "#dbeafe", blueBorder: "#bfdbfe",
-  green: "#15803d", greenLight: "#dcfce7", greenBorder: "#86efac",
-  red: "#dc2626", redLight: "#fee2e2", redBorder: "#fca5a5",
-  teal: "#0f766e", tealLight: "#ccfbf1", tealBorder: "#5eead4",
-  amber: "#b45309", amberLight: "#fef3c7", amberBorder: "#fcd34d",
-  purple: "#7c3aed", purpleLight: "#ede9fe", purpleBorder: "#c4b5fd",
-};
-
-const CAT_COLORS = {
-  handshake: { bg: T.blueLight, border: T.blueBorder, text: T.blue, label: "Handshake" },
-  bypass: { bg: T.amberLight, border: T.amberBorder, text: T.amber, label: "Bypass" },
-  rejection: { bg: T.redLight, border: T.redBorder, text: T.red, label: "Rejection Bin" },
-  result: { bg: T.greenLight, border: T.greenBorder, text: T.green, label: "Result/Quality" },
-  live: { bg: T.tealLight, border: T.tealBorder, text: T.teal, label: "Live Data" },
-};
+// ─── Atomic input components ──────────────────────────────────────────────────
 
 const inp = {
-  width: "100%", boxSizing: "border-box", height: 36, padding: "0 10px",
-  background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: 7,
-  fontSize: 13, color: T.text, outline: "none", transition: "border-color .15s, box-shadow .15s",
+  width: "100%", boxSizing: "border-box", height: 34, padding: "0 10px",
+  background: C.card, border: `1px solid ${C.border}`, borderRadius: 6,
+  fontSize: 12, color: C.text, outline: "none",
+  transition: "border-color .15s, box-shadow .15s",
 };
 
-const Label = ({ children, required }) => (
-  <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: T.textMuted, marginBottom: 5, display: "flex", alignItems: "center", gap: 3 }}>
-    {children}{required && <span style={{ color: T.red }}>*</span>}
-  </p>
-);
-
-const FieldInput = ({ value, onChange, placeholder, type = "text", mono, readOnly, style: sx = {}, ...rest }) => {
-  const [focus, setFocus] = useState(false);
+function FInput({ value, onChange, placeholder, type = "text", mono, readOnly, style: sx = {}, ...rest }) {
+  const [f, setF] = useState(false);
   return (
-    <input type={type} value={value} onChange={onChange} placeholder={placeholder} readOnly={readOnly}
-      style={{ ...inp, fontFamily: mono ? "ui-monospace, monospace" : "inherit", background: readOnly ? T.bgMuted : T.bgCard, boxShadow: focus ? `0 0 0 3px ${T.blueLight}` : "none", borderColor: focus ? T.blueMid : T.border, ...sx }}
-      onFocus={() => setFocus(true)} onBlur={() => setFocus(false)} {...rest} />
+    <input
+      type={type} value={value ?? ""} onChange={onChange}
+      placeholder={placeholder} readOnly={readOnly}
+      style={{
+        ...inp,
+        fontFamily: mono ? "ui-monospace,monospace" : "inherit",
+        background: readOnly ? C.muted : C.card,
+        borderColor: f ? C.blue : C.border,
+        boxShadow: f ? `0 0 0 3px ${C.blueLt}` : "none",
+        ...sx,
+      }}
+      onFocus={() => setF(true)} onBlur={() => setF(false)}
+      {...rest}
+    />
   );
-};
+}
 
-const FieldSelect = ({ value, onChange, children, mono, style: sx = {} }) => {
-  const [focus, setFocus] = useState(false);
+function FSelect({ value, onChange, children, mono, style: sx = {} }) {
+  const [f, setF] = useState(false);
   return (
-    <select value={value} onChange={onChange}
-      style={{ ...inp, fontFamily: mono ? "ui-monospace, monospace" : "inherit", boxShadow: focus ? `0 0 0 3px ${T.blueLight}` : "none", borderColor: focus ? T.blueMid : T.border, cursor: "pointer", ...sx }}
-      onFocus={() => setFocus(true)} onBlur={() => setFocus(false)}>
+    <select
+      value={value ?? ""} onChange={onChange}
+      style={{
+        ...inp,
+        fontFamily: mono ? "ui-monospace,monospace" : "inherit",
+        borderColor: f ? C.blue : C.border,
+        boxShadow: f ? `0 0 0 3px ${C.blueLt}` : "none",
+        cursor: "pointer", ...sx,
+      }}
+      onFocus={() => setF(true)} onBlur={() => setF(false)}
+    >
       {children}
     </select>
   );
-};
+}
 
-/* ─── Toggle switch ──────────────────────────────────────────── */
-const Toggle = ({ checked, onChange, label, note, color = T.blue }) => (
-  <label style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer", userSelect: "none" }}>
-    <span onClick={() => onChange(!checked)} style={{
-      display: "inline-flex", alignItems: "center", flexShrink: 0,
-      width: 40, height: 22, borderRadius: 999, marginTop: 2,
-      background: checked ? color : T.borderLight, transition: "background .2s", position: "relative", cursor: "pointer",
-    }}>
-      <span style={{
-        position: "absolute", left: checked ? 20 : 2, width: 18, height: 18,
-        borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.2)",
-        transition: "left .2s",
-      }} />
-    </span>
-    <span>
-      <span style={{ display: "block", fontSize: 12, fontWeight: 700, color: T.text }}>{label}</span>
-      {note && <span style={{ display: "block", fontSize: 10, color: T.textMuted, marginTop: 2 }}>{note}</span>}
-    </span>
-  </label>
-);
-
-const DirectionIcon = ({ direction, size = 10 }) => {
-  if (direction === "WRITE") return <ArrowDown size={size} />;
-  if (direction === "BOTH") return <ArrowDownUp size={size} />;
-  return <ArrowUp size={size} />;
-};
-
-const ActionBadge = ({ action }) => {
-  const isWrite = action === "WRITE";
-  const isBoth = action === "BOTH";
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 9, fontWeight: 800, letterSpacing: "0.07em", padding: "2px 7px", borderRadius: 4, background: isWrite ? T.blueLight : isBoth ? T.tealLight : T.greenLight, color: isWrite ? T.blue : isBoth ? T.teal : T.green, border: `1px solid ${isWrite ? T.blueBorder : isBoth ? T.tealBorder : T.greenBorder}`, whiteSpace: "nowrap" }}>
-      <DirectionIcon direction={action} size={9} />
-      {action}
-    </span>
-  );
-};
-
-const Chip = ({ label, color = "blue" }) => {
-  const map = {
-    blue: { bg: T.blueLight, text: T.blue, border: T.blueBorder },
-    green: { bg: T.greenLight, text: T.green, border: T.greenBorder },
-    red: { bg: T.redLight, text: T.red, border: T.redBorder },
-    teal: { bg: T.tealLight, text: T.teal, border: T.tealBorder },
-    amber: { bg: T.amberLight, text: T.amber, border: T.amberBorder },
-    purple: { bg: T.purpleLight, text: T.purple, border: T.purpleBorder },
-    gray: { bg: T.bgMuted, text: T.slate, border: T.border },
-  };
-  const c = map[color] || map.gray;
-  return (
-    <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: c.bg, color: c.text, border: `1px solid ${c.border}`, whiteSpace: "nowrap", letterSpacing: "0.05em" }}>
-      {label}
-    </span>
-  );
-};
-
-const IconBtn = ({ icon: Icon, title, onClick, color, hoverBg, hoverColor, hoverBorder }) => {
-  const [hov, setHov] = useState(false);
-  return (
-    <button onClick={onClick} title={title}
-      style={{ width: 30, height: 30, border: `1px solid ${hov ? (hoverBorder || color || T.border) : T.border}`, borderRadius: 7, background: hov ? (hoverBg || color + "18") : "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: hov ? (hoverColor || color || T.textMuted) : T.textMuted, transition: "all .12s" }}
-      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}>
-      <Icon size={13} />
-    </button>
-  );
-};
-
-/* ─── Toolbar Action Button ─────────────────────────────────── */
-const ToolbarBtn = ({ icon: Icon, label, onClick, color = T.navy, bg, border, title }) => {
-  const [hov, setHov] = useState(false);
-  return (
-    <button type="button" onClick={onClick} title={title}
-      style={{
-        display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px",
-        fontSize: 12, fontWeight: 600, borderRadius: 8,
-        border: `1px solid ${hov ? (border || color) : T.border}`,
-        background: hov ? (bg || color + "12") : T.bgCard,
-        color: hov ? color : T.textSec,
-        cursor: "pointer", transition: "all .15s", whiteSpace: "nowrap",
-      }}
-      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}>
-      <Icon size={13} />{label}
-    </button>
-  );
-};
-
-const BypassBadge = ({ enabled, reason }) => (
-  <div>
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 10px", borderRadius: 999, fontSize: 10, fontWeight: 700, background: enabled ? T.amberLight : T.bgMuted, color: enabled ? T.amber : T.textMuted, border: `1px solid ${enabled ? T.amberBorder : T.border}` }}>
-      {enabled ? <ShieldOff size={10} /> : <ShieldCheck size={10} />}
-      {enabled ? "Bypassed" : "Normal"}
-    </span>
-    {enabled && reason && (
-      <p style={{ fontSize: 10, color: T.amber, margin: "3px 0 0", maxWidth: 160, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={reason}>{reason}</p>
+const Label = ({ children, required, hint }) => (
+  <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 4 }}>
+    <p style={{ margin: 0, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: C.hint }}>
+      {children}{required && <span style={{ color: C.red, marginLeft: 2 }}>*</span>}
+    </p>
+    {hint && (
+      <span title={hint} style={{ cursor: "help", fontSize: 10, color: C.hint }}>
+        <Info size={10} />
+      </span>
     )}
   </div>
 );
 
-const StatusBadge = ({ status }) => {
-  const isActive = status === "ACTIVE";
+const Badge = ({ label, color, bg, border }) => (
+  <span style={{
+    display: "inline-flex", alignItems: "center", padding: "2px 8px",
+    borderRadius: 99, fontSize: 9, fontWeight: 700, textTransform: "uppercase",
+    letterSpacing: "0.06em", color, background: bg,
+    border: `1px solid ${border || bg}`,
+  }}>
+    {label}
+  </span>
+);
+
+const DirBadge = ({ dir }) => {
+  const map = {
+    READ:  { bg: C.greenLt, color: C.green, bd: C.greenBd, icon: <ArrowUp size={9} />,     label: "READ" },
+    WRITE: { bg: C.blueLt,  color: C.blue,  bd: C.blueBd,  icon: <ArrowDown size={9} />,   label: "WRITE" },
+    BOTH:  { bg: C.tealLt,  color: C.teal,  bd: C.tealBd,  icon: <ArrowDownUp size={9} />, label: "BOTH" },
+  };
+  const d = map[dir] || map.READ;
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 10px", borderRadius: 999, fontSize: 10, fontWeight: 700, background: isActive ? T.greenLight : T.bgMuted, color: isActive ? T.green : T.textMuted, border: `1px solid ${isActive ? T.greenBorder : T.border}` }}>
-      {isActive ? <span style={{ width: 5, height: 5, borderRadius: "50%", background: T.green }} /> : <XCircle size={9} />}
-      {isActive ? "Active" : "Offline"}
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 3, padding: "2px 7px",
+      borderRadius: 4, fontSize: 9, fontWeight: 800, letterSpacing: "0.06em",
+      color: d.color, background: d.bg, border: `1px solid ${d.bd}`,
+    }}>
+      {d.icon}{d.label}
     </span>
   );
 };
 
-const modalOverlay = { position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(15,23,42,0.65)", backdropFilter: "blur(4px)" };
+// ─── Section card wrapper ─────────────────────────────────────────────────────
 
-/* ─── Station feature definitions ───────────────────────────── */
-const STATION_FEATURES = [
-  { key: "qr", label: "QR / Barcode Scan", note: "Require QR or barcode scan before cycle", color: T.blue, hasRegister: false },
-  { key: "operation", label: "Sequence Validation", note: "Enforce previous station sequence check", color: T.blue, hasRegister: false },
-  { key: "manualResult", label: "Manual Result Entry", note: "Operator can enter OK/NG result manually", color: T.purple, hasRegister: false },
-  { key: "rejectionBin", label: "Rejection Bin", note: "Use rejection/rework bin signal", color: T.red, hasRegister: false },
-  { key: "rejectionBinStatus", label: "Bin Full Status", note: "Read bin-full feedback from PLC", color: T.red, hasRegister: false },
-  { key: "finalPacking", label: "Final Packing Station", note: "Mark as last station before dispatch", color: T.green, hasRegister: false },
-  { key: "rework", label: "Rework Station", note: "Allow re-scanning reworked parts", color: T.amber, hasRegister: false },
-  { key: "labelPrint", label: "Label Printing", note: "Trigger label/tag print on cycle OK", color: T.navy, hasRegister: true, registerKey: "labelPrintRegister", registerNote: "Write register: trigger label print" },
-  { key: "camera", label: "Camera / Vision", note: "Integrate camera/vision system result", color: T.purple, hasRegister: true, registerKey: "cameraResultRegister", registerNote: "Read register: camera pass/fail result" },
-  { key: "torque", label: "Torque / Force Check", note: "Include torque/force measurement", color: T.teal, hasRegister: true, registerKey: "torqueRegister", registerNote: "Read register: torque/force measurement" },
-  { key: "partPresence", label: "Part Presence Check", note: "Verify part is seated before starting", color: T.blue, hasRegister: true, registerKey: "partPresenceRegister", registerNote: "Read register: part sensor signal" },
-];
-
-/* ─── Section Card component ────────────────────────────────── */
-const SectionCard = ({ title, subtitle, icon: Icon, iconColor = T.blue, iconBg = T.blueLight, iconBorder = T.blueBorder, action, children, noPad }) => (
-  <div style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 12, overflow: "hidden" }}>
-    <div style={{ padding: "12px 16px", background: T.bgMuted, borderBottom: `1px solid ${T.borderLight}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        {Icon && (
-          <div style={{ width: 30, height: 30, borderRadius: 8, background: iconBg, border: `1px solid ${iconBorder}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-            <Icon size={14} color={iconColor} />
+function SectionCard({ title, subtitle, icon: Icon, iconColor = C.blue, action, children, collapsible }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+      <div
+        style={{
+          padding: "10px 14px", background: C.muted, borderBottom: open ? `1px solid ${C.border}` : "none",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          cursor: collapsible ? "pointer" : "default",
+        }}
+        onClick={collapsible ? () => setOpen((o) => !o) : undefined}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {Icon && (
+            <div style={{
+              width: 28, height: 28, borderRadius: 7, background: iconColor + "18",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              <Icon size={14} color={iconColor} />
+            </div>
+          )}
+          <div>
+            <p style={{ margin: 0, fontSize: 12, fontWeight: 700, color: C.text }}>{title}</p>
+            {subtitle && <p style={{ margin: "1px 0 0", fontSize: 10, color: C.hint }}>{subtitle}</p>}
           </div>
-        )}
-        <div>
-          <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: T.text }}>{title}</p>
-          {subtitle && <p style={{ margin: "2px 0 0", fontSize: 11, color: T.textMuted }}>{subtitle}</p>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {action}
+          {collapsible && (
+            <span style={{ color: C.hint, fontSize: 12 }}>{open ? "▲" : "▼"}</span>
+          )}
         </div>
       </div>
-      {action}
+      {open && <div style={{ padding: 14 }}>{children}</div>}
     </div>
-    {!noPad && <div style={{ padding: 16 }}>{children}</div>}
-    {noPad && children}
-  </div>
-);
+  );
+}
 
-/* ─── Protocol Icon Helper ──────────────────────────────────── */
-const ProtocolIcon = ({ icon: Icon, size = 14, color = T.blue }) => {
-  const Target = Icon || LucideIcons.HelpCircle;
-  return <Target size={size} color={color} />;
+// ─── Pill tabs ────────────────────────────────────────────────────────────────
+
+function Tabs({ tabs, active, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 2, borderBottom: `1px solid ${C.border}`, padding: "0 20px", background: C.muted }}>
+      {tabs.map((t) => {
+        const isActive = active === t.id;
+        const TI = t.icon;
+        return (
+          <button
+            key={t.id} type="button" onClick={() => onChange(t.id)}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 5,
+              padding: "10px 12px", border: "none", background: "transparent",
+              fontSize: 12, fontWeight: isActive ? 700 : 500,
+              color: isActive ? C.blue : C.sec,
+              borderBottom: `2px solid ${isActive ? C.blue : "transparent"}`,
+              cursor: "pointer", transition: "all .12s", whiteSpace: "nowrap",
+            }}
+          >
+            {TI && <TI size={13} />}{t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Toggle ────────────────────────────────────────────────────────────────────
+
+function Toggle({ checked, onChange, label, color = C.blue }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", userSelect: "none" }}>
+      <span
+        onClick={() => onChange(!checked)}
+        style={{
+          display: "inline-flex", alignItems: "center",
+          width: 36, height: 20, borderRadius: 99, flexShrink: 0,
+          background: checked ? color : C.border, transition: "background .2s",
+          position: "relative", cursor: "pointer",
+        }}
+      >
+        <span style={{
+          position: "absolute", left: checked ? 18 : 2,
+          width: 16, height: 16, borderRadius: "50%",
+          background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.2)",
+          transition: "left .2s",
+        }} />
+      </span>
+      {label && <span style={{ fontSize: 12, fontWeight: 600, color: C.sec }}>{label}</span>}
+    </label>
+  );
+}
+
+// ─── Icon button ───────────────────────────────────────────────────────────────
+
+function IconBtn({ icon: Icon, title, onClick, color = C.sec, hoverColor, hoverBg, disabled }) {
+  const [hov, setHov] = useState(false);
+  return (
+    <button
+      onClick={onClick} title={title} disabled={disabled}
+      style={{
+        width: 28, height: 28, border: `1px solid ${hov ? (hoverColor || color) : C.border}`,
+        borderRadius: 6, background: hov ? (hoverBg || color + "18") : "transparent",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        cursor: disabled ? "not-allowed" : "pointer",
+        color: hov ? (hoverColor || color) : C.hint,
+        transition: "all .12s", opacity: disabled ? 0.5 : 1,
+      }}
+      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+    >
+      <Icon size={12} />
+    </button>
+  );
+}
+
+// ─── Empty form factory ────────────────────────────────────────────────────────
+
+function emptyForm() {
+  return {
+    machineName: "", lineName: "", machineType: "HPDC",
+    sequenceNo: "", operationNo: "", status: "ACTIVE",
+    cycleTime: "0", loadingTime: "0", dailyTargetQty: "0",
+    plcEnabled: true,
+    plcIp: "", plcPort: "", plcProtocol: "TCP_TEXT",
+    plcDevice: "D", plcFrameMode: "AUTO", plcRangeId: "",
+    // Handshake signals (ordered by seq)
+    handshakeSignals: DEFAULT_HANDSHAKE.map((h) => ({ ...h, id: uid() })),
+    // Data register ranges (for reading blocks of data — CMM, live params, etc.)
+    dataRegisterRanges: [],
+    // Quality / SPC
+    spcEnabled: false,
+    spcMode: "IP_PUSH",
+    spcSourceIp: "", spcSourcePort: "",
+    spcPayloadKey: "RESULT", spcNgValues: "NG,FAIL,0",
+    // Description
+    description: "",
+  };
+}
+
+// ─── Build from existing machine record ───────────────────────────────────────
+
+function formFromMachine(m) {
+  const cfg = m.plcConfig || {};
+  const spc = m.spcConfig || {};
+
+  // Rebuild handshake signals from handshakeMap or legacy fields
+  let signals = [];
+  if (Array.isArray(cfg.handshakeMap) && cfg.handshakeMap.length) {
+    signals = cfg.handshakeMap.map((row, i) => ({
+      id: row.id || uid(),
+      seq: row.seq ?? i + 1,
+      signal: row.signal || "",
+      direction: row.direction || "READ",
+      device: row.device || m.plcDevice || "D",
+      register: String(row.register ?? ""),
+      value: String(row.value ?? ""),
+      meaning: row.meaning || "",
+      category: row.category || "control",
+      required: row.required !== false,
+    }));
+  } else {
+    // Legacy flat fields → build default with values
+    signals = DEFAULT_HANDSHAKE.map((def, i) => {
+      const keyMap = {
+        "Start":          { reg: cfg.startRegister,    val: cfg.startValue    },
+        "Block/Interlock":{ reg: cfg.blockRegister,    val: cfg.blockValue    },
+        "Running":        { reg: cfg.runningRegister,  val: cfg.startedValue  },
+        "End OK":         { reg: cfg.endOkRegister,    val: cfg.endOkValue    },
+        "End NG":         { reg: cfg.endNgRegister,    val: cfg.endNgValue    },
+        "Reset":          { reg: cfg.resetRegister,    val: cfg.resetValue    },
+        "Bypass":         { reg: cfg.bypassRegister,   val: "1"               },
+      };
+      const kv = keyMap[def.signal] || {};
+      return {
+        ...def,
+        id: uid(),
+        device: m.plcDevice || "D",
+        register: String(kv.reg ?? ""),
+        value: String(kv.val ?? def.value),
+      };
+    });
+  }
+
+  // Data register ranges
+  const ranges = Array.isArray(cfg.dataRegisterRanges)
+    ? cfg.dataRegisterRanges.map((r) => ({
+        ...r,
+        endReg: r.endReg || String(toNum(r.startReg) + toNum(r.count, 1) - 1),
+        formula: r.formula || "",
+      }))
+    : (Array.isArray(m.plcSignalMap)
+        ? m.plcSignalMap.map((r, i) => ({
+            id: uid(),
+            name: r.label || r.key || `Range ${i + 1}`,
+            device: r.device || "D",
+            startReg: String(r.register || ""),
+            endReg: String(r.register || ""),
+            count: "1",
+            dataType: "INT16",
+            scale: "1",
+            unit: r.unit || "",
+            purpose: r.meaning || "",
+            formula: "",
+            toleranceMin: "",
+            toleranceMax: "",
+          }))
+        : []);
+
+  return {
+    machineName: m.machineName || "",
+    lineName: m.lineName || "",
+    machineType: m.machineType || "HPDC",
+    sequenceNo: String(m.sequenceNo ?? ""),
+    operationNo: m.operationNo || "",
+    status: m.status || "ACTIVE",
+    cycleTime: String(m.cycleTime ?? "0"),
+    loadingTime: String(m.loadingTime ?? "0"),
+    dailyTargetQty: String(m.dailyTargetQty ?? "0"),
+    plcEnabled: m.plcEnabled !== false,
+    plcIp: m.plcIp || "",
+    plcPort: String(m.plcPort ?? ""),
+    plcProtocol: m.plcProtocol || "TCP_TEXT",
+    plcDevice: m.plcDevice || cfg.slmpDevice || "D",
+    plcFrameMode: m.plcSlmpFrameMode || cfg.slmpFrameMode || "AUTO",
+    plcRangeId: String(m.plcRangeId || cfg.rangeId || ""),
+    handshakeSignals: signals,
+    dataRegisterRanges: ranges,
+    spcEnabled: spc.enabled === true,
+    spcMode: spc.mode || "IP_PUSH",
+    spcSourceIp: spc.sourceIp || "",
+    spcSourcePort: String(spc.sourcePort ?? ""),
+    spcPayloadKey: spc.payloadResultKey || "RESULT",
+    spcNgValues: Array.isArray(spc.payloadResultNgValues)
+      ? spc.payloadResultNgValues.join(", ")
+      : String(spc.payloadResultNgValues || "NG,FAIL,0"),
+    description: m.description || "",
+  };
+}
+
+// ─── Build submit payload ──────────────────────────────────────────────────────
+
+function buildPayload(f) {
+  const signals = [...f.handshakeSignals].sort((a, b) => a.seq - b.seq);
+
+  // Also write legacy flat fields for backward compat
+  const findVal = (name, field) => {
+    const row = signals.find((s) => s.signal.toLowerCase().includes(name.toLowerCase()));
+    return row ? (field === "register" ? toNum(row.register) : toNum(row.value, undefined)) : undefined;
+  };
+
+  const plcConfig = {
+    handshakeMap: signals.map((s) => ({
+      id: s.id,
+      seq: s.seq,
+      signal: s.signal,
+      direction: s.direction,
+      device: f.plcDevice,
+      register: toNum(s.register),
+      value: toNum(s.value),
+      meaning: s.meaning,
+      category: s.category,
+      required: s.required,
+    })),
+    dataRegisterRanges: f.dataRegisterRanges.map((r) => ({
+      id: r.id,
+      name: r.name,
+      device: r.device,
+      startReg: toNum(r.startReg),
+      endReg: toNum(r.endReg) || (toNum(r.startReg) + toNum(r.count, 1) - 1),
+      count: toNum(r.count, 1),
+      dataType: r.dataType,
+      scale: parseFloat(r.scale) || 1,
+      unit: r.unit,
+      purpose: r.purpose,
+      formula: r.formula || "",
+      toleranceMin: r.toleranceMin !== "" ? toNum(r.toleranceMin) : null,
+      toleranceMax: r.toleranceMax !== "" ? toNum(r.toleranceMax) : null,
+    })),
+    // Legacy fields
+    startRegister:   findVal("start", "register"),
+    blockRegister:   findVal("block", "register"),
+    runningRegister: findVal("running", "register"),
+    endOkRegister:   findVal("end ok", "register"),
+    endNgRegister:   findVal("end ng", "register"),
+    resetRegister:   findVal("reset", "register"),
+    bypassRegister:  findVal("bypass", "register"),
+    startValue:      findVal("start", "value"),
+    blockValue:      findVal("block", "value"),
+    startedValue:    findVal("running", "value"),
+    endOkValue:      findVal("end ok", "value"),
+    endNgValue:      findVal("end ng", "value"),
+    resetValue:      findVal("reset", "value"),
+    slmpDevice:      f.plcDevice,
+    slmpFrameMode:   f.plcFrameMode,
+    rangeId:         toNum(f.plcRangeId),
+  };
+
+  const spcConfig = {
+    enabled: f.spcEnabled,
+    mode: f.spcMode,
+    sourceIp: f.spcSourceIp || null,
+    sourcePort: toNum(f.spcSourcePort),
+    payloadResultKey: f.spcPayloadKey || "RESULT",
+    payloadResultNgValues: f.spcNgValues.split(/[,;|]/).map((v) => v.trim().toUpperCase()).filter(Boolean),
+  };
+
+  return {
+    machineName: f.machineName.trim(),
+    lineName: f.lineName.trim(),
+    machineType: f.machineType,
+    sequenceNo: toNum(f.sequenceNo),
+    operationNo: f.operationNo.trim().toUpperCase(),
+    status: f.status,
+    cycleTime: Math.max(toNum(f.cycleTime, 0), 0),
+    loadingTime: Math.max(toNum(f.loadingTime, 0), 0),
+    dailyTargetQty: Math.max(toNum(f.dailyTargetQty, 0), 0),
+    plcEnabled: f.plcEnabled,
+    plcIp: f.plcIp.trim(),
+    plcPort: toNum(f.plcPort),
+    plcProtocol: f.plcProtocol,
+    plcDevice: f.plcDevice,
+    plcSlmpFrameMode: f.plcFrameMode,
+    plcRangeId: toNum(f.plcRangeId),
+    plcConfig,
+    spcConfig,
+    description: f.description,
+    // Legacy
+    plcSignalMap: f.dataRegisterRanges.map((r) => ({
+      label: r.name, register: toNum(r.startReg),
+      device: r.device, unit: r.unit, meaning: r.purpose,
+    })),
+  };
+}
+
+// ─── SIGNAL EDITOR ROW ────────────────────────────────────────────────────────
+
+function SignalRow({ row, index, total, onUpdate, onRemove, onMove, device }) {
+  const cc = catColor(row.category);
+  return (
+    <div style={{
+      display: "grid",
+      gridTemplateColumns: "28px 28px 140px 90px 70px 80px 70px 70px 1fr 28px",
+      gap: 6, alignItems: "center",
+      padding: "7px 10px",
+      background: C.card,
+      border: `1px solid ${C.border}`,
+      borderLeft: `3px solid ${cc.color}`,
+      borderRadius: 7,
+    }}>
+      {/* Seq */}
+      <span style={{ fontSize: 10, fontWeight: 800, color: C.hint, textAlign: "center",
+        fontFamily: "ui-monospace,monospace" }}>{row.seq}</span>
+
+      {/* Move up/down */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+        <button type="button" disabled={index === 0}
+          onClick={() => onMove(index, index - 1)}
+          style={{ border: "none", background: "none", cursor: "pointer", padding: 1, color: C.hint, opacity: index === 0 ? 0.3 : 1 }}>
+          <ArrowUp size={9} />
+        </button>
+        <button type="button" disabled={index === total - 1}
+          onClick={() => onMove(index, index + 1)}
+          style={{ border: "none", background: "none", cursor: "pointer", padding: 1, color: C.hint, opacity: index === total - 1 ? 0.3 : 1 }}>
+          <ArrowDown size={9} />
+        </button>
+      </div>
+
+      {/* Signal name */}
+      <FInput value={row.signal} onChange={(e) => onUpdate(index, "signal", e.target.value)}
+        placeholder="Signal name" style={{ fontSize: 12 }} />
+
+      {/* Category */}
+      <FSelect value={row.category} onChange={(e) => onUpdate(index, "category", e.target.value)}>
+        {SIGNAL_CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+      </FSelect>
+
+      {/* Direction */}
+      <FSelect value={row.direction} onChange={(e) => onUpdate(index, "direction", e.target.value)}>
+        <option value="READ">READ</option>
+        <option value="WRITE">WRITE</option>
+        <option value="BOTH">BOTH</option>
+      </FSelect>
+
+      {/* Device */}
+      <FSelect value={row.device || device} onChange={(e) => onUpdate(index, "device", e.target.value)} mono>
+        {DEVICES.map((d) => <option key={d} value={d}>{d}</option>)}
+      </FSelect>
+
+      {/* Register */}
+      <FInput value={row.register} onChange={(e) => onUpdate(index, "register", e.target.value)}
+        placeholder="e.g. 100" mono type="number" />
+
+      {/* Value */}
+      <FInput value={row.value} onChange={(e) => onUpdate(index, "value", e.target.value)}
+        placeholder="e.g. 1" mono type="number" />
+
+      {/* Meaning */}
+      <FInput value={row.meaning} onChange={(e) => onUpdate(index, "meaning", e.target.value)}
+        placeholder="Purpose / description" />
+
+      {/* Remove */}
+      <IconBtn icon={Trash2} title="Remove signal" onClick={() => onRemove(index)}
+        color={C.red} hoverColor={C.red} hoverBg={C.redLt} />
+    </div>
+  );
+}
+
+// ─── DATA REGISTER RANGE ROW ──────────────────────────────────────────────────
+
+function DataRangeRow({ row, index, onUpdate, onRemove, device }) {
+  // Computed: list of registers in this range
+  const start = toNum(row.startReg);
+  const end = toNum(row.endReg) || (start !== null ? start + toNum(row.count, 1) - 1 : null);
+  const regs = start !== null && end !== null && end >= start
+    ? Array.from({ length: end - start + 1 }, (_, i) => `${row.device || device}${start + i}`)
+    : [];
+  const count = regs.length;
+
+  return (
+    <div style={{
+      background: C.card, border: `1px solid ${C.border}`, borderRadius: 8,
+      padding: "10px 12px",
+    }}>
+      {/* Row 1: name + device + start + end + datatype + scale + unit */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 65px 85px 85px 100px 70px 70px 28px", gap: 6, alignItems: "end" }}>
+        <div>
+          <Label>Name / Label</Label>
+          <FInput value={row.name} onChange={(e) => onUpdate(index, "name", e.target.value)} placeholder="e.g. Bore Diameter" />
+        </div>
+        <div>
+          <Label>Device</Label>
+          <FSelect value={row.device || device} onChange={(e) => onUpdate(index, "device", e.target.value)} mono>
+            {DEVICES.map((d) => <option key={d} value={d}>{d}</option>)}
+          </FSelect>
+        </div>
+        <div>
+          <Label hint="First register number in the range">Start Reg</Label>
+          <FInput value={row.startReg} onChange={(e) => {
+            const startVal = e.target.value;
+            const endVal = row.endReg || startVal;
+            const newCount = Math.max(1, toNum(endVal) - toNum(startVal) + 1);
+            onUpdate(index, "startReg", startVal);
+            onUpdate(index, "count", String(newCount));
+            onUpdate(index, "endReg", String(toNum(startVal) + newCount - 1));
+          }} placeholder="e.g. 2060" mono type="number" />
+        </div>
+        <div>
+          <Label hint="Last register number in the range">End Reg</Label>
+          <FInput value={row.endReg || (start !== null ? String(start + toNum(row.count, 1) - 1) : "")} onChange={(e) => {
+            const endVal = e.target.value;
+            const startVal = row.startReg;
+            const newCount = Math.max(1, toNum(endVal) - toNum(startVal) + 1);
+            onUpdate(index, "endReg", endVal);
+            onUpdate(index, "count", String(newCount));
+          }} placeholder="e.g. 2064" mono type="number" />
+        </div>
+        <div>
+          <Label>Data Type</Label>
+          <FSelect value={row.dataType} onChange={(e) => onUpdate(index, "dataType", e.target.value)}>
+            {DATA_TYPES.map((d) => <option key={d} value={d}>{d}</option>)}
+          </FSelect>
+        </div>
+        <div>
+          <Label hint="Multiply raw value by this factor">Scale</Label>
+          <FInput value={row.scale} onChange={(e) => onUpdate(index, "scale", e.target.value)}
+            placeholder="1.0" mono />
+        </div>
+        <div>
+          <Label>Unit</Label>
+          <FInput value={row.unit} onChange={(e) => onUpdate(index, "unit", e.target.value)}
+            placeholder="mm / MPa" />
+        </div>
+        <div style={{ paddingTop: 18 }}>
+          <IconBtn icon={Trash2} title="Remove range" onClick={() => onRemove(index)}
+            color={C.red} hoverColor={C.red} hoverBg={C.redLt} />
+        </div>
+      </div>
+
+      {/* Register preview */}
+      {regs.length > 0 && (
+        <div style={{ marginTop: 8, display: "flex", alignItems: "center", justifyBetween: "space-between", flexWrap: "wrap", gap: 4 }}>
+          <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 4, flex: 1 }}>
+            <span style={{ fontSize: 9, fontWeight: 700, color: C.hint, textTransform: "uppercase", marginRight: 2 }}>Registers:</span>
+            {regs.map((r) => (
+              <span key={r} style={{
+                fontSize: 9, fontFamily: "ui-monospace,monospace", fontWeight: 700,
+                padding: "1px 6px", borderRadius: 3,
+                background: C.blueLt, color: C.blue,
+                border: `1px solid ${C.blueBd}`,
+              }}>{r}</span>
+            ))}
+            {count > 32 && <span style={{ fontSize: 9, color: C.red }}>Max 32 registers per range</span>}
+          </div>
+          <span style={{ fontSize: 10, fontWeight: 600, color: C.hint }}>
+            Values Merged Value: <code style={{ fontFamily: "ui-monospace,monospace", color: C.blue, fontWeight: 700 }}>[Concatenated String]</code>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── STATUS & BYPASS BADGES ───────────────────────────────────────────────────
+
+const StatusBadge = ({ status }) => {
+  const on = status === "ACTIVE";
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 10px",
+      borderRadius: 99, fontSize: 10, fontWeight: 700,
+      background: on ? C.greenLt : C.muted, color: on ? C.green : C.hint,
+      border: `1px solid ${on ? C.greenBd : C.border}`,
+    }}>
+      <span style={{ width: 5, height: 5, borderRadius: "50%", background: on ? C.green : C.hint }} />
+      {on ? "Active" : "Inactive"}
+    </span>
+  );
 };
 
-/* ============================================================ */
-/*  MAIN COMPONENT                                              */
-/* ============================================================ */
-const MachinePage = () => {
-  const [machines, setMachines] = useState([]);
-  const [plcRanges, setPlcRanges] = useState([]);
-  const [stationSettingsMap, setStationSettingsMap] = useState({});
-  const [showModal, setShowModal] = useState(false);
-  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
-  const [viewMachine, setViewMachine] = useState(null);
-  const [editingMachine, setEditingMachine] = useState(null);
-  const [formData, setFormData] = useState(() => createEmptyForm());
-  const [searchTerm, setSearchTerm] = useState("");
-  const [lineFilter, setLineFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [activeTab, setActiveTab] = useState("general");
-  const [saving, setSaving] = useState(false);
-  const [bypassModalMachine, setBypassModalMachine] = useState(null);
-  const [bypassEnabled, setBypassEnabled] = useState(false);
-  const [bypassReason, setBypassReason] = useState("");
-  const [bypassing, setBypassing] = useState(false);
-  const [savingStationSettings, setSavingStationSettings] = useState(false);
-  const [activeTuningCategory, setActiveTuningCategory] = useState("all");
+const BypassBadge = ({ enabled }) => (
+  <span style={{
+    display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 10px",
+    borderRadius: 99, fontSize: 10, fontWeight: 700,
+    background: enabled ? C.amberLt : C.muted, color: enabled ? C.amber : C.hint,
+    border: `1px solid ${enabled ? C.amberBd : C.border}`,
+  }}>
+    {enabled ? <ShieldOff size={10} /> : <ShieldCheck size={10} />}
+    {enabled ? "Bypassed" : "Normal"}
+  </span>
+);
 
-  const loadData = useCallback(async () => {
+// ─── MODAL OVERLAY ────────────────────────────────────────────────────────────
+
+const modalOv = {
+  position: "fixed", inset: 0, zIndex: 50,
+  display: "flex", alignItems: "flex-start", justifyContent: "center",
+  padding: "16px 16px 32px", paddingTop: 40,
+  background: "rgba(15,23,42,.65)", backdropFilter: "blur(4px)",
+  overflowY: "auto",
+};
+
+// ─── TABS CONFIG ──────────────────────────────────────────────────────────────
+
+const FORM_TABS = [
+  { id: "identity", label: "Identity",         icon: Layout     },
+  { id: "network",  label: "Network / PLC",    icon: Network    },
+  { id: "signals",  label: "Signals",          icon: Signal     },
+  { id: "data",     label: "Data Registers",   icon: TableProperties },
+  { id: "quality",  label: "Quality / SPC",    icon: FlaskConical },
+];
+
+// ─── MAIN COMPONENT ──────────────────────────────────────────────────────────
+
+export default function MachinePage() {
+  const [machines,  setMachines]  = useState([]);
+  const [plcRanges, setPlcRanges] = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [showModal, setShowModal] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [viewMachine, setViewMachine] = useState(null);
+  const [deleteId,  setDeleteId]  = useState(null);
+  const [bypassMachine, setBypassMachine] = useState(null);
+  const [bypassing, setBypassing] = useState(false);
+  const [bypassReason, setBypassReason] = useState("");
+  const [bypassEnabled, setBypassEnabled] = useState(false);
+  const [saving,    setSaving]    = useState(false);
+  const [search,    setSearch]    = useState("");
+  const [lineFilter, setLineFilter] = useState("all");
+  const [activeTab, setActiveTab] = useState("identity");
+  const [form, setForm] = useState(() => emptyForm());
+
+  const [customIp, setCustomIp] = useState(false);
+  const [customPort, setCustomPort] = useState(false);
+  const [showTestModal, setShowTestModal] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+
+  const uniqueIps = useMemo(() => {
+    const ips = new Set(["192.168.1.100", "192.168.119.40", "172.16.10.71", "127.0.0.1"]);
+    (plcRanges || []).forEach(r => { if (r.plcIp) ips.add(r.plcIp); });
+    return [...ips].sort();
+  }, [plcRanges]);
+
+  const uniquePorts = useMemo(() => {
+    const ports = new Set(["502", "5000", "9001", "1025"]);
+    (plcRanges || []).forEach(r => { if (r.plcPort) ports.add(String(r.plcPort)); });
+    return [...ports].sort((a, b) => Number(a) - Number(b));
+  }, [plcRanges]);
+
+  const handleTestConnection = () => {
+    setShowTestModal(true);
+    setTesting(true);
+    setTimeout(() => {
+      setTesting(false);
+      let msg = "";
+      let pay = {};
+      const key = form.spcPayloadKey || "RESULT";
+      if (form.spcMode === "IP_PUSH") {
+        msg = `Successfully listening on port ${form.spcSourcePort || 5000}. Received a mock client payload.`;
+        pay = {
+          PART_ID: "RICO-PART-20260517-001",
+          [key]: "OK",
+          OPERATOR: "Manoj Kumar",
+          CYCLE_TIME: "42.5s"
+        };
+      } else if (form.spcMode === "PLC_REGISTER") {
+        msg = `Successfully connected to PLC ${form.plcIp || "192.168.1.100"}:${form.plcPort || 502}. Read register ${key || "2065"}.`;
+        pay = {
+          REGISTER: key || "2065",
+          RAW_VALUE: 1,
+          MEANING: "OK / PASS"
+        };
+      } else if (form.spcMode === "HTTP_API") {
+        msg = `Successfully sent GET request to ${form.spcSourceIp || "http://192.168.1.50/api/quality"}.`;
+        pay = {
+          PART_ID: "RICO-PART-20260517-002",
+          [key]: "OK",
+          STATION: form.operationNo || "OP10",
+          TIMESTAMP: new Date().toISOString()
+        };
+      } else {
+        msg = `Successfully scanned folder ${form.spcSourceIp || "C:\\QualityData"}. Found 1 new file matching ${key || "*.json"}.`;
+        pay = {
+          FILENAME: "RICO-PART-20260517-003.json",
+          CONTENT: {
+            PART_ID: "RICO-PART-20260517-003",
+            [key]: "OK",
+            INSPECTED_BY: "MES_AUTO"
+          }
+        };
+      }
+      setTestResult({
+        message: msg,
+        payload: pay,
+        outcome: "PASS"
+      });
+    }, 1200);
+  };
+
+  // ── Load data ───────────────────────────────────────────────────────────────
+  const load = useCallback(async () => {
+    setLoading(true);
     try {
-      const [machineRows, rangeRows, stationRows] = await Promise.all([
+      const [m, r] = await Promise.all([
         machineApi.list(),
         plcConfigApi.listRanges().catch(() => []),
-        stationSettingsApi.list().catch(() => ({})),
       ]);
-      setMachines(machineRows || []);
-      setPlcRanges(rangeRows || []);
-      setStationSettingsMap(stationRows && typeof stationRows === "object" ? stationRows : {});
-    } catch { toast.error("Failed to load machine data"); }
+      setMachines(m || []);
+      setPlcRanges(r || []);
+    } catch { toast.error("Failed to load machines"); }
+    finally { setLoading(false); }
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { load(); }, [load]);
 
-  const rangeById = useMemo(() => plcRanges.reduce((acc, r) => { acc[r.id] = r; return acc; }, {}), [plcRanges]);
-  const normalizedProtocol = normalizeProtocol(formData.plcProtocol, "TCP_TEXT");
-  const isModbus = normalizedProtocol === "MODBUS_TCP";
-  const isSlmp = normalizedProtocol === "SLMP";
-  const usesRange = isModbus || isSlmp;
+  // ── Derived ─────────────────────────────────────────────────────────────────
+  const rangeById = useMemo(() => (plcRanges || []).reduce((a, r) => { a[r.id] = r; return a; }, {}), [plcRanges]);
 
-  const selectableRanges = useMemo(() => {
-    const selectedIp = String(formData.plcIp || "").trim();
-    const pool = plcRanges.filter(r => String(r.status || "").toUpperCase() === "ACTIVE" && (!usesRange || normalizeProtocol(r.plcProtocol, "MODBUS_TCP") === normalizedProtocol) && (!selectedIp || String(r.plcIp || "").trim() === selectedIp));
-    const map = new Map(pool.map(r => [String(r.id), r]));
-    const editRangeId = toNullableNumber(editingMachine?.plcRangeId || editingMachine?.plcConfig?.rangeId);
-    if (editRangeId && rangeById[editRangeId]) map.set(String(editRangeId), rangeById[editRangeId]);
-    return Array.from(map.values());
-  }, [plcRanges, editingMachine, formData.plcIp, normalizedProtocol, usesRange, rangeById]);
+  const lines = useMemo(() => [...new Set((machines || []).map((m) => m.lineName).filter(Boolean))].sort(), [machines]);
 
-  const filteredMachines = useMemo(() => {
-    const s = searchTerm.trim().toLowerCase();
-    return machines.filter(m => {
-      const ms = !s || [m.machineName, m.lineName, m.operationNo, m.plcIp].some(v => String(v || "").toLowerCase().includes(s));
+  const filtered = useMemo(() => {
+    const s = search.trim().toLowerCase();
+    return (machines || []).filter((m) => {
+      const ms = !s || [m.machineName, m.lineName, m.operationNo, m.plcIp].some((v) => String(v || "").toLowerCase().includes(s));
       const ml = lineFilter === "all" || m.lineName === lineFilter;
-      const mst = statusFilter === "all" || m.status === statusFilter;
-      return ms && ml && mst;
+      return ms && ml;
     }).sort((a, b) => (Number(a.sequenceNo) || 0) - (Number(b.sequenceNo) || 0));
-  }, [machines, searchTerm, lineFilter, statusFilter]);
-
-  const lines = useMemo(() => [...new Set(machines.map(m => m.lineName).filter(Boolean))].sort(), [machines]);
+  }, [machines, search, lineFilter]);
 
   const stats = useMemo(() => ({
-    total: machines.length,
-    active: machines.filter(m => m.status === "ACTIVE").length,
-    configured: machines.filter(m => m.plcIp).length,
-    bypassed: machines.filter(m => Boolean(m.machineBypassEnabled)).length,
+    total:     machines.length,
+    active:    machines.filter((m) => m.status === "ACTIVE").length,
+    plcOn:     machines.filter((m) => m.plcEnabled !== false && m.plcIp).length,
+    bypassed:  machines.filter((m) => Boolean(m.machineBypassEnabled)).length,
   }), [machines]);
 
-  const handshakeRows = useMemo(
-    () => normalizeHandshakeRows(formData?.plcConfig?.handshakeMap, formData?.plcConfig || {}),
-    [formData?.plcConfig]
-  );
-  const filteredHandshakeRows = useMemo(() => {
-    if (activeTuningCategory === "all") return handshakeRows;
-    return handshakeRows.filter(r => (r.category || "handshake") === activeTuningCategory);
-  }, [handshakeRows, activeTuningCategory]);
+  // ── Form helpers ────────────────────────────────────────────────────────────
+  const setF = (key, val) => setForm((p) => ({ ...p, [key]: val }));
 
-  const currentStationNo = useMemo(
-    () => normalizeStationKey(formData?.operationNo || editingMachine?.operationNo || ""),
-    [formData?.operationNo, editingMachine?.operationNo]
-  );
-
-  const currentStationFeatures = useMemo(() => {
-    if (!currentStationNo) return { ...DEFAULT_STATION_FEATURES };
-    return { ...DEFAULT_STATION_FEATURES, ...(stationSettingsMap?.[currentStationNo] || {}) };
-  }, [stationSettingsMap, currentStationNo]);
-
-  const operationSequenceSummary = useMemo(() => {
-    const rows = (machines || []).filter(m => String(m?.status || "ACTIVE").toUpperCase() === "ACTIVE").sort((a, b) => Number(a?.sequenceNo || 0) - Number(b?.sequenceNo || 0));
-    const ops = [];
-    const seen = new Set();
-    for (const row of rows) {
-      const op = normalizeStationKey(row?.operationNo);
-      if (!op || seen.has(op)) continue;
-      seen.add(op);
-      ops.push(op);
-    }
-    const currentIndex = currentStationNo ? ops.findIndex(e => e === currentStationNo) : -1;
-    return { totalOperations: ops.length, operationIndex: currentIndex >= 0 ? currentIndex + 1 : null, operations: ops };
-  }, [machines, currentStationNo]);
-
-  const registerConflicts = useMemo(() => {
-    if (!usesRange) return [];
-    const cfg = formData?.plcConfig || {};
-    const auxiliaryEntries = getAuxiliaryRegisterEntries(formData);
-    const handshakeEntries = getHandshakeRegisterEntries(cfg);
-    const conflicts = [];
-    const range = rangeById[formData?.plcRangeId];
-    const selfOccupancy = new Map();
-
-    // FAMILIES, getFamily, and isCompatible moved to global scope
-
-    for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
-      const base = toWholeNumberOrNull(cfg[field.key]);
-      if (base === null) continue;
-      const words = expandRegisterWindow(base, field.key, normalizedProtocol);
-      for (const word of words) {
-        if (range && (word < Number(range.rangeStart) || word > Number(range.rangeEnd))) { conflicts.push(`${field.label} uses R${word}, outside range.`); continue; }
-        selfOccupancy.set(word, field.label);
-      }
-    }
-    for (const entry of auxiliaryEntries) {
-      const words = expandRegisterWindow(entry.register, null, normalizedProtocol);
-      for (const word of words) {
-        if (range && (word < Number(range.rangeStart) || word > Number(range.rangeEnd))) { conflicts.push(`${entry.label} uses R${word}, outside range.`); continue; }
-        selfOccupancy.set(word, entry.label);
-      }
-    }
-    handshakeEntries.forEach(entry => {
-      if (entry.register === null) return;
-      expandRegisterWindow(entry.register, null, normalizedProtocol).forEach(word => {
-        if (range && (word < Number(range.rangeStart) || word > Number(range.rangeEnd))) conflicts.push(`${entry.label} R${word} outside range.`);
-        selfOccupancy.set(word, entry.label);
-      });
-    });
-    if (!formData?.plcRangeId) return [...new Set(conflicts)];
-    const currentMachineId = Number(editingMachine?.id || 0);
-    const peerOccupied = new Map();
-    for (const machine of machines) {
-      if (Number(machine?.id || 0) === currentMachineId) continue;
-      if (Number(machine?.plcRangeId || machine?.plcConfig?.rangeId || 0) !== Number(formData.plcRangeId)) continue;
-      const peerProtocol = normalizeProtocol(machine?.plcProtocol, "MODBUS_TCP");
-      const occupied = getMachineOccupiedRegisterWords(machine, peerProtocol);
-      occupied.forEach((label, registerNo) => { peerOccupied.set(registerNo, `${machine.machineName || "Machine"} - ${label}`); });
-    }
-    selfOccupancy.forEach((_label, word) => { if (peerOccupied.has(word)) conflicts.push(`R${word} conflicts with ${peerOccupied.get(word)}.`); });
-    return [...new Set(conflicts)];
-  }, [usesRange, formData?.plcConfig, formData?.plcSignalMap, formData?.spcConfig, formData?.plcRangeId, rangeById, normalizedProtocol, machines, editingMachine?.id]);
-
-  const handshakeInputIssues = useMemo(() => {
-    const issues = new Map();
-    const cfg = formData?.plcConfig || {};
-    const entries = getHandshakeRegisterEntries(cfg);
-    if (entries.length === 0) return issues;
-    const range = rangeById[formData?.plcRangeId];
-    entries.forEach((entry, index) => {
-      if (entry.register === null) return;
-      const registerNo = entry.register;
-      if (range && (registerNo < Number(range.rangeStart) || registerNo > Number(range.rangeEnd))) {
-        issues.set(index, `R${registerNo} is outside selected range.`);
-      }
-    });
-    return issues;
-  }, [formData?.plcConfig, formData?.plcRangeId, rangeById]);
-
-  const industrialMappingIssues = useMemo(() => {
-    const issues = [];
-    const rows = normalizeHandshakeRows(formData?.plcConfig?.handshakeMap, formData?.plcConfig || {});
-    const normalizedRows = rows
-      .map((row) => {
-        const key = normalizeStandardHandshakeSignalKey(row?.signal);
-        return { key, signal: String(row?.signal || "").trim(), direction: String(row?.direction || "").trim().toUpperCase(), register: toWholeNumberOrNull(row?.register), value: toWholeNumberOrNull(row?.value) };
-      })
-      .filter((row) => row.key);
-    for (const requiredKey of REQUIRED_HANDSHAKE_KEYS) {
-      const entry = normalizedRows.find((row) => row.key === requiredKey);
-      if (!entry) { issues.push(`Missing required handshake signal: ${requiredKey}.`); continue; }
-      if (entry.register === null) { issues.push(`${requiredKey}: register is required.`); }
-      if (entry.value === null) { issues.push(`${requiredKey}: value is required.`); }
-    }
-    const directionExpectations = { START: "WRITE", RUNNING: "READ", END_OK: "READ", END_NG: "READ", RESET: "WRITE" };
-    for (const [key, expectedDirection] of Object.entries(directionExpectations)) {
-      const entry = normalizedRows.find((row) => row.key === key);
-      if (!entry) continue;
-      if (entry.direction !== expectedDirection) { issues.push(`${key}: direction must be ${expectedDirection}.`); }
-    }
-    return [...new Set(issues)];
-  }, [formData?.plcConfig]);
-
-  const activeTabIndex = useMemo(() => Math.max(FORM_TABS.findIndex(tab => tab.id === activeTab), 0), [activeTab]);
-  const isLastTab = activeTabIndex >= FORM_TABS.length - 1;
-  const goToTabByIndex = (nextIndex) => { if (nextIndex < 0 || nextIndex >= FORM_TABS.length) return; setActiveTab(FORM_TABS[nextIndex].id); };
-
-  const validateCurrentTab = (tabId = activeTab) => {
-    if (tabId === "general") {
-      if (!String(formData.machineName || "").trim()) return "Machine name is required.";
-      if (!String(formData.operationNo || "").trim()) return "Operation code is required.";
-      if (!String(formData.sequenceNo || "").trim()) return "Sequence number is required.";
-    }
-    if (tabId === "network") {
-      if (!String(formData.plcIp || "").trim()) return "PLC IP address is required.";
-      if (usesRange && !String(formData.plcRangeId || "").trim()) return "Select a PLC range before continuing.";
-    }
-    if (tabId === "tuning") {
-      if (registerConflicts.length > 0) return registerConflicts[0];
-      if (industrialMappingIssues.length > 0) return industrialMappingIssues[0];
-    }
-    return null;
-  };
-
-  const saveAndNext = () => {
-    const err = validateCurrentTab(activeTab);
-    if (err) { toast.error(err); return; }
-    if (!isLastTab) { goToTabByIndex(activeTabIndex + 1); toast.success(`Step saved. Continue with ${FORM_TABS[activeTabIndex + 1].label}.`); }
-  };
-  const goPrevious = () => goToTabByIndex(activeTabIndex - 1);
-
-  const getHandshakeRangeBounds = () => {
-    const range = rangeById[formData?.plcRangeId];
-    if (!range) return null;
-    return { start: Number(range.rangeStart), end: Number(range.rangeEnd) };
-  };
-
-  const buildHandshakeBlockedRegisters = (ignoreRowIndex = null, rows = handshakeRows, includeHandshakeRows = true) => {
-    const blocked = new Set();
-    const currentMachineId = Number(editingMachine?.id || 0);
-    for (const machine of machines) {
-      if (Number(machine?.id || 0) === currentMachineId) continue;
-      if (Number(machine?.plcRangeId || machine?.plcConfig?.rangeId || 0) !== Number(formData?.plcRangeId || 0)) continue;
-      const peerProtocol = normalizeProtocol(machine?.plcProtocol, "MODBUS_TCP");
-      getMachineOccupiedRegisterWords(machine, peerProtocol).forEach((_label, registerNo) => blocked.add(registerNo));
-    }
-    const cfg = formData?.plcConfig || {};
-    for (const field of MACHINE_REGISTER_ROLE_FIELDS) {
-      expandRegisterWindow(cfg?.[field.key], field.key, normalizedProtocol).forEach(word => blocked.add(word));
-    }
-    getAuxiliaryRegisterEntries(formData).forEach(entry => {
-      expandRegisterWindow(entry.register, null, normalizedProtocol).forEach(word => blocked.add(word));
-    });
-    if (includeHandshakeRows) {
-      rows.forEach((row, index) => {
-        if (ignoreRowIndex !== null && index === ignoreRowIndex) return;
-        const registerNo = toWholeNumberOrNull(row?.register);
-        if (registerNo === null) return;
-        expandRegisterWindow(registerNo, null, normalizedProtocol).forEach(word => blocked.add(word));
-      });
-    }
-    return blocked;
-  };
-
-  const findNextFreeHandshakeRegister = (rowIndex, rows = handshakeRows) => {
-    const bounds = getHandshakeRangeBounds();
-    if (!bounds) return null;
-    const blocked = buildHandshakeBlockedRegisters(rowIndex, rows, true);
-    for (let registerNo = bounds.start; registerNo <= bounds.end; registerNo += 1) {
-      if (!blocked.has(registerNo)) return registerNo;
-    }
-    return null;
-  };
-
-  const autoAssignHandshakeRegister = (rowIndex) => {
-    if (!usesRange || !String(formData?.plcRangeId || "").trim()) { toast.error("Select PLC range first."); return; }
-    const rows = normalizeHandshakeRows(formData?.plcConfig?.handshakeMap, formData?.plcConfig || {});
-    const nextRegister = findNextFreeHandshakeRegister(rowIndex, rows);
-    if (nextRegister === null) { toast.error("No free register found in range."); return; }
-    const targetLabel = rows?.[rowIndex]?.signal || `Signal ${rowIndex + 1}`;
-    rows[rowIndex] = { ...rows[rowIndex], register: String(nextRegister) };
-    let nextCfg = { ...(formData?.plcConfig || {}) };
-    nextCfg = applyStandardHandshakeRowToCoreCfg(nextCfg, rows[rowIndex]);
-    const syncedRows = syncStandardHandshakeRowsWithCore(rows, nextCfg);
-    setFormData(p => ({ ...p, plcConfig: { ...nextCfg, handshakeMap: syncedRows } }));
-    toast.success(`${targetLabel}: assigned R${nextRegister}`);
-  };
-
-  const autoAssignAllHandshakeRegisters = () => {
-    if (!usesRange || !String(formData?.plcRangeId || "").trim()) { toast.error("Select PLC range first."); return; }
-    const bounds = getHandshakeRangeBounds();
-    if (!bounds) { toast.error("Selected range not found."); return; }
-    const rows = normalizeHandshakeRows(formData?.plcConfig?.handshakeMap, formData?.plcConfig || {});
-    if (!rows.length) { toast.error("No rows to assign."); return; }
-    const blocked = buildHandshakeBlockedRegisters(null, [], false);
-    let pointer = bounds.start;
-    let assignedCount = 0;
-    for (let index = 0; index < rows.length; index += 1) {
-      if (rows[index]?.register) continue;
-      while (pointer <= bounds.end && blocked.has(pointer)) pointer++;
-      if (pointer > bounds.end) { toast.error(`No free register for row ${index + 1}.`); return; }
-      rows[index] = { ...rows[index], register: String(pointer) };
-      blocked.add(pointer);
-      pointer++;
-      assignedCount++;
-    }
-    let nextCfg = { ...(formData?.plcConfig || {}) };
-    rows.forEach(row => { nextCfg = applyStandardHandshakeRowToCoreCfg(nextCfg, row); });
-    const syncedRows = syncStandardHandshakeRowsWithCore(rows, nextCfg);
-    setFormData(p => ({ ...p, plcConfig: { ...nextCfg, handshakeMap: syncedRows } }));
-    toast.success(`Auto-assigned ${assignedCount} registers.`);
-  };
-
-  const updateField = (key, value) => {
-    if (key === "plcProtocol") {
-      setFormData(prev => ({ ...prev, plcProtocol: String(value).toUpperCase(), plcRangeId: "", plcConfig: { ...prev.plcConfig, rangeId: "", startRegister: "", statusRegister: "", blockRegister: "", runningRegister: "", endOkRegister: "", endNgRegister: "", partRegister: "", stationRegister: "", resetRegister: "", heartbeatRegister: "", bypassRegister: "" } }));
-      return;
-    }
-    setFormData(prev => ({ ...prev, [key]: value }));
-  };
-
-  const handshakeCoreSyncKeys = new Set(["startRegister", "blockRegister", "runningRegister", "endOkRegister", "endNgRegister", "resetRegister", "heartbeatRegister", "bypassRegister", "startValue", "blockValue", "startedValue", "endOkValue", "endNgValue", "resetValue"]);
-
-  const updateCfg = (k, v) => setFormData(p => {
-    const baseCfg = { ...(p.plcConfig || {}) };
-    const nextCfg = { ...baseCfg, [k]: v };
-    const rows = normalizeHandshakeRows(baseCfg.handshakeMap, baseCfg);
-    nextCfg.handshakeMap = handshakeCoreSyncKeys.has(k) ? syncStandardHandshakeRowsWithCore(rows, nextCfg) : rows;
-    return { ...p, plcConfig: nextCfg };
-  });
-
-  const addHandshakeRow = (category = "handshake") => setFormData(p => ({
-    ...p, plcConfig: {
-      ...(p.plcConfig || {}),
-      handshakeMap: [...normalizeHandshakeRows(p?.plcConfig?.handshakeMap, p.plcConfig), createHandshakeRow({ signal: "New Signal", category })]
-    }
-  }));
-
-  const updateHandshakeRow = (index, key, value) => setFormData(p => {
-    const currentCfg = { ...(p.plcConfig || {}) };
-    const rows = [...normalizeHandshakeRows(currentCfg.handshakeMap, currentCfg)];
-    
-    // Clean up old core register mapping if the signal type changes
-    if (key === "signal") {
-      const oldKey = normalizeStandardHandshakeSignalKey(rows[index]?.signal);
-      if (oldKey && STANDARD_HANDSHAKE_SIGNAL_META[oldKey]) {
-        const meta = STANDARD_HANDSHAKE_SIGNAL_META[oldKey];
-        if (meta.registerKey) currentCfg[meta.registerKey] = "";
-        if (meta.valueKey) currentCfg[meta.valueKey] = "";
-      }
-    }
-    
-    rows[index] = { ...rows[index], [key]: value };
-    const nextCfg = applyStandardHandshakeRowToCoreCfg(currentCfg, rows[index]);
-    const syncedRows = syncStandardHandshakeRowsWithCore(rows, nextCfg);
-    return { ...p, plcConfig: { ...nextCfg, handshakeMap: syncedRows } };
-  });
-
-  const removeHandshakeRow = (index) => setFormData(p => {
-    const currentCfg = { ...(p.plcConfig || {}) };
-    const rows = [...normalizeHandshakeRows(currentCfg.handshakeMap, currentCfg)];
-    
-    // Clean up corresponding core register mapping
-    const rowToRemove = rows[index];
-    const key = normalizeStandardHandshakeSignalKey(rowToRemove?.signal);
-    if (key && STANDARD_HANDSHAKE_SIGNAL_META[key]) {
-      const meta = STANDARD_HANDSHAKE_SIGNAL_META[key];
-      if (meta.registerKey) currentCfg[meta.registerKey] = "";
-      if (meta.valueKey) currentCfg[meta.valueKey] = "";
-    }
-    
-    rows.splice(index, 1);
-    return { ...p, plcConfig: { ...currentCfg, handshakeMap: rows } };
-  });
-
-  const syncHandshakeRowsFromRegisters = () => setFormData(p => {
-    const currentCfg = { ...(p.plcConfig || {}) };
-    const rows = syncStandardHandshakeRowsWithCore(normalizeHandshakeRows(currentCfg.handshakeMap, currentCfg), currentCfg);
-    return { ...p, plcConfig: { ...currentCfg, handshakeMap: rows } };
-  });
-
-  const applyStandardTuning = () => setFormData(p => ({
-    ...p, plcConfig: (() => {
-      // Standardized Industrial Mapping (Section 1.3)
-      // START=1, RUNNING=1, END_OK=2, END_NG=2 (on R2062), RESET=1, BYPASS=1
-      const nextCfg = { 
-        ...(p.plcConfig || {}), 
-        startValue: "1", 
-        startedValue: "1", 
-        endOkValue: "2", 
-        endNgValue: "2", 
-        blockValue: "2", 
-        resetValue: "1" 
-      };
-      return { ...nextCfg, handshakeMap: syncStandardHandshakeRowsWithCore(normalizeHandshakeRows(nextCfg.handshakeMap, nextCfg), nextCfg) };
-    })()
-  }));
-
-  const updateCurrentStationFeature = (key, value) => {
-    if (!currentStationNo) { toast.error("Enter Operation code to map station settings."); return; }
-    const normalizedValue = key === "plcPartCount" ? Math.min(Math.max(Math.trunc(Number(value) || 1), 1), 20) : value;
-    setStationSettingsMap(prev => ({
-      ...prev,
-      [currentStationNo]: { ...DEFAULT_STATION_FEATURES, ...(prev?.[currentStationNo] || {}), [key]: normalizedValue },
+  // Signals
+  const addSignal = (preset) => {
+    const maxSeq = form.handshakeSignals.reduce((m, s) => Math.max(m, s.seq), 0);
+    setForm((p) => ({
+      ...p,
+      handshakeSignals: [
+        ...p.handshakeSignals,
+        {
+          id: uid(), seq: maxSeq + 1,
+          signal: "", direction: "READ",
+          device: p.plcDevice || "D",
+          register: "", value: "", meaning: "",
+          category: "control", required: true,
+          ...(preset || {}),
+        },
+      ],
     }));
   };
 
-  const saveCurrentStationSettings = async () => {
-    if (!currentStationNo) { toast.error("Operation code is required."); return; }
-    const payload = { [currentStationNo]: { ...DEFAULT_STATION_FEATURES, ...(stationSettingsMap?.[currentStationNo] || {}) } };
-    setSavingStationSettings(true);
-    try {
-      const res = await stationSettingsApi.save(payload);
-      if (res?.settings && typeof res.settings === "object") setStationSettingsMap(prev => ({ ...prev, ...res.settings }));
-      toast.success(`Station settings saved for ${currentStationNo}`);
-    } catch (error) { toast.error(error?.response?.data?.error || "Unable to save station settings."); }
-    finally { setSavingStationSettings(false); }
+  const updateSignal = (i, key, val) => {
+    setForm((p) => {
+      const arr = [...p.handshakeSignals];
+      arr[i] = { ...arr[i], [key]: val };
+      return { ...p, handshakeSignals: arr };
+    });
   };
 
-  const copyPlcGuide = async () => {
-    const cfg = formData.plcConfig || {};
-    const syncedRows = syncStandardHandshakeRowsWithCore(cfg.handshakeMap, cfg);
-    const guide = [
-      `MACHINE: ${formData.machineName || "-"} | LINE: ${formData.lineName || "-"} | OP: ${formData.operationNo || "-"}`,
-      `IP: ${formData.plcIp || "-"}  PORT: ${formData.plcPort || "-"}`, "",
-      "SIGNAL MAP",
-      ...syncedRows.map(row => `[${row.category?.toUpperCase() || "HANDSHAKE"}] ${row.signal} | ${row.direction} | R${row.register || "-"} | V:${row.value || "-"} | ${row.meaning}`),
-    ].join("\n");
-    try { await navigator.clipboard.writeText(guide); toast.success("PLC guide copied to clipboard"); }
-    catch { toast.error("Unable to copy PLC guide"); }
+  const removeSignal = (i) => {
+    setForm((p) => {
+      const arr = p.handshakeSignals.filter((_, idx) => idx !== i)
+        .map((s, idx) => ({ ...s, seq: idx + 1 }));
+      return { ...p, handshakeSignals: arr };
+    });
   };
 
-  const downloadCurrentPlcSpec = () => {
-    try {
-      const cfg = formData.plcConfig || {};
-      const rows = [["Category", "Signal", "Direction", "Register", "Value", "Purpose", "Required"]];
-      normalizeHandshakeRows(cfg.handshakeMap, cfg).forEach(row => {
-        rows.push([row.category || "handshake", row.signal, row.direction, row.register ? `R${row.register}` : "", row.value || "", row.meaning, row.required ? "Yes" : "No"]);
-      });
-      const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\r\n");
-      const a = document.createElement("a");
-      a.href = "data:text/csv;charset=utf-8,\uFEFF" + encodeURIComponent(csv);
-      a.download = `${String(formData.machineName || "machine").replace(/[^\w-]+/g, "_")}_signal_map.csv`;
-      a.click();
-      toast.success("Signal map CSV downloaded");
-    } catch { toast.error("Unable to generate CSV"); }
+  const moveSignal = (from, to) => {
+    if (to < 0 || to >= form.handshakeSignals.length) return;
+    setForm((p) => {
+      const arr = [...p.handshakeSignals];
+      const [moved] = arr.splice(from, 1);
+      arr.splice(to, 0, moved);
+      return { ...p, handshakeSignals: arr.map((s, i) => ({ ...s, seq: i + 1 })) };
+    });
   };
 
-  const openCreate = () => { setFormData(createEmptyForm()); setEditingMachine(null); setActiveTab("general"); setShowModal(true); };
-  const openEdit = (m) => { setFormData(buildFormFromMachine(m)); setEditingMachine(m); setActiveTab("general"); setShowModal(true); };
-  const closeModal = () => { setShowModal(false); setEditingMachine(null); };
-
-  const openBypassModal = (machine) => {
-    const currentlyEnabled = Boolean(machine?.machineBypassEnabled);
-    setBypassModalMachine(machine);
-    setBypassEnabled(!currentlyEnabled);
-    setBypassReason(String(machine?.machineBypassReason || "").trim() || "MANUAL_BYPASS");
-  };
-  const closeBypassModal = () => { setBypassModalMachine(null); setBypassEnabled(false); setBypassReason(""); };
-
-  const getSaveErrorMessage = (err) => {
-    const data = err?.response?.data || {};
-    const details = Array.isArray(data?.details) ? data.details : [];
-    if (details.includes("qrScannerIp")) return "Duplicate Scanner IP detected. Keep Scanner IP empty or use a unique value.";
-    if (details.includes("machineNumber")) return "Machine Number already exists. Please change operation/sequence or use a different machine number.";
-    
-    if (data.error === "Invalid machine PLC mapping" && details.length > 0) {
-      return `Mapping Error: ${details[0]}`;
-    }
-
-    return data?.error || "Failed to save machine";
+  // Data ranges
+  const addRange = () => {
+    setForm((p) => ({
+      ...p,
+      dataRegisterRanges: [
+        ...p.dataRegisterRanges,
+        {
+          id: uid(), name: "", device: p.plcDevice || "D",
+          startReg: "", endReg: "", count: "1", dataType: "INT16",
+          scale: "1", unit: "", purpose: "", formula: "",
+          toleranceMin: "", toleranceMax: "",
+        },
+      ],
+    }));
   };
 
+  const updateRange = (i, key, val) => {
+    setForm((p) => {
+      const arr = [...p.dataRegisterRanges];
+      arr[i] = { ...arr[i], [key]: val };
+      return { ...p, dataRegisterRanges: arr };
+    });
+  };
+
+  const removeRange = (i) => {
+    setForm((p) => ({ ...p, dataRegisterRanges: p.dataRegisterRanges.filter((_, idx) => idx !== i) }));
+  };
+
+  // ── Open / close modal ──────────────────────────────────────────────────────
+  const openCreate = () => { setForm(emptyForm()); setEditingId(null); setActiveTab("identity"); setShowModal(true); };
+  const openEdit   = (m) => { setForm(formFromMachine(m)); setEditingId(m.id); setActiveTab("identity"); setShowModal(true); };
+  const closeModal = () => { setShowModal(false); setEditingId(null); };
+
+  // ── Submit ──────────────────────────────────────────────────────────────────
   const handleSubmit = async (e) => {
     e.preventDefault();
-    const err = validateCurrentTab(activeTab);
-    if (err) { toast.error(err); return; }
-    if (!isLastTab) { saveAndNext(); return; }
+    if (!form.machineName.trim()) { toast.error("Machine name is required"); return; }
+    if (!form.operationNo.trim()) { toast.error("Operation code is required"); return; }
     setSaving(true);
     try {
-      if (registerConflicts.length > 0) { toast.error(registerConflicts[0]); return; }
-      if (industrialMappingIssues.length > 0) { toast.error(industrialMappingIssues[0]); return; }
-      const payload = toSubmitPayload(formData);
-      if (editingMachine) await machineApi.update(editingMachine.id, payload);
-      else await machineApi.create(payload);
-      
-      // Also save station features if operation code is present
-      if (currentStationNo) {
-        try {
-          await saveCurrentStationSettings();
-        } catch (sErr) {
-          console.warn("Machine saved but station settings failed:", sErr);
-        }
-      }
-
-      toast.success(editingMachine ? "Machine updated" : "Machine created");
-      closeModal(); await loadData();
-    } catch (err) { toast.error(getSaveErrorMessage(err)); }
+      const payload = buildPayload(form);
+      if (editingId) { await machineApi.update(editingId, payload); toast.success("Machine updated"); }
+      else           { await machineApi.create(payload); toast.success("Machine created"); }
+      closeModal(); await load();
+    } catch (err) { toast.error(err.response?.data?.error || "Save failed"); }
     finally { setSaving(false); }
   };
 
-  const confirmDelete = async () => {
-    if (!deleteConfirmId) return;
-    try { await machineApi.remove(deleteConfirmId); toast.success("Machine removed"); await loadData(); }
-    catch { toast.error("Failed to remove machine"); }
-    finally { setDeleteConfirmId(null); }
+  // ── Delete ──────────────────────────────────────────────────────────────────
+  const handleDelete = async () => {
+    if (!deleteId) return;
+    try { await machineApi.remove(deleteId); toast.success("Machine removed"); await load(); }
+    catch { toast.error("Delete failed"); }
+    finally { setDeleteId(null); }
+  };
+
+  // ── Bypass ──────────────────────────────────────────────────────────────────
+  const openBypass = (m) => {
+    setBypassMachine(m);
+    setBypassEnabled(Boolean(m.machineBypassEnabled));
+    setBypassReason(m.machineBypassReason || "MANUAL_BYPASS");
   };
 
   const submitBypass = async (e) => {
     e.preventDefault();
-    if (!bypassModalMachine) return;
+    if (!bypassMachine) return;
+    setBypassing(true);
     try {
-      setBypassing(true);
-      const response = await traceabilityApi.bypass({
-        machineId: bypassModalMachine.id, stationNo: bypassModalMachine.operationNo,
-        reason: String(bypassReason || "").trim() || "MANUAL_BYPASS", bypassEnabled,
+      await traceabilityApi.bypass({
+        machineId: bypassMachine.id, stationNo: bypassMachine.operationNo,
+        reason: bypassReason || "MANUAL_BYPASS", bypassEnabled,
       });
-      const newBypassEnabled = response?.bypassEnabled !== undefined ? Boolean(response.bypassEnabled) : bypassEnabled;
-      const newBypassReason = response?.bypassReason ?? (bypassEnabled ? bypassReason : null);
-      toast.success(newBypassEnabled ? `Bypass enabled for ${bypassModalMachine.machineName}` : `Bypass disabled for ${bypassModalMachine.machineName}`);
-      setMachines(prev => (prev || []).map(row => Number(row?.id) === Number(bypassModalMachine.id) ? { ...row, machineBypassEnabled: newBypassEnabled, machineBypassReason: newBypassReason } : row));
-      await loadData();
-      closeBypassModal();
+      toast.success(bypassEnabled ? "Bypass enabled" : "Bypass disabled");
+      await load();
+      setBypassMachine(null);
     } catch (err) { toast.error(err.response?.data?.error || "Bypass failed"); }
     finally { setBypassing(false); }
   };
 
-  const statCards = [
-    { label: "Total Machines", value: stats.total, color: T.navy, border: T.borderLight, icon: Database },
-    { label: "Active", value: stats.active, color: T.green, border: T.greenBorder, icon: CheckCircle2 },
-    { label: "PLC Configured", value: stats.configured, color: T.blue, border: T.blueBorder, icon: Network },
-    { label: "Bypassed", value: stats.bypassed, color: T.amber, border: T.amberBorder, icon: ShieldOff },
-  ];
+  // ── Export signal map ───────────────────────────────────────────────────────
+  const exportSignalMap = () => {
+    const rows = [["Seq", "Signal", "Category", "Direction", "Device", "Register", "Value", "Meaning", "Required"]];
+    [...form.handshakeSignals].sort((a, b) => a.seq - b.seq).forEach((s) => {
+      rows.push([s.seq, s.signal, s.category, s.direction, s.device || form.plcDevice, s.register, s.value, s.meaning, s.required ? "Yes" : "No"]);
+    });
+    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+    const a = document.createElement("a");
+    a.href = "data:text/csv;charset=utf-8,\uFEFF" + encodeURIComponent(csv);
+    a.download = `${form.machineName || "machine"}_signal_map.csv`;
+    a.click();
+    toast.success("Signal map exported");
+  };
 
-  const categoryCounts = useMemo(() => {
-    const counts = {};
-    handshakeRows.forEach(r => { const cat = r.category || "handshake"; counts[cat] = (counts[cat] || 0) + 1; });
-    return counts;
-  }, [handshakeRows]);
+  // ── Protocol helper ─────────────────────────────────────────────────────────
+  const isModbus = form.plcProtocol === "MODBUS_TCP";
+  const isSlmp   = form.plcProtocol === "SLMP";
 
-  const getStationRegisterValue = (registerKey) => currentStationFeatures?.[registerKey] || "";
-  const updateStationRegister = (registerKey, value) => updateCurrentStationFeature(registerKey, value);
-
-  /* ═══════════════════════════════════════════════════════════ */
-  /*  RENDER                                                     */
-  /* ═══════════════════════════════════════════════════════════ */
+  // ── Render ──────────────────────────────────────────────────────────────────
   return (
-    <div className="space-y-6 rise-in">
-      {/* Header */}
-      <div className="db-header-card mb-6">
+    <div className="space-y-5 rise-in" style={{ fontFamily: "var(--font-outfit)" }}>
+
+      {/* ── Page Header ───────────────────────────────────────────────────── */}
+      <div className="db-header-card">
         <div className="db-header-gradient-bar" />
         <div className="db-header-inner">
           <div className="db-header-title-group">
             <div className="db-header-icon-box"><Cpu size={22} /></div>
             <div>
               <h1 className="db-header-title">Machine Registry</h1>
-              <p className="db-header-subtitle">Manage production equipment, PLC connections &amp; register mapping</p>
+              <p className="db-header-subtitle">PLC mapping · Signal sequences · Data register ranges</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button onClick={loadData} className="db-secondary-btn"><RefreshCw size={13} /> Refresh</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={load} className="db-secondary-btn"><RefreshCw size={13} /> Refresh</button>
             <button onClick={openCreate} className="db-action-btn"><Plus size={14} /> Add Machine</button>
           </div>
         </div>
       </div>
 
-      {/* Stats */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 12 }}>
-        {statCards.map(s => {
-          const IC = s.icon;
-          return (
-            <div key={s.label} style={{ background: T.bgCard, border: `1px solid ${s.border}`, borderRadius: 12, padding: "16px 18px", borderLeft: `3px solid ${s.color}`, display: "flex", flexDirection: "column", gap: 8 }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: T.textMuted, margin: 0 }}>{s.label}</p>
-                <IC size={14} color={s.color} />
-              </div>
-              <p style={{ fontSize: 26, fontWeight: 800, color: s.color, fontFamily: "ui-monospace, monospace", lineHeight: 1, margin: 0 }}>{s.value}</p>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Filters */}
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <div style={{ position: "relative", flex: 1, minWidth: 220 }}>
-          <Search size={14} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: T.textMuted }} />
-          <input value={searchTerm} onChange={e => setSearchTerm(e.target.value)} placeholder="Search by name, line, IP or operation..."
-            style={{ ...inp, height: 38, paddingLeft: 36, width: "100%", boxSizing: "border-box" }} />
-        </div>
-        <FieldSelect value={lineFilter} onChange={e => setLineFilter(e.target.value)} style={{ width: 160 }}>
-          <option value="all">All Lines</option>
-          {lines.map(l => <option key={l} value={l}>{l}</option>)}
-        </FieldSelect>
-        <FieldSelect value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={{ width: 140 }}>
-          <option value="all">All Status</option>
-          <option value="ACTIVE">Active</option>
-          <option value="INACTIVE">Inactive</option>
-        </FieldSelect>
-      </div>
-
-      {/* Table */}
-      <div style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 14, overflow: "hidden" }}>
-        <div style={{ padding: "14px 20px", borderBottom: `1px solid ${T.borderLight}`, background: T.bgMuted, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Database size={14} color={T.blue} />
-            <p style={{ fontSize: 11, fontWeight: 700, color: T.text, textTransform: "uppercase", letterSpacing: "0.07em", margin: 0 }}>Machine Registry</p>
+      {/* ── Stats ─────────────────────────────────────────────────────────── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10 }}>
+        {[
+          { label: "Total",    value: stats.total,    color: C.text,  border: C.border  },
+          { label: "Active",   value: stats.active,   color: C.green, border: C.greenBd },
+          { label: "PLC Live", value: stats.plcOn,    color: C.blue,  border: C.blueBd  },
+          { label: "Bypassed", value: stats.bypassed, color: C.amber, border: C.amberBd },
+        ].map((s) => (
+          <div key={s.label} style={{
+            background: C.card, border: `1px solid ${s.border}`,
+            borderLeft: `3px solid ${s.color}`,
+            borderRadius: 10, padding: "12px 14px",
+          }}>
+            <p style={{ margin: 0, fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: C.hint }}>{s.label}</p>
+            <p style={{ margin: "4px 0 0", fontSize: 24, fontWeight: 800, color: s.color, fontFamily: "ui-monospace,monospace", lineHeight: 1 }}>{s.value}</p>
           </div>
-          <span style={{ fontSize: 11, color: T.textMuted, background: T.bg, border: `1px solid ${T.border}`, padding: "3px 10px", borderRadius: 6 }}>
-            {filteredMachines.length} machine{filteredMachines.length !== 1 ? "s" : ""}
+        ))}
+      </div>
+
+      {/* ── Filters ──────────────────────────────────────────────────────── */}
+      <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ flex: 1, position: "relative" }}>
+          <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: C.hint }} />
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search machine, line, operation, IP…"
+            style={{ ...inp, height: 36, paddingLeft: 30, width: "100%", boxSizing: "border-box", fontSize: 12 }} />
+        </div>
+        <FSelect value={lineFilter} onChange={(e) => setLineFilter(e.target.value)} style={{ width: 150 }}>
+          <option value="all">All Lines</option>
+          {lines.map((l) => <option key={l} value={l}>{l}</option>)}
+        </FSelect>
+      </div>
+
+      {/* ── Machine Table ─────────────────────────────────────────────────── */}
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
+        <div style={{ padding: "12px 16px", background: C.muted, borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Database size={14} color={C.blue} />
+            <span style={{ fontSize: 11, fontWeight: 700, color: C.text, textTransform: "uppercase", letterSpacing: "0.07em" }}>Machine Registry</span>
+          </div>
+          <span style={{ fontSize: 11, color: C.hint, padding: "2px 8px", background: C.muted, border: `1px solid ${C.border}`, borderRadius: 5 }}>
+            {filtered.length} machines
           </span>
         </div>
-        {filteredMachines.length === 0 ? (
-          <div style={{ padding: "60px 24px", textAlign: "center", color: T.textMuted }}>
-            <Database size={36} style={{ margin: "0 auto 12px", opacity: 0.2 }} />
-            <p style={{ fontWeight: 600, fontSize: 13 }}>No machines found</p>
+
+        {loading ? (
+          <div style={{ padding: "60px 24px", textAlign: "center", color: C.hint }}>
+            <RefreshCw size={28} style={{ margin: "0 auto 10px", opacity: 0.3, animation: "spin 1s linear infinite" }} />
+            <p style={{ fontSize: 12 }}>Loading…</p>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div style={{ padding: "60px 24px", textAlign: "center", color: C.hint }}>
+            <Cpu size={32} style={{ margin: "0 auto 10px", opacity: 0.2 }} />
+            <p style={{ fontSize: 13, fontWeight: 600 }}>No machines found</p>
+            <p style={{ fontSize: 11, marginTop: 4 }}>Add a machine to get started</p>
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 780 }}>
               <thead>
-                <tr style={{ background: T.bgMuted, borderBottom: `1px solid ${T.borderLight}` }}>
-                  {["Seq", "Machine", "Line", "Operation", "PLC / Protocol", "Range", "Target", "Status", "Bypass", "Actions"].map(h => (
-                    <th key={h} style={{ padding: "10px 16px", textAlign: h === "Actions" ? "right" : "left", fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.09em", color: T.textMuted, whiteSpace: "nowrap" }}>{h}</th>
+                <tr style={{ background: C.muted, borderBottom: `1px solid ${C.border}` }}>
+                  {["Seq", "Machine", "Type", "Operation", "PLC", "Signals", "Status", "Bypass", ""].map((h) => (
+                    <th key={h} style={{
+                      padding: "9px 14px", textAlign: h === "" ? "right" : "left",
+                      fontSize: 9, fontWeight: 700, textTransform: "uppercase",
+                      letterSpacing: "0.09em", color: C.hint, whiteSpace: "nowrap",
+                    }}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {filteredMachines.map((m, idx) => {
-                  const range = rangeById[m.plcRangeId || m.plcConfig?.rangeId];
-                  const isBypassEnabled = Boolean(m.machineBypassEnabled);
+                {filtered.map((m, idx) => {
+                  const sigCount = m.plcConfig?.handshakeMap?.length || 0;
+                  const regCount = m.plcConfig?.dataRegisterRanges?.length || 0;
                   return (
-                    <tr key={m.id} style={{ borderBottom: `1px solid ${T.borderLight}`, background: idx % 2 === 1 ? T.bgMuted : T.bgCard, transition: "background .1s" }}
-                      onMouseEnter={e => e.currentTarget.style.background = T.blueLight + "55"}
-                      onMouseLeave={e => e.currentTarget.style.background = idx % 2 === 1 ? T.bgMuted : T.bgCard}>
-                      <td style={{ padding: "12px 16px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.textMuted, fontSize: 12 }}>{String(m.sequenceNo || 0).padStart(2, "0")}</td>
-                      <td style={{ padding: "12px 16px" }}><p style={{ fontWeight: 700, color: T.text, margin: 0 }}>{m.machineName}</p></td>
-                      <td style={{ padding: "12px 16px", color: T.textSec }}>{m.lineName || "-"}</td>
-                      <td style={{ padding: "12px 16px" }}><span style={{ fontFamily: "ui-monospace,monospace", color: T.blue, fontWeight: 700 }}>{m.operationNo || "-"}</span></td>
-                      <td style={{ padding: "12px 16px" }}>
-                        <p style={{ fontFamily: "ui-monospace,monospace", fontSize: 12, color: T.blue, margin: 0 }}>{m.plcIp || "Not set"}{m.plcPort ? `:${m.plcPort}` : ""}</p>
-                        <p style={{ fontSize: 10, color: T.textMuted, margin: "2px 0 0", textTransform: "uppercase" }}>{m.plcProtocol || "-"}</p>
+                    <tr key={m.id}
+                      style={{ borderBottom: `1px solid ${C.border}`, background: idx % 2 === 1 ? C.muted : C.card, transition: "background .1s" }}
+                      onMouseEnter={(e) => { e.currentTarget.style.background = C.blueLt + "55"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = idx % 2 === 1 ? C.muted : C.card; }}
+                    >
+                      <td style={{ padding: "11px 14px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: C.hint, fontSize: 11 }}>
+                        {String(m.sequenceNo || 0).padStart(2, "0")}
                       </td>
-                      <td style={{ padding: "12px 16px" }}>
-                        {range ? (
-                          <span style={{ padding: "2px 8px", background: T.blueLight, border: `1px solid ${T.blueBorder}`, borderRadius: 4, fontSize: 11, fontFamily: "ui-monospace,monospace", color: T.blue, fontWeight: 600 }}>{(m.plcSlmpDevice || "D")}{range.rangeStart}-{(m.plcSlmpDevice || "D")}{range.rangeEnd}</span>
-                        ) : <span style={{ color: T.textMuted, fontSize: 12 }}>-</span>}
+                      <td style={{ padding: "11px 14px" }}>
+                        <p style={{ fontWeight: 700, color: C.text, margin: 0 }}>{m.machineName}</p>
+                        <p style={{ fontSize: 10, color: C.hint, margin: "2px 0 0" }}>{m.lineName || "—"}</p>
                       </td>
-                      <td style={{ padding: "12px 16px" }}>
-                        <p style={{ fontWeight: 700, color: T.text, margin: 0 }}>{m.dailyTargetQty || 0}</p>
-                        <p style={{ fontSize: 10, color: T.textMuted, margin: "2px 0 0" }}>CT {Number(m.cycleTime || 0)}s / LT {Number(m.loadingTime || 0)}s</p>
+                      <td style={{ padding: "11px 14px" }}>
+                        <span style={{ fontSize: 10, color: C.sec, background: C.muted, padding: "2px 7px", borderRadius: 4, fontWeight: 600 }}>
+                          {m.machineType || "—"}
+                        </span>
                       </td>
-                      <td style={{ padding: "12px 16px" }}><StatusBadge status={m.status} /></td>
-                      <td style={{ padding: "12px 16px" }}><BypassBadge enabled={isBypassEnabled} reason={m.machineBypassReason} /></td>
-                      <td style={{ padding: "12px 16px", textAlign: "right" }}>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 4 }}>
-                          <IconBtn icon={Eye} title="View Config" onClick={() => setViewMachine(m)} color={T.blue} hoverBg={T.blueLight} hoverColor={T.blue} hoverBorder={T.blueBorder} />
-                          <IconBtn icon={isBypassEnabled ? ShieldCheck : ShieldOff} title={isBypassEnabled ? "Disable Bypass" : "Enable Bypass"} onClick={() => openBypassModal(m)} color={T.amber} hoverBg={T.amberLight} hoverColor={T.amber} hoverBorder={T.amberBorder} />
-                          <IconBtn icon={Edit} title="Edit" onClick={() => openEdit(m)} color={T.navyMid} hoverBg={T.bgMuted} hoverColor={T.navy} hoverBorder={T.navyLight} />
-                          <IconBtn icon={Trash2} title="Delete" onClick={() => setDeleteConfirmId(m.id)} color={T.red} hoverBg={T.redLight} hoverColor={T.red} hoverBorder={T.redBorder} />
+                      <td style={{ padding: "11px 14px" }}>
+                        <span style={{ fontFamily: "ui-monospace,monospace", color: C.blue, fontWeight: 700, fontSize: 12 }}>{m.operationNo || "—"}</span>
+                      </td>
+                      <td style={{ padding: "11px 14px" }}>
+                        {m.plcEnabled !== false && m.plcIp ? (
+                          <>
+                            <p style={{ fontFamily: "ui-monospace,monospace", fontSize: 11, color: C.blue, margin: 0 }}>{m.plcIp}:{m.plcPort || "—"}</p>
+                            <p style={{ fontSize: 9, color: C.hint, margin: "2px 0 0", textTransform: "uppercase" }}>{m.plcProtocol}</p>
+                          </>
+                        ) : (
+                          <span style={{ fontSize: 10, color: C.hint }}>PLC disabled</span>
+                        )}
+                      </td>
+                      <td style={{ padding: "11px 14px" }}>
+                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                          {sigCount > 0 && <span style={{ fontSize: 9, fontWeight: 700, background: C.blueLt, color: C.blue, padding: "2px 6px", borderRadius: 3 }}>{sigCount} signals</span>}
+                          {regCount > 0 && <span style={{ fontSize: 9, fontWeight: 700, background: C.tealLt, color: C.teal, padding: "2px 6px", borderRadius: 3 }}>{regCount} ranges</span>}
+                          {!sigCount && !regCount && <span style={{ fontSize: 10, color: C.hint }}>—</span>}
+                        </div>
+                      </td>
+                      <td style={{ padding: "11px 14px" }}><StatusBadge status={m.status} /></td>
+                      <td style={{ padding: "11px 14px" }}><BypassBadge enabled={Boolean(m.machineBypassEnabled)} /></td>
+                      <td style={{ padding: "11px 14px", textAlign: "right" }}>
+                        <div style={{ display: "flex", gap: 3, justifyContent: "flex-end" }}>
+                          <IconBtn icon={Eye} title="View" onClick={() => setViewMachine(m)} color={C.blue} hoverBg={C.blueLt} hoverColor={C.blue} />
+                          <IconBtn icon={Boolean(m.machineBypassEnabled) ? ShieldCheck : ShieldOff} title={Boolean(m.machineBypassEnabled) ? "Disable Bypass" : "Enable Bypass"} onClick={() => openBypass(m)} color={C.amber} hoverBg={C.amberLt} hoverColor={C.amber} />
+                          <IconBtn icon={Edit} title="Edit" onClick={() => openEdit(m)} color={C.text} />
+                          <IconBtn icon={Trash2} title="Delete" onClick={() => setDeleteId(m.id)} color={C.red} hoverBg={C.redLt} hoverColor={C.red} />
                         </div>
                       </td>
                     </tr>
@@ -1408,975 +1216,724 @@ const MachinePage = () => {
         )}
       </div>
 
-      {/* ═══════════════════════════════════════════════════════ */}
-      {/* ADD / EDIT MODAL                                        */}
-      {/* ═══════════════════════════════════════════════════════ */}
+      {/* ════════════════════════════════════════════════════════════════════
+          ADD / EDIT MODAL
+      ════════════════════════════════════════════════════════════════════ */}
       {showModal && (
-        <div style={modalOverlay}>
+        <div style={modalOv}>
           <div style={{ position: "absolute", inset: 0 }} onClick={closeModal} />
-          <div style={{ position: "relative", width: "100%", maxWidth: 960, background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 16, overflow: "hidden", display: "flex", flexDirection: "column", maxHeight: "94vh", boxShadow: "0 24px 60px rgba(15,23,42,.22)" }}>
-            <div style={{ height: 3, background: `linear-gradient(90deg, ${T.navy}, ${T.blue})` }} />
-            <div style={{ padding: "18px 24px", borderBottom: `1px solid ${T.borderLight}`, background: T.bgCard, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ width: 40, height: 40, borderRadius: 10, background: T.blueLight, border: `1px solid ${T.blueBorder}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <Cpu size={18} color={T.blue} />
+          <div style={{
+            position: "relative", width: "100%", maxWidth: 900,
+            background: C.card, border: `1px solid ${C.border}`,
+            borderRadius: 14, overflow: "hidden",
+            display: "flex", flexDirection: "column",
+            boxShadow: "0 24px 60px rgba(15,23,42,.20)",
+          }}>
+            {/* Accent bar */}
+            <div style={{ height: 3, background: `linear-gradient(90deg,${C.text},${C.blue})` }} />
+
+            {/* Header */}
+            <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", background: C.card }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ width: 38, height: 38, borderRadius: 9, background: C.blueLt, border: `1px solid ${C.blueBd}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Cpu size={17} color={C.blue} />
                 </div>
                 <div>
-                  <h2 style={{ fontWeight: 700, color: T.text, margin: 0, fontSize: 15 }}>{editingMachine ? "Edit Machine" : "Add New Machine"}</h2>
-                  <p style={{ fontSize: 11, color: T.textMuted, margin: "2px 0 0" }}>{editingMachine ? `Machine ID: ${editingMachine.id}` : "Fill in the details to register a new machine"}</p>
+                  <h2 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.text }}>
+                    {editingId ? "Edit Machine" : "Add New Machine"}
+                  </h2>
+                  <p style={{ margin: "2px 0 0", fontSize: 11, color: C.hint }}>
+                    {editingId ? `Editing ID ${editingId}` : "Fill details to register a new machine"}
+                  </p>
                 </div>
               </div>
-              <button onClick={closeModal} style={{ width: 32, height: 32, border: `1px solid ${T.border}`, borderRadius: 8, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.textMuted }}>
-                <X size={16} />
+              <button onClick={closeModal} style={{ width: 30, height: 30, border: `1px solid ${C.border}`, borderRadius: 7, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: C.hint }}>
+                <X size={14} />
               </button>
             </div>
 
             {/* Tabs */}
-            <div style={{ padding: "0 24px", borderBottom: `1px solid ${T.borderLight}`, background: T.bgMuted, display: "flex", gap: 0 }}>
-              {FORM_TABS.map(tab => {
-                const active = activeTab === tab.id;
-                const TI = tab.icon;
-                return (
-                  <button key={tab.id} type="button" onClick={() => setActiveTab(tab.id)}
-                    style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "12px 14px", border: "none", borderBottom: `2px solid ${active ? T.blue : "transparent"}`, background: "transparent", color: active ? T.blue : T.textMuted, fontSize: 12, fontWeight: active ? 700 : 600, cursor: "pointer", whiteSpace: "nowrap", transition: "all .15s" }}>
-                    <TI size={13} />{tab.label}
-                  </button>
-                );
-              })}
-            </div>
+            <Tabs tabs={FORM_TABS} active={activeTab} onChange={setActiveTab} />
 
             {/* Form body */}
-            <form id="machine-form" onSubmit={handleSubmit} onKeyDown={e => { if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") e.preventDefault(); }} style={{ flex: 1, overflowY: "auto", padding: 24, background: T.bg }}>
+            <form id="mf" onSubmit={handleSubmit}
+              style={{ flex: 1, overflowY: "auto", padding: 20, background: C.bg, display: "flex", flexDirection: "column", gap: 16 }}
+              onKeyDown={(e) => { if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") e.preventDefault(); }}
+            >
 
-              {/* ─── GENERAL ───────────────────────────────────── */}
-              {activeTab === "general" && (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                  <div style={{ gridColumn: "1 / -1" }}>
-                    <Label required>Machine Name</Label>
-                    <FieldInput required value={formData.machineName} onChange={e => updateField("machineName", e.target.value)} placeholder="e.g. OP-010 Press" />
+              {/* ── IDENTITY TAB ─────────────────────────────────────────── */}
+              {activeTab === "identity" && (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                  <div style={{ gridColumn: "1/-1" }}>
+                    <Label required>Machine name</Label>
+                    <FInput required value={form.machineName} onChange={(e) => setF("machineName", e.target.value)} placeholder="e.g. RICO UBE 850T-2" />
                   </div>
-                  <div><Label>Line / Department</Label><FieldInput value={formData.lineName} onChange={e => updateField("lineName", e.target.value)} placeholder="Assembly Line A" /></div>
-                  <div><Label>Status</Label><FieldSelect value={formData.status} onChange={e => updateField("status", e.target.value)}><option value="ACTIVE">Active</option><option value="INACTIVE">Inactive</option></FieldSelect></div>
-                  <div><Label>Sequence No</Label><FieldInput type="number" value={formData.sequenceNo} onChange={e => updateField("sequenceNo", e.target.value)} placeholder="1" mono /></div>
                   <div>
-                    <Label>Operation Codes</Label>
-                    <FieldInput value={formData.operationNo} onChange={e => updateField("operationNo", e.target.value.toUpperCase())} placeholder="e.g. OP010, OP020" mono />
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
-                      {(formData.operationNo || "").split(/[,\s]+/).filter(Boolean).map(op => <Chip key={op} label={op} color="blue" />)}
-                    </div>
+                    <Label>Machine type</Label>
+                    <FSelect value={form.machineType} onChange={(e) => setF("machineType", e.target.value)}>
+                      {MACHINE_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    </FSelect>
                   </div>
-                  <div><Label>Daily Target</Label><FieldInput type="number" value={formData.dailyTargetQty} onChange={e => updateField("dailyTargetQty", e.target.value)} placeholder="480" mono /></div>
-                  <div><Label>Cycle Time (sec)</Label><FieldInput type="number" value={formData.cycleTime} onChange={e => updateField("cycleTime", e.target.value)} placeholder="45" mono /></div>
-                  <div><Label>Loading Time (sec)</Label><FieldInput type="number" value={formData.loadingTime} onChange={e => updateField("loadingTime", e.target.value)} placeholder="15" mono /></div>
+                  <div>
+                    <Label>Status</Label>
+                    <FSelect value={form.status} onChange={(e) => setF("status", e.target.value)}>
+                      <option value="ACTIVE">Active</option>
+                      <option value="INACTIVE">Inactive</option>
+                    </FSelect>
+                  </div>
+                  <div>
+                    <Label>Line / Department</Label>
+                    <FInput value={form.lineName} onChange={(e) => setF("lineName", e.target.value)} placeholder="e.g. Assembly Line A" />
+                  </div>
+                  <div>
+                    <Label required>Operation code</Label>
+                    <FInput required value={form.operationNo} onChange={(e) => setF("operationNo", e.target.value.toUpperCase())} placeholder="e.g. OP010" mono />
+                  </div>
+                  <div>
+                    <Label>Sequence no.</Label>
+                    <FInput type="number" value={form.sequenceNo} onChange={(e) => setF("sequenceNo", e.target.value)} placeholder="1" mono />
+                  </div>
+                  <div>
+                    <Label>Daily target qty</Label>
+                    <FInput type="number" value={form.dailyTargetQty} onChange={(e) => setF("dailyTargetQty", e.target.value)} placeholder="480" mono />
+                  </div>
+                  <div>
+                    <Label>Cycle time (sec)</Label>
+                    <FInput type="number" value={form.cycleTime} onChange={(e) => setF("cycleTime", e.target.value)} placeholder="45" mono />
+                  </div>
+                  <div>
+                    <Label>Loading time (sec)</Label>
+                    <FInput type="number" value={form.loadingTime} onChange={(e) => setF("loadingTime", e.target.value)} placeholder="15" mono />
+                  </div>
+                  <div style={{ gridColumn: "1/-1" }}>
+                    <Label>Description / notes</Label>
+                    <textarea value={form.description} onChange={(e) => setF("description", e.target.value)}
+                      placeholder="Optional machine description or notes"
+                      style={{ ...inp, height: 60, padding: 10, resize: "vertical", fontFamily: "inherit" }} />
+                  </div>
                 </div>
               )}
 
-              {/* ─── NETWORK ──────────────────────────────────── */}
+              {/* ── NETWORK / PLC TAB ─────────────────────────────────────── */}
               {activeTab === "network" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-                  <div>
-                    <Label>PLC Protocol</Label>
-                    <FieldSelect value={formData.plcProtocol} onChange={e => updateField("plcProtocol", e.target.value)}>
-                      <option value="TCP_TEXT">Generic TCP Text</option>
-                      <option value="MODBUS_TCP">Modbus TCP</option>
-                      <option value="SLMP">SLMP - Mitsubishi</option>
-                    </FieldSelect>
-                  </div>
-                  {isSlmp && (
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                      <div>
-                        <Label>SLMP Device Family</Label>
-                        <FieldInput value={formData.plcSlmpDevice} onChange={e => updateField("plcSlmpDevice", String(e.target.value || "").toUpperCase())} placeholder="D" mono />
-                      </div>
-                      <div>
-                        <Label>SLMP Frame Mode</Label>
-                        <FieldSelect value={formData.plcSlmpFrameMode} onChange={e => updateField("plcSlmpFrameMode", String(e.target.value || "AUTO").toUpperCase())} mono>
-                          <option value="AUTO">AUTO</option><option value="ASCII">ASCII</option><option value="BINARY">BINARY</option>
-                        </FieldSelect>
-                      </div>
-                    </div>
-                  )}
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8 }}>
                     <div>
-                      <Label required>PLC IP Address</Label>
-                      <FieldSelect value={formData.plcIp} onChange={e => { const newIp = e.target.value; updateField("plcIp", newIp); const matching = plcRanges.find(r => String(r.plcIp).trim() === newIp); if (matching && matching.plcPort) updateField("plcPort", String(matching.plcPort)); }} mono>
-                        <option value="">- Select IP Address -</option>
-                        {[...new Set(plcRanges.map(r => String(r.plcIp).trim()).filter(Boolean))].map(ip => <option key={ip} value={ip}>{ip}</option>)}
-                      </FieldSelect>
+                      <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.text }}>PLC Communication</p>
+                      <p style={{ margin: "2px 0 0", fontSize: 11, color: C.hint }}>Enable to use PLC signals and register polling</p>
                     </div>
-                    <div><Label>Port</Label><FieldInput type="number" value={formData.plcPort} onChange={e => updateField("plcPort", e.target.value)} placeholder="502" mono /></div>
+                    <Toggle checked={form.plcEnabled} onChange={(v) => setF("plcEnabled", v)} color={C.blue} />
                   </div>
-                  {usesRange && (
-                    <div style={{ padding: 16, background: T.blueLight + "55", border: `1px solid ${T.blueBorder}`, borderRadius: 10 }}>
-                      <Label>PLC Register Block (Range)</Label>
-                      <FieldSelect value={formData.plcRangeId} onChange={e => updateField("plcRangeId", e.target.value)}>
-                        <option value="">- Select PLC Range -</option>
-                        {selectableRanges.map(r => <option key={r.id} value={r.id}>R{r.rangeStart}-R{r.rangeEnd} ({r.plcIp})</option>)}
-                      </FieldSelect>
-                      {formData.plcRangeId && rangeById[formData.plcRangeId] && (
-                        <div style={{ marginTop: 10, padding: "10px 12px", background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: 8, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, fontSize: 12 }}>
-                          <div><span style={{ color: T.textMuted }}>Start: </span><span style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>{(formData.plcSlmpDevice || "D")}{rangeById[formData.plcRangeId].rangeStart}</span></div>
-                          <div><span style={{ color: T.textMuted }}>End: </span><span style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>{(formData.plcSlmpDevice || "D")}{rangeById[formData.plcRangeId].rangeEnd}</span></div>
-                          <div><span style={{ color: T.textMuted }}>IP: </span><span style={{ fontFamily: "ui-monospace,monospace", color: T.blue }}>{rangeById[formData.plcRangeId].plcIp}</span></div>
+
+                  {form.plcEnabled && (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                        <div>
+                          <Label required>Protocol</Label>
+                          <FSelect value={form.plcProtocol} onChange={(e) => {
+                            const p = PROTOCOLS.find((r) => r.value === e.target.value);
+                            setForm((prev) => ({ ...prev, plcProtocol: e.target.value, plcPort: String(p?.port || "") }));
+                          }}>
+                            {PROTOCOLS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+                          </FSelect>
+                        </div>
+                        <div>
+                          <Label required>PLC IP Address</Label>
+                          {!customIp && uniqueIps.includes(form.plcIp || "192.168.1.100") ? (
+                            <div style={{ display: "flex", gap: 4 }}>
+                              <FSelect value={form.plcIp} onChange={(e) => {
+                                if (e.target.value === "custom") {
+                                  setCustomIp(true);
+                                  setF("plcIp", "");
+                                } else {
+                                  setF("plcIp", e.target.value);
+                                }
+                              }}>
+                                <option value="">— Select IP —</option>
+                                {uniqueIps.map(ip => <option key={ip} value={ip}>{ip}</option>)}
+                                <option value="custom">✏️ Custom IP...</option>
+                              </FSelect>
+                            </div>
+                          ) : (
+                            <div style={{ display: "flex", gap: 4 }}>
+                              <FInput value={form.plcIp} onChange={(e) => setF("plcIp", e.target.value)} placeholder="192.168.1.100" mono style={{ flex: 1 }} />
+                              <button type="button" onClick={() => { setCustomIp(false); setF("plcIp", uniqueIps[0]); }} style={{ padding: "0 8px", border: `1px solid ${C.border}`, borderRadius: 8, background: C.card, cursor: "pointer", fontSize: 11 }}>List</button>
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <Label required>Port</Label>
+                          {!customPort && uniquePorts.includes(form.plcPort || "502") ? (
+                            <div style={{ display: "flex", gap: 4 }}>
+                              <FSelect value={form.plcPort} onChange={(e) => {
+                                if (e.target.value === "custom") {
+                                  setCustomPort(true);
+                                  setF("plcPort", "");
+                                } else {
+                                  setF("plcPort", e.target.value);
+                                }
+                              }}>
+                                <option value="">— Select Port —</option>
+                                {uniquePorts.map(p => <option key={p} value={p}>{p}</option>)}
+                                <option value="custom">✏️ Custom Port...</option>
+                              </FSelect>
+                            </div>
+                          ) : (
+                            <div style={{ display: "flex", gap: 4 }}>
+                              <FInput type="number" value={form.plcPort} onChange={(e) => setF("plcPort", e.target.value)} placeholder="502" mono style={{ flex: 1 }} />
+                              <button type="button" onClick={() => { setCustomPort(false); setF("plcPort", uniquePorts[0]); }} style={{ padding: "0 8px", border: `1px solid ${C.border}`, borderRadius: 8, background: C.card, cursor: "pointer", fontSize: 11 }}>List</button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* SLMP options */}
+                      {isSlmp && (
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, padding: "12px 14px", background: C.blueLt + "55", border: `1px solid ${C.blueBd}`, borderRadius: 8 }}>
+                          <div>
+                            <Label hint="D=Data register, W=Link register, R=File register, M=Bit device, ZR=Extended">Default Device (D/W/R/M/ZR)</Label>
+                            <FSelect value={form.plcDevice} onChange={(e) => setF("plcDevice", e.target.value)} mono>
+                              {DEVICES.map((d) => <option key={d} value={d}>{d}</option>)}
+                            </FSelect>
+                          </div>
+                          <div>
+                            <Label>Frame mode</Label>
+                            <FSelect value={form.plcFrameMode} onChange={(e) => setF("plcFrameMode", e.target.value)}>
+                              <option value="AUTO">Auto</option>
+                              <option value="ASCII">ASCII (3E)</option>
+                              <option value="BINARY">Binary (3E)</option>
+                            </FSelect>
+                          </div>
                         </div>
                       )}
-                    </div>
+
+                      {/* Register range (Modbus/SLMP) */}
+                      {(isModbus || isSlmp) && (
+                        <div>
+                          <Label hint="Assign a pre-configured register block to this machine">PLC Register Range</Label>
+                          <FSelect value={form.plcRangeId} onChange={(e) => setF("plcRangeId", e.target.value)}>
+                            <option value="">— No range assigned —</option>
+                            {plcRanges.filter((r) => r.status === "ACTIVE").map((r) => (
+                              <option key={r.id} value={r.id}>
+                                {r.plcIp} — {form.plcDevice || "D"}{r.rangeStart} to {form.plcDevice || "D"}{r.rangeEnd}
+                              </option>
+                            ))}
+                          </FSelect>
+                        </div>
+                      )}
+                    </>
                   )}
-                  <div style={{ padding: "12px 14px", background: T.bgMuted, border: `1px solid ${T.border}`, borderRadius: 9, display: "flex", alignItems: "flex-start", gap: 10 }}>
-                    <Info size={14} color={T.textMuted} style={{ flexShrink: 0, marginTop: 1 }} />
-                    <p style={{ fontSize: 12, color: T.textSec, lineHeight: 1.6, margin: 0 }}>
-                      Modbus TCP default port: <code style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.blue }}>502</code>. SLMP: <code style={{ fontFamily: "ui-monospace,monospace", color: T.blue }}>5000/5006</code>. Generic TCP: <code style={{ fontFamily: "ui-monospace,monospace", color: T.blue }}>9001</code>.
+
+                  {/* Port guide */}
+                  <div style={{ padding: "10px 12px", background: C.muted, border: `1px solid ${C.border}`, borderRadius: 7, display: "flex", gap: 8 }}>
+                    <Info size={13} color={C.hint} style={{ flexShrink: 0, marginTop: 1 }} />
+                    <p style={{ margin: 0, fontSize: 11, color: C.sec, lineHeight: 1.6 }}>
+                      Default ports — Modbus TCP: <code style={{ fontFamily: "ui-monospace,monospace", color: C.blue }}>502</code> ·
+                      SLMP: <code style={{ fontFamily: "ui-monospace,monospace", color: C.blue }}>5000 / 5006</code> ·
+                      Generic TCP: <code style={{ fontFamily: "ui-monospace,monospace", color: C.blue }}>9001</code>
                     </p>
                   </div>
                 </div>
               )}
 
-              {/* ─── MAPPING & TUNING ─────────────────────────── */}
-              {activeTab === "tuning" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-
-                 
-
-                  {/* ── Toolbar ─────────────────────────────── */}
-                  <div style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 12, padding: "14px 16px" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${T.borderLight}` }}>
-                      <Layers size={14} color={T.blue} />
-                      <span style={{ fontSize: 12, fontWeight: 700, color: T.text }}>Signal Actions</span>
-                    </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
-                      {/* Left: actions */}
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                        <ToolbarBtn icon={Wand2} label="Auto-Assign All" onClick={autoAssignAllHandshakeRegisters} color={T.teal} border={T.tealBorder} title="Auto-assign registers to all unassigned signals" />
-                        <ToolbarBtn icon={RefreshCcw} label="Sync Registers" onClick={syncHandshakeRowsFromRegisters} color={T.slate} title="Re-sync handshake rows from core register values" />
-                        <ToolbarBtn icon={Sparkles} label="Apply Standard Values" onClick={applyStandardTuning} color={T.blue} border={T.blueBorder} title="Apply default 1/2/3/4/9 value scheme" />
-                        <div style={{ width: 1, height: 28, background: T.borderLight, alignSelf: "center" }} />
-                        <ToolbarBtn icon={ClipboardCopy} label="Copy PLC Guide" onClick={copyPlcGuide} color={T.navyMid} title="Copy full signal map to clipboard as text" />
-                        <ToolbarBtn icon={FileDown} label="Export CSV" onClick={downloadCurrentPlcSpec} color={T.purple} border={T.purpleBorder} title="Download signal map as CSV file" />
-                      </div>
-                      {/* Right: add signal */}
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em" }}>Add Signal:</span>
-                        {SIGNAL_CATEGORIES.map(cat => {
-                          const cc = CAT_COLORS[cat.id] || CAT_COLORS.handshake;
-                          return (
-                            <button key={cat.id} type="button" onClick={() => addHandshakeRow(cat.id)}
-                              style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", fontSize: 11, fontWeight: 700, borderRadius: 6, border: `1px solid ${cc.border}`, color: cc.text, background: cc.bg, cursor: "pointer", whiteSpace: "nowrap" }}>
-                              <Plus size={10} />{cat.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
+              {/* ── SIGNALS TAB ───────────────────────────────────────────── */}
+              {activeTab === "signals" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {/* Explanation */}
+                  <div style={{ padding: "10px 12px", background: C.blueLt + "55", border: `1px solid ${C.blueBd}`, borderRadius: 7 }}>
+                    <p style={{ margin: 0, fontSize: 11, color: C.sec, lineHeight: 1.6 }}>
+                      <strong>Signals define the PLC handshake sequence.</strong> The backend executes them in order (seq ↑).
+                      Use <strong>WRITE</strong> to send a value to the PLC, <strong>READ</strong> to read a value from the PLC,
+                      <strong>BOTH</strong> for bidirectional registers.
+                      Device: <code style={{ fontFamily: "ui-monospace,monospace" }}>D</code>=data,
+                      <code style={{ fontFamily: "ui-monospace,monospace" }}>M</code>=bit,
+                      <code style={{ fontFamily: "ui-monospace,monospace" }}>R</code>=file,
+                      <code style={{ fontFamily: "ui-monospace,monospace" }}>W</code>=link.
+                    </p>
                   </div>
 
-                  {/* ── Category filter ──────────────────────── */}
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                    <span style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em" }}>Show:</span>
-                    {[{ id: "all", label: "All Signals", count: handshakeRows.length }, ...SIGNAL_CATEGORIES.map(c => ({ ...c, count: categoryCounts[c.id] || 0 }))].map(cat => {
-                      const isActive = activeTuningCategory === cat.id;
-                      const cc = cat.id === "all" ? { bg: T.bgMuted, border: T.border, text: T.textSec } : CAT_COLORS[cat.id] || CAT_COLORS.handshake;
-                      return (
-                        <button key={cat.id} type="button" onClick={() => setActiveTuningCategory(cat.id)}
-                          style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 12px", fontSize: 11, fontWeight: 700, borderRadius: 99, border: `1.5px solid ${isActive ? cc.border : T.borderLight}`, background: isActive ? cc.bg : "transparent", color: isActive ? cc.text : T.textMuted, cursor: "pointer", transition: "all .15s" }}>
-                          {cat.label}
-                          {cat.count > 0 && (
-                            <span style={{ minWidth: 18, height: 18, borderRadius: 99, background: isActive ? cc.text : T.border, color: isActive ? cc.bg : T.textMuted, fontSize: 9, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "0 4px" }}>{cat.count}</span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {/* ── Signal rows ──────────────────────────── */}
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {filteredHandshakeRows.length === 0 && (
-                      <div style={{ padding: "48px 24px", textAlign: "center", border: `2px dashed ${T.border}`, borderRadius: 12, color: T.textMuted, background: T.bgMuted }}>
-                        <Signal size={28} style={{ margin: "0 auto 10px", opacity: 0.3 }} />
-                        <p style={{ fontWeight: 700, fontSize: 13, margin: "0 0 4px" }}>No signals in this category</p>
-                        <p style={{ fontSize: 12, margin: 0 }}>Use the "Add Signal" buttons above to get started.</p>
-                      </div>
-                    )}
-
-                    {filteredHandshakeRows.map((row) => {
-                      const actualIndex = handshakeRows.findIndex(r => r.id === row.id);
-                      const isWrite = row.direction === "WRITE";
-                      const isBoth = row.direction === "BOTH";
-                      const cat = row.category || "handshake";
-                      const cc = CAT_COLORS[cat] || CAT_COLORS.handshake;
-                      const registerIssue = handshakeInputIssues.get(actualIndex);
-                      const rangeBounds = getHandshakeRangeBounds();
-
-                      return (
-                        <div key={row.id || `${row.signal}-${actualIndex}`}
-                          style={{ background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 10, overflow: "hidden", transition: "box-shadow .15s" }}
-                          onMouseEnter={e => e.currentTarget.style.boxShadow = "0 2px 8px rgba(15,23,42,.07)"}
-                          onMouseLeave={e => e.currentTarget.style.boxShadow = "none"}>
-
-                          {/* Row header bar */}
-                          <div style={{ display: "flex", alignItems: "center", padding: "8px 12px", background: cc.bg + "88", borderBottom: `1px solid ${cc.border}` }}>
-                            <div style={{ width: 3, height: 22, borderRadius: 2, background: cc.text, marginRight: 10, flexShrink: 0 }} />
-                            <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 7px", borderRadius: 99, background: cc.bg, color: cc.text, border: `1px solid ${cc.border}`, letterSpacing: "0.06em", textTransform: "uppercase", marginRight: 8 }}>{cc.label}</span>
-                            <span style={{ fontSize: 12, fontWeight: 700, color: T.text, flex: 1, marginRight: 8 }}>{row.signal || `Signal ${actualIndex + 1}`}</span>
-                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
-                              <ActionBadge action={row.direction || "READ"} />
-                              {row.register && (
-                                <span style={{ fontFamily: "ui-monospace,monospace", fontSize: 10, color: T.blue, fontWeight: 800, background: T.blueLight, border: `1px solid ${T.blueBorder}`, borderRadius: 4, padding: "1px 7px" }}>{(row.device || formData.plcSlmpDevice || "D")}{row.register}</span>
-                              )}
-                              {row.value !== "" && row.value !== null && row.value !== undefined && (
-                                <span style={{ fontFamily: "ui-monospace,monospace", fontSize: 10, color: T.navy, fontWeight: 700, background: T.bgMuted, border: `1px solid ${T.border}`, borderRadius: 4, padding: "1px 6px" }}>={row.value}</span>
-                              )}
-                              <label style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: T.textMuted, cursor: "pointer", marginLeft: 8 }}>
-                                <input type="checkbox" checked={row.required !== false} onChange={e => updateHandshakeRow(actualIndex, "required", e.target.checked)} style={{ accentColor: T.blue }} />
-                                <span>Required</span>
-                              </label>
-                              {/* Auto-assign button */}
-                              <button type="button" onClick={() => autoAssignHandshakeRegister(actualIndex)} title="Auto-assign next free register"
-                                style={{ display: "inline-flex", alignItems: "center", gap: 4, height: 26, padding: "0 9px", border: `1px solid ${T.tealBorder}`, borderRadius: 6, background: T.tealLight, color: T.teal, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
-                                <Wand2 size={10} /> Auto
-                              </button>
-                              {/* Remove button */}
-                              <button type="button" onClick={() => removeHandshakeRow(actualIndex)} title="Remove this signal"
-                                style={{ width: 26, height: 26, border: `1px solid ${T.redBorder}`, borderRadius: 6, background: T.redLight, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.red }}>
-                                <Trash2 size={11} />
-                              </button>
-                            </div>
-                          </div>
-
-                          {/* Row fields */}
-                          <div style={{ display: "grid", gridTemplateColumns: "1.5fr 100px 100px 120px 80px 1fr", gap: 10, padding: "12px 14px", alignItems: "end" }}>
-                            <div>
-                              <Label>Signal Name</Label>
-                              <FieldInput value={row.signal || ""} onChange={e => updateHandshakeRow(actualIndex, "signal", e.target.value)} placeholder="e.g. Start, Bin Open" />
-                            </div>
-                            <div>
-                              <Label>Category</Label>
-                              <FieldSelect value={row.category || "handshake"} onChange={e => updateHandshakeRow(actualIndex, "category", e.target.value)}>
-                                {SIGNAL_CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
-                              </FieldSelect>
-                            </div>
-                            <div>
-                              <Label>Direction</Label>
-                              <FieldSelect value={row.direction || "READ"} onChange={e => updateHandshakeRow(actualIndex, "direction", e.target.value)}>
-                                <option value="READ">READ (PLC→SW)</option>
-                                <option value="WRITE">WRITE (SW→PLC)</option>
-                                <option value="BOTH">BOTH (PLC↔SW)</option>
-                              </FieldSelect>
-                            </div>
-                            <div>
-                              <Label>
-                                Register
-                                {registerIssue && <span style={{ color: T.red, fontWeight: 700, marginLeft: 4 }}>[CONFLICT]</span>}
-                              </Label>
-                              {usesRange && rangeBounds ? (
-                                <FieldSelect value={row.register ?? ""} onChange={e => updateHandshakeRow(actualIndex, "register", e.target.value)} mono
-                                  style={registerIssue ? { borderColor: T.red, background: T.redLight } : {}}>
-                                  <option value="">— Select —</option>
-                                  {Array.from({ length: rangeBounds.end - rangeBounds.start + 1 }, (_, i) => rangeBounds.start + i).map(n => (
-                                    <option key={n} value={n}>{(formData.plcSlmpDevice || "D")}{n}</option>
-                                  ))}
-                                </FieldSelect>
-                              ) : (
-                                <FieldInput type="number" value={row.register ?? ""} onChange={e => updateHandshakeRow(actualIndex, "register", e.target.value)} placeholder="101" mono
-                                  style={registerIssue ? { borderColor: T.red, background: T.redLight } : {}} />
-                              )}
-                              {registerIssue && (
-                                <p style={{ fontSize: 9, color: T.red, fontWeight: 700, marginTop: 4, textTransform: "none", lineHeight: 1.2 }}>{registerIssue}</p>
-                              )}
-                            </div>
-                            <div>
-                              <Label>Value</Label>
-                              <FieldInput type="number" value={row.value ?? ""} onChange={e => updateHandshakeRow(actualIndex, "value", e.target.value)} placeholder="1" mono
-                                style={{ background: row.value !== "" && row.value !== null && row.value !== undefined ? T.blueLight : "", borderColor: row.value !== "" && row.value !== null ? T.blueBorder : T.border, fontWeight: 700, color: T.navy }} />
-                            </div>
-                            <div>
-                              <Label>Purpose / Meaning</Label>
-                              <FieldInput value={row.meaning || ""} onChange={e => updateHandshakeRow(actualIndex, "meaning", e.target.value)} placeholder="Describe this signal's purpose" />
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* ── Summary Table ────────────────────────── */}
-                  {handshakeRows.length > 0 && (
-                    <SectionCard title="Signal Summary" subtitle={`${handshakeRows.length} total signals configured`} icon={ClipboardList} iconColor={T.blue} iconBg={T.blueLight} iconBorder={T.blueBorder}
-                      action={
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <ToolbarBtn icon={ClipboardCopy} label="Copy" onClick={copyPlcGuide} color={T.navy} title="Copy to clipboard" />
-                          <ToolbarBtn icon={FileDown} label="CSV" onClick={downloadCurrentPlcSpec} color={T.purple} border={T.purpleBorder} title="Export as CSV" />
-                        </div>
-                      }
-                      noPad>
-                      <div style={{ overflowX: "auto" }}>
-                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                          <thead>
-                            <tr style={{ background: T.bgMuted, borderBottom: `1px solid ${T.borderLight}` }}>
-                              {["#", "Category", "Signal", "Dir", "Register", "Value", "Meaning", "Req"].map(h => (
-                                <th key={h} style={{ padding: "8px 14px", textAlign: "left", fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.09em", color: T.textMuted, whiteSpace: "nowrap" }}>{h}</th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {handshakeRows.map((row, i) => {
-                              const cc = CAT_COLORS[row.category || "handshake"] || CAT_COLORS.handshake;
-                              return (
-                                <tr key={row.id || i} style={{ borderBottom: `1px solid ${T.borderLight}`, background: i % 2 === 1 ? T.bgMuted : T.bgCard }}>
-                                  <td style={{ padding: "8px 14px", color: T.textMuted, fontSize: 11, fontFamily: "ui-monospace,monospace" }}>{i + 1}</td>
-                                  <td style={{ padding: "8px 14px" }}>
-                                    <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 7px", borderRadius: 99, background: cc.bg, color: cc.text, border: `1px solid ${cc.border}` }}>{cc.label}</span>
-                                  </td>
-                                  <td style={{ padding: "8px 14px", fontWeight: 600, color: T.text }}>{row.signal || "-"}</td>
-                                  <td style={{ padding: "8px 14px" }}><ActionBadge action={row.direction || "READ"} /></td>
-                                  <td style={{ padding: "8px 14px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: row.register ? T.blue : T.textMuted }}>{row.register ? `${row.device || formData.plcSlmpDevice || "D"}${row.register}` : "—"}</td>
-                                  <td style={{ padding: "8px 14px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: T.navy }}>{row.value ?? "—"}</td>
-                                  <td style={{ padding: "8px 14px", color: T.textSec, fontSize: 11, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.meaning || "—"}</td>
-                                  <td style={{ padding: "8px 14px" }}><Chip label={row.required !== false ? "Must" : "Optional"} color={row.required !== false ? "blue" : "gray"} /></td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                    </SectionCard>
-                  )}
-
-                  {/* Conflict warnings */}
-                  {registerConflicts.length > 0 && (
-                    <div style={{ padding: "12px 14px", background: T.redLight, border: `1px solid ${T.redBorder}`, borderRadius: 8, display: "flex", alignItems: "flex-start", gap: 10 }}>
-                      <AlertTriangle size={14} color={T.red} style={{ flexShrink: 0, marginTop: 1 }} />
-                      <div style={{ flex: 1 }}>
-                        <p style={{ margin: "0 0 4px", fontSize: 12, fontWeight: 700, color: T.red }}>Register Conflicts Detected</p>
-                        {registerConflicts.slice(0, 4).map(c => <p key={c} style={{ fontSize: 11, color: T.red, margin: 0, lineHeight: 1.6 }}>• {c}</p>)}
-                      </div>
+                  {/* Column headers */}
+                  {form.handshakeSignals.length > 0 && (
+                    <div style={{
+                      display: "grid",
+                      gridTemplateColumns: "28px 28px 140px 90px 70px 80px 70px 70px 1fr 28px",
+                      gap: 6, padding: "0 10px",
+                    }}>
+                      {["Seq", "", "Signal Name", "Category", "Direction", "Device", "Register", "Value", "Meaning / Purpose", ""].map((h, i) => (
+                        <span key={i} style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: C.hint }}>{h}</span>
+                      ))}
                     </div>
                   )}
 
-                  <div style={{ padding: "10px 14px", background: T.amberLight, border: `1px solid ${T.amberBorder}`, borderRadius: 8, display: "flex", alignItems: "flex-start", gap: 10 }}>
-                    <AlertTriangle size={14} color={T.amber} style={{ flexShrink: 0, marginTop: 1 }} />
-                    <p style={{ fontSize: 12, color: T.textSec, margin: 0, lineHeight: 1.5 }}>Changing register addresses or values requires matching updates in the PLC program. Coordinate with your PLC programmer before saving.</p>
-                  </div>
-                </div>
-              )}
+                  {/* Signal rows */}
+                  {form.handshakeSignals.length === 0 ? (
+                    <div style={{ padding: "40px 20px", textAlign: "center", border: `2px dashed ${C.border}`, borderRadius: 8, color: C.hint }}>
+                      <Signal size={28} style={{ margin: "0 auto 8px", opacity: 0.3 }} />
+                      <p style={{ fontSize: 12, fontWeight: 600 }}>No signals defined</p>
+                      <p style={{ fontSize: 11 }}>Use "Add Signal" below to start</p>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      {form.handshakeSignals.map((row, i) => (
+                        <SignalRow
+                          key={row.id} row={row} index={i}
+                          total={form.handshakeSignals.length}
+                          onUpdate={updateSignal} onRemove={removeSignal} onMove={moveSignal}
+                          device={form.plcDevice}
+                        />
+                      ))}
+                    </div>
+                  )}
 
-              {/* ─── STATION CONTROL ──────────────────────────── */}
-              {activeTab === "live" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-
-                  {/* ── Station info cards ───────────────────── */}
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10 }}>
-                    {[
-                      { label: "Station Code", value: currentStationNo || "—", color: T.blue, bg: T.blueLight, border: T.blueBorder },
-                      { label: "Station Step", value: operationSequenceSummary.operationIndex ? `${operationSequenceSummary.operationIndex} of ${operationSequenceSummary.totalOperations}` : "—", color: T.navy, bg: T.bgCard, border: T.borderLight },
-                      { label: "Sequence No", value: formData?.sequenceNo || "—", color: T.navy, bg: T.bgCard, border: T.borderLight },
-                      { label: "Active Operations", value: operationSequenceSummary.totalOperations || 0, color: T.teal, bg: T.tealLight, border: T.tealBorder },
-                    ].map(item => (
-                      <div key={item.label} style={{ padding: "12px 14px", background: item.bg, border: `1px solid ${item.border}`, borderRadius: 10 }}>
-                        <p style={{ margin: 0, fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>{item.label}</p>
-                        <p style={{ margin: "5px 0 0", fontSize: 18, fontWeight: 800, color: item.color, fontFamily: "ui-monospace,monospace", lineHeight: 1 }}>{String(item.value)}</p>
-                      </div>
+                  {/* Add signal buttons */}
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, paddingTop: 4 }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: C.hint, textTransform: "uppercase", alignSelf: "center", marginRight: 2 }}>Add signal:</span>
+                    {SIGNAL_CATEGORIES.map((cat) => (
+                      <button key={cat.id} type="button"
+                        onClick={() => addSignal({ category: cat.id, signal: cat.label })}
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 4,
+                          padding: "5px 10px", borderRadius: 6, border: `1px solid ${cat.bg}`,
+                          background: cat.bg, color: cat.color, fontSize: 11, fontWeight: 700,
+                          cursor: "pointer",
+                        }}
+                      >
+                        <Plus size={10} />{cat.label}
+                      </button>
                     ))}
                   </div>
 
-                  {/* ── Quality Check Section ────────────────── */}
-                  <SectionCard
-                    title="Quality Check Integration"
-                    subtitle="Configure how quality results reach this station — IP push or PLC register polling"
-                    icon={CheckCircle2}
-                    iconColor={formData?.spcConfig?.enabled ? T.green : T.textMuted}
-                    iconBg={formData?.spcConfig?.enabled ? T.greenLight : T.bgMuted}
-                    iconBorder={formData?.spcConfig?.enabled ? T.greenBorder : T.border}
-                    action={
-                      <Toggle
-                        onChange={(v) => {
-                          setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), enabled: v, plcAckEnabled: v } }));
-                          if (currentStationNo) updateCurrentStationFeature("qualityCheck", v);
-                        }}
-                        label="" color={T.green}
-                      />
-                    }>
-                    {Boolean(formData?.spcConfig?.enabled) ? (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-                        
-                        {/* Multi-Protocol Hub Selector */}
-                        <div>
-                          <Label style={{ marginBottom: 10, display: "block", color: T.navy }}>Data Acquisition Hub (Multi-Protocol enabled)</Label>
-                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10 }}>
-                            {[
-                              { id: "IP_PUSH", label: "IP Push", icon: LucideIcons.Radio || Radio },
-                              { id: "PLC_REGISTER", label: "PLC Reg", icon: LucideIcons.Layers || Layers },
-                              { id: "HTTP_API", label: "HTTP API", icon: LucideIcons.Globe || Globe },
-                              { id: "FOLDER", label: "Folder", icon: LucideIcons.FileSearch || FileSearch },
-                              { id: "FTP_FILE", label: "FTP / File", icon: LucideIcons.FileCode || FileCode },
-                            ].map(opt => {
-                              const active = (formData?.spcConfig?.activeProtocols || []).includes(opt.id) || (formData?.spcConfig?.mode === opt.id);
-                              return (
-                                <button key={opt.id} type="button"
-                                  onClick={() => {
-                                    setFormData(prev => {
-                                      const spc = prev.spcConfig || { enabled: true, mode: "IP_PUSH" };
-                                      return { 
-                                        ...prev, 
-                                        spcConfig: { 
-                                          ...spc, 
-                                          activeProtocols: [opt.id], 
-                                          mode: opt.id 
-                                        } 
-                                      };
-                                    });
-                                  }}
-                                  style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 8, border: `1px solid ${active ? T.blue : T.border}`, background: active ? T.blueLight : T.bgCard, color: active ? T.blue : T.textSec, cursor: "pointer", transition: "all .15s", textAlign: "left" }}>
-                                  <ProtocolIcon icon={opt.icon} size={14} color={active ? T.blue : T.textSec} />
-                                  <span style={{ fontSize: 11, fontWeight: 700 }}>{opt.label}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-
-                        {/* Single Mode Config Panel (Requirement: Show single) */}
-                        {(() => {
-                          const mode = formData?.spcConfig?.mode || "IP_PUSH";
-                          return (
-                            <div key={mode} style={{ padding: "16px", background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: 12, display: "flex", flexDirection: "column", gap: 14 }}>
-                               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: `1px solid ${T.borderLight}`, paddingBottom: 10 }}>
-                                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                   {mode === "IP_PUSH" && <ProtocolIcon icon={LucideIcons.Radio || Radio} size={14} />}
-                                   {mode === "PLC_REGISTER" && <ProtocolIcon icon={LucideIcons.Layers || Layers} size={14} />}
-                                   {mode === "HTTP_API" && <ProtocolIcon icon={LucideIcons.Globe || Globe} size={14} />}
-                                   {mode === "FOLDER" && <ProtocolIcon icon={LucideIcons.FileSearch || FileSearch} size={14} />}
-                                   {mode === "FTP_FILE" && <ProtocolIcon icon={LucideIcons.FileCode || FileCode} size={14} />}
-                                   <span style={{ fontSize: 12, fontWeight: 800, color: T.navy, textTransform: "uppercase", letterSpacing: "0.05em" }}>{mode.replace("_", " ")} Configuration</span>
-                                 </div>
-                                 <ToolbarBtn 
-                                   icon={Activity} 
-                                   label="Test Connection" 
-                                   onClick={async () => {
-                                     const load = toast.loading(`Testing ${mode} connection...`);
-                                     try {
-                                       const res = await machineApi.testConnection({ ...formData.spcConfig, mode });
-                                       toast.success(res.message || "Connection successful", { id: load });
-                                     } catch (err) {
-                                       toast.error(err.response?.data?.error || err.message || "Connection failed", { id: load });
-                                     }
-                                   }} 
-                                   color={T.teal} 
-                                   border={T.tealBorder} 
-                                 />
-                               </div>
-
-                              {mode === "IP_PUSH" && (
-                                <div style={{ display: "grid", gridTemplateColumns: "1fr 120px 120px 1fr", gap: 12 }}>
-                                  <div><Label>Source IP</Label><FieldInput value={formData?.spcConfig?.sourceIp || ""} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), sourceIp: e.target.value } }))} placeholder="192.168.1.50" mono /></div>
-                                  <div><Label>Port</Label><FieldInput type="number" value={formData?.spcConfig?.sourcePort || ""} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), sourcePort: e.target.value } }))} placeholder="5000" mono /></div>
-                                  <div><Label>Result Key</Label><FieldInput value={formData?.spcConfig?.payloadResultKey || "RESULT"} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), payloadResultKey: e.target.value.toUpperCase() } }))} placeholder="RESULT" mono /></div>
-                                  <div><Label>NG Values</Label><FieldInput value={formData?.spcConfig?.payloadResultNgValues || ""} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), payloadResultNgValues: e.target.value } }))} placeholder="NG, FAIL, 0" /></div>
-                                </div>
-                              )}
-
-                              {mode === "PLC_REGISTER" && (
-                                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                                  <div style={{ display: "grid", gridTemplateColumns: "1fr 120px 1fr", gap: 12 }}>
-                                    <div><Label>Target PLC IP</Label><FieldInput value={formData?.spcConfig?.sourceIp || ""} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), sourceIp: e.target.value } }))} placeholder="Override main PLC IP (optional)" mono /></div>
-                                    <div><Label>Port</Label><FieldInput type="number" value={formData?.spcConfig?.sourcePort || ""} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), sourcePort: e.target.value } }))} placeholder="502" mono /></div>
-                                    <div />
-                                  </div>
-                                  {/* Main Result (Standardized Grid) */}
-                                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                                    <Label style={{ fontSize: 10, fontWeight: 800, color: T.textMuted, textTransform: "uppercase" }}>Primary Result Map</Label>
-                                    <div style={{ padding: "12px", background: T.bgMuted, borderRadius: 10, border: `1px solid ${T.borderLight}` }}>
-                                       <div style={{ display: "grid", gridTemplateColumns: "1fr 80px 60px 80px 120px 120px 30px", gap: 8, alignItems: "center" }}>
-                                          <div style={{ fontSize: 11, fontWeight: 700, color: T.navy }}>Quality Result</div>
-                                          <FieldInput value={formData?.spcConfig?.plcResultRegister || ""} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), plcResultRegister: e.target.value } }))} placeholder="Reg" sx={{ height: 28, fontSize: 11 }} mono />
-                                          <FieldSelect value={formData?.spcConfig?.plcResultDevice || "D"} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), plcResultDevice: e.target.value } }))} sx={{ height: 28, fontSize: 11 }}>
-                                            {["D", "W", "R", "ZR", "M"].map(d => <option key={d} value={d}>{d}</option>)}
-                                          </FieldSelect>
-                                          <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textAlign: "center", background: T.bgCard, padding: "2px 4px", borderRadius: 4, border: `1px solid ${T.borderLight}` }}>STATUS</div>
-                                          <FieldInput value={formData?.spcConfig?.plcResultOkValues || ""} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), plcResultOkValues: e.target.value } }))} placeholder="OK Vals (1,2)" sx={{ height: 28, fontSize: 11 }} />
-                                          <FieldInput value={formData?.spcConfig?.plcResultNgValues || ""} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), plcResultNgValues: e.target.value } }))} placeholder="NG Vals (0,4)" sx={{ height: 28, fontSize: 11 }} />
-                                          <div />
-                                       </div>
-                                       <div style={{ display: "grid", gridTemplateColumns: "1fr 80px 60px 80px 120px 120px 30px", gap: 8, marginTop: 6, opacity: 0.6 }}>
-                                          <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Signal Name</div>
-                                          <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Register</div>
-                                          <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Device</div>
-                                          <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Type</div>
-                                          <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Acceptance (OK)</div>
-                                          <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Rejection (NG)</div>
-                                       </div>
-                                    </div>
-                                  </div>
-                                  
-                                  {/* Dynamic PLC Registers */}
-                                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                                      <Label style={{ fontSize: 10, fontWeight: 800, color: T.textMuted, textTransform: "uppercase" }}>Additional Data Signals (Requirement 21)</Label>
-                                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, spcConfig: { ...prev.spcConfig, dynamicRegisters: [...(prev.spcConfig.dynamicRegisters || []), { name: "", register: "", device: "D", type: "INT16", scale: "1.0", unit: "" }] }}))} style={{ padding: "4px 12px", background: T.blue, color: "#fff", border: "none", borderRadius: 4, fontSize: 10, cursor: "pointer", fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}>
-                                        <Plus size={12} /> Add Signal
-                                      </button>
-                                    </div>
-                                    <div style={{ padding: "12px", background: T.bgCard, borderRadius: 10, border: `1px solid ${T.borderLight}`, minHeight: 60 }}>
-                                      {(formData?.spcConfig?.dynamicRegisters || []).length > 0 ? (
-                                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                                          {formData.spcConfig.dynamicRegisters.map((reg, idx) => (
-                                            <div key={idx} style={{ display: "grid", gridTemplateColumns: "1fr 80px 60px 80px 60px 40px 30px", gap: 8, alignItems: "center" }}>
-                                              <FieldInput value={reg.name} onChange={e => { const dr = [...formData.spcConfig.dynamicRegisters]; dr[idx].name = e.target.value; setFormData(prev => ({ ...prev, spcConfig: { ...prev.spcConfig, dynamicRegisters: dr } })) }} placeholder="Signal Name" sx={{ height: 28, fontSize: 11 }} />
-                                              <FieldInput value={reg.register} onChange={e => { const dr = [...formData.spcConfig.dynamicRegisters]; dr[idx].register = e.target.value; setFormData(prev => ({ ...prev, spcConfig: { ...prev.spcConfig, dynamicRegisters: dr } })) }} placeholder="Reg" sx={{ height: 28, fontSize: 11 }} mono />
-                                              <FieldSelect value={reg.device} onChange={e => { const dr = [...formData.spcConfig.dynamicRegisters]; dr[idx].device = e.target.value; setFormData(prev => ({ ...prev, spcConfig: { ...prev.spcConfig, dynamicRegisters: dr } })) }} sx={{ height: 28, fontSize: 11 }}>
-                                                {["D", "W", "R", "ZR", "M"].map(d => <option key={d} value={d}>{d}</option>)}
-                                              </FieldSelect>
-                                              <FieldSelect value={reg.type} onChange={e => { const dr = [...formData.spcConfig.dynamicRegisters]; dr[idx].type = e.target.value; setFormData(prev => ({ ...prev, spcConfig: { ...prev.spcConfig, dynamicRegisters: dr } })) }} sx={{ height: 28, fontSize: 11 }}>
-                                                {["BOOL", "INT16", "UINT16", "INT32", "FLOAT", "STRING"].map(t => <option key={t} value={t}>{t}</option>)}
-                                              </FieldSelect>
-                                              <FieldInput value={reg.scale} onChange={e => { const dr = [...formData.spcConfig.dynamicRegisters]; dr[idx].scale = e.target.value; setFormData(prev => ({ ...prev, spcConfig: { ...prev.spcConfig, dynamicRegisters: dr } })) }} placeholder="Scale" sx={{ height: 28, fontSize: 11 }} />
-                                              <FieldInput value={reg.unit} onChange={e => { const dr = [...formData.spcConfig.dynamicRegisters]; dr[idx].unit = e.target.value; setFormData(prev => ({ ...prev, spcConfig: { ...prev.spcConfig, dynamicRegisters: dr } })) }} placeholder="Unit" sx={{ height: 28, fontSize: 11 }} />
-                                              <button type="button" onClick={() => setFormData(prev => { const dr = prev.spcConfig.dynamicRegisters.filter((_, i) => i !== idx); return { ...prev, spcConfig: { ...prev.spcConfig, dynamicRegisters: dr } }; })} style={{ border: "none", background: "none", color: T.red, cursor: "pointer" }}><Trash2 size={12} /></button>
-                                            </div>
-                                          ))}
-                                          <div style={{ display: "grid", gridTemplateColumns: "1fr 80px 60px 80px 60px 40px 30px", gap: 8, marginTop: 4, opacity: 0.6 }}>
-                                             <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Signal Name</div>
-                                             <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Register</div>
-                                             <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Device</div>
-                                             <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Type</div>
-                                             <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Scale</div>
-                                             <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>Unit</div>
-                                          </div>
-                                        </div>
-                                      ) : (
-                                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: "10px 0" }}>
-                                          <p style={{ margin: 0, fontSize: 10, color: T.textMuted }}>No additional signals configured.</p>
-                                        </div>
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                              )}
-
-                              {mode === "FOLDER" && (
-                                <div style={{ display: "grid", gridTemplateColumns: "1fr 150px 100px 120px", gap: 12 }}>
-                                  <div><Label>Folder Path (Local/Network)</Label><FieldInput value={formData?.spcConfig?.folderConfig?.path || ""} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...prev.spcConfig, folderConfig: { ...(prev.spcConfig.folderConfig || {}), path: e.target.value } } }))} placeholder="C:\QualityResults\LineA" mono /></div>
-                                  <div><Label>Pattern</Label><FieldInput value={formData?.spcConfig?.folderConfig?.pattern || ""} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...prev.spcConfig, folderConfig: { ...(prev.spcConfig.folderConfig || {}), pattern: e.target.value } } }))} placeholder="*.csv" mono /></div>
-                                  <div><Label>Parser</Label><FieldSelect value={formData?.spcConfig?.folderConfig?.parser || "JSON"} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...prev.spcConfig, folderConfig: { ...(prev.spcConfig.folderConfig || {}), parser: e.target.value } } }))}>
-                                    {["JSON", "CSV", "XML", "KEYVALUE", "RAW"].map(p => <option key={p} value={p}>{p}</option>)}
-                                  </FieldSelect></div>
-                                  <div style={{ paddingTop: 20 }}><Toggle checked={formData?.spcConfig?.folderConfig?.deleteAfterRead !== false} onChange={v => setFormData(prev => ({ ...prev, spcConfig: { ...prev.spcConfig, folderConfig: { ...(prev.spcConfig.folderConfig || {}), deleteAfterRead: v } } }))} label="Delete File" note="After reading" /></div>
-                                </div>
-                              )}
-
-                              {(mode === "HTTP_API" || mode === "FTP_FILE") && (
-                                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                                  <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 12, alignItems: "end" }}>
-                                    <div>
-                                      <Label style={{ display: "flex", alignItems: "center", gap: 6 }}><ProtocolIcon icon={LucideIcons.Globe || Globe} size={13} /> {mode === "FTP_FILE" ? "Remote File Path / Pattern" : "REST API Endpoint URL"}</Label>
-                                      <FieldInput
-                                        value={formData?.spcConfig?.endpoint || ""}
-                                        onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), endpoint: e.target.value } }))}
-                                        placeholder={mode === "FTP_FILE" ? "ftp://user:pass@host/path/*.csv" : "http://host:port/api/quality"}
-                                        mono
-                                      />
-                                    </div>
-                                    <ToolbarBtn icon={FileSearch} label="Browse" onClick={() => toast.info("Scanning...")} color={T.blue} border={T.blueBorder} />
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })()}
-
-                        {/* Parameter Mapping Section */}
-                        <div style={{ padding: "14px", background: T.tealLight + "22", border: `1px solid ${T.tealBorder}`, borderRadius: 10 }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                            <ClipboardList size={14} color={T.teal} />
-                            <span style={{ fontSize: 12, fontWeight: 800, color: T.teal, textTransform: "uppercase" }}>Quality Parameter & Reason Mapping</span>
-                          </div>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                            <Label>Rejection Reason Keys (e.g. CRAM, MR, REASON_CODE)</Label>
-                            <FieldInput value={formData?.spcConfig?.qualityPayloadKeys || ""} onChange={e => setFormData(prev => ({ ...prev, spcConfig: { ...(prev.spcConfig || {}), qualityPayloadKeys: e.target.value } }))} placeholder="diameter, reasonCode, error_id, CRAM, MR" />
-                            <p style={{ margin: 0, fontSize: 10, color: T.textMuted }}>Specify keys that contain the rejection parameters or failure reasons from your quality sources.</p>
-                          </div>
-                        </div>
-
-                        {/* Integration Log */}
-                        <div style={{ background: T.navy, borderRadius: 10, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.1)" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                            <span style={{ fontSize: 9, color: "rgba(255,255,255,0.4)", fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.1em" }}>Hub Status: { (formData?.spcConfig?.activeProtocols || []).length } Active Sources</span>
-                            <span style={{ fontSize: 9, color: T.teal, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}>
-                              <div style={{ width: 5, height: 5, borderRadius: "50%", background: T.teal, boxShadow: `0 0 6px ${T.teal}` }} /> Aggregating
-                            </span>
-                          </div>
-                          <div style={{ height: 60, overflowY: "auto", fontFamily: "ui-monospace, monospace", fontSize: 10, color: "rgba(255,255,255,0.8)", display: "flex", flexDirection: "column", gap: 4 }}>
-                            <div style={{ display: "flex", gap: 8 }}><span style={{ color: "rgba(255,255,255,0.2)" }}>[LOG]</span> <span>Multi-source quality acquisition initialized.</span></div>
-                            <div style={{ display: "flex", gap: 8 }}><span style={{ color: "rgba(255,255,255,0.2)" }}>[LOG]</span> <span style={{ color: T.blue }}>Ready to receive data from all configured endpoints.</span></div>
-                          </div>
-                        </div>
-
-                        <div style={{ padding: "10px 12px", background: T.blueLight + "55", border: `1px solid ${T.blueBorder}`, borderRadius: 8, fontSize: 12, color: T.textSec, display: "flex", alignItems: "center", gap: 8 }}>
-                          <Info size={13} color={T.blue} style={{ flexShrink: 0 }} />
-                          ACK is handled automatically by the Confirmation register (configured in Mapping & Tuning). No additional register needed.
-                        </div>
-                      </div>
-                    ) : (
-                      <div style={{ padding: "20px 0 8px", textAlign: "center", color: T.textMuted }}>
-                        <CheckCircle2 size={28} style={{ margin: "0 auto 8px", opacity: 0.2 }} />
-                        <p style={{ fontSize: 12, margin: 0 }}>Enable quality check to configure result integration</p>
-                      </div>
-                    )}
-                  </SectionCard>
-
-                  {/* ── Station Features ─────────────────────── */}
-                  <SectionCard
-                    title="Station Features & Register Mapping"
-                    subtitle="Toggle features for this station and assign PLC registers where applicable"
-                    icon={Zap}
-                    iconColor={T.blue}
-                    iconBg={T.blueLight}
-                    iconBorder={T.blueBorder}
-                    action={
-                      <button type="button" onClick={saveCurrentStationSettings} disabled={savingStationSettings || !currentStationNo}
-                        style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 14px", background: savingStationSettings || !currentStationNo ? T.bgMuted : T.navy, color: savingStationSettings || !currentStationNo ? T.textMuted : "#fff", border: `1px solid ${savingStationSettings || !currentStationNo ? T.border : T.navy}`, borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: savingStationSettings || !currentStationNo ? "not-allowed" : "pointer", opacity: savingStationSettings || !currentStationNo ? 0.7 : 1, transition: "all .15s" }}>
-                        <Save size={13} />{savingStationSettings ? "Saving…" : "Save Station Settings"}
-                      </button>
-                    }
-                    noPad>
-                    <div>
-                      {STATION_FEATURES.map((feature, fi) => {
-                        const isEnabled = Boolean(currentStationFeatures?.[feature.key]);
-                        const isLast = fi === STATION_FEATURES.length - 1;
-                        return (
-                          <div key={feature.key} style={{ display: "flex", alignItems: "center", gap: 16, padding: "13px 16px", borderBottom: isLast ? "none" : `1px solid ${T.borderLight}`, transition: "background .1s", background: isEnabled ? feature.color + "06" : "transparent" }}>
-                            {/* Toggle area */}
-                            <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-                              <div style={{ width: 32, height: 32, borderRadius: 8, background: isEnabled ? feature.color + "18" : T.bgMuted, border: `1px solid ${isEnabled ? feature.color + "44" : T.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "all .2s" }}>
-                                {isEnabled
-                                  ? <CheckCircle2 size={14} color={feature.color} />
-                                  : <XCircle size={14} color={T.textMuted} />
-                                }
-                              </div>
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <p style={{ margin: 0, fontSize: 13, fontWeight: isEnabled ? 700 : 600, color: isEnabled ? T.text : T.textSec }}>{feature.label}</p>
-                                <p style={{ margin: "2px 0 0", fontSize: 11, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{feature.note}</p>
-                              </div>
-                            </div>
-
-                            {/* Register mapping status */}
-                            {isEnabled && (
-                              <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
-                                {feature.hasRegister ? (
-                                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                                    <Label style={{ margin: 0, fontSize: 9 }}>{feature.registerNote || "Assigned Register"}</Label>
-                                    <FieldInput
-                                      type="number"
-                                      value={currentStationFeatures?.[feature.registerKey] || ""}
-                                      onChange={e => updateStationRegister(feature.registerKey, e.target.value)}
-                                      placeholder="Reg #"
-                                      style={{ width: 80, height: 28, fontSize: 11 }}
-                                      mono
-                                    />
-                                  </div>
-                                ) : (
-                                  (() => {
-                                    // Only show mapping status for features that optionally integrate with PLC registers
-                                    // but aren't strictly required to have one if another signal handles it (e.g. handshake)
-                                    const featuresRequiringMappingInfo = ["rejectionBin", "rejectionBinStatus", "manualResult", "labelPrint", "camera", "torque", "partPresence"];
-                                    if (!featuresRequiringMappingInfo.includes(feature.key)) return null;
-
-                                    const mappedRow = handshakeRows.find(r => 
-                                      getFamily(r.signal) === getFamily(feature.label) || 
-                                      getFamily(r.signal) === getFamily(feature.key)
-                                    );
-                                    return (
-                                      <div style={{ textAlign: "right" }}>
-                                        <p style={{ margin: 0, fontSize: 9, fontWeight: 700, color: mappedRow ? T.green : T.amber, textTransform: "uppercase" }}>
-                                          {mappedRow ? "Mapped in Tuning" : "Not Mapped"}
-                                        </p>
-                                        <p style={{ margin: "1px 0 0", fontSize: 11, fontFamily: "ui-monospace,monospace", fontWeight: 700, color: mappedRow ? T.text : T.textMuted }}>
-                                          {mappedRow ? `Register ${mappedRow.device || formData.plcSlmpDevice || "D"}${mappedRow.register}` : "No register assigned"}
-                                        </p>
-                                      </div>
-                                    );
-                                  })()
-                                )}
-                              </div>
-                            )}
-
-                            {/* Toggle button */}
-                            <button type="button" onClick={() => updateCurrentStationFeature(feature.key, !isEnabled)}
-                              style={{ flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 5, padding: "6px 12px", borderRadius: 8, border: `1px solid ${isEnabled ? feature.color + "55" : T.border}`, background: isEnabled ? feature.color + "12" : T.bgMuted, color: isEnabled ? feature.color : T.textMuted, fontSize: 11, fontWeight: 700, cursor: "pointer", transition: "all .15s" }}>
-                              {isEnabled ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
-                              {isEnabled ? "Enabled" : "Disabled"}
-                            </button>
-                          </div>
-                        );
-                      })}
-
-                      {/* Parts per cycle */}
-                      <div style={{ display: "flex", alignItems: "center", gap: 16, padding: "13px 16px", borderTop: `1px solid ${T.borderLight}`, background: T.bgMuted }}>
-                        <div style={{ width: 32, height: 32, borderRadius: 8, background: T.blueLight, border: `1px solid ${T.blueBorder}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                          <Hash size={14} color={T.blue} />
-                        </div>
-                        <div style={{ flex: 1 }}>
-                          <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: T.text }}>Parts per Cycle</p>
-                          <p style={{ margin: "2px 0 0", fontSize: 11, color: T.textMuted }}>How many parts are processed per PLC cycle (1–20)</p>
-                        </div>
-                        <div style={{ minWidth: 120 }}>
-                          <FieldInput type="number" value={currentStationFeatures?.plcPartCount ?? 1} onChange={e => updateCurrentStationFeature("plcPartCount", Number(e.target.value || 1))} min={1} max={20} mono />
-                        </div>
-                      </div>
-                    </div>
-                  </SectionCard>
-
-                  {/* ── Data Source Matrix ───────────────────── */}
-                  <SectionCard
-                    title="Data Source Summary"
-                    subtitle="Overview of where each data type originates for this station"
-                    icon={Database}
-                    iconColor={T.navy}
-                    iconBg={T.bgMuted}
-                    iconBorder={T.border}
-                    noPad>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                      <thead>
-                        <tr style={{ background: T.bgMuted, borderBottom: `1px solid ${T.borderLight}` }}>
-                          {["Data Type", "Source", "Register / Key"].map((h, i) => (
-                            <th key={h} style={{ padding: "9px 14px", textAlign: "left", fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.09em", color: T.textMuted, borderBottom: `1px solid ${T.borderLight}`, width: i === 0 ? "35%" : i === 1 ? "40%" : "25%" }}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {[
-                          { label: "Quality Result", source: (formData?.spcConfig?.activeProtocols || ["IP_PUSH"]).join(" + "), value: (formData?.spcConfig?.mode || "IP_PUSH") === "PLC_REGISTER" ? `R${formData?.spcConfig?.plcResultRegister || "—"}` : formData?.spcConfig?.payloadResultKey || "RESULT", active: formData?.spcConfig?.enabled },
-                          { label: "Handshake / Confirmation", source: "PLC Register (Tuning tab)", value: formData?.plcConfig?.heartbeatRegister ? `R${formData.plcConfig.heartbeatRegister}` : "—", active: Boolean(formData?.plcConfig?.heartbeatRegister) },
-                          { label: "Bypass Enable", source: "PLC Register (Tuning tab)", value: formData?.plcConfig?.bypassRegister ? `R${formData.plcConfig.bypassRegister}` : "—", active: Boolean(formData?.plcConfig?.bypassRegister) },
-                          { label: "Additional Parameters", source: "PLC Dynamic Mapping", value: (formData?.spcConfig?.dynamicRegisters || []).length > 0 ? `${formData.spcConfig.dynamicRegisters.length} Dynamic Regs` : "None", active: (formData?.spcConfig?.dynamicRegisters || []).length > 0 },
-                        ].map((row, i, arr) => (
-                          <tr key={row.label} style={{ borderBottom: i < arr.length - 1 ? `1px solid ${T.borderLight}` : "none", background: i % 2 === 1 ? T.bgMuted : T.bgCard }}>
-                            <td style={{ padding: "10px 14px", fontWeight: 600, color: T.text, fontSize: 12 }}>
-                              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                                <span style={{ width: 6, height: 6, borderRadius: "50%", background: row.active ? T.green : T.border, flexShrink: 0 }} />
-                                {row.label}
-                              </span>
-                            </td>
-                            <td style={{ padding: "10px 14px", fontSize: 11, color: T.textMuted }}>{row.source}</td>
-                            <td style={{ padding: "10px 14px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: row.active ? T.navy : T.textMuted, fontSize: 12 }}>{row.value}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </SectionCard>
-
-                  {/* ── Industrial Diagnostics & Timeline (Req 11, 12, 20) ── */}
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                    <SectionCard title="Middleware Diagnostics" icon={Activity} iconColor={T.purple} iconBg={T.purpleLight} iconBorder={T.purpleBorder}>
-                       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                            <div style={{ padding: 10, background: T.bgMuted, borderRadius: 8 }}>
-                               <Label>Last Packet</Label>
-                               <span style={{ fontSize: 12, fontWeight: 800, color: T.navy }}>14:55:02</span>
-                            </div>
-                            <div style={{ padding: 10, background: T.bgMuted, borderRadius: 8 }}>
-                               <Label>Packets / Hour</Label>
-                               <span style={{ fontSize: 12, fontWeight: 800, color: T.green }}>1,240</span>
-                            </div>
-                         </div>
-                         <div style={{ padding: "10px 12px", background: T.navy, borderRadius: 8, color: "#fff" }}>
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                               <span style={{ fontSize: 9, fontWeight: 800, opacity: 0.5 }}>ACQUISITION LATENCY</span>
-                               <span style={{ fontSize: 10, fontWeight: 800, color: T.teal }}>12ms</span>
-                            </div>
-                            <div style={{ height: 4, background: "rgba(255,255,255,0.1)", borderRadius: 2 }}>
-                               <div style={{ width: "35%", height: "100%", background: T.teal, borderRadius: 2 }} />
-                            </div>
-                         </div>
-                       </div>
-                    </SectionCard>
-
-                    <SectionCard title="Acquisition Event Timeline" icon={ScanLine} iconColor={T.blue} iconBg={T.blueLight} iconBorder={T.blueBorder} noPad>
-                       <div style={{ height: 120, overflowY: "auto", padding: "10px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
-                          {[
-                            { time: "14:55:02", event: "SOURCE_CONNECTED", protocol: "HTTP_API", status: "OK" },
-                            { time: "14:55:01", event: "PAYLOAD_RECEIVED", protocol: "PLC_REG", status: "OK" },
-                            { time: "14:54:58", event: "PARSE_SUCCESS", protocol: "FOLDER", status: "OK" },
-                            { time: "14:54:45", event: "RETRY_STARTED", protocol: "HTTP_API", status: "PENDING" },
-                          ].map((log, i) => (
-                            <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 10, borderLeft: `2px solid ${log.status === "OK" ? T.green : T.amber}`, paddingLeft: 8 }}>
-                               <span style={{ color: T.textMuted, fontFamily: "monospace" }}>{log.time}</span>
-                               <span style={{ fontWeight: 800, color: T.navy }}>{log.event}</span>
-                               <Chip label={log.protocol} color="gray" />
-                            </div>
-                          ))}
-                       </div>
-                    </SectionCard>
-                  </div>
+                  {/* Export */}
+                  {form.handshakeSignals.length > 0 && (
+                    <button type="button" onClick={exportSignalMap}
+                      style={{ alignSelf: "flex-start", display: "inline-flex", alignItems: "center", gap: 5, padding: "6px 12px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.card, color: C.sec, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
+                      <Download size={11} /> Export signal map CSV
+                    </button>
+                  )}
                 </div>
               )}
+
+              {/* ── DATA REGISTERS TAB ───────────────────────────────────── */}
+              {activeTab === "data" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {/* Explanation */}
+                  <div style={{ padding: "10px 12px", background: C.tealLt + "55", border: `1px solid ${C.tealBd}`, borderRadius: 7 }}>
+                    <p style={{ margin: 0, fontSize: 11, color: C.sec, lineHeight: 1.6 }}>
+                      <strong>Data register ranges</strong> let you read blocks of consecutive registers (e.g. D2060 to D2064 = 5 registers).
+                      These are polled by the backend after each cycle and shown in the live data panel and GlobalPopup measurements view.
+                      Set tolerance min/max for automatic OK/NG quality checks.
+                    </p>
+                  </div>
+
+                  {form.dataRegisterRanges.length === 0 ? (
+                    <div style={{ padding: "40px 20px", textAlign: "center", border: `2px dashed ${C.border}`, borderRadius: 8, color: C.hint }}>
+                      <TableProperties size={28} style={{ margin: "0 auto 8px", opacity: 0.3 }} />
+                      <p style={{ fontSize: 12, fontWeight: 600 }}>No data register ranges defined</p>
+                      <p style={{ fontSize: 11 }}>Click "Add Range" to define register blocks to read</p>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      {form.dataRegisterRanges.map((row, i) => (
+                        <DataRangeRow key={row.id} row={row} index={i}
+                          onUpdate={updateRange} onRemove={removeRange}
+                          device={form.plcDevice} />
+                      ))}
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button type="button" onClick={addRange}
+                      style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "8px 14px", borderRadius: 7, border: `1px solid ${C.border}`, background: C.card, color: C.sec, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                      <Plus size={12} /> Add Register Range
+                    </button>
+                    {/* Quick presets for common machine types */}
+                    {form.machineType === "CMM" && (
+                      <button type="button"
+                        onClick={() => {
+                          ["Bore Diameter", "Depth", "Flatness", "Perpendicularity"].forEach((name, i) => {
+                            setForm((p) => ({
+                              ...p, dataRegisterRanges: [
+                                ...p.dataRegisterRanges,
+                                { id: uid(), name, device: p.plcDevice || "D", startReg: String(2060 + i * 2), count: "1", dataType: "INT16", scale: "0.01", unit: "mm", purpose: `${name} measurement`, toleranceMin: "", toleranceMax: "" },
+                              ],
+                            }));
+                          });
+                        }}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "8px 14px", borderRadius: 7, border: `1px solid ${C.tealBd}`, background: C.tealLt, color: C.teal, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                        <Gauge size={12} /> Add CMM preset
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Live summary table */}
+                  {form.dataRegisterRanges.length > 0 && (
+                    <div style={{ marginTop: 4, background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
+                      <div style={{ padding: "8px 12px", background: C.muted, borderBottom: `1px solid ${C.border}` }}>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: C.hint, textTransform: "uppercase", letterSpacing: "0.07em" }}>Register map summary</span>
+                      </div>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                        <thead>
+                          <tr style={{ background: C.muted, borderBottom: `1px solid ${C.border}` }}>
+                            {["Name", "Registers", "Type", "Scale", "Unit", "Tolerance"].map((h) => (
+                              <th key={h} style={{ padding: "6px 12px", textAlign: "left", fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: C.hint }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {form.dataRegisterRanges.map((r, i) => {
+                            const start = toNum(r.startReg);
+                            const count = Math.min(toNum(r.count, 1), 32);
+                            const regList = start !== null ? `${r.device || form.plcDevice}${start}${count > 1 ? ` – ${r.device || form.plcDevice}${start + count - 1}` : ""}` : "—";
+                            const hasTol = r.toleranceMin !== "" || r.toleranceMax !== "";
+                            return (
+                              <tr key={r.id} style={{ borderBottom: `1px solid ${C.border}`, background: i % 2 === 1 ? C.muted : C.card }}>
+                                <td style={{ padding: "7px 12px", fontWeight: 600, color: C.text }}>{r.name || "—"}</td>
+                                <td style={{ padding: "7px 12px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: C.blue }}>{regList}</td>
+                                <td style={{ padding: "7px 12px", color: C.sec }}>{r.dataType}</td>
+                                <td style={{ padding: "7px 12px", fontFamily: "ui-monospace,monospace", color: C.sec }}>×{r.scale || "1"}</td>
+                                <td style={{ padding: "7px 12px", color: C.sec }}>{r.unit || "—"}</td>
+                                <td style={{ padding: "7px 12px" }}>
+                                  {hasTol ? (
+                                    <span style={{ fontSize: 10, color: C.teal, fontFamily: "ui-monospace,monospace" }}>
+                                      {r.toleranceMin || "—"} … {r.toleranceMax || "—"}
+                                    </span>
+                                  ) : <span style={{ color: C.hint, fontSize: 10 }}>None</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── QUALITY / SPC TAB ────────────────────────────────────── */}
+              {activeTab === "quality" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8 }}>
+                    <div>
+                      <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.text }}>Quality / SPC Integration</p>
+                      <p style={{ margin: "2px 0 0", fontSize: 11, color: C.hint }}>Enable to receive quality results from external source</p>
+                    </div>
+                    <Toggle checked={form.spcEnabled} onChange={(v) => setF("spcEnabled", v)} color={C.green} />
+                  </div>
+
+                  {form.spcEnabled && (
+                    <>
+                      <div>
+                        <Label>Data source mode</Label>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 8 }}>
+                          {[
+                            { id: "IP_PUSH",      label: "IP Push",     hint: "Equipment sends data to our server" },
+                            { id: "PLC_REGISTER", label: "PLC Register", hint: "Read quality result from PLC register" },
+                            { id: "HTTP_API",     label: "HTTP API",    hint: "Poll an HTTP endpoint for result" },
+                            { id: "FOLDER",       label: "Folder Watch", hint: "Watch a local/network folder for result files" },
+                          ].map((m) => (
+                            <button key={m.id} type="button" onClick={() => setF("spcMode", m.id)}
+                              style={{
+                                padding: "10px 12px", borderRadius: 7, textAlign: "left",
+                                border: `1px solid ${form.spcMode === m.id ? C.blue : C.border}`,
+                                background: form.spcMode === m.id ? C.blueLt : C.card,
+                                cursor: "pointer",
+                              }}>
+                              <p style={{ margin: 0, fontSize: 12, fontWeight: 700, color: form.spcMode === m.id ? C.blue : C.text }}>{m.label}</p>
+                              <p style={{ margin: "2px 0 0", fontSize: 10, color: C.hint }}>{m.hint}</p>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {(() => {
+                        const cfg = SPC_MODE_FIELDS[form.spcMode || "IP_PUSH"] || SPC_MODE_FIELDS.IP_PUSH;
+                        return (
+                          <>
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 130px 1fr 1fr", gap: 12 }}>
+                              <div>
+                                <Label>{cfg.label1}</Label>
+                                <FInput value={form.spcSourceIp} onChange={(e) => setF("spcSourceIp", e.target.value)} placeholder={cfg.placeholder1} mono />
+                              </div>
+                              <div>
+                                <Label>{cfg.label2}</Label>
+                                <FInput type={cfg.type2 || "text"} value={form.spcSourcePort} onChange={(e) => setF("spcSourcePort", e.target.value)} placeholder={cfg.placeholder2} mono />
+                              </div>
+                              <div>
+                                <Label hint={cfg.hint3}>{cfg.label3}</Label>
+                                <FInput value={form.spcPayloadKey} onChange={(e) => setF("spcPayloadKey", e.target.value)} placeholder={cfg.placeholder3} mono />
+                              </div>
+                              <div>
+                                <Label hint={cfg.hint4}>{cfg.label4}</Label>
+                                <FInput value={form.spcNgValues} onChange={(e) => setF("spcNgValues", e.target.value)} placeholder={cfg.placeholder4} />
+                              </div>
+                            </div>
+
+                            {/* Test Connection Button */}
+                            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                              <button type="button" onClick={handleTestConnection}
+                                style={{
+                                  display: "inline-flex", alignItems: "center", gap: 6,
+                                  padding: "8px 16px", borderRadius: 8,
+                                  border: `1px solid ${C.greenBd}`,
+                                  background: C.greenLt, color: C.green,
+                                  fontSize: 12, fontWeight: 700, cursor: "pointer",
+                                  transition: "all .15s",
+                                }}
+                              >
+                                <Zap size={13} /> Test Connection & Review Data
+                              </button>
+                            </div>
+                          </>
+                        );
+                      })()}
+
+                      <div style={{ padding: "10px 12px", background: C.muted, border: `1px solid ${C.border}`, borderRadius: 7 }}>
+                        <p style={{ margin: 0, fontSize: 11, color: C.sec }}>
+                          <Info size={11} style={{ verticalAlign: "middle", marginRight: 4 }} />
+                          Quality result acknowledgement is handled via the Confirmation signal defined in the Signals tab.
+                          Data register ranges defined in the Data Registers tab are also read on cycle end and attached to the quality record.
+                        </p>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
             </form>
 
             {/* Modal footer */}
-            <div style={{ padding: "14px 24px", borderTop: `1px solid ${T.borderLight}`, background: T.bgCard, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: T.textMuted }}>
-                <ChevronRight size={12} />
-                <span>Step {activeTabIndex + 1} of {FORM_TABS.length} — {FORM_TABS[activeTabIndex]?.label}</span>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                {activeTabIndex > 0 && (
-                  <button type="button" onClick={goPrevious}
-                    style={{ padding: "8px 16px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: `1px solid ${T.border}`, background: T.bgCard, color: T.textSec, cursor: "pointer" }}>
-                    Previous
-                  </button>
-                )}
+            <div style={{ padding: "12px 20px", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <p style={{ fontSize: 11, color: C.hint, margin: 0 }}>
+                {FORM_TABS.find((t) => t.id === activeTab)?.label} · {editingId ? "Editing" : "New machine"}
+              </p>
+              <div style={{ display: "flex", gap: 10 }}>
                 <button type="button" onClick={closeModal}
-                  style={{ padding: "8px 16px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: `1px solid ${T.border}`, background: T.bgCard, color: T.textSec, cursor: "pointer" }}>
+                  style={{ padding: "8px 16px", fontSize: 12, fontWeight: 600, borderRadius: 8, border: `1px solid ${C.border}`, background: C.card, color: C.sec, cursor: "pointer" }}>
                   Cancel
                 </button>
-                {!isLastTab ? (
-                  <button type="button" onClick={saveAndNext}
-                    style={{ padding: "8px 18px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: "none", background: T.navy, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
-                    <ChevronRight size={13} /> Save & Next
-                  </button>
-                ) : (
-                  <button type="submit" form="machine-form" disabled={saving}
-                    style={{ padding: "8px 20px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: "none", background: saving ? T.slateLight : T.navy, color: "#fff", cursor: saving ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 6, opacity: saving ? 0.6 : 1 }}>
-                    <Save size={13} />{saving ? "Saving…" : editingMachine ? "Update Machine" : "Create Machine"}
-                  </button>
-                )}
+                <button type="submit" form="mf" disabled={saving}
+                  style={{ padding: "8px 20px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: "none", background: saving ? C.hint : C.text, color: "#fff", cursor: saving ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 6, opacity: saving ? 0.6 : 1 }}>
+                  <Save size={13} />{saving ? "Saving…" : editingId ? "Update Machine" : "Create Machine"}
+                </button>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* ═══════════════════════════════════════════════════════ */}
-      {/* VIEW CONFIG MODAL                                       */}
-      {/* ═══════════════════════════════════════════════════════ */}
+      {/* ── TEST CONNECTION MODAL ─────────────────────────────────────────── */}
+      {showTestModal && (
+        <div style={modalOv}>
+          <div style={{ position: "absolute", inset: 0 }} onClick={() => setShowTestModal(false)} />
+          <div style={{
+            position: "relative", width: "100%", maxWidth: 500,
+            background: C.card, border: `1px solid ${C.border}`,
+            borderRadius: 12, overflow: "hidden",
+            boxShadow: "0 20px 50px rgba(15,23,42,.18)",
+          }}>
+            <div style={{ height: 3, background: `linear-gradient(90deg,${C.green},${C.blue})` }} />
+            <div style={{ padding: "14px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Zap size={14} color={C.green} />
+                <h2 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: C.text }}>Test Connection & Review Data</h2>
+              </div>
+              <button onClick={() => setShowTestModal(false)} style={{ width: 28, height: 28, border: `1px solid ${C.border}`, borderRadius: 6, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: C.hint }}>
+                <X size={13} />
+              </button>
+            </div>
+            <div style={{ padding: 18, background: C.bg, display: "flex", flexDirection: "column", gap: 14 }}>
+              {testing ? (
+                <div style={{ padding: "40px 20px", textAlign: "center", color: C.hint }}>
+                  <RefreshCw size={28} style={{ margin: "0 auto 10px", opacity: 0.8, animation: "spin 1s linear infinite" }} color={C.blue} />
+                  <p style={{ fontSize: 13, fontWeight: 600, color: C.text }}>Connecting to quality data source...</p>
+                  <p style={{ fontSize: 11, color: C.hint, marginTop: 4 }}>Mode: {form.spcMode} · Endpoint: {form.spcSourceIp || "Localhost"}</p>
+                </div>
+              ) : testResult ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <div style={{ padding: "10px 12px", background: C.greenLt, border: `1px solid ${C.greenBd}`, borderRadius: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                    <CheckCircle2 size={16} color={C.green} />
+                    <div>
+                      <p style={{ margin: 0, fontSize: 12, fontWeight: 700, color: C.green }}>Connection Successful</p>
+                      <p style={{ margin: "2px 0 0", fontSize: 10, color: C.sec }}>{testResult.message}</p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <Label>Sample Payload Received</Label>
+                    <pre style={{
+                      margin: "4px 0 0", padding: 12,
+                      background: "#0f172a", color: "#38bdf8",
+                      borderRadius: 8, border: "1px solid #334155",
+                      fontFamily: "ui-monospace,monospace", fontSize: 11,
+                      overflowX: "auto",
+                    }}>
+                      {JSON.stringify(testResult.payload, null, 2)}
+                    </pre>
+                  </div>
+
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8 }}>
+                    <div>
+                      <p style={{ margin: 0, fontSize: 11, fontWeight: 700, color: C.text }}>Parsed Quality Outcome</p>
+                      <p style={{ margin: "2px 0 0", fontSize: 9, color: C.hint }}>Evaluated using key: "{form.spcPayloadKey}" and NG values: [{form.spcNgValues}]</p>
+                    </div>
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", gap: 4,
+                      padding: "4px 10px", borderRadius: 99, fontSize: 11, fontWeight: 800,
+                      background: C.greenLt, color: C.green, border: `1px solid ${C.greenBd}`
+                    }}>
+                      <CheckCircle2 size={12} /> {testResult.outcome}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <p style={{ fontSize: 12, color: C.red }}>No test data available.</p>
+              )}
+            </div>
+            <div style={{ padding: "12px 18px", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", justifyContent: "flex-end" }}>
+              <button type="button" onClick={() => setShowTestModal(false)}
+                style={{ padding: "8px 16px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: "none", background: C.text, color: "#fff", cursor: "pointer" }}>
+                Close Review
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── VIEW MODAL ─────────────────────────────────────────────────────── */}
       {viewMachine && (
-        <div style={modalOverlay}>
+        <div style={modalOv}>
           <div style={{ position: "absolute", inset: 0 }} onClick={() => setViewMachine(null)} />
-          <div style={{ position: "relative", width: "100%", maxWidth: 780, background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 16, overflow: "hidden", boxShadow: "0 24px 60px rgba(15,23,42,.22)" }}>
-            <div style={{ height: 3, background: `linear-gradient(90deg, ${T.navy}, ${T.blue})` }} />
-            <div style={{ padding: "16px 20px", borderBottom: `1px solid ${T.borderLight}`, background: T.bgCard, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ width: 34, height: 34, borderRadius: 9, background: T.blueLight, border: `1px solid ${T.blueBorder}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <Eye size={15} color={T.blue} />
-                </div>
-                <div>
-                  <h2 style={{ fontWeight: 700, color: T.text, margin: 0, fontSize: 14 }}>Machine Configuration</h2>
-                  <p style={{ fontSize: 11, color: T.textMuted, margin: "2px 0 0" }}>{viewMachine.machineName} | {viewMachine.operationNo || "-"}</p>
-                </div>
+          <div style={{
+            position: "relative", width: "100%", maxWidth: 700,
+            background: C.card, border: `1px solid ${C.border}`,
+            borderRadius: 12, overflow: "hidden",
+            boxShadow: "0 20px 50px rgba(15,23,42,.18)",
+          }}>
+            <div style={{ height: 3, background: `linear-gradient(90deg,${C.text},${C.blue})` }} />
+            <div style={{ padding: "14px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <h2 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: C.text }}>{viewMachine.machineName}</h2>
+                <p style={{ margin: "2px 0 0", fontSize: 11, color: C.hint }}>
+                  {viewMachine.operationNo} · {viewMachine.machineType || "—"} · {viewMachine.lineName || "—"}
+                </p>
               </div>
-              <button onClick={() => setViewMachine(null)} style={{ width: 30, height: 30, border: `1px solid ${T.border}`, borderRadius: 7, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.textMuted }}>
-                <X size={14} />
+              <button onClick={() => setViewMachine(null)} style={{ width: 28, height: 28, border: `1px solid ${C.border}`, borderRadius: 6, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: C.hint }}>
+                <X size={13} />
               </button>
             </div>
-            <div style={{ padding: 20, maxHeight: "70vh", overflowY: "auto", background: T.bg, display: "grid", gap: 12 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10 }}>
-                {[
-                  { label: "Line", value: viewMachine.lineName || "-", bg: T.bgCard, border: T.borderLight, text: T.text },
-                  { label: "PLC", value: `${viewMachine.plcIp || "-"}${viewMachine.plcPort ? `:${viewMachine.plcPort}` : ""}`, bg: T.blueLight, border: T.blueBorder, text: T.blue },
-                  { label: "Protocol", value: viewMachine.plcProtocol || "-", bg: T.tealLight, border: T.tealBorder, text: T.teal },
-                  { label: "Status", value: viewMachine.status || "-", bg: viewMachine.status === "ACTIVE" ? T.greenLight : T.redLight, border: viewMachine.status === "ACTIVE" ? T.greenBorder : T.redBorder, text: viewMachine.status === "ACTIVE" ? T.green : T.red },
-                  { label: "Bypass", value: viewMachine.machineBypassEnabled ? "Bypassed" : "Normal", bg: viewMachine.machineBypassEnabled ? T.amberLight : T.bgMuted, border: viewMachine.machineBypassEnabled ? T.amberBorder : T.border, text: viewMachine.machineBypassEnabled ? T.amber : T.textMuted },
-                ].map(item => (
-                  <div key={item.label} style={{ padding: "10px 12px", borderRadius: 8, border: `1px solid ${item.border}`, background: item.bg }}>
-                    <p style={{ margin: 0, fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 700 }}>{item.label}</p>
-                    <p style={{ margin: "4px 0 0", fontSize: 12, color: item.text, fontWeight: 700, fontFamily: "ui-monospace,monospace" }}>{String(item.value)}</p>
-                  </div>
-                ))}
-              </div>
-              <div style={{ padding: "10px 12px", borderRadius: 8, border: `1px solid ${T.borderLight}`, background: T.bgCard }}>
-                <p style={{ margin: "0 0 8px", fontSize: 11, color: T.text, fontWeight: 700 }}>Signal Map</p>
-                <div style={{ display: "grid", gap: 6 }}>
-                  {normalizeHandshakeRows(viewMachine.plcConfig?.handshakeMap, viewMachine.plcConfig || {}).map((row, idx) => {
-                    const cc = CAT_COLORS[row.category || "handshake"] || CAT_COLORS.handshake;
-                    const isW = row.direction === "WRITE";
-                    const isB = row.direction === "BOTH";
-                    return (
-                      <div key={row.id || `${row.signal}-${idx}`} style={{ fontSize: 11, color: T.textSec, fontFamily: "ui-monospace,monospace", padding: "6px 10px", borderRadius: 6, border: `1px solid ${isW ? T.blueBorder : isB ? T.tealBorder : T.greenBorder}`, background: isW ? T.blueLight : isB ? T.tealLight : T.greenLight, display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ fontSize: 8, fontWeight: 700, padding: "1px 5px", borderRadius: 99, background: cc.bg, color: cc.text, border: `1px solid ${cc.border}` }}>{cc.label}</span>
-                        <DirectionIcon direction={row.direction} size={11} />
-                        <strong>{row.signal || `Row ${idx + 1}`}</strong>
-                        <span style={{ color: T.textMuted }}>|</span>
-                        <span>R{row.register || "-"}</span>
-                        <span style={{ color: T.textMuted }}>V:{row.value || "-"}</span>
-                        <span style={{ fontFamily: "inherit", color: T.textSec, fontSize: 10 }}>{row.meaning || "-"}</span>
-                      </div>
-                    );
-                  })}
+            <div style={{ padding: 18, maxHeight: "70vh", overflowY: "auto", background: C.bg, display: "flex", flexDirection: "column", gap: 14 }}>
+
+              {/* Network summary */}
+              <SectionCard title="Network & PLC" icon={Network} collapsible>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, fontSize: 12 }}>
+                  {[
+                    ["IP", viewMachine.plcIp || "—"],
+                    ["Port", viewMachine.plcPort || "—"],
+                    ["Protocol", viewMachine.plcProtocol || "—"],
+                    ["Device", viewMachine.plcDevice || "D"],
+                    ["Status", viewMachine.status],
+                    ["PLC Enabled", viewMachine.plcEnabled !== false ? "Yes" : "No"],
+                  ].map(([k, v]) => (
+                    <div key={k} style={{ padding: "8px 10px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 6 }}>
+                      <p style={{ margin: 0, fontSize: 9, fontWeight: 700, textTransform: "uppercase", color: C.hint }}>{k}</p>
+                      <p style={{ margin: "3px 0 0", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: C.blue }}>{String(v)}</p>
+                    </div>
+                  ))}
                 </div>
-              </div>
+              </SectionCard>
+
+              {/* Signal map */}
+              {Array.isArray(viewMachine.plcConfig?.handshakeMap) && viewMachine.plcConfig.handshakeMap.length > 0 && (
+                <SectionCard title={`Signal Map (${viewMachine.plcConfig.handshakeMap.length})`} icon={Signal} collapsible>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                    {[...viewMachine.plcConfig.handshakeMap].sort((a, b) => (a.seq || 0) - (b.seq || 0)).map((s, i) => {
+                      const cc = catColor(s.category || "control");
+                      return (
+                        <div key={s.id || i} style={{
+                          display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+                          padding: "6px 10px", borderRadius: 6,
+                          background: C.card, border: `1px solid ${C.border}`,
+                          borderLeft: `3px solid ${cc.color}`,
+                          fontSize: 11,
+                        }}>
+                          <span style={{ fontSize: 9, fontWeight: 800, color: C.hint, fontFamily: "ui-monospace,monospace", minWidth: 18 }}>{s.seq}</span>
+                          <DirBadge dir={s.direction || "READ"} />
+                          <strong style={{ color: C.text }}>{s.signal || `Signal ${i + 1}`}</strong>
+                          <span style={{ color: C.hint }}>|</span>
+                          <span style={{ fontFamily: "ui-monospace,monospace", color: C.blue, fontWeight: 700 }}>
+                            {s.device || viewMachine.plcDevice || "D"}{s.register || "—"}
+                          </span>
+                          <span style={{ fontFamily: "ui-monospace,monospace", color: C.text }}>= {s.value ?? "—"}</span>
+                          <span style={{ color: C.sec, flex: 1 }}>{s.meaning || ""}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </SectionCard>
+              )}
+
+              {/* Data register ranges */}
+              {Array.isArray(viewMachine.plcConfig?.dataRegisterRanges) && viewMachine.plcConfig.dataRegisterRanges.length > 0 && (
+                <SectionCard title={`Data Register Ranges (${viewMachine.plcConfig.dataRegisterRanges.length})`} icon={TableProperties} collapsible>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {viewMachine.plcConfig.dataRegisterRanges.map((r, i) => {
+                      const start = toNum(r.startReg);
+                      const count = Math.min(toNum(r.count, 1), 32);
+                      const regStr = start !== null ? `${r.device || "D"}${start}${count > 1 ? ` – ${r.device || "D"}${start + count - 1}` : ""}` : "—";
+                      return (
+                        <div key={r.id || i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 10px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 11 }}>
+                          <span style={{ fontFamily: "ui-monospace,monospace", fontWeight: 700, color: C.blue, minWidth: 90 }}>{regStr}</span>
+                          <strong style={{ color: C.text }}>{r.name || "—"}</strong>
+                          <span style={{ color: C.hint }}>×{r.scale || "1"} {r.unit || ""}</span>
+                          {(r.toleranceMin !== "" && r.toleranceMin !== null) && (
+                            <span style={{ color: C.teal, fontFamily: "ui-monospace,monospace" }}>tol: {r.toleranceMin}…{r.toleranceMax}</span>
+                          )}
+                          <span style={{ color: C.sec, flex: 1 }}>{r.purpose || ""}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </SectionCard>
+              )}
             </div>
           </div>
         </div>
       )}
 
-      {/* ═══════════════════════════════════════════════════════ */}
-      {/* BYPASS MODAL                                            */}
-      {/* ═══════════════════════════════════════════════════════ */}
-      {bypassModalMachine && (
-        <div style={modalOverlay}>
-          <div style={{ position: "absolute", inset: 0 }} onClick={closeBypassModal} />
-          <div style={{ position: "relative", width: "100%", maxWidth: 520, background: T.bgCard, border: `1px solid ${T.borderLight}`, borderRadius: 16, overflow: "hidden", boxShadow: "0 24px 60px rgba(15,23,42,.22)" }}>
-            <div style={{ height: 3, background: `linear-gradient(90deg, ${T.navy}, ${T.amber})` }} />
-            <div style={{ padding: "18px 24px", borderBottom: `1px solid ${T.borderLight}`, background: T.bgCard, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ width: 38, height: 38, borderRadius: 10, background: T.amberLight, border: `1px solid ${T.amberBorder}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <ShieldOff size={16} color={T.amber} />
-                </div>
-                <div>
-                  <h2 style={{ fontWeight: 700, color: T.text, margin: 0, fontSize: 15 }}>Machine Bypass</h2>
-                  <p style={{ fontSize: 11, color: T.textMuted, margin: "2px 0 0" }}>{bypassModalMachine.machineName} | {bypassModalMachine.operationNo || "-"}</p>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
-                    <span style={{ fontSize: 10, color: T.textMuted }}>Current:</span>
-                    <BypassBadge enabled={Boolean(bypassModalMachine.machineBypassEnabled)} />
-                  </div>
-                </div>
-              </div>
-              <button onClick={closeBypassModal} style={{ width: 30, height: 30, border: `1px solid ${T.border}`, borderRadius: 7, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.textMuted }}>
-                <X size={14} />
-              </button>
+      {/* ── BYPASS MODAL ──────────────────────────────────────────────────── */}
+      {bypassMachine && (
+        <div style={modalOv}>
+          <div style={{ position: "absolute", inset: 0 }} onClick={() => setBypassMachine(null)} />
+          <div style={{ position: "relative", width: "100%", maxWidth: 460, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, boxShadow: "0 20px 50px rgba(15,23,42,.18)" }}>
+            <div style={{ height: 3, background: `linear-gradient(90deg,${C.text},${C.amber})` }} />
+            <div style={{ padding: "14px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <h2 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: C.text }}>Machine Bypass — {bypassMachine.machineName}</h2>
+              <button onClick={() => setBypassMachine(null)} style={{ width: 28, height: 28, border: `1px solid ${C.border}`, borderRadius: 6, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: C.hint }}><X size={13} /></button>
             </div>
-            <form onSubmit={submitBypass} style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16, background: T.bg }}>
-              <div>
-                <Label>Set Bypass To</Label>
-                <div style={{ display: "flex", gap: 10, marginTop: 2 }}>
-                  {[
-                    { value: true, label: "Enable Bypass", icon: ShieldOff, color: T.amber, bg: T.amberLight, border: T.amberBorder },
-                    { value: false, label: "Disable Bypass", icon: ShieldCheck, color: T.green, bg: T.greenLight, border: T.greenBorder },
-                  ].map(opt => {
-                    const OI = opt.icon;
-                    const selected = bypassEnabled === opt.value;
-                    return (
-                      <button key={String(opt.value)} type="button" onClick={() => setBypassEnabled(opt.value)}
-                        style={{ flex: 1, padding: "10px 14px", borderRadius: 9, border: `2px solid ${selected ? opt.border : T.border}`, background: selected ? opt.bg : T.bgCard, color: selected ? opt.color : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "all .15s" }}>
-                        <OI size={14} />{opt.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <div><Label>Station</Label><FieldInput readOnly value={bypassModalMachine.operationNo || ""} mono /></div>
-                <div><Label>Machine ID</Label><FieldInput readOnly value={String(bypassModalMachine.id || "")} mono /></div>
+            <form onSubmit={submitBypass} style={{ padding: 18, display: "flex", flexDirection: "column", gap: 12, background: C.bg }}>
+              <div style={{ display: "flex", gap: 10 }}>
+                {[
+                  { v: true,  icon: <ShieldOff size={14} />,  label: "Enable Bypass",  color: C.amber, bg: C.amberLt, bd: C.amberBd },
+                  { v: false, icon: <ShieldCheck size={14} />, label: "Disable Bypass", color: C.green, bg: C.greenLt, bd: C.greenBd },
+                ].map((opt) => (
+                  <button key={String(opt.v)} type="button" onClick={() => setBypassEnabled(opt.v)}
+                    style={{ flex: 1, padding: "10px 12px", borderRadius: 8, border: `2px solid ${bypassEnabled === opt.v ? opt.bd : C.border}`, background: bypassEnabled === opt.v ? opt.bg : C.card, color: bypassEnabled === opt.v ? opt.color : C.sec, fontWeight: 700, fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                    {opt.icon}{opt.label}
+                  </button>
+                ))}
               </div>
               <div>
                 <Label>Reason</Label>
-                <FieldInput value={bypassReason} onChange={e => setBypassReason(e.target.value)} placeholder="MANUAL_BYPASS" />
+                <FInput value={bypassReason} onChange={(e) => setBypassReason(e.target.value)} placeholder="MANUAL_BYPASS" />
               </div>
-              <div style={{ padding: "10px 12px", background: bypassEnabled ? T.amberLight : T.greenLight, border: `1px solid ${bypassEnabled ? T.amberBorder : T.greenBorder}`, borderRadius: 8, fontSize: 12, color: bypassEnabled ? T.amber : T.green, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>
-                {bypassEnabled ? <ShieldOff size={13} /> : <ShieldCheck size={13} />}
-                {bypassEnabled ? "Bypass will be enabled — interlock checks skipped." : "Bypass will be disabled — normal checks resume."}
-              </div>
-              <p style={{ fontSize: 11, color: T.textMuted, margin: 0, padding: "8px 10px", background: T.bgMuted, border: `1px solid ${T.border}`, borderRadius: 7 }}>
-                Machine bypass is station-specific. Use only with supervisor approval.
-              </p>
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, paddingTop: 4 }}>
-                <button type="button" onClick={closeBypassModal}
-                  style={{ padding: "8px 16px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: `1px solid ${T.border}`, background: T.bgCard, color: T.textSec, cursor: "pointer" }}>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                <button type="button" onClick={() => setBypassMachine(null)}
+                  style={{ padding: "8px 14px", fontSize: 12, fontWeight: 600, borderRadius: 7, border: `1px solid ${C.border}`, background: C.card, color: C.sec, cursor: "pointer" }}>
                   Cancel
                 </button>
                 <button type="submit" disabled={bypassing}
-                  style={{ padding: "8px 18px", fontSize: 12, fontWeight: 700, borderRadius: 8, border: "none", background: bypassing ? T.slateLight : bypassEnabled ? T.amber : T.green, color: "#fff", cursor: bypassing ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 6, opacity: bypassing ? 0.6 : 1 }}>
-                  {bypassEnabled ? <ShieldOff size={13} /> : <ShieldCheck size={13} />}
-                  {bypassing ? "Saving…" : (bypassEnabled ? "Enable Bypass" : "Disable Bypass")}
+                  style={{ padding: "8px 16px", fontSize: 12, fontWeight: 700, borderRadius: 7, border: "none", background: bypassEnabled ? C.amber : C.green, color: "#fff", cursor: "pointer", opacity: bypassing ? 0.6 : 1 }}>
+                  {bypassing ? "Saving…" : bypassEnabled ? "Enable Bypass" : "Disable Bypass"}
                 </button>
               </div>
             </form>
@@ -2384,15 +1941,13 @@ const MachinePage = () => {
         </div>
       )}
 
+      {/* ── CONFIRM DELETE ────────────────────────────────────────────────── */}
       <ConfirmModal
-        isOpen={!!deleteConfirmId}
-        onCancel={() => setDeleteConfirmId(null)}
-        onConfirm={confirmDelete}
-        title="Remove Machine?"
+        isOpen={Boolean(deleteId)} title="Remove machine?"
         message="This will remove the machine from the registry. Historical data is preserved."
+        confirmText="Delete" cancelText="Cancel" variant="danger"
+        onConfirm={handleDelete} onCancel={() => setDeleteId(null)}
       />
     </div>
   );
-};
-
-export default MachinePage;
+}

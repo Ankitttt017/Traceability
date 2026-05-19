@@ -48,7 +48,18 @@ function rowsToMap(rows = []) {
     }
 
     // Start with values from the config JSON column if available
-    const config = row.config && typeof row.config === "object" ? row.config : {};
+    let config = {};
+    if (row.config) {
+      if (typeof row.config === "string") {
+        try {
+          config = JSON.parse(row.config);
+        } catch (err) {
+          config = {};
+        }
+      } else if (typeof row.config === "object") {
+        config = row.config;
+      }
+    }
 
     acc[stationNo] = {
       ...config,
@@ -97,7 +108,7 @@ exports.saveSettings = async (req, res) => {
           manual_result_enabled: data.manualResult === true,
           plc_part_count: normalizePlcPartCount(data.plcPartCount ?? data.plc_part_count),
           final_packing_enabled: data.finalPacking === true,
-          config: data, // JSON column handles the full object
+          config: JSON.stringify(data), // JSON column handles the full object as string
           updated_by: req.user?.id || null,
         };
 

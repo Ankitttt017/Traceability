@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { RefreshCw, Save, Settings2, ChevronDown, Info } from "lucide-react";
-import { machineApi, stationSettingsApi } from "../api/services";
+import { RefreshCw, Save, Settings2, ChevronDown, Info, Activity, X } from "lucide-react";
+import { machineApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
 import { getMachineStage } from "../utils/machineFields";
 import {
@@ -181,6 +181,26 @@ const StationControl = () => {
   const [popup, setPopup] = useState(null);
   const [showDropdown, setShowDropdown] = useState(false);
 
+  const [testModalOpen, setTestModalOpen] = useState(false);
+  const [testBarcode, setTestBarcode] = useState("");
+  const [testLoading, setTestLoading] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+
+  const handleTestSubmit = async (e) => {
+    e.preventDefault();
+    if (!testBarcode.trim()) return;
+    setTestLoading(true);
+    setTestResult(null);
+    try {
+      const res = await traceabilityApi.testPlcCycle({ barcode: testBarcode });
+      setTestResult(res);
+    } catch (err) {
+      setTestResult({ error: err.response?.data?.error || err.message || "Error connecting to server" });
+    } finally {
+      setTestLoading(false);
+    }
+  };
+
   const stationRows = useMemo(() => {
     const grouped = new Map();
     for (const machine of machines) {
@@ -316,6 +336,9 @@ const StationControl = () => {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            <button onClick={() => setTestModalOpen(true)} className="db-secondary-btn" style={{ background: T.violet, color: '#fff', border: 'none', display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}>
+              <Activity size={14} /> Live DB Test
+            </button>
             <button onClick={() => loadData({ silent: false })} className="db-action-btn">
               <RefreshCw size={14} /> Refresh
             </button>
@@ -467,6 +490,69 @@ const StationControl = () => {
           </div>
         </div>
       )}
+
+      {/* Live DB Test Modal */}
+      {testModalOpen && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 100, display: "flex", alignItems: "center", justifyItems: "center", justifyContent: "center", background: "rgba(15,23,42,0.65)", backdropFilter: "blur(4px)", padding: 20 }}>
+          <div style={{ background: "#fff", borderRadius: 12, width: "100%", maxWidth: 600, overflow: "hidden", boxShadow: "0 20px 40px rgba(0,0,0,0.2)" }}>
+            <div style={{ padding: "16px 20px", borderBottom: "1px solid rgba(15,23,42,0.1)", display: "flex", alignItems: "center", justifyContent: "space-between", background: "#f8fafc" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Activity size={18} color={T.violet} />
+                <h3 style={{ margin: 0, fontSize: 14, fontWeight: 800, color: "#0f172a" }}>Test PlcCycleReadings Mapping</h3>
+              </div>
+              <button onClick={() => setTestModalOpen(false)} style={{ background: "transparent", border: "none", cursor: "pointer", color: "#64748b" }}><X size={16} /></button>
+            </div>
+            
+            <div style={{ padding: 20 }}>
+              <p style={{ margin: "0 0 16px 0", fontSize: 12, color: "#475569", lineHeight: 1.5 }}>
+                Enter a barcode to test the live DB sync. The engine will parse the barcode against active QrFormatRules to extract the shot number, and query the <code style={{ background: "#f1f5f9", padding: "2px 6px", borderRadius: 4, color: T.blue }}>PlcCycleReadings</code> table.
+              </p>
+              
+              <form onSubmit={handleTestSubmit} style={{ display: "flex", gap: 10 }}>
+                <input 
+                  type="text" 
+                  value={testBarcode} 
+                  onChange={e => setTestBarcode(e.target.value)} 
+                  placeholder="Scan or type barcode..." 
+                  style={{ flex: 1, padding: "10px 14px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 13, outline: "none", fontFamily: "ui-monospace, monospace" }}
+                  autoFocus
+                />
+                <button 
+                  type="submit" 
+                  disabled={testLoading || !testBarcode}
+                  style={{ background: T.violet, color: "#fff", border: "none", borderRadius: 8, padding: "0 20px", fontWeight: 700, fontSize: 12, cursor: testLoading || !testBarcode ? "not-allowed" : "pointer", opacity: testLoading || !testBarcode ? 0.6 : 1 }}
+                >
+                  {testLoading ? "Testing..." : "Test Reading"}
+                </button>
+              </form>
+
+              {testResult && (
+                <div style={{ marginTop: 20, border: `1px solid ${testResult.error ? T.rose : testResult.success ? T.emerald : T.rose}`, borderRadius: 8, overflow: "hidden" }}>
+                  <div style={{ padding: "8px 14px", background: testResult.error ? "rgba(244,63,94,0.1)" : testResult.success ? "rgba(16,185,129,0.1)" : "rgba(244,63,94,0.1)", fontSize: 12, fontWeight: 700, color: testResult.error ? T.rose : testResult.success ? T.emerald : T.rose, display: "flex", justifyContent: "space-between" }}>
+                    <span>{testResult.error ? "Error" : testResult.success ? "Data Found" : "No Data Found"}</span>
+                    {testResult.matchedRule && <span style={{ fontSize: 10, opacity: 0.8 }}>Rule: {testResult.matchedRule}</span>}
+                  </div>
+                  <div style={{ padding: 14, background: "#f8fafc", fontSize: 11, fontFamily: "ui-monospace, monospace", color: "#334155", maxHeight: 300, overflowY: "auto", whiteSpace: "pre-wrap" }}>
+                    {testResult.error ? (
+                      testResult.error
+                    ) : testResult.success ? (
+                      JSON.stringify(testResult.reading, null, 2)
+                    ) : (
+                      testResult.message
+                    )}
+                  </div>
+                  {!testResult.error && (
+                    <div style={{ padding: "8px 14px", borderTop: "1px solid rgba(15,23,42,0.05)", background: "#fff", fontSize: 11, color: "#475569" }}>
+                      <strong>Extracted Shot Number:</strong> {testResult.extractedShot || "N/A"}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 };

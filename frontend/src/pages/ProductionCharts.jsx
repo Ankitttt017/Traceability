@@ -317,10 +317,14 @@ const ProductionCharts=()=>{
     })),[report.hourlyProduction]);
 
   const machineBarData=useMemo(()=>
-    (report.machineWise||[]).map(r=>({
-      name:(machineMap.get(Number(r.machine_id))||`M${r.machine_id}`).slice(0,12),
-      Pass:Number(r.ok||0),Fail:Number(r.ng||0),
-    })),[machineMap,report.machineWise]);
+    (report.machineWise||[]).map(r=>{
+      const mObj = machineMap.get(Number(r.machine_id));
+      const mName = String(mObj?.machine_name || mObj?.machineName || `M${r.machine_id}`);
+      return {
+        name: mName.slice(0,12),
+        Pass:Number(r.ok||0),Fail:Number(r.ng||0),
+      };
+    }),[machineMap,report.machineWise]);
 
   const timeLabel=useMemo(()=>{
     if(timeRange==="daily")return"Today";

@@ -143,7 +143,9 @@ const PlcConfiguration = () => {
                       <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-primary/10 text-black border border-primary/20 rounded-md">{r.plcProtocol}</span>
                     </td>
                     <td className="px-5 py-4">
-                      <span className="px-3 py-1 text-xs font-mono font-semibold bg-bg-dark border border-border rounded-lg text-text-muted">R{r.rangeStart}–R{r.rangeEnd}</span>
+                      <span className="px-3 py-1 text-xs font-mono font-semibold bg-bg-dark border border-border rounded-lg text-text-muted">
+                        {r.rangeStart}–{r.rangeEnd}
+                      </span>
                     </td>
                     <td className="px-5 py-4 text-right">
                       <button onClick={() => setDeleteId(r.id)} className="p-2 text-text-muted hover:text-danger hover:bg-danger/10 rounded-lg transition-all" title="Delete">
@@ -198,11 +200,11 @@ const PlcConfiguration = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-text-muted mb-1.5">Range (start-size)</label>
+                <label className="block text-xs font-semibold text-text-muted mb-1.5">Range (Start-End)</label>
                 <input value={formData.rangeInput} onChange={e => updateField("rangeInput", e.target.value)}
-                  placeholder="100-12" className="w-full bg-bg-dark border border-border rounded-2xl px-4 py-3 text-sm font-mono focus:border-primary outline-none" />
-                <p className="text-xs text-text-muted mt-1">Example: 100-12 means R100 to R111 (min 6 registers recommended)</p>
-                <p className="text-xs text-text-muted mt-1">For SLMP, these are word addresses (e.g. D100–D111 with device selected in machine mapping).</p>
+                  placeholder="100-200" className="w-full bg-bg-dark border border-border rounded-2xl px-4 py-3 text-sm font-mono focus:border-primary outline-none" />
+                <p className="text-xs text-text-muted mt-1">Example: 100-200 means registers 100 to 200 (inclusive)</p>
+                <p className="text-xs text-text-muted mt-1">For SLMP, these are word addresses (e.g. 100–200, with device selected in machine mapping).</p>
               </div>
 
               <div className="flex gap-3 pt-4 border-t border-border mt-4">

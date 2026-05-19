@@ -1,6 +1,10 @@
 const { Sequelize } = require("sequelize");
 const Machine = require("../models/Machine");
 const MachineRuntimeState = require("../models/MachineRuntimeState");
+const Alarm = require("../models/Alarm");
+const OperationLog = require("../models/OperationLog");
+const ProductionLog = require("../models/ProductionLog");
+const Scanner = require("../models/Scanner");
 const plcService = require("../services/plcCommunicationService");
 const {
   readModbusRegisters,
@@ -197,6 +201,7 @@ function buildParsedPlcSnapshot(machine) {
     resetValue: toInt(parsed.resetValue ?? machine?.plc_reset_value),
     slmpFrameMode: toText(parsed.slmpFrameMode || machine?.plc_slmp_frame_mode || "AUTO").toUpperCase() || "AUTO",
     handshakeMap,
+    dataRegisterRanges: Array.isArray(parsed.dataRegisterRanges) ? parsed.dataRegisterRanges : [],
   };
 
   return {
@@ -214,6 +219,7 @@ function toMachineResponse(machine) {
     id: plain.id,
     machineNumber: plain.machine_number,
     machineName: plain.machine_name,
+    machineType: plain.machine_type || "HPDC",
     lineName: plain.line_name,
     sequenceNo: plain.sequence_no,
     operationNo: plain.operation_no,
@@ -225,7 +231,7 @@ function toMachineResponse(machine) {
     plcRangeId: plain.plc_range_id,
     plcProtocol: normalizeProtocol(plain.plc_protocol, "TCP_TEXT"),
     plcUnitId: plain.plc_unit_id || 1,
-    plcSlmpDevice: plain.plc_slmp_device || "D",
+    plcSlmpDevice: "D",
     plcSlmpFrameMode: plcConfig.slmpFrameMode || "AUTO",
     plcStartRegister: plain.plc_start_register,
     plcStatusRegister: plain.plc_status_register,
@@ -298,31 +304,32 @@ function normalizePayload(body = {}, existing = null) {
 
   const plcConfig = {
     rangeId: toInt(cfgRaw.rangeId ?? body.plcRangeId ?? body.plc_range_id ?? existing?.plc_range_id),
-    startRegister: toInt(cfgRaw.startRegister ?? body.plcStartRegister ?? body.plc_start_register ?? existing?.plc_start_register ?? 2060),
+    startRegister: toInt(cfgRaw.startRegister ?? body.plcStartRegister ?? body.plc_start_register ?? existing?.plc_start_register ?? null),
     statusRegister: toInt(
       cfgRaw.statusRegister ??
         cfgRaw.runningRegister ??
         body.plcStatusRegister ??
         body.plc_status_register ??
-        existing?.plc_status_register ?? 2061
+        existing?.plc_status_register ?? null
     ),
-    runningRegister: toInt(cfgRaw.runningRegister ?? existing?.plc_status_register ?? 2061),
-    blockRegister: toInt(cfgRaw.blockRegister ?? body.plcBlockRegister ?? body.plc_block_register ?? 2060),
-    endOkRegister: toInt(cfgRaw.endOkRegister ?? body.plcEndOkRegister ?? body.plc_end_ok_register ?? 2061),
-    endNgRegister: toInt(cfgRaw.endNgRegister ?? body.plcEndNgRegister ?? body.plc_end_ng_register ?? 2062),
-    partRegister: toInt(cfgRaw.partRegister ?? body.plcPartRegister ?? body.plc_part_register ?? existing?.plc_part_register),
-    stationRegister: toInt(cfgRaw.stationRegister ?? body.plcStationRegister ?? body.plc_station_register ?? existing?.plc_station_register),
-    resetRegister: toInt(cfgRaw.resetRegister ?? body.plcResetRegister ?? body.plc_reset_register ?? existing?.plc_reset_register ?? 2063),
-    heartbeatRegister: toInt(cfgRaw.heartbeatRegister ?? body.plcHeartbeatRegister ?? existing?.plc_heartbeat_register),
-    bypassRegister: toInt(cfgRaw.bypassRegister ?? body.plcBypassRegister ?? 2065),
-    startValue: toInt(cfgRaw.startValue ?? body.plcStartValue ?? body.plc_start_value ?? existing?.plc_start_value ?? 1),
-    startedValue: toInt(cfgRaw.startedValue ?? body.plcStartedValue ?? body.plc_started_value ?? existing?.plc_started_value ?? 1),
-    endOkValue: toInt(cfgRaw.endOkValue ?? body.plcEndOkValue ?? body.plc_end_ok_value ?? existing?.plc_end_ok_value ?? 2),
-    endNgValue: toInt(cfgRaw.endNgValue ?? body.plcEndNgValue ?? body.plc_end_ng_value ?? existing?.plc_end_ng_value ?? 2),
-    blockValue: toInt(cfgRaw.blockValue ?? body.plcBlockValue ?? body.plc_block_value ?? existing?.plc_block_value ?? 2),
-    resetValue: toInt(cfgRaw.resetValue ?? body.plcResetValue ?? body.plc_reset_value ?? existing?.plc_reset_value ?? 1),
+    runningRegister: toInt(cfgRaw.runningRegister ?? existing?.plc_status_register ?? null),
+    blockRegister: toInt(cfgRaw.blockRegister ?? body.plcBlockRegister ?? body.plc_block_register ?? null),
+    endOkRegister: toInt(cfgRaw.endOkRegister ?? body.plcEndOkRegister ?? body.plc_end_ok_register ?? null),
+    endNgRegister: toInt(cfgRaw.endNgRegister ?? body.plcEndNgRegister ?? body.plc_end_ng_register ?? null),
+    partRegister: toInt(cfgRaw.partRegister ?? body.plcPartRegister ?? body.plc_part_register ?? existing?.plc_part_register ?? null),
+    stationRegister: toInt(cfgRaw.stationRegister ?? body.plcStationRegister ?? body.plc_station_register ?? existing?.plc_station_register ?? null),
+    resetRegister: toInt(cfgRaw.resetRegister ?? body.plcResetRegister ?? body.plc_reset_register ?? existing?.plc_reset_register ?? null),
+    heartbeatRegister: toInt(cfgRaw.heartbeatRegister ?? body.plcHeartbeatRegister ?? existing?.plc_heartbeat_register ?? null),
+    bypassRegister: toInt(cfgRaw.bypassRegister ?? body.plcBypassRegister ?? null),
+    startValue: toInt(cfgRaw.startValue ?? body.plcStartValue ?? body.plc_start_value ?? existing?.plc_start_value ?? null),
+    startedValue: toInt(cfgRaw.startedValue ?? body.plcStartedValue ?? body.plc_started_value ?? existing?.plc_started_value ?? null),
+    endOkValue: toInt(cfgRaw.endOkValue ?? body.plcEndOkValue ?? body.plc_end_ok_value ?? existing?.plc_end_ok_value ?? null),
+    endNgValue: toInt(cfgRaw.endNgValue ?? body.plcEndNgValue ?? body.plc_end_ng_value ?? existing?.plc_end_ng_value ?? null),
+    blockValue: toInt(cfgRaw.blockValue ?? body.plcBlockValue ?? body.plc_block_value ?? existing?.plc_block_value ?? null),
+    resetValue: toInt(cfgRaw.resetValue ?? body.plcResetValue ?? body.plc_reset_value ?? existing?.plc_reset_value ?? null),
     slmpFrameMode,
     handshakeMap: normalizeHandshakeMap(cfgRaw.handshakeMap),
+    dataRegisterRanges: Array.isArray(cfgRaw.dataRegisterRanges) ? cfgRaw.dataRegisterRanges : [],
   };
 
   const spcConfig = normalizeSpcConfig(body.spcConfig || {});
@@ -330,6 +337,7 @@ function normalizePayload(body = {}, existing = null) {
 
   const payload = {
     machine_name: toText(body.machineName ?? body.machine_name ?? existing?.machine_name),
+    machine_type: toText(body.machineType ?? body.machine_type ?? existing?.machine_type) || "HPDC",
     line_name: toText(body.lineName ?? body.line_name ?? existing?.line_name) || "-",
     sequence_no: toInt(body.sequenceNo ?? body.sequence_no ?? existing?.sequence_no),
     operation_no: toText(body.operationNo ?? body.operation_no ?? existing?.operation_no).toUpperCase(),
@@ -348,13 +356,12 @@ function normalizePayload(body = {}, existing = null) {
     plc_part_register: toInt(plcConfig.partRegister),
     plc_station_register: toInt(plcConfig.stationRegister),
     plc_reset_register: toInt(plcConfig.resetRegister),
-    plc_start_value: toInt(plcConfig.startValue ?? 1),
-    plc_started_value: toInt(plcConfig.startedValue ?? 2),
-    plc_end_ok_value: toInt(plcConfig.endOkValue ?? 3),
-    plc_end_ng_value: toInt(plcConfig.endNgValue ?? 4),
-    plc_block_value: toInt(plcConfig.blockValue ?? 2),
-    plc_reset_value: toInt(plcConfig.resetValue ?? 9),
-    plc_slmp_device: toText(body.plcSlmpDevice ?? body.plc_slmp_device ?? existing?.plc_slmp_device).toUpperCase() || null,
+    plc_start_value: toInt(plcConfig.startValue),
+    plc_started_value: toInt(plcConfig.startedValue),
+    plc_end_ok_value: toInt(plcConfig.endOkValue),
+    plc_end_ng_value: toInt(plcConfig.endNgValue),
+    plc_block_value: toInt(plcConfig.blockValue),
+    plc_reset_value: toInt(plcConfig.resetValue),
     plc_slmp_frame_mode: slmpFrameMode,
     plc_test_timeout_ms: toPositiveInt(body.plcTestTimeoutMs ?? body.plc_test_timeout_ms ?? existing?.plc_test_timeout_ms),
     plc_test_retry_count: toPositiveInt(body.plcTestRetryCount ?? body.plc_test_retry_count ?? existing?.plc_test_retry_count),
@@ -394,118 +401,6 @@ function parsePlcSnapshotFromPayload(payload = {}) {
 
 function validateIndustrialMachinePayload(payload = {}) {
   const errors = [];
-  const parsed = parsePlcSnapshotFromPayload(payload);
-  const coreRegisterMap = new Map();
-
-  const registerFields = [
-    ["startRegister", "START"],
-    ["statusRegister", "RUNNING"],
-    ["blockRegister", "BLOCK_INTERLOCK"],
-    ["endOkRegister", "END_OK"],
-    ["endNgRegister", "END_NG"],
-    ["resetRegister", "RESET"],
-
-    ["partRegister", "PART_HASH"],
-    ["stationRegister", "STATION_HASH"],
-    ["bypassRegister", "BYPASS"],
-  ];
-
-  for (const [field, label] of registerFields) {
-    const register = toInt(parsed?.[field]);
-    if (register === null) continue;
-    if (!coreRegisterMap.has(register)) {
-      coreRegisterMap.set(register, new Set());
-    }
-    coreRegisterMap.get(register).add(label);
-  }
-
-  const handshakeMap = Array.isArray(parsed?.handshakeMap) ? parsed.handshakeMap : [];
-  for (const row of handshakeMap) {
-    const register = toInt(row?.register);
-    const signal = toText(row?.signal || row?.label || "HANDSHAKE");
-    if (register === null) continue;
-    if (!coreRegisterMap.has(register)) {
-      coreRegisterMap.set(register, new Set());
-    }
-    coreRegisterMap.get(register).add(`HANDSHAKE:${signal}`);
-  }
-
-  for (const [register, labels] of coreRegisterMap.entries()) {
-    const entries = Array.from(labels);
-    if (entries.length <= 1) {
-      continue;
-    }
-
-    // Check if we have actual conflicts (e.g. START and RESET on same register)
-    const normalized = entries.map(l => {
-      let s = l.replace("HANDSHAKE:", "").toUpperCase()
-        .replace(/[^A-Z0-9]/g, "_") // Replace spaces, slashes, etc. with underscores
-        .replace(/_+/g, "_")        // Collapse multiple underscores
-        .trim();
-      
-      if (s.includes("START") || s === "TRIGGER") return "START";
-      if (s.includes("RUNNING") || s === "STARTED") return "RUNNING";
-      if (s.includes("BLOCK") || s.includes("INTERLOCK")) return "BLOCK_INTERLOCK";
-      if (s.includes("END_OK") || s.includes("OK_END")) return "END_OK";
-      if (s.includes("END_NG") || s.includes("NG_END")) return "END_NG";
-      if (s.includes("RESET")) return "RESET";
-
-      if (s.includes("BYPASS")) return "BYPASS";
-      return s;
-    });
-
-    const uniqueLogical = new Set(normalized);
-    
-    // Group signals into "Compatible Families" to allow single-register mapping (Point 22)
-    const families = {
-      CONTROL: ["START", "INTERLOCK", "BLOCK_INTERLOCK", "START_SENT", "WAITING_RUNNING"],
-      FEEDBACK: ["RUNNING", "END_OK", "END_NG", "COMPLETE", "WAITING_END"],
-      BYPASS: ["BYPASS"],
-      REJECTION: ["REJECTION", "BIN_OPEN", "BIN_STATUS"]
-    };
-
-    const detectedFamilies = new Set();
-    uniqueLogical.forEach(s => {
-      let found = false;
-      for (const [fam, members] of Object.entries(families)) {
-        if (members.includes(s)) {
-          detectedFamilies.add(fam);
-          found = true;
-          break;
-        }
-      }
-      if (!found) detectedFamilies.add(`RAW_${s}`); // Standalone signals count as their own family
-    });
-
-    // If multiple distinct families are detected on one register, it's a conflict.
-    // But if they are all from the same family (e.g. START and BLOCK), it's allowed.
-    if (detectedFamilies.size > 1) {
-      errors.push(`Register ${register} has incompatible signal families: ${Array.from(detectedFamilies).join(", ")} (${entries.join(", ")})`);
-    }
-  }
-
-  // Hard Validation: Reject mismatched device families for SLMP (Point 6)
-  if (payload.plc_protocol === "SLMP") {
-    const configDevice = toText(payload.plc_slmp_device || "D").toUpperCase();
-    const handshakeMap = Array.isArray(parsed?.handshakeMap) ? parsed.handshakeMap : [];
-    
-    handshakeMap.forEach((row, idx) => {
-      if (!row.register) return;
-      const rowDevice = toText(row.device || configDevice).toUpperCase();
-      if (rowDevice !== configDevice) {
-        errors.push(`Signal "${row.signal || `Row ${idx + 1}`}" uses device family "${rowDevice}" which does not match machine default "${configDevice}".`);
-      }
-    });
-
-    // Check SPC config as well
-    const spc = parsed?.spcConfig || {};
-    if (spc.enabled && spc.mode === "PLC_REGISTER") {
-      if (spc.plcResultRegister && toText(spc.plcResultDevice || "D").toUpperCase() !== configDevice) {
-        errors.push(`SPC Result uses device family "${spc.plcResultDevice}" which does not match machine default "${configDevice}".`);
-      }
-    }
-  }
-
   if (!payload.machine_name) {
     errors.push("Machine name is required.");
   }
@@ -515,11 +410,19 @@ function validateIndustrialMachinePayload(payload = {}) {
   if (payload.sequence_no === null || payload.sequence_no === undefined) {
     errors.push("Sequence number is required.");
   }
-
   return errors;
 }
 
 function sequelizeErrorToHttp(error) {
+  if (error) {
+    console.error("[Database Error] Handled by sequelizeErrorToHttp:", {
+      name: error.name,
+      message: error.message,
+      errors: error.errors?.map(e => ({ message: e.message, path: e.path, value: e.value })),
+      parent: error.parent?.message,
+      original: error.original?.message
+    });
+  }
   if (error?.name === "SequelizeUniqueConstraintError") {
     const rawDetails = (error.errors || []).map((entry) => entry.path).filter(Boolean);
     const normalizedDetails = rawDetails.map((detail) => {
@@ -599,7 +502,6 @@ function buildPlcMachineSnapshot(machine, body = {}) {
   if (toInt(body.plcTestTimeoutMs) !== null) snapshot.plc_test_timeout_ms = toInt(body.plcTestTimeoutMs);
   if (toInt(body.plcTestRetryCount) !== null) snapshot.plc_test_retry_count = toInt(body.plcTestRetryCount);
   if (toText(body.plcProtocol)) snapshot.plc_protocol = normalizeProtocol(body.plcProtocol);
-  if (toText(body.plcSlmpDevice)) snapshot.plc_slmp_device = toText(body.plcSlmpDevice).toUpperCase();
 
   const parsedRegisters = parseJson(snapshot.plc_registers, {}) || {};
   const slmpFrameMode = toText(body.plcSlmpFrameMode || body.plc_slmp_frame_mode || parsedRegisters.slmpFrameMode || snapshot.plc_slmp_frame_mode || "AUTO")
@@ -749,10 +651,17 @@ exports.deleteMachine = async (req, res) => {
     const row = await Machine.findByPk(id);
     if (!row) return res.status(404).json({ error: "Machine not found" });
 
-    // Clean up dependent MachineRuntimeState record(s) first
-    await MachineRuntimeState.destroy({ where: { machine_id: id } });
+    // Cascade-delete all FK-dependent records before destroying the machine
+    // Only include tables that actually reference machine_id
+    await Promise.all([
+      MachineRuntimeState.destroy({ where: { machine_id: id } }),
+      OperationLog.destroy({ where: { machine_id: id } }),
+      ProductionLog.destroy({ where: { machine_id: id } }),
+      Scanner.destroy({ where: { mapped_machine_id: id } }),
+      // Alarm uses machineId (camelCase) — no FK constraint but clean up anyway
+      Alarm.destroy({ where: { machineId: id } }),
+    ]);
 
-    // Now safe to delete the machine
     await row.destroy();
     res.status(204).send();
   } catch (error) {
@@ -870,9 +779,7 @@ exports.sendPlcCommand = async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
-};
-
-exports.writePlcValue = async (req, res) => {
+};exports.writePlcValue = async (req, res) => {
   try {
     const machine = await resolveMachineForPlc(req.body);
     const { ip, port, protocol } = resolvePlcEndpoint(req.body, machine);
@@ -881,8 +788,9 @@ exports.writePlcValue = async (req, res) => {
     }
 
     const machineSnapshot = buildPlcMachineSnapshot(machine, req.body);
-    const registerNoFromBody = toInt(req.body.registerNo ?? req.body.register ?? req.body.register_no);
-    const registerNo = registerNoFromBody !== null ? registerNoFromBody : resolveWritableRegisterFromSignal(machineSnapshot, req.body.signalKey);
+    const rawRegister = req.body.registerNo ?? req.body.register ?? req.body.register_no;
+    const regToken = parseRegisterToken(rawRegister);
+    const registerNo = regToken.register !== null ? regToken.register : resolveWritableRegisterFromSignal(machineSnapshot, req.body.signalKey);
     const value = toInt(req.body.value);
     if (registerNo === null) return res.status(400).json({ error: "registerNo is required" });
     if (value === null) return res.status(400).json({ error: "value must be a number" });
@@ -895,12 +803,13 @@ exports.writePlcValue = async (req, res) => {
 
     let write = null;
     if (normalizedProtocol === "SLMP") {
+      const device = regToken.device || toText(req.body.plcSlmpDevice || "D").toUpperCase() || "D";
       write = await writeSlmpRegister({
         ip,
         port,
         register: registerNo,
         value,
-        device: toText(req.body.plcSlmpDevice || machineSnapshot?.plc_slmp_device || "D").toUpperCase() || "D",
+        device,
         frameMode: toText(req.body.plcSlmpFrameMode || machineSnapshot?.plc_slmp_frame_mode || "AUTO").toUpperCase() || "AUTO",
         timeoutMs,
         retryCount,
@@ -953,11 +862,12 @@ exports.readPlcValue = async (req, res) => {
 
     const machineSnapshot = buildPlcMachineSnapshot(machine, req.body);
     const signalKey = toText(req.body.signalKey).toUpperCase() || null;
-    const registerNoFromBody = toInt(req.body.registerNo ?? req.body.register ?? req.body.register_no);
+    const rawRegister = req.body.registerNo ?? req.body.register ?? req.body.register_no;
+    const regToken = parseRegisterToken(rawRegister);
     const resolvedSignalEntry = resolveSignalMapEntry(machineSnapshot, signalKey);
     const registerNo =
-      registerNoFromBody !== null
-        ? registerNoFromBody
+      regToken.register !== null
+        ? regToken.register
         : resolveWritableRegisterFromSignal(machineSnapshot, signalKey);
 
     if (registerNo === null) return res.status(400).json({ error: "registerNo is required" });
@@ -970,7 +880,8 @@ exports.readPlcValue = async (req, res) => {
     let read = null;
     if (normalizedProtocol === "SLMP") {
       const device =
-        toText(req.body.plcSlmpDevice || resolvedSignalEntry?.device || machineSnapshot?.plc_slmp_device || "D")
+        regToken.device ||
+        toText(req.body.plcSlmpDevice || resolvedSignalEntry?.device || "D")
           .toUpperCase() || "D";
       const frameMode =
         toText(req.body.plcSlmpFrameMode || machineSnapshot?.plc_slmp_frame_mode || "AUTO").toUpperCase() || "AUTO";
@@ -1042,6 +953,89 @@ exports.readPlcValue = async (req, res) => {
       return res.status(504).json({
         error:
           "PLC packet timeout. Check Unit ID/register mapping, PLC load, and increase machine test timeout if needed.",
+        details: String(error?.message || ""),
+      });
+    }
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.readPlcRegisters = async (req, res) => {
+  try {
+    const machine = await resolveMachineForPlc(req.body);
+    const { ip, port, protocol } = resolvePlcEndpoint(req.body, machine);
+    if (!ip || !port) {
+      return res.status(400).json({ error: "PLC IP and port are required" });
+    }
+
+    const machineSnapshot = buildPlcMachineSnapshot(machine, req.body);
+    const registers = req.body.registers; // expects array of { register, device }
+    if (!Array.isArray(registers) || registers.length === 0) {
+      return res.status(400).json({ error: "registers array is required" });
+    }
+
+    const timeoutMs = toPositiveInt(req.body.timeoutMs ?? machineSnapshot?.plc_test_timeout_ms) || 8000;
+    const normalizedProtocol = normalizeProtocol(protocol);
+
+    let values = {};
+    let errors = [];
+
+    if (normalizedProtocol === "SLMP") {
+      const defaultDevice = toText(req.body.plcSlmpDevice || "D").toUpperCase() || "D";
+      const frameMode = toText(req.body.plcSlmpFrameMode || machineSnapshot?.plc_slmp_frame_mode || "AUTO").toUpperCase() || "AUTO";
+      const mappedRegisters = registers.map(r => {
+        const token = parseRegisterToken(r.register, r.device || defaultDevice);
+        return {
+          register: token.register,
+          device: token.device || defaultDevice
+        };
+      }).filter(r => r.register !== null);
+
+      if (mappedRegisters.length === 0) return res.status(400).json({ error: "No valid registers provided" });
+
+      const result = await readSlmpRegisters({
+        ip,
+        port,
+        registers: mappedRegisters,
+        timeoutMs,
+        defaultDevice,
+        frameMode,
+      });
+      values = result?.values || {};
+      errors = Array.isArray(result?.errors) ? result.errors : [];
+    } else if (normalizedProtocol === "MODBUS_TCP") {
+      const unitId = toInt(req.body.plcUnitId ?? machineSnapshot?.plc_unit_id ?? 1) || 1;
+      const mappedRegisters = registers.map(r => {
+        const token = parseRegisterToken(r.register);
+        return token.register;
+      }).filter(r => r !== null);
+
+      if (mappedRegisters.length === 0) return res.status(400).json({ error: "No valid registers provided" });
+
+      const result = await readModbusRegisters({
+        ip,
+        port,
+        unitId,
+        registers: mappedRegisters,
+        timeoutMs,
+      });
+      values = result?.values || {};
+      errors = Array.isArray(result?.errors) ? result.errors : [];
+    } else {
+      return res.status(400).json({ error: "Register read is supported only for MODBUS_TCP and SLMP protocols" });
+    }
+
+    res.json({
+      message: "PLC registers read successful",
+      machineId: machine?.id || null,
+      plc: { ip, port, protocol: normalizedProtocol },
+      values,
+      errors
+    });
+  } catch (error) {
+    if (/plc packet timeout/i.test(String(error?.message || ""))) {
+      return res.status(504).json({
+        error: "PLC packet timeout.",
         details: String(error?.message || ""),
       });
     }

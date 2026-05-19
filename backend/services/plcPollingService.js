@@ -58,26 +58,41 @@ class PlcPollingService {
     const poller = this.pollers.get(machine.id);
     if (!poller || !poller.active) return;
 
+    // Re-fetch the latest machine instance from the database dynamically
+    let latestMachine = machine;
+    try {
+      const dbMachine = await Machine.findByPk(machine.id);
+      if (!dbMachine || dbMachine.status !== "ACTIVE") {
+        this.stopPolling(machine.id);
+        return;
+      }
+      latestMachine = dbMachine;
+    } catch (err) {
+      console.warn(`[PollingService] Failed to re-fetch machine ${machine.id}:`, err.message);
+    }
+
     // Guard: Skip polling during active handshake cycle to prevent lease contention
     const plcHandshakeEngine = require("./plcHandshakeEngine");
-    if (plcHandshakeEngine.machineBusy.has(machine.id)) {
+    if (plcHandshakeEngine.machineBusy.has(latestMachine.id)) {
+      const currentInterval = latestMachine.polling_interval_ms || this.DEFAULT_POLLING_INTERVAL_MS;
       // Re-schedule next poll without performing current one
-      poller.timeoutRef = setTimeout(() => this.pollLoop(machine, interval), interval);
+      poller.timeoutRef = setTimeout(() => this.pollLoop(latestMachine, currentInterval), currentInterval);
       return;
     }
 
     const startTime = Date.now();
-    await this.poll(machine);
+    await this.poll(latestMachine);
 
     // Check if still active after poll completes
-    const currentPoller = this.pollers.get(machine.id);
+    const currentPoller = this.pollers.get(latestMachine.id);
     if (!currentPoller || !currentPoller.active) return;
 
+    const currentInterval = latestMachine.polling_interval_ms || this.DEFAULT_POLLING_INTERVAL_MS;
     // Calculate dynamic delay to maintain steady interval without overlapping
     const elapsed = Date.now() - startTime;
-    const delay = Math.max(10, interval - elapsed); // Minimum 10ms safety delay
+    const delay = Math.max(10, currentInterval - elapsed); // Minimum 10ms safety delay
 
-    currentPoller.timeoutRef = setTimeout(() => this.pollLoop(machine, interval), delay);
+    currentPoller.timeoutRef = setTimeout(() => this.pollLoop(latestMachine, currentInterval), delay);
   }
 
   async poll(machine) {
@@ -149,10 +164,38 @@ class PlcPollingService {
 
       let values = {};
       if (protocol === "SLMP") {
+        let signalMap = [];
+        try {
+          signalMap = typeof machine.plc_signal_map === "string" ? JSON.parse(machine.plc_signal_map) : machine.plc_signal_map || [];
+        } catch (e) {
+          signalMap = [];
+        }
+        if (!Array.isArray(signalMap)) signalMap = [];
+
+        const defaultDevice = String(machine.plc_slmp_device || "D").trim().toUpperCase() || "D";
+        const mappedRegisters = registers.map((r) => {
+          let matched = signalMap.find(row => {
+            const parsedReg = Number(row.register ?? row.registerNo ?? row.address);
+            return parsedReg === r;
+          });
+          
+          if (!matched) {
+            if (r === runningReg) matched = signalMap.find(row => String(row.signal || row.key || "").trim().toUpperCase() === "RUNNING");
+            else if (r === endOkReg) matched = signalMap.find(row => String(row.signal || row.key || "").trim().toUpperCase() === "END_OK");
+            else if (r === endNgReg) matched = signalMap.find(row => String(row.signal || row.key || "").trim().toUpperCase() === "END_NG");
+            else if (r === resetReg) matched = signalMap.find(row => String(row.signal || row.key || "").trim().toUpperCase() === "RESET");
+            else if (r === bypassReg) matched = signalMap.find(row => String(row.signal || row.key || "").trim().toUpperCase() === "BYPASS");
+            else if (r === startReg) matched = signalMap.find(row => String(row.signal || row.key || "").trim().toUpperCase() === "START");
+          }
+
+          const device = matched?.device ? String(matched.device).trim().toUpperCase() : defaultDevice;
+          return { register: r, device };
+        });
+
         const result = await readSlmpRegisters({
           ip, port,
-          registers: registers.map((r) => ({ register: r, device: String(machine.plc_slmp_device || "D").trim().toUpperCase() || "D" })),
-          defaultDevice: String(machine.plc_slmp_device || "D").trim().toUpperCase() || "D",
+          registers: mappedRegisters,
+          defaultDevice,
           timeoutMs: 1000,
           frameMode: String(machine.plc_slmp_frame_mode || "AUTO").trim().toUpperCase() || "AUTO"
         });

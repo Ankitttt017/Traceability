@@ -128,11 +128,11 @@ function formatScanErrorMessage(payload = {}) {
   const reason = String(payload.reason || "").trim().toUpperCase();
   const station = String(payload.stationNo || payload.station_no || "").trim().toUpperCase();
   const expected = String(payload.expectedStation || payload.expected_station || "").trim().toUpperCase();
-  if (reason === "DUPLICATE_SCAN") return `This part has already completed the ${station || "current"} operation. Duplicate scan detected.`;
-  if (reason === "ALREADY_COMPLETED") return `This part is already completed. Duplicate scan detected.`;
+  if (reason === "DUPLICATE_SCAN") return "Duplicate scan. Operation has already passed.";
+  if (reason === "ALREADY_COMPLETED") return "Duplicate scan. Operation has already passed.";
   if (reason === "RESET_REQUIRED_AFTER_PLC_COMM_ERROR") return `Previous PLC cycle timed out at ${station || "station"}. Use Reset Operation, then scan again.`;
   if (reason.startsWith("PLC_TIMEOUT")) return "PLC response timeout. Use Reset Operation, then scan again.";
-  if (reason === "PREVIOUS_STATION_NOT_COMPLETED") return expected ? `Station sequence skipped! Please complete operation at ${expected} first.` : "Station sequence error. Previous station not completed.";
+  if (reason === "PREVIOUS_STATION_NOT_COMPLETED") return expected ? `Previous station not completed with OP number ${expected}.` : "Station sequence error. Previous station not completed.";
   if (reason === "INVALID_QR_FORMAT") return String(payload.message || "").trim() || "Invalid QR format. Scan correct component code.";
   if (reason === "QR_RULE_CONFIG_ERROR") return String(payload.message || "").trim() || "QR rule configuration is invalid. Contact supervisor.";
   if (reason === "PART_INTERLOCKED") return "Part interlocked. Reset required from control flow.";
@@ -445,6 +445,7 @@ const OperatorView = () => {
   const lastLiveRefreshRef = useRef(0);
   const lastQrEventRef = useRef({ key: "", at: 0 });
   const lastPopupEventRef = useRef({ key: "", at: 0 });
+  const lastSimulationActiveRef = useRef(false);
 
   const isMobile = breakpoint === "sm" || breakpoint === "md";
   const isTablet = breakpoint === "lg";
@@ -502,6 +503,45 @@ const OperatorView = () => {
   const opStatusSource = liveState?.machineState?.state || currentContext?.plcStatus;
   const opVariant = useMemo(() => getOperationVariant(opStatusSource), [opStatusSource]);
   const opLabel = useMemo(() => getOperationLabel(opStatusSource), [opStatusSource]);
+
+  useEffect(() => {
+    if (!selectedMachineId || !selectedStation) return;
+    
+    const cStat = String(currentContext?.plcStatus || "").trim().toUpperCase();
+    const isManualResultStation = stationFeatureConfig?.manualResult === true || String(selectedStation).toUpperCase() === "OP020";
+    const isOperationEnabled = stationFeatureConfig?.operation !== false;
+    
+    // For manual stations, or stations with PLC operations disabled, the station itself never needs a "reset" to proceed.
+    const isManualResetRequired = isOperationEnabled && !isManualResultStation && ["INTERLOCKED", "BLOCKED", "ENDED_NG", "FAILED", "NG"].includes(cStat);
+
+    if (currentContext?.partId && isManualResetRequired) {
+      setPopup({
+        partId: currentContext.partId,
+        stationNo: selectedStation,
+        machineId: selectedMachineId,
+        type: "ERROR",
+        title: "Operation Blocked",
+        message: `Part ${currentContext.partId} is currently blocked or NG. Reset required to proceed.`,
+        isSimulationPlaceholder: false,
+        qrResult: "FAILED",
+        plcStatus: cStat,
+      });
+      return;
+    }
+
+    const isSim = Boolean(scannerInfo?.isSimulation);
+    setPopup({
+      partId: "",
+      stationNo: selectedStation,
+      machineId: selectedMachineId,
+      type: "INFO",
+      title: isSim ? "Simulation Active" : "Station Active",
+      message: isSim 
+        ? "Scan Simulation Active. Enter QR code below to validate."
+        : `Selected Station ${selectedStation}. Ready for scan.`,
+      isSimulationPlaceholder: true,
+    });
+  }, [selectedMachineId, selectedStation, scannerInfo?.isSimulation, currentContext?.partId, currentContext?.plcStatus, stationFeatureConfig]);
 
   const quickResetPartId = useMemo(
     () => normalizePartId(currentContext?.partId || popup?.partId || popup?.part_id),
@@ -704,7 +744,12 @@ const OperatorView = () => {
     const timer = setInterval(() => loadMachines({ silent: true }), 10000);
     return () => clearInterval(timer);
   }, [loadMachines]);
-  useEffect(() => { if (!selectedMachineId) return; loadMachineTelemetry(selectedMachineId, true); }, [selectedMachineId, loadMachineTelemetry]);
+  useEffect(() => {
+    if (!selectedMachineId) return;
+    setLiveState(null);
+    setStationStats(null);
+    loadMachineTelemetry(selectedMachineId, true);
+  }, [selectedMachineId, loadMachineTelemetry]);
   useEffect(() => { const t = setInterval(() => { if (selectedMachineIdRef.current) loadMachineTelemetry(selectedMachineIdRef.current, false); }, 15000); return () => clearInterval(t); }, [loadMachineTelemetry]);
   useEffect(() => { const t = setInterval(() => setClockTick(Date.now()), 1000); return () => clearInterval(t); }, []);
 
@@ -798,7 +843,9 @@ const OperatorView = () => {
     }}>
       <GlobalPopup popup={popup} onClose={() => setPopup(null)}
         onResetOperation={handleResetOperation}
-        autoCloseMs={3500} criticalAutoCloseMs={9000} showAcknowledge={false} />
+        autoCloseMs={3500} criticalAutoCloseMs={9000} showAcknowledge={false}
+        machineId={selectedMachineId}
+        scannerInfo={scannerInfo} />
 
       {/* ── Page Header ───────────────────────────────────────────── */}
       <div style={{
@@ -841,6 +888,18 @@ const OperatorView = () => {
               }}>
                 {selectedMachine?.lineName || "—"}
                 {selectedStation && <> · Station <span style={{ color: C.amber(), fontWeight: 700 }}>{selectedStation}</span></>}
+                {stationFeatureConfig && (
+                  <>
+                    {" · "}
+                    <span style={{ color: stationFeatureConfig.qr ? C.ok() : C.idle(), fontWeight: 700 }}>
+                      QR: {stationFeatureConfig.qr ? "ON" : "OFF"}
+                    </span>
+                    {" · "}
+                    <span style={{ color: stationFeatureConfig.operation ? C.ok() : C.idle(), fontWeight: 700 }}>
+                      OP: {stationFeatureConfig.operation ? "ON" : "OFF"}
+                    </span>
+                  </>
+                )}
                 {selectedMachine && (
                   <>
                     {" · "}

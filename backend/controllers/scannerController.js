@@ -24,6 +24,10 @@ function toPayload(body = {}) {
       body.isActive === undefined && body.is_active === undefined
         ? true
         : Boolean(body.isActive ?? body.is_active),
+    is_simulation:
+      body.isSimulation === undefined && body.is_simulation === undefined
+        ? false
+        : Boolean(body.isSimulation ?? body.is_simulation),
   };
 }
 
@@ -36,6 +40,7 @@ async function toResponse(scanner) {
     scannerPort: scanner.scanner_port,
     mappedMachineId: scanner.mapped_machine_id,
     isActive: scanner.is_active,
+    isSimulation: Boolean(scanner.is_simulation),
     mappedMachine: machine
         ? {
             id: machine.id,

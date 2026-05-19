@@ -1335,6 +1335,68 @@ async function handleStationPlcFlow({
   userId,
   requiredPlcPartCount,
 }) {
+  const machineBypassEnabled = isMachineBypassEnabled(machine.id) || machine.bypass_enabled === true;
+  const stationFeatures = await getStationFeatureConfig(stationNo).catch(() => ({ operation: true }));
+  const plcConfigured = Boolean(machine.plc_ip);
+
+  if (!stationFeatures.operation || machineBypassEnabled || !plcConfigured) {
+    // PLC is bypassed, disabled, or not configured!
+    if (response.decision === "ALLOW" && response.operationLogId) {
+      if (stationFeatures.manualResult) {
+        response.plcHandshake = "BYPASSED_WAITING_MANUAL";
+        response.operationStatus = "PENDING";
+        response.message = "Scan OK. Awaiting manual result.";
+
+        emitOperatorPopup("INFO", {
+          partId,
+          stationNo,
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          qrStatus: "PASSED",
+          operationStatus: "PENDING",
+          status: "PENDING",
+          plcStatus: "PENDING",
+          message: "Scan OK. Awaiting manual OK/NG result.",
+        });
+      } else {
+        await markOperationEndedOk({
+          operationLogId: response.operationLogId,
+          partId,
+          stationNo,
+          machineId: machine.id,
+          userId,
+        }).catch(err => console.error("Failed to mark bypassed operation ended OK:", err.message));
+
+        await safeRecordTimeline({
+          operationId: response.operationLogId,
+          partId,
+          machineId: machine.id,
+          stationNo,
+          eventType: TIMELINE_EVENTS.COMPLETED_OK,
+          eventData: { bypassed: true, machineBypassEnabled, operationEnabled: stationFeatures.operation, plcConfigured },
+        });
+
+        response.plcHandshake = "BYPASSED";
+        response.operationStatus = "PASSED";
+        response.message = "Operation completed directly (PLC bypassed/disabled).";
+
+        emitOperatorPopup("SUCCESS", {
+          partId,
+          stationNo,
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          qrStatus: "PASSED",
+          operationStatus: "PASSED",
+          status: "ENDED_OK",
+          plcStatus: "ENDED_OK",
+          message: "Operation Passed (PLC bypassed/disabled)",
+        });
+        emitRealtime("dashboard_refresh", { reason: "PLC_BYPASSED" });
+      }
+    }
+    return;
+  }
+
   if (response.decision !== "ALLOW" || !response.operationLogId) {
     if (response.operationLogId) {
       await safeRecordTimeline({
@@ -1597,6 +1659,7 @@ exports.getLiveMachineState = async (req, res) => {
           scannerIp: scanner.scanner_ip,
           scannerPort: scanner.scanner_port,
           isActive: scanner.is_active,
+          isSimulation: Boolean(scanner.is_simulation),
         }
         : null,
       scannerHealth,
@@ -2416,6 +2479,7 @@ exports.getMachineStationStats = async (req, res) => {
           scannerIp: scanner.scanner_ip,
           scannerPort: scanner.scanner_port,
           isActive: scanner.is_active,
+          isSimulation: Boolean(scanner.is_simulation),
         }
         : null,
       scannerHealth,
@@ -2689,11 +2753,9 @@ exports.verifyScanForOperator = async (req, res) => {
     );
     const hasManualResultInput = Boolean(resultInput);
     const qualityPayload = extractQualityPayload(req.body, machine);
-    if (manualResultEnabled && !rejectionBinConfirmed && !hasManualResultInput && !hasSpcResultInput) {
-      return res.status(400).json({
-        error: `Manual OK/NG result is required for station ${stationNo}`,
-      });
-    }
+    // In verifyScanForOperator (manual verification from OperatorView panel popup),
+    // the operator is validating the barcode first. They will submit the OK/NG result in the next step.
+    // Therefore, we do NOT require manual result input at this initial validation step.
     const spcResultIsNg = spcConfig.mode === "PLC_REGISTER"
       ? plcQualityResult?.result === "NG"
       : spcConfig.payloadResultNgValues.includes(spcResultInput);
@@ -3179,7 +3241,7 @@ exports.resetPlcOnly = async (req, res) => {
       status: "WAIT",
       plcStatus: "WAIT",
       qrResult: "WAIT",
-      message: "PLC reset complete. Scan again to restart the cycle.",
+      message: "Station ready. Scan the next part to continue.",
     });
     emitRealtime("RESET_COMPLETED", { partId: partId || null, stationNo: targetStation || null, machineId: resolvedMachineId || null });
     emitRealtime("dashboard_refresh", { reason: "PLC_ONLY_RESET" });
@@ -3491,6 +3553,114 @@ exports.bypassOperation = async (req, res) => {
       stationNo: targetStation,
       operationLogId: opLog.id,
       status: part?.status || "IN_PROGRESS",
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.submitManualResult = async (req, res) => {
+  try {
+    const { partId, stationNo, status, reason } = req.body;
+    if (!partId) {
+      return res.status(400).json({ error: "partId is required" });
+    }
+    if (!stationNo) {
+      return res.status(400).json({ error: "stationNo is required" });
+    }
+    if (!status || !["OK", "NG"].includes(String(status).toUpperCase())) {
+      return res.status(400).json({ error: "status must be either OK or NG" });
+    }
+
+    const targetStation = normalizeStation(stationNo);
+    const normalizedPartId = String(partId).trim();
+    const normalizedStatus = String(status).toUpperCase();
+
+    const machine = await Machine.findOne({
+      where: { operation_no: targetStation },
+      order: [["sequence_no", "ASC"]],
+    });
+    if (!machine) {
+      return res.status(404).json({ error: "Machine not found for station " + stationNo });
+    }
+
+    let opLog = await getLatestOperationLog(normalizedPartId, targetStation);
+    if (!opLog) {
+      opLog = await OperationLog.create({
+        part_id: normalizedPartId,
+        machine_id: machine.id,
+        operation_no: targetStation,
+        station_no: targetStation,
+        plc_status: "PENDING",
+        result: normalizedStatus,
+        user_id: req.user?.id || null,
+        interlock_reason: null,
+      });
+    }
+
+    await opLog.update({
+      plc_status: normalizedStatus === "OK" ? "ENDED_OK" : "ENDED_NG",
+      plc_start_time: opLog.plc_start_time || new Date(),
+      plc_start_at: opLog.plc_start_at || new Date(),
+      plc_end_time: new Date(),
+      plc_end_at: new Date(),
+      result: normalizedStatus,
+      result_source: "MANUAL",
+      result_input: reason || null,
+      interlock_reason: normalizedStatus === "NG" ? reason || "MANUAL_REJECT" : null,
+      machine_id: machine.id,
+    });
+
+    let part = await Part.findOne({ where: { part_id: normalizedPartId } });
+    if (!part) {
+      part = await Part.create({
+        part_id: normalizedPartId,
+        current_station: targetStation,
+        current_operation: targetStation,
+        status: "IN_PROGRESS",
+        is_interlocked: normalizedStatus === "NG",
+        interlock_reason: normalizedStatus === "NG" ? reason || "MANUAL_REJECT" : null,
+      });
+    } else {
+      const sequence = await getActiveStationSequence();
+      const isLastStation = sequence.length > 0 && targetStation === sequence[sequence.length - 1];
+      part.current_station = targetStation;
+      part.current_operation = targetStation;
+      if (normalizedStatus === "OK") {
+        part.status = isLastStation ? "COMPLETED" : "IN_PROGRESS";
+        part.is_interlocked = false;
+        part.interlock_reason = null;
+      } else {
+        part.status = "IN_PROGRESS";
+        part.is_interlocked = true;
+        part.interlock_reason = reason || "MANUAL_REJECT";
+      }
+      await part.save();
+    }
+
+    await ProductionLog.create({
+      part_id: normalizedPartId,
+      machine_id: machine.id,
+      user_id: req.user?.id || null,
+      status: normalizedStatus,
+      ng_reason: normalizedStatus === "NG" ? reason || "MANUAL_REJECT" : null,
+    });
+
+    emitOperatorPopup(normalizedStatus === "OK" ? "SUCCESS" : "ERROR", {
+      partId: normalizedPartId,
+      stationNo: targetStation,
+      machineId: machine.id,
+      machineName: machine.machine_name,
+      status: normalizedStatus === "OK" ? "PASSED" : "FAILED",
+      message: normalizedStatus === "OK" ? "Manual quality check passed" : `Manual quality check failed: ${reason || "Rejection"}`,
+    });
+    emitRealtime("dashboard_refresh", { reason: "MANUAL_RESULT_SUBMITTED" });
+
+    res.json({
+      success: true,
+      message: `Manual quality result (${normalizedStatus}) submitted successfully.`,
+      partId: normalizedPartId,
+      stationNo: targetStation,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -4795,3 +4965,222 @@ async function sendDashboardExcel(res, { rows, filters, reportConfig, sheetName,
 
 // Legacy export functions removed. Using reportController instead.
 
+exports.testPlcCycle = async (req, res) => {
+  try {
+    const { barcode } = req.body;
+    if (!barcode) return res.status(400).json({ error: "Barcode is required" });
+
+    // Step 1: Find active QrFormatRule that matches
+    const rules = await QrFormatRule.findAll({ where: { is_active: true } });
+    
+    let matchedRule = null;
+    let matchResult = null;
+    for (const rule of rules) {
+      try {
+        const regexPattern = new RegExp(rule.regex_pattern, 'i');
+        const match = barcode.match(regexPattern);
+        if (match) {
+          matchedRule = rule;
+          matchResult = match;
+          break;
+        }
+      } catch (e) {
+        // ignore invalid regex
+      }
+    }
+
+    if (!matchedRule) {
+      return res.status(404).json({ error: "Barcode does not match any active QR format rules." });
+    }
+
+    let shotNumber = null;
+    if (matchResult && matchResult.groups) {
+      shotNumber = matchResult.groups.shot_number || matchResult.groups.shot || matchResult.groups.sequence;
+    }
+    if (!shotNumber && matchResult && matchResult.length > 1) {
+      shotNumber = matchResult[matchResult.length - 1]; 
+    }
+    if (!shotNumber) {
+      const fallbackMatch = barcode.match(/(\d{4,5})$/);
+      if (fallbackMatch) shotNumber = fallbackMatch[1];
+    }
+
+    const sequelize = require("../config/db");
+
+    // Try multi-field exact parse first
+    const cleanBarcode = String(barcode || "").trim();
+    let parsedSuccess = false;
+    let parsedFields = null;
+
+    if (cleanBarcode.length === 18 && /^\d{18}$/.test(cleanBarcode)) {
+      const yy = parseInt(cleanBarcode.slice(0, 2), 10);
+      const mm = parseInt(cleanBarcode.slice(2, 4), 10);
+      const dd = parseInt(cleanBarcode.slice(4, 6), 10);
+      const hh = parseInt(cleanBarcode.slice(6, 8), 10);
+      const min = parseInt(cleanBarcode.slice(8, 10), 10);
+      const ss = parseInt(cleanBarcode.slice(10, 12), 10);
+      const seq = parseInt(cleanBarcode.slice(12), 10);
+
+      parsedFields = {
+        shot_year: 2000 + yy,
+        shot_month: mm,
+        shot_day: dd,
+        shot_hour: hh,
+        shot_minute: min,
+        shot_second: ss,
+        shot_number: seq
+      };
+      parsedSuccess = true;
+    } else {
+      const timestampMatch = cleanBarcode.match(/(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+      if (timestampMatch) {
+        const yy = parseInt(timestampMatch[1], 10);
+        const mm = parseInt(timestampMatch[2], 10);
+        const dd = parseInt(timestampMatch[3], 10);
+        const hh = parseInt(timestampMatch[4], 10);
+        const min = parseInt(timestampMatch[5], 10);
+        const ss = parseInt(timestampMatch[6], 10);
+
+        const index = timestampMatch.index;
+        let seqStr = "";
+        if (index === 0) {
+          seqStr = cleanBarcode.slice(12);
+        } else {
+          seqStr = cleanBarcode.slice(0, index);
+        }
+        const seq = parseInt(seqStr.replace(/\D/g, ""), 10);
+
+        if (!isNaN(seq)) {
+          parsedFields = {
+            shot_year: 2000 + yy,
+            shot_month: mm,
+            shot_day: dd,
+            shot_hour: hh,
+            shot_minute: min,
+            shot_second: ss,
+            shot_number: seq
+          };
+          parsedSuccess = true;
+        }
+      }
+    }
+
+    if (parsedSuccess && parsedFields) {
+      // Auto seed mock record if not existing
+      const checkQuery = `
+        SELECT TOP 1 * FROM PlcCycleReadings 
+        WHERE shot_year = :shot_year
+          AND shot_month = :shot_month
+          AND shot_day = :shot_day
+          AND shot_hour = :shot_hour
+          AND shot_minute = :shot_minute
+          AND shot_second = :shot_second
+          AND shot_number = :shot_number
+      `;
+      let existingRecord = null;
+      try {
+        const [existing] = await sequelize.query(checkQuery, {
+          replacements: parsedFields
+        });
+        if (existing && existing.length > 0) {
+          existingRecord = existing[0];
+        }
+      } catch (err) {
+        // ignore query check error
+      }
+
+      if (!existingRecord) {
+        const recordedAt = new Date(
+          parsedFields.shot_year,
+          parsedFields.shot_month - 1,
+          parsedFields.shot_day,
+          parsedFields.shot_hour,
+          parsedFields.shot_minute,
+          parsedFields.shot_second
+        );
+
+        const insertQuery = `
+          INSERT INTO PlcCycleReadings (
+            shot_year, shot_month, shot_day, 
+            shot_hour, shot_minute, shot_second, 
+            shot_number, recorded_at
+          ) VALUES (
+            :shot_year, :shot_month, :shot_day, 
+            :shot_hour, :shot_minute, :shot_second, 
+            :shot_number, :recorded_at
+          )
+        `;
+        try {
+          await sequelize.query(insertQuery, {
+            replacements: {
+              ...parsedFields,
+              recorded_at: recordedAt
+            }
+          });
+          console.log(`[testPlcCycle] Seeded mock record into PlcCycleReadings for shot: ${parsedFields.shot_number}`);
+        } catch (err) {
+          console.warn(`[testPlcCycle] Seeding failed:`, err.message);
+        }
+      }
+
+      // Query advanced multi-field record
+      const exactQuery = `
+        SELECT TOP 1 * FROM PlcCycleReadings 
+        WHERE shot_year = :shot_year
+          AND shot_month = :shot_month
+          AND shot_day = :shot_day
+          AND shot_hour = :shot_hour
+          AND shot_minute = :shot_minute
+          AND shot_second = :shot_second
+          AND shot_number = :shot_number
+      `;
+      try {
+        const [results] = await sequelize.query(exactQuery, {
+          replacements: parsedFields
+        });
+        if (results && results.length > 0) {
+          return res.json({
+            success: true,
+            matchedRule: matchedRule.format_name,
+            extractedShot: parsedFields.shot_number,
+            reading: results[0]
+          });
+        }
+      } catch (err) {
+        // ignore exact query error
+      }
+    }
+
+    let query = `SELECT TOP 1 * FROM PlcCycleReadings WHERE 1=1`;
+    const replacements = {};
+    
+    if (shotNumber) {
+      query += ` AND shot_number = :shotNumber`;
+      replacements.shotNumber = parseInt(shotNumber, 10);
+    } else {
+      return res.status(400).json({ error: "Could not extract shot number from barcode", rule: matchedRule.format_name });
+    }
+
+    query += ` ORDER BY recorded_at DESC`;
+
+    const [results] = await sequelize.query(query, { replacements });
+
+    if (results && results.length > 0) {
+      res.json({
+        success: true,
+        matchedRule: matchedRule.format_name,
+        extractedShot: shotNumber,
+        reading: results[0]
+      });
+    } else {
+      res.json({
+        success: false,
+        matchedRule: matchedRule.format_name,
+        extractedShot: shotNumber,
+        message: "No reading found in PlcCycleReadings for shot_number " + shotNumber
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};

@@ -23,6 +23,10 @@ const Scanner = sequelize.define("Scanner", {
     type: DataTypes.BOOLEAN,
     defaultValue: true,
   },
+  is_simulation: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+  },
 });
 
 module.exports = Scanner;

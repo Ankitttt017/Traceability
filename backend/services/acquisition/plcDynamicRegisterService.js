@@ -7,6 +7,29 @@
 
 const { readModbusRegisters, readSlmpRegisters } = require('../plcIoService');
 
+function parseRegister(rawValue, fallbackDevice = "D") {
+  const text = String(rawValue ?? "").trim().toUpperCase();
+  if (!text) {
+    return { register: null, device: fallbackDevice };
+  }
+  const direct = Number(text);
+  if (Number.isFinite(direct)) {
+    return { register: Math.trunc(direct), device: fallbackDevice };
+  }
+  const match = text.match(/^([A-Z]+)?\s*(\d+)$/);
+  if (!match) {
+    return { register: null, device: fallbackDevice };
+  }
+  const register = Number(match[2]);
+  if (!Number.isFinite(register)) {
+    return { register: null, device: fallbackDevice };
+  }
+  return {
+    register: Math.trunc(register),
+    device: String(match[1] || fallbackDevice || "").trim().toUpperCase() || fallbackDevice,
+  };
+}
+
 class PlcDynamicRegisterService {
   /**
    * Reads a set of dynamic registers for a machine and normalizes them.
@@ -19,7 +42,6 @@ class PlcDynamicRegisterService {
       return {};
     }
 
-    // 1. Batch Registers by Device/Type to optimize PLC communication
     const protocol = String(machine.plc_protocol || 'TCP_TEXT').toUpperCase();
     const parameters = {};
 
@@ -40,17 +62,21 @@ class PlcDynamicRegisterService {
 
   async readModbusBatch(machine, registerMap) {
     const results = {};
-    // Modbus optimization: if registers are close, read them in one go
-    // For now, read each or simple grouping
     for (const reg of registerMap) {
       try {
+        const token = parseRegister(reg.register);
+        if (token.register === null) {
+          results[reg.name] = null;
+          continue;
+        }
         const val = await readModbusRegisters({
-          ip: machine.plc_ip,
-          port: machine.plc_port,
+          ip: machine.plc_ip || machine.machine_ip,
+          port: machine.plc_port || machine.machine_port,
           unitId: machine.plc_unit_id || 1,
-          registers: [{ register: parseInt(reg.register), count: 1 }]
+          registers: [token.register]
         });
-        results[reg.name] = this.scaleValue(val[0], reg.scale);
+        const rawVal = val?.values?.[token.register];
+        results[reg.name] = this.scaleValue(rawVal, reg.scale);
       } catch (e) {
         results[reg.name] = null;
       }
@@ -62,12 +88,18 @@ class PlcDynamicRegisterService {
     const results = {};
     for (const reg of registerMap) {
       try {
+        const token = parseRegister(reg.register, machine.plc_slmp_device || 'D');
+        if (token.register === null) {
+          results[reg.name] = null;
+          continue;
+        }
         const val = await readSlmpRegisters({
-          ip: machine.plc_ip,
-          port: machine.plc_port,
-          registers: [{ register: parseInt(reg.register), device: reg.device || machine.plc_slmp_device || 'D' }]
+          ip: machine.plc_ip || machine.machine_ip,
+          port: machine.plc_port || machine.machine_port,
+          registers: [{ register: token.register, device: token.device }]
         });
-        results[reg.name] = this.scaleValue(val[0], reg.scale);
+        const rawVal = val?.values?.[token.register];
+        results[reg.name] = this.scaleValue(rawVal, reg.scale);
       } catch (e) {
         results[reg.name] = null;
       }

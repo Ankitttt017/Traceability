@@ -14,7 +14,7 @@ import ConfirmModal from "../components/ConfirmModal";
 /* ─── constants ────────────────────────────────────────────── */
 const EMPTY_FORM = {
   scannerName: "", scannerIp: "", scannerPort: "",
-  mappedMachineId: "", isActive: true,
+  mappedMachineId: "", isActive: true, isSimulation: false,
 };
 
 /* ─── component ────────────────────────────────────────────── */
@@ -54,6 +54,7 @@ const Scanners = () => {
       scannerPort: scanner.scannerPort ? String(scanner.scannerPort) : "",
       mappedMachineId: String(scanner.mappedMachineId || ""),
       isActive: Boolean(scanner.isActive),
+      isSimulation: Boolean(scanner.isSimulation),
     });
     setShowForm(true);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -215,15 +216,27 @@ const Scanners = () => {
             </div>
 
             <div className="flex items-center justify-between gap-4">
-              {/* Active toggle */}
-              <label className="flex items-center gap-3 cursor-pointer select-none">
-                <div className="relative">
-                  <input type="checkbox" checked={form.isActive} onChange={e => setForm({ ...form, isActive: e.target.checked })} className="sr-only peer" />
-                  <div className="w-8 h-4 bg-border rounded-full peer peer-checked:bg-accent transition-colors"></div>
-                  <div className="absolute left-0.5 top-0.5 w-3 h-3 bg-white rounded-full transition-transform peer-checked:translate-x-4 shadow-sm"></div>
-                </div>
-                <span className="text-xs font-bold text-text-muted uppercase tracking-wider">Active Device</span>
-              </label>
+              <div className="flex items-center gap-6">
+                {/* Active toggle */}
+                <label className="flex items-center gap-3 cursor-pointer select-none">
+                  <div className="relative">
+                    <input type="checkbox" checked={form.isActive} onChange={e => setForm({ ...form, isActive: e.target.checked })} className="sr-only peer" />
+                    <div className="w-8 h-4 bg-border rounded-full peer peer-checked:bg-accent transition-colors"></div>
+                    <div className="absolute left-0.5 top-0.5 w-3 h-3 bg-white rounded-full transition-transform peer-checked:translate-x-4 shadow-sm"></div>
+                  </div>
+                  <span className="text-xs font-bold text-text-muted uppercase tracking-wider">Active Device</span>
+                </label>
+
+                {/* Simulation toggle */}
+                <label className="flex items-center gap-3 cursor-pointer select-none">
+                  <div className="relative">
+                    <input type="checkbox" checked={form.isSimulation} onChange={e => setForm({ ...form, isSimulation: e.target.checked })} className="sr-only peer" />
+                    <div className="w-8 h-4 bg-border rounded-full peer peer-checked:bg-primary transition-colors"></div>
+                    <div className="absolute left-0.5 top-0.5 w-3 h-3 bg-white rounded-full transition-transform peer-checked:translate-x-4 shadow-sm"></div>
+                  </div>
+                  <span className="text-xs font-bold text-text-muted uppercase tracking-wider">Simulation Mode</span>
+                </label>
+              </div>
 
               <div className="flex items-center gap-3">
                 <button type="button" onClick={resetForm}
@@ -310,11 +323,20 @@ const Scanners = () => {
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-1.5">
-                        <div className={`w-1.5 h-1.5 rounded-full ${scanner.isActive ? 'bg-accent animate-pulse' : 'bg-text-muted/30'}`} />
-                        <span className={`text-[9px] font-black uppercase ${scanner.isActive ? 'text-accent' : 'text-text-muted'}`}>
-                          {scanner.isActive ? "Active" : "Inactive"}
-                        </span>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-1.5">
+                          <div className={`w-1.5 h-1.5 rounded-full ${scanner.isActive ? 'bg-accent animate-pulse' : 'bg-text-muted/30'}`} />
+                          <span className={`text-[9px] font-black uppercase ${scanner.isActive ? 'text-accent' : 'text-text-muted'}`}>
+                            {scanner.isActive ? "Active" : "Inactive"}
+                          </span>
+                        </div>
+                        {scanner.isSimulation && (
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[8px] font-black uppercase bg-primary/10 text-primary px-1.5 py-0.5 rounded border border-primary/20">
+                              SIMULATION
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-right">

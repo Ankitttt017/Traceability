@@ -132,6 +132,17 @@ function releaseSocket({ socket, pooled, key }) {
     return;
   }
 
+  if (socket.destroyed) {
+    pool.delete(key);
+    // Notify next waiter
+    const list = waiters.get(key);
+    if (list && list.length > 0) {
+      const next = list.shift();
+      if (next) next();
+    }
+    return;
+  }
+
   // Cleanup listeners before returning to pool to prevent MaxListenersExceededWarning
   try {
     socket.removeAllListeners("data");
@@ -159,7 +170,13 @@ async function withSocket({ ip, port, timeoutMs }, fn) {
   // operations on the same socket corrupt the protocol framing.
   const lease = await acquireSocket({ ip, port, timeoutMs });
   try {
-    return await fn(lease.socket);
+    const res = await fn(lease.socket);
+    return res;
+  } catch (error) {
+    try {
+      lease.socket.destroy();
+    } catch (_) {}
+    throw error;
   } finally {
     releaseSocket(lease);
   }

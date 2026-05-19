@@ -739,6 +739,50 @@ async function handleStationPlcFlow({
   partId,
   requiredPlcPartCount,
 }) {
+  const machineBypassEnabled = isMachineBypassEnabled(machine.id) || machine.bypass_enabled === true;
+  const stationFeatures = await getStationFeatureConfig(stationNo).catch(() => ({ operation: true }));
+  const plcConfigured = Boolean(machine.plc_ip);
+
+  if (!stationFeatures.operation || machineBypassEnabled || !plcConfigured) {
+    // PLC is bypassed, disabled, or not configured!
+    const isValid = scanResult.decision === "ALLOW" || scanResult.valid === true;
+    if (isValid && scanResult.operationLogId) {
+      await markEndOk({
+        operationLogId: scanResult.operationLogId,
+        partId,
+        stationNo,
+        machineId: machine.id,
+      }).catch(err => console.error("Failed to mark TCP bypassed operation ended OK:", err.message));
+
+      await safeRecordTimeline({
+        operationId: scanResult.operationLogId,
+        partId,
+        machineId: machine.id,
+        stationNo,
+        eventType: TIMELINE_EVENTS.COMPLETED_OK,
+        eventData: { bypassed: true, machineBypassEnabled, operationEnabled: stationFeatures.operation, plcConfigured },
+      });
+
+      scanResult.plcHandshake = "BYPASSED";
+      scanResult.operationStatus = "PASSED";
+      scanResult.message = "Operation completed directly (PLC bypassed/disabled).";
+
+      emitRealtime("operator_popup", {
+        type: "SUCCESS",
+        partId,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "ENDED_OK",
+        plcStatus: "ENDED_OK",
+        qrResult: "PASS",
+        message: "Operation Passed (PLC bypassed/disabled)",
+      });
+      emitRealtime("dashboard_refresh", { reason: "PLC_BYPASSED" });
+    }
+    return;
+  }
+
   const isValid = scanResult.decision === "ALLOW" || scanResult.valid === true;
   if (!isValid) {
     // Section 1, 2 & 3: Signal Interlock to PLC and transition FSM, but KEEP scanner socket open.
@@ -1056,23 +1100,7 @@ server.on("connection", (socket) => {
       );
       const hasResultInput = Boolean(tracePayload?.resultProvided && resultInput);
       const qualityPayload = extractQualityPayloadFromTrace(tracePayload, machine);
-      if (manualResultEnabled && !rejectionBinConfirmed && !hasResultInput && !hasSpcResultInput) {
-        safeSocketWrite("BLOCK\n");
-        emitRealtime("operator_popup", {
-          type: "ERROR",
-          message: `Manual OK/NG result missing for station ${stationNo}`,
-          partId,
-          stationNo,
-          machineId: machine.id,
-          machineName: machine.machine_name,
-          scannerName: scanner.scanner_name,
-          scannerIp,
-          status: "INTERLOCKED",
-          reason: "MANUAL_RESULT_REQUIRED",
-          timestamp: new Date().toISOString(),
-        });
-        return;
-      }
+      // Allow initial scan verification without manual result input during scanning
       const spcResultIsNg = spcConfig.mode === "PLC_REGISTER"
         ? plcQualityResult?.result === "NG"
         : spcConfig.payloadResultNgValues.includes(spcResultInput);

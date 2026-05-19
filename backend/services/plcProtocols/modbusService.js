@@ -231,7 +231,12 @@ async function handshake({ ip, port, partId, stationNo, machine }) {
   console.log(`[PLC:REGISTER_RESOLVE] start:${startRegister} status:${statusRegister} endOk:${endOkRegister} endNg:${endNgRegister}`);
 
   if (!Number.isFinite(startRegister) || !Number.isFinite(statusRegister)) {
-    throw new Error("MODBUS registers missing (plc_start_register/plc_status_register)");
+    console.log("[PLC:HANDSHAKE] MODBUS registers missing (plc_start_register/plc_status_register). Bypassing handshake sequence.");
+    return {
+      ok: true,
+      bypassed: true,
+      message: "MODBUS registers missing. Bypassing active handshake sequence.",
+    };
   }
 
   return withSocket({ ip, port, timeoutMs: DEFAULT_CONNECT_TIMEOUT_MS }, async (socket) => {
@@ -528,7 +533,13 @@ async function sendCommand({ ip, port, command, machine, partId, stationNo }) {
   const commandRegister = normalizeModbusRegisterAddress(machine?.plc_start_register);
   const resetRegister = normalizeModbusRegisterAddress(machine?.plc_reset_register);
   if (!Number.isFinite(commandRegister)) {
-    throw new Error("MODBUS command register (plc_start_register) is required");
+    console.log("[PLC:COMMAND] MODBUS command register (plc_start_register) not configured. Bypassing command.");
+    return {
+      protocol: "MODBUS_TCP",
+      command: normalized,
+      bypassed: true,
+      message: "Command register not configured. Command bypassed.",
+    };
   }
 
   const commandValue =

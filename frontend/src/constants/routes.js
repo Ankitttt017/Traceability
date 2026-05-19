@@ -20,12 +20,6 @@ export const APP_ROUTES = {
   operatorView: "/operator-view",
   packing: "/packing",
   packingManagement: "/packing-management",
-  parts: "/organization/parts",
-  machineMaster: "/organization/machines",
-  operations: "/organization/operations",
-  lines: "/organization/lines",
-  plants: "/organization/plants",
-  divisions: "/organization/divisions",
-  dies: "/organization/dies",
+
   reports: "/reports",
 };

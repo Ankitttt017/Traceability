@@ -23,6 +23,11 @@ const Machine = sequelize.define("Machine", {
     type: DataTypes.STRING,
     allowNull: false,
   },
+  machine_type: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: "HPDC",
+  },
   machine_ip: {
     type: DataTypes.STRING,
     allowNull: false,
@@ -42,6 +47,14 @@ const Machine = sequelize.define("Machine", {
   plc_port: {
     type: DataTypes.INTEGER,
     allowNull: true,
+  },
+  plc_endpoint_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: {
+      model: "plc_endpoints",
+      key: "id",
+    },
   },
   plc_range_id: {
     type: DataTypes.INTEGER,
@@ -114,10 +127,7 @@ const Machine = sequelize.define("Machine", {
     allowNull: true,
     defaultValue: 9,
   },
-  plc_slmp_device: {
-    type: DataTypes.STRING,
-    allowNull: true,
-  },
+
   plc_test_timeout_ms: {
     type: DataTypes.INTEGER,
     allowNull: true,
