@@ -629,7 +629,7 @@ const ProductionCharts=()=>{
               <div style={{display:"flex",alignItems:"center",gap:24,padding:"8px 0"}}>
                 {/* Donut */}
                 <div style={{position:"relative",width:160,height:160,flexShrink:0}}>
-                  <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+                  <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                     <RePieChart>
                       <Pie data={qualityPie} cx="50%" cy="50%" innerRadius={52} outerRadius={72}
                         paddingAngle={3} dataKey="value" strokeWidth={0}>
@@ -735,7 +735,7 @@ const ProductionCharts=()=>{
               </div>
             ):(
               <div style={{height:350}}>
-                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                   {chartType==="area"?(
                     <AreaChart data={productionData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <defs>
@@ -793,7 +793,7 @@ const ProductionCharts=()=>{
               </div>
             ):(
               <div style={{height:260}}>
-                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                   <BarChart data={machineBarData} barGap={3} margin={{top:4,right:8,bottom:0,left:-10}}>
                     <CartesianGrid stroke={C.bdr(0.1)} strokeDasharray="3 4" vertical={false}/>
                     <XAxis dataKey="name" tick={{...axStyle,fontSize:10}} axisLine={false} tickLine={false}/>
@@ -826,7 +826,8 @@ const ProductionCharts=()=>{
                   ):(report.machineWise||[]).map((row,i)=>{
                     const t=(Number(row.ok||0))+(Number(row.ng||0));
                     const eff=t>0?Math.round(Number(row.ok||0)/t*100):0;
-                    const name=machineMap.get(Number(row.machine_id))||`Machine ${row.machine_id}`;
+                    const machine=machineMap.get(Number(row.machine_id));
+                    const name = String(machine?.machineName || machine?.machine_name || machine?.machineNumber || `Machine ${row.machine_id}`);
                     const v=eff>=85?"ok":eff>=60?"wip":"ng";
                     const vc=v==="ok"?C.ok():v==="wip"?C.wip():C.ng();
                     return(

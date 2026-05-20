@@ -396,12 +396,22 @@ const Dashboard = () => {
   ],[summary.quality]);
 
   // Shift bar data
-  const shiftData = useMemo(()=>
-    Object.entries(report.shiftProduction||{}).map(([k,v])=>({
-      name: k==="SHIFT_A"?"Shift A": k==="SHIFT_B"?"Shift B":"Shift C",
-      OK:v.ok||0, NG:v.ng||0,
-    }))
-  ,[report.shiftProduction]);
+  const shiftData = useMemo(() => {
+    const labelByCode = {
+      SHIFT_A: "Shift A",
+      SHIFT_B: "Shift B",
+      SHIFT_C: "Shift C",
+      UNASSIGNED: "Unassigned",
+    };
+    return Object.entries(report.shiftProduction || {})
+      .map(([k, v]) => ({
+        code: k,
+        name: labelByCode[k] || k.replace(/_/g, " "),
+        OK: v?.ok || 0,
+        NG: v?.ng || 0,
+      }))
+      .filter((row) => row.code !== "UNASSIGNED" || (row.OK + row.NG) > 0);
+  }, [report.shiftProduction]);
 
   const hasFilters = Object.values(filters).some(Boolean);
   const selectedFilterCount = useMemo(() => Object.values(filters).filter(Boolean).length, [filters]);
