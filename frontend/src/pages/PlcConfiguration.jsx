@@ -1,6 +1,6 @@
 // PlcConfiguration.jsx — Clean PLC Register Management
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Cpu, Plus, Save, Trash2, RefreshCw, Download, AlertTriangle, Info } from "lucide-react";
+import { Cpu, Plus, Save, Trash2, RefreshCw, Download, AlertTriangle, Info, Pencil } from "lucide-react";
 import toast from "react-hot-toast";
 import ConfirmModal from "../components/ConfirmModal";
 import { plcConfigApi } from "../api/services";
@@ -20,6 +20,7 @@ const PlcConfiguration = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [deleteId, setDeleteId] = useState(null);
+  const [editingRangeId, setEditingRangeId] = useState(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -60,16 +61,37 @@ const PlcConfiguration = () => {
         toast.error("IP and Range are required");
         return;
       }
-      await plcConfigApi.createRange({ ...formData, rangeName: `Block_${formData.rangeInput}` });
-      toast.success("Register block added successfully");
+      if (editingRangeId) {
+        await plcConfigApi.updateRange(editingRangeId, {
+          ...formData,
+          rangeName: formData.plcName ? `${formData.plcName}_${formData.rangeInput}` : `Block_${formData.rangeInput}`,
+        });
+        toast.success("Register block updated successfully");
+      } else {
+        await plcConfigApi.createRange({ ...formData, rangeName: `Block_${formData.rangeInput}` });
+        toast.success("Register block added successfully");
+      }
       setShowAddModal(false);
       setFormData({ plcName: "", plcIp: "", plcPort: "502", plcProtocol: "MODBUS_TCP", rangeInput: "" });
+      setEditingRangeId(null);
       await loadData();
     } catch (err) {
       toast.error(err.response?.data?.error || "Failed to save");
     } finally {
       setSaving(false);
     }
+  };
+
+  const openEditModal = (range) => {
+    setEditingRangeId(range.id);
+    setFormData({
+      plcName: range.plcName || "",
+      plcIp: range.plcIp || "",
+      plcPort: String(range.plcPort ?? "502"),
+      plcProtocol: range.plcProtocol || "MODBUS_TCP",
+      rangeInput: `${range.rangeStart}-${range.rangeEnd}`,
+    });
+    setShowAddModal(true);
   };
 
   const handleDelete = async () => {
@@ -104,7 +126,7 @@ const PlcConfiguration = () => {
             <button onClick={loadData} className="db-secondary-btn">
               <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> Refresh
             </button>
-            <button onClick={() => setShowAddModal(true)} className="db-action-btn">
+            <button onClick={() => { setEditingRangeId(null); setShowAddModal(true); }} className="db-action-btn">
               <Plus size={14} /> Add Register Block
             </button>
           </div>
@@ -148,6 +170,9 @@ const PlcConfiguration = () => {
                       </span>
                     </td>
                     <td className="px-5 py-4 text-right">
+                      <button onClick={() => openEditModal(r)} className="p-2 mr-1 text-text-muted hover:text-primary hover:bg-primary/10 rounded-lg transition-all" title="Edit">
+                        <Pencil size={14} />
+                      </button>
                       <button onClick={() => setDeleteId(r.id)} className="p-2 text-text-muted hover:text-danger hover:bg-danger/10 rounded-lg transition-all" title="Delete">
                         <Trash2 size={14} />
                       </button>
@@ -165,8 +190,8 @@ const PlcConfiguration = () => {
         <div className="fixed inset-0 bg-bg-dark/90 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-bg-card border border-border/60 rounded-2xl max-w-lg w-full overflow-hidden rise-in shadow-2xl">
             <div className="px-6 py-5 border-b border-border flex justify-between items-center bg-bg-dark/30">
-              <h3 className="font-bold text-text-main">Add New Register Block</h3>
-              <button onClick={() => setShowAddModal(false)} className="p-2 text-text-muted hover:text-text-main hover:bg-bg-dark rounded-xl transition-all">✕</button>
+              <h3 className="font-bold text-text-main">{editingRangeId ? "Edit Register Block" : "Add New Register Block"}</h3>
+              <button onClick={() => { setShowAddModal(false); setEditingRangeId(null); }} className="p-2 text-text-muted hover:text-text-main hover:bg-bg-dark rounded-xl transition-all">✕</button>
             </div>
 
             <form onSubmit={handleSubmit} className="p-6 space-y-5">
@@ -208,11 +233,11 @@ const PlcConfiguration = () => {
               </div>
 
               <div className="flex gap-3 pt-4 border-t border-border mt-4">
-                <button type="button" onClick={() => setShowAddModal(false)} className="px-4 py-2 text-sm text-text-muted hover:text-text-main transition-colors font-semibold">
+                <button type="button" onClick={() => { setShowAddModal(false); setEditingRangeId(null); }} className="px-4 py-2 text-sm text-text-muted hover:text-text-main transition-colors font-semibold">
                   Cancel
                 </button>
                 <button type="submit" disabled={saving} className="px-6 py-2 bg-primary text-on-strong font-bold rounded-xl text-sm hover:brightness-110 transition-all ml-auto disabled:opacity-50">
-                  {saving ? "Saving..." : "Add Block"}
+                  {saving ? "Saving..." : editingRangeId ? "Update Block" : "Add Block"}
                 </button>
               </div>
             </form>

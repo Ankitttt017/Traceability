@@ -369,7 +369,7 @@ function emptyForm() {
     plcIp: "", plcPort: "", plcProtocol: "TCP_TEXT",
     plcDevice: "D", plcFrameMode: "AUTO", plcRangeId: "",
     // Handshake signals (ordered by seq)
-    handshakeSignals: DEFAULT_HANDSHAKE.map((h) => ({ ...h, id: uid() })),
+    handshakeSignals: DEFAULT_HANDSHAKE.map((h) => ({ ...h, id: uid(), frameMode: "AUTO" })),
     // Data register ranges (for reading blocks of data — CMM, live params, etc.)
     dataRegisterRanges: [],
     // Quality / SPC
@@ -402,6 +402,7 @@ function formFromMachine(m) {
       meaning: row.meaning || "",
       category: row.category || "control",
       required: row.required !== false,
+      frameMode: row.frameMode || row.slmpFrameMode || cfg.slmpFrameMode || m.plcSlmpFrameMode || "AUTO",
     }));
   } else {
     // Legacy flat fields → build default with values
@@ -422,6 +423,7 @@ function formFromMachine(m) {
         device: m.plcDevice || "D",
         register: String(kv.reg ?? ""),
         value: String(kv.val ?? def.value),
+        frameMode: cfg.slmpFrameMode || m.plcSlmpFrameMode || "AUTO",
       };
     });
   }
@@ -432,6 +434,7 @@ function formFromMachine(m) {
         ...r,
         endReg: r.endReg || String(toNum(r.startReg) + toNum(r.count, 1) - 1),
         formula: r.formula || "",
+        frameMode: r.frameMode || r.slmpFrameMode || cfg.slmpFrameMode || m.plcSlmpFrameMode || "AUTO",
       }))
     : (Array.isArray(m.plcSignalMap)
         ? m.plcSignalMap.map((r, i) => ({
@@ -448,6 +451,7 @@ function formFromMachine(m) {
             formula: "",
             toleranceMin: "",
             toleranceMax: "",
+            frameMode: cfg.slmpFrameMode || m.plcSlmpFrameMode || "AUTO",
           }))
         : []);
 
@@ -505,6 +509,7 @@ function buildPayload(f) {
       meaning: s.meaning,
       category: s.category,
       required: s.required,
+      frameMode: s.frameMode || f.plcFrameMode || "AUTO",
     })),
     dataRegisterRanges: f.dataRegisterRanges.map((r) => ({
       id: r.id,
@@ -520,6 +525,7 @@ function buildPayload(f) {
       formula: r.formula || "",
       toleranceMin: r.toleranceMin !== "" ? toNum(r.toleranceMin) : null,
       toleranceMax: r.toleranceMax !== "" ? toNum(r.toleranceMax) : null,
+      frameMode: r.frameMode || f.plcFrameMode || "AUTO",
     })),
     // Legacy fields
     startRegister:   findVal("start", "register"),
@@ -573,6 +579,7 @@ function buildPayload(f) {
     plcSignalMap: f.dataRegisterRanges.map((r) => ({
       label: r.name, register: toNum(r.startReg),
       device: r.device, unit: r.unit, meaning: r.purpose,
+      frameMode: r.frameMode || f.plcFrameMode || "AUTO",
     })),
   };
 }
@@ -584,7 +591,7 @@ function SignalRow({ row, index, total, onUpdate, onRemove, onMove, device }) {
   return (
     <div style={{
       display: "grid",
-      gridTemplateColumns: "28px 28px 140px 90px 70px 80px 70px 70px 1fr 28px",
+      gridTemplateColumns: "28px 28px 140px 90px 70px 80px 85px 70px 70px 1fr 28px",
       gap: 6, alignItems: "center",
       padding: "7px 10px",
       background: C.card,
@@ -631,6 +638,13 @@ function SignalRow({ row, index, total, onUpdate, onRemove, onMove, device }) {
         {DEVICES.map((d) => <option key={d} value={d}>{d}</option>)}
       </FSelect>
 
+      {/* Frame Mode */}
+      <FSelect value={row.frameMode || "AUTO"} onChange={(e) => onUpdate(index, "frameMode", e.target.value)}>
+        <option value="AUTO">AUTO</option>
+        <option value="ASCII">ASCII</option>
+        <option value="BINARY">BINARY</option>
+      </FSelect>
+
       {/* Register */}
       <FInput value={row.register} onChange={(e) => onUpdate(index, "register", e.target.value)}
         placeholder="e.g. 100" mono type="number" />
@@ -667,7 +681,7 @@ function DataRangeRow({ row, index, onUpdate, onRemove, device }) {
       padding: "10px 12px",
     }}>
       {/* Row 1: name + device + start + end + datatype + scale + unit */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 65px 85px 85px 100px 70px 70px 28px", gap: 6, alignItems: "end" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 65px 85px 85px 100px 90px 70px 70px 28px", gap: 6, alignItems: "end" }}>
         <div>
           <Label>Name / Label</Label>
           <FInput value={row.name} onChange={(e) => onUpdate(index, "name", e.target.value)} placeholder="e.g. Bore Diameter" />
@@ -703,6 +717,14 @@ function DataRangeRow({ row, index, onUpdate, onRemove, device }) {
           <Label>Data Type</Label>
           <FSelect value={row.dataType} onChange={(e) => onUpdate(index, "dataType", e.target.value)}>
             {DATA_TYPES.map((d) => <option key={d} value={d}>{d}</option>)}
+          </FSelect>
+        </div>
+        <div>
+          <Label>Frame Mode</Label>
+          <FSelect value={row.frameMode || "AUTO"} onChange={(e) => onUpdate(index, "frameMode", e.target.value)}>
+            <option value="AUTO">AUTO</option>
+            <option value="ASCII">ASCII</option>
+            <option value="BINARY">BINARY</option>
           </FSelect>
         </div>
         <div>
@@ -799,6 +821,7 @@ const FORM_TABS = [
 export default function MachinePage() {
   const [machines,  setMachines]  = useState([]);
   const [plcRanges, setPlcRanges] = useState([]);
+  const [plcEndpoints, setPlcEndpoints] = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -821,16 +844,195 @@ export default function MachinePage() {
   const [testResult, setTestResult] = useState(null);
 
   const uniqueIps = useMemo(() => {
-    const ips = new Set(["192.168.1.100", "192.168.119.40", "172.16.10.71", "127.0.0.1"]);
+    const ips = new Set();
     (plcRanges || []).forEach(r => { if (r.plcIp) ips.add(r.plcIp); });
+    (machines || []).forEach(m => { if (m.plcIp) ips.add(m.plcIp); });
+    (plcEndpoints || []).forEach(e => { if (e.plcIp) ips.add(e.plcIp); });
     return [...ips].sort();
-  }, [plcRanges]);
+  }, [plcRanges, machines, plcEndpoints]);
 
   const uniquePorts = useMemo(() => {
-    const ports = new Set(["502", "5000", "9001", "1025"]);
+    const ports = new Set();
     (plcRanges || []).forEach(r => { if (r.plcPort) ports.add(String(r.plcPort)); });
+    (machines || []).forEach(m => { if (m.plcPort) ports.add(String(m.plcPort)); });
+    (plcEndpoints || []).forEach(e => { if (e.plcPort) ports.add(String(e.plcPort)); });
     return [...ports].sort((a, b) => Number(a) - Number(b));
-  }, [plcRanges]);
+  }, [plcRanges, machines, plcEndpoints]);
+
+  const handleTestDataRegisters = async () => {
+    if (!form.plcIp || !form.plcPort) {
+      toast.error("Please provide PLC IP and Port in Network Tab first");
+      return;
+    }
+    if (form.dataRegisterRanges.length === 0) {
+      toast.error("No data registers to test");
+      return;
+    }
+    
+    setShowTestModal(true);
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const allRegisters = [];
+      form.dataRegisterRanges.forEach(r => {
+        const start = Number(r.startReg);
+        const end = Number(r.endReg) || start;
+        const count = Math.max(1, end - start + 1);
+        const device = r.device || form.plcDevice || "D";
+        const frameMode = r.frameMode || form.plcFrameMode || "AUTO";
+        
+        if (!isNaN(start)) {
+          for (let i = 0; i < count; i++) {
+            allRegisters.push({
+              register: start + i,
+              device: device,
+              frameMode: frameMode,
+            });
+          }
+        }
+      });
+      
+      if (allRegisters.length === 0) {
+        toast.error("Invalid register map");
+        setTesting(false);
+        return;
+      }
+      
+      // Group by device type class: D/W/R/ZR vs M/X/Y
+      const wordGroup = [];
+      const bitGroup = [];
+      
+      allRegisters.forEach(reg => {
+        const dev = String(reg.device).toUpperCase();
+        if (["M", "X", "Y"].includes(dev)) {
+          bitGroup.push(reg);
+        } else {
+          wordGroup.push(reg);
+        }
+      });
+      
+      const blocks = [];
+      
+      // Helper to split a group of registers into contiguous blocks of max 60
+      const splitIntoBlocks = (regs) => {
+        // Group by actual device name first (e.g. "D" vs "W" vs "ZR")
+        const byDeviceName = {};
+        regs.forEach(r => {
+          const name = String(r.device).toUpperCase();
+          if (!byDeviceName[name]) byDeviceName[name] = [];
+          byDeviceName[name].push(r);
+        });
+        
+        Object.keys(byDeviceName).forEach(deviceName => {
+          const subRegs = byDeviceName[deviceName];
+          // Sort numerically by register address
+          subRegs.sort((a, b) => a.register - b.register);
+          
+          let currentBlock = [];
+          for (let i = 0; i < subRegs.length; i++) {
+            const regObj = subRegs[i];
+            if (currentBlock.length === 0) {
+              currentBlock.push(regObj);
+            } else {
+              const prevReg = currentBlock[currentBlock.length - 1].register;
+              if (regObj.register - prevReg > 1 || currentBlock.length >= 60) {
+                blocks.push({
+                  device: deviceName,
+                  registers: currentBlock
+                });
+                currentBlock = [regObj];
+              } else {
+                currentBlock.push(regObj);
+              }
+            }
+          }
+          if (currentBlock.length > 0) {
+            blocks.push({
+              device: deviceName,
+              registers: currentBlock
+            });
+          }
+        });
+      };
+      
+      splitIntoBlocks(wordGroup);
+      splitIntoBlocks(bitGroup);
+      
+      if (blocks.length === 0) {
+        toast.error("Invalid register map");
+        setTesting(false);
+        return;
+      }
+      
+      const mergedValues = {};
+      
+      // Call readPlcRegisters for each block
+      for (const block of blocks) {
+        const isBitDevice = ["M", "X", "Y"].includes(block.device.toUpperCase());
+        const payload = {
+          machineId: editingId,
+          ip: form.plcIp,
+          port: Number(form.plcPort),
+          protocol: form.plcProtocol,
+          registers: block.registers,
+          timeoutMs: 8000,
+          plcSlmpDevice: block.device,
+          plcSlmpFrameMode: isBitDevice ? "BINARY" : (form.plcFrameMode || "ASCII"),
+        };
+        
+        const res = await machineApi.readPlcRegisters(payload);
+        const vals = res.values || res.read?.value || {};
+        Object.assign(mergedValues, vals);
+      }
+      
+      // Group the merged values by range names
+      const groupedResult = {};
+      form.dataRegisterRanges.forEach(r => {
+        const start = Number(r.startReg);
+        const end = Number(r.endReg) || start;
+        const count = Math.max(1, end - start + 1);
+        const device = r.device || form.plcDevice || "D";
+        const rangeName = r.name || `Range (${device}${start})`;
+        
+        if (count === 1) {
+          const val = mergedValues[start];
+          if (val !== undefined) {
+            groupedResult[rangeName] = val;
+          }
+        } else {
+          const vals = [];
+          for (let i = 0; i < count; i++) {
+            const val = mergedValues[start + i];
+            if (val !== undefined) {
+              vals.push(val);
+            }
+          }
+          if (vals.length > 0) {
+            groupedResult[rangeName] = vals;
+          }
+        }
+      });
+      
+      const finalPayload = Object.keys(groupedResult).length > 0 ? groupedResult : mergedValues;
+      
+      setTestResult({
+        message: "Data registers read successfully from PLC",
+        payload: finalPayload,
+        outcome: "PASS"
+      });
+      toast.success("Registers read successfully!");
+    } catch (err) {
+      console.error(err);
+      setTestResult({
+        message: err.response?.data?.error || err.message || "Failed to read registers",
+        payload: err.response?.data?.details || err,
+        outcome: "FAIL"
+      });
+      toast.error("PLC read failed");
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const handleTestConnection = () => {
     setShowTestModal(true);
@@ -886,12 +1088,14 @@ export default function MachinePage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [m, r] = await Promise.all([
+      const [m, r, ep] = await Promise.all([
         machineApi.list(),
         plcConfigApi.listRanges().catch(() => []),
+        plcConfigApi.listEndpoints().catch(() => []),
       ]);
       setMachines(m || []);
       setPlcRanges(r || []);
+      setPlcEndpoints(ep || []);
     } catch { toast.error("Failed to load machines"); }
     finally { setLoading(false); }
   }, []);
@@ -933,6 +1137,7 @@ export default function MachinePage() {
           id: uid(), seq: maxSeq + 1,
           signal: "", direction: "READ",
           device: p.plcDevice || "D",
+          frameMode: p.plcFrameMode || "AUTO",
           register: "", value: "", meaning: "",
           category: "control", required: true,
           ...(preset || {}),
@@ -975,6 +1180,7 @@ export default function MachinePage() {
         ...p.dataRegisterRanges,
         {
           id: uid(), name: "", device: p.plcDevice || "D",
+          frameMode: p.plcFrameMode || "AUTO",
           startReg: "", endReg: "", count: "1", dataType: "INT16",
           scale: "1", unit: "", purpose: "", formula: "",
           toleranceMin: "", toleranceMax: "",
@@ -1387,25 +1593,7 @@ export default function MachinePage() {
                         </div>
                       </div>
 
-                      {/* SLMP options */}
-                      {isSlmp && (
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, padding: "12px 14px", background: C.blueLt + "55", border: `1px solid ${C.blueBd}`, borderRadius: 8 }}>
-                          <div>
-                            <Label hint="D=Data register, W=Link register, R=File register, M=Bit device, ZR=Extended">Default Device (D/W/R/M/ZR)</Label>
-                            <FSelect value={form.plcDevice} onChange={(e) => setF("plcDevice", e.target.value)} mono>
-                              {DEVICES.map((d) => <option key={d} value={d}>{d}</option>)}
-                            </FSelect>
-                          </div>
-                          <div>
-                            <Label>Frame mode</Label>
-                            <FSelect value={form.plcFrameMode} onChange={(e) => setF("plcFrameMode", e.target.value)}>
-                              <option value="AUTO">Auto</option>
-                              <option value="ASCII">ASCII (3E)</option>
-                              <option value="BINARY">Binary (3E)</option>
-                            </FSelect>
-                          </div>
-                        </div>
-                      )}
+
 
                       {/* Register range (Modbus/SLMP) */}
                       {(isModbus || isSlmp) && (
@@ -1439,6 +1627,7 @@ export default function MachinePage() {
               {/* ── SIGNALS TAB ───────────────────────────────────────────── */}
               {activeTab === "signals" && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                
                   {/* Explanation */}
                   <div style={{ padding: "10px 12px", background: C.blueLt + "55", border: `1px solid ${C.blueBd}`, borderRadius: 7 }}>
                     <p style={{ margin: 0, fontSize: 11, color: C.sec, lineHeight: 1.6 }}>
@@ -1456,10 +1645,10 @@ export default function MachinePage() {
                   {form.handshakeSignals.length > 0 && (
                     <div style={{
                       display: "grid",
-                      gridTemplateColumns: "28px 28px 140px 90px 70px 80px 70px 70px 1fr 28px",
+                      gridTemplateColumns: "28px 28px 140px 90px 70px 80px 85px 70px 70px 1fr 28px",
                       gap: 6, padding: "0 10px",
                     }}>
-                      {["Seq", "", "Signal Name", "Category", "Direction", "Device", "Register", "Value", "Meaning / Purpose", ""].map((h, i) => (
+                      {["Seq", "", "Signal Name", "Category", "Direction", "Device", "Frame", "Register", "Value", "Meaning / Purpose", ""].map((h, i) => (
                         <span key={i} style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: C.hint }}>{h}</span>
                       ))}
                     </div>
@@ -1516,6 +1705,7 @@ export default function MachinePage() {
               {/* ── DATA REGISTERS TAB ───────────────────────────────────── */}
               {activeTab === "data" && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+               
                   {/* Explanation */}
                   <div style={{ padding: "10px 12px", background: C.tealLt + "55", border: `1px solid ${C.tealBd}`, borderRadius: 7 }}>
                     <p style={{ margin: 0, fontSize: 11, color: C.sec, lineHeight: 1.6 }}>
@@ -1554,7 +1744,7 @@ export default function MachinePage() {
                             setForm((p) => ({
                               ...p, dataRegisterRanges: [
                                 ...p.dataRegisterRanges,
-                                { id: uid(), name, device: p.plcDevice || "D", startReg: String(2060 + i * 2), count: "1", dataType: "INT16", scale: "0.01", unit: "mm", purpose: `${name} measurement`, toleranceMin: "", toleranceMax: "" },
+                                { id: uid(), name, device: p.plcDevice || "D", frameMode: p.plcFrameMode || "AUTO", startReg: String(2060 + i * 2), count: "1", dataType: "INT16", scale: "0.01", unit: "mm", purpose: `${name} measurement`, toleranceMin: "", toleranceMax: "" },
                               ],
                             }));
                           });
@@ -1563,6 +1753,10 @@ export default function MachinePage() {
                         <Gauge size={12} /> Add CMM preset
                       </button>
                     )}
+                    <button type="button" onClick={handleTestDataRegisters}
+                      style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "8px 14px", borderRadius: 7, border: `1px solid ${C.greenBd}`, background: C.greenLt, color: C.green, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                      <Zap size={12} /> Test Connection & Review Data
+                    </button>
                   </div>
 
                   {/* Live summary table */}
@@ -1574,7 +1768,7 @@ export default function MachinePage() {
                       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
                         <thead>
                           <tr style={{ background: C.muted, borderBottom: `1px solid ${C.border}` }}>
-                            {["Name", "Registers", "Type", "Scale", "Unit", "Tolerance"].map((h) => (
+                            {["Name", "Registers", "Type", "Frame", "Scale", "Unit", "Tolerance"].map((h) => (
                               <th key={h} style={{ padding: "6px 12px", textAlign: "left", fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: C.hint }}>{h}</th>
                             ))}
                           </tr>
@@ -1590,6 +1784,7 @@ export default function MachinePage() {
                                 <td style={{ padding: "7px 12px", fontWeight: 600, color: C.text }}>{r.name || "—"}</td>
                                 <td style={{ padding: "7px 12px", fontFamily: "ui-monospace,monospace", fontWeight: 700, color: C.blue }}>{regList}</td>
                                 <td style={{ padding: "7px 12px", color: C.sec }}>{r.dataType}</td>
+                                <td style={{ padding: "7px 12px", color: C.sec, fontFamily: "ui-monospace,monospace" }}>{r.frameMode || form.plcFrameMode || "AUTO"}</td>
                                 <td style={{ padding: "7px 12px", fontFamily: "ui-monospace,monospace", color: C.sec }}>×{r.scale || "1"}</td>
                                 <td style={{ padding: "7px 12px", color: C.sec }}>{r.unit || "—"}</td>
                                 <td style={{ padding: "7px 12px" }}>

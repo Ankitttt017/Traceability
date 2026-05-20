@@ -86,14 +86,14 @@
       "section": "7.5",
       "desc": "Reports Export endpoint",
       "status": "PASS",
-      "actual": "200 OK, Content-Type: text/csv; charset=utf-8",
+      "actual": "200 OK, Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "severity": "-"
     },
     {
       "section": "7.6",
       "desc": "POST /machines (valid body) → 201",
       "status": "FAIL",
-      "actual": "Status: 400 — {\"error\":\"Required fields: machineName, plcIp, plcPort\"}",
+      "actual": "Status: 400 — {\"error\":\"machineName, operationNo and sequenceNo are required\"}",
       "severity": "High"
     },
     {

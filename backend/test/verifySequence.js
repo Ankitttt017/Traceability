@@ -1,3 +1,4 @@
+process.env.NODE_ENV = 'test';
 const { saveScan } = require('../services/scanService');
 const Machine = require('../models/Machine');
 const Part = require('../models/Part');
@@ -5,7 +6,6 @@ const OperationLog = require('../models/OperationLog');
 const sequelize = require('../config/db');
 
 async function runSequenceTests() {
-  process.env.NODE_ENV = 'test';
   await sequelize.sync({ force: true });
 
   console.log('🧪 Starting Station Sequence Verification...');

@@ -9,7 +9,7 @@ import {
   Activity, AlertCircle, CheckCircle2, RefreshCw, RotateCcw,
   Save, History, Cpu, Unplug, Zap, Radio, ShieldAlert,
   Wifi, WifiOff, Clock, Signal, Settings, Edit3, Send,
-  ChevronDown, ChevronUp, Server, Play, X, List,
+  ChevronDown, ChevronUp, Server, Play, X, List, TableProperties, FlaskConical,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { machineApi, traceabilityApi } from "../api/services";
@@ -71,6 +71,18 @@ const SNAPSHOT_POLL_INTERVAL_MS = 10000;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function normalizeIp(v)   { return String(v||"").replace("::ffff:","").trim(); }
+function isValidPlcEndpointIp(v) {
+  const ip = normalizeIp(v);
+  if (!ip) return false;
+  if (ip === "0.0.0.0") return false;
+  if (ip === "127.0.0.1") return false;
+  return true;
+}
+function isMachinePlcEnabled(machine = {}) {
+  const raw = machine?.plcEnabled ?? machine?.plc_enabled ?? machine?.isPlcEnabled ?? machine?.plcActive;
+  if (raw === undefined || raw === null) return true;
+  return raw === true || String(raw).trim().toUpperCase() === "TRUE" || String(raw).trim() === "1";
+}
 function toIntOrNull(v)   { const n=Number(v); return Number.isFinite(n)?Math.trunc(n):null; }
 function normalizeRole(v) { return String(v||"").trim().toLowerCase(); }
 function fmtTime(v)  { if(!v) return "—"; const d=new Date(v); return isNaN(d)?"—":d.toLocaleTimeString(); }
@@ -692,7 +704,14 @@ const IoMonitor = () => {
     try {
       if (!silent) setLoadingMachines(true);
       const rows = await machineApi.list();
-      setMachines((rows||[]).filter(r=>String(r.status||"ACTIVE").toUpperCase()==="ACTIVE"));
+      setMachines(
+        (rows || []).filter((r) => {
+          const active = String(r.status || "ACTIVE").toUpperCase() === "ACTIVE";
+          const plcEnabled = isMachinePlcEnabled(r);
+          const plcIp = normalizeIp(r.plcIp || r.plc_ip || "");
+          return active && plcEnabled && isValidPlcEndpointIp(plcIp);
+        })
+      );
     } catch(e){
       if (!silent) {
         setMachines([]);
@@ -816,10 +835,12 @@ const IoMonitor = () => {
     const snapMachineId = Number(snapshot?.machine?.id || 0);
     const snapConnected = snapshot?.plcConnection?.connected;
     for (const m of machines){
+      if (m.plcEnabled === false) continue;
       const ip=normalizeIp(m.plcIp||m.machineIp);
+      if (!isMachinePlcEnabled(m) || !isValidPlcEndpointIp(ip)) continue;
       const port=m.plcPort||m.machinePort||502;
       const key=`${ip}:${port}`;
-      if (!ip||seen.has(key)) continue;
+      if (!ip || ip.includes("192.168.1.100") || seen.has(key)) continue;
       seen.add(key);
       const proto=(m.plcProtocol||m.protocol||"Modbus TCP").toUpperCase();
       const isMitsu=proto.includes("SLMP")||proto.includes("MITSUBISHI");
@@ -902,7 +923,7 @@ const IoMonitor = () => {
         registerNo:reg,
         signalKey:String(row.signalKey||row.signal||"").toUpperCase()||undefined,
         plcSlmpDevice:selectedMachine.plcSlmpDevice||"D",
-        plcSlmpFrameMode:selectedMachine.plcSlmpFrameMode||selectedMachine.plcConfig?.slmpFrameMode||"AUTO",
+        plcSlmpFrameMode:row?.frameMode||selectedMachine.plcSlmpFrameMode||selectedMachine.plcConfig?.slmpFrameMode||"AUTO",
         timeoutMs: Math.max(toIntOrNull(selectedMachine?.plcTestTimeoutMs) || 8000, 1000),
         retryCount: Math.max(toIntOrNull(selectedMachine?.plcTestRetryCount) || 2, 1),
       };
@@ -936,7 +957,7 @@ const IoMonitor = () => {
         registerNo:reg,
         signalKey:String(row.signalKey||row.signal||"").toUpperCase()||undefined,
         plcSlmpDevice:String(row.device || selectedMachine?.plcSlmpDevice || "D").toUpperCase(),
-        plcSlmpFrameMode:selectedMachine.plcSlmpFrameMode||selectedMachine.plcConfig?.slmpFrameMode||"AUTO",
+        plcSlmpFrameMode:row?.frameMode||selectedMachine.plcSlmpFrameMode||selectedMachine.plcConfig?.slmpFrameMode||"AUTO",
         timeoutMs: Math.max(toIntOrNull(selectedMachine?.plcTestTimeoutMs) || 8000, 1000),
       };
       const res = await machineApi.readPlcValue(req, { timeout: 30000 });
@@ -1067,6 +1088,8 @@ const IoMonitor = () => {
   const TABS=[
     {key:"plc_list", label:"PLC Overview",    icon:List   },
     {key:"signals",  label:"Mapped I/O",      icon:Signal },
+    {key:"data",     label:"Data Registers",  icon:TableProperties},
+    {key:"spc",      label:"Quality / SPC",   icon:FlaskConical},
     {key:"logs",     label:"Connection Log",  icon:History},
   ];
 
@@ -1492,9 +1515,87 @@ const IoMonitor = () => {
         </div>
       )}
 
-    
+      {/* ══ TAB: Data Registers ═══════════════════════════════════ */}
+      {activeTab==="data" && (
+        <div style={{display:"flex",flexDirection:"column",gap:14, animation:"ioFadeIn .3s ease"}}>
+          <SCard title="Machine Data Registers" subtitle="Numeric Process Data">
+            {(!selectedMachine?.plcSignalMap || selectedMachine.plcSignalMap.length === 0) ? (
+              <div style={{padding:"28px 20px",textAlign:"center", color:C.txt("muted")}}>
+                <TableProperties size={24} style={{margin:"0 auto 10px", opacity:0.6}}/>
+                <p style={{fontSize:12}}>No data registers mapped for this machine.</p>
+                <p style={{fontSize:11, marginTop:4}}>Configure 'Data Register Ranges' in Machine Settings.</p>
+              </div>
+            ) : (
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead>
+                    <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
+                      {["Register","Label","Unit","Purpose","Live Value"].map(h=>(
+                        <th key={h} style={{padding:"9px 12px",textAlign:"left",fontSize:9,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.09em",color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedMachine.plcSignalMap.map((reg, i)=>{
+                      const rKey = `${String(reg.device||selectedMachine.plcSlmpDevice||"D").toUpperCase()}${reg.register}`;
+                      // Look up the live value from snapshot or registers
+                      const liveVal = snapshot?.registers?.[reg.register] !== undefined ? snapshot.registers[reg.register] : "—";
+                      return (
+                        <tr key={i} style={{borderBottom:`1px solid ${C.bdr()}`,background:i%2===1?C.bg("surf"):"transparent"}}>
+                          <td style={{padding:"9px 12px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.steel()}}>{rKey}</td>
+                          <td style={{padding:"9px 12px",fontWeight:700,color:C.txt("pri")}}>{reg.label||"—"}</td>
+                          <td style={{padding:"9px 12px",fontSize:11,color:C.txt("sec")}}>{reg.unit||"—"}</td>
+                          <td style={{padding:"9px 12px",fontSize:11,color:C.txt("muted")}}>{reg.meaning||"—"}</td>
+                          <td style={{padding:"9px 12px",fontFamily:"'DM Mono',monospace",fontWeight:800,color:C.ok()}}>{liveVal}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </SCard>
+        </div>
+      )}
 
-      {/* ══ TAB: Connection Log ═══════════════════════════════════ */}
+      {/* ══ TAB: Quality / SPC ═══════════════════════════════════ */}
+      {activeTab==="spc" && (
+        <div style={{display:"flex",flexDirection:"column",gap:14, animation:"ioFadeIn .3s ease"}}>
+          <SCard title="Quality & SPC Control" subtitle="Statistical Process Control">
+             {(!selectedMachine?.spcConfig || !selectedMachine.spcConfig.enabled) ? (
+              <div style={{padding:"28px 20px",textAlign:"center", color:C.txt("muted")}}>
+                <FlaskConical size={24} style={{margin:"0 auto 10px", opacity:0.6}}/>
+                <p style={{fontSize:12}}>SPC is disabled for this machine.</p>
+                <p style={{fontSize:11, marginTop:4}}>Enable SPC in Machine Settings to monitor quality data.</p>
+              </div>
+            ) : (
+              <div style={{display:"flex", flexDirection:"column", gap:16}}>
+                <div style={{display:"flex", gap:12, flexWrap:"wrap"}}>
+                  <div style={{flex:1, minWidth:200, padding:14, borderRadius:10, background:C.bg("surf"), border:`1px solid ${C.bdr()}`}}>
+                    <p style={{fontSize:10, fontWeight:800, textTransform:"uppercase", color:C.txt("muted"), marginBottom:6}}>SPC Mode</p>
+                    <p style={{fontSize:13, fontWeight:700, color:C.txt("pri")}}>{selectedMachine.spcConfig.mode}</p>
+                  </div>
+                  <div style={{flex:1, minWidth:200, padding:14, borderRadius:10, background:C.bg("surf"), border:`1px solid ${C.bdr()}`}}>
+                    <p style={{fontSize:10, fontWeight:800, textTransform:"uppercase", color:C.txt("muted"), marginBottom:6}}>Data Source</p>
+                    <p style={{fontSize:13, fontWeight:700, color:C.txt("pri")}}>{selectedMachine.spcConfig.mode === "IP_PAYLOAD" ? `${selectedMachine.spcConfig.sourceIp}:${selectedMachine.spcConfig.sourcePort}` : "PLC Direct"}</p>
+                  </div>
+                  <div style={{flex:1, minWidth:200, padding:14, borderRadius:10, background:C.bg("surf"), border:`1px solid ${C.bdr()}`}}>
+                    <p style={{fontSize:10, fontWeight:800, textTransform:"uppercase", color:C.txt("muted"), marginBottom:6}}>Result Key</p>
+                    <p style={{fontSize:13, fontWeight:700, color:C.txt("pri"), fontFamily:"'DM Mono',monospace"}}>{selectedMachine.spcConfig.payloadResultKey}</p>
+                  </div>
+                </div>
+                
+                <div style={{padding:"28px 20px",textAlign:"center", border:`1px dashed ${C.bdr()}`, borderRadius:10, background:C.bg("surf")}}>
+                   <Activity size={24} style={{margin:"0 auto 10px", opacity:0.6, color:C.txt("muted")}}/>
+                   <p style={{fontSize:12, color:C.txt("muted")}}>Waiting for next quality payload...</p>
+                </div>
+              </div>
+            )}
+          </SCard>
+        </div>
+      )}
+
+
       {activeTab==="logs" && (
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
           {snapshot?.latestOperation?(
@@ -1652,5 +1753,3 @@ const IoMonitor = () => {
 };
 
 export default IoMonitor;
-
-

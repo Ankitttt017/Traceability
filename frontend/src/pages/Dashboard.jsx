@@ -450,18 +450,24 @@ const Dashboard = () => {
             <div>
               <h1 style={{fontSize:18,fontWeight:800,color:C.txt("pri"),
                 letterSpacing:"-0.02em",lineHeight:1.2, fontFamily:"var(--font-outfit)"}}>
-                Production Overview
+                Dashboard Overview
               </h1>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginTop:4}}>
-                <div style={{position:"relative",width:8,height:8}}>
-                  <div style={{position:"absolute",inset:0,borderRadius:"50%",
-                    background:C.ok(),animation:"dbPing 1.6s ease-out infinite",opacity:0.6}}/>
-                  <div style={{width:8,height:8,borderRadius:"50%",background:C.ok()}}/>
-                </div>
-                <p style={{fontSize:12,color:C.txt("muted")}}>
-                  Live — auto-refreshes every 15 seconds · {lineContextLabel}
-                </p>
-              </div>
+              <p style={{
+                marginTop:6,
+                display:"inline-flex",
+                alignItems:"center",
+                padding:"3px 10px",
+                borderRadius:999,
+                fontSize:11,
+                fontWeight:800,
+                color:C.navy(),
+                background:C.navy(0.08),
+                border:`1px solid ${C.navy(0.2)}`,
+                letterSpacing:"0.03em"
+              }}>
+                {lineContextLabel}
+              </p>
+              
             </div>
           </div>
 
@@ -791,7 +797,7 @@ const Dashboard = () => {
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
               <SectionHead title="Pass / Fail Split"/>
               <div style={{display:"flex",justifyContent:"center",marginBottom:16}}>
-                <div style={{position:"relative",width:160,height:160}}>
+                <div style={{position:"relative",width:160,height:160,minWidth:1,minHeight:1}}>
                   <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                     <PieChart>
                       <Pie data={pieData} cx="50%" cy="50%"
@@ -841,8 +847,8 @@ const Dashboard = () => {
                   </div>
                 }
               />
-              <div style={{height:220}}>
-                <ResponsiveContainer width="100%" height="100%">
+              <div style={{height:220,width:"100%",minWidth:1,minHeight:1,position:"relative"}}>
+                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <LineChart data={report.hourlyProduction}
                     margin={{top:4,right:8,bottom:0,left:-10}}>
                     <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
@@ -885,8 +891,8 @@ const Dashboard = () => {
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
               <SectionHead title="Production by Shift"/>
-              <div style={{height:200}}>
-                <ResponsiveContainer width="100%" height="100%">
+              <div style={{height:200,width:"100%",minWidth:1,minHeight:1,position:"relative"}}>
+                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <BarChart data={shiftData} margin={{top:4,right:8,bottom:0,left:-10}}>
                     <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                     <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("muted")}}
@@ -935,17 +941,47 @@ const Dashboard = () => {
         </div>
       )}
 
+      {activeTab==="oee" && (
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:16}}>
+          {(oeeData.length ? oeeData : [{stationNo:"OP100"},{stationNo:"OP110"},{stationNo:"OP120"}]).map((row, idx)=>{
+            const oee = Number(row?.oee ?? row?.OEE ?? 0);
+            const availability = Number(row?.availability ?? row?.Availability ?? 0);
+            const performance = Number(row?.performance ?? row?.Performance ?? 0);
+            const quality = Number(row?.quality ?? row?.Quality ?? 0);
+            const stationName = row?.stationNo || row?.station || row?.machineName || `Station ${idx + 1}`;
+            return (
+              <div key={`${stationName}-${idx}`} style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:16,boxShadow:SHADOW}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+                  <p style={{fontSize:13,fontWeight:800,color:C.txt("pri"),margin:0}}>{stationName}</p>
+                  <Badge variant={oee>=85 ? "ok" : oee>=60 ? "wip" : "ng"} label={`OEE ${Math.round(oee)}%`} />
+                </div>
+                <div style={{display:"flex",justifyContent:"center",marginBottom:12}}>
+                  <OeeGauge value={oee} size={88} stroke={8}/>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+                  {[{label:"Availability",value:availability},{label:"Performance",value:performance},{label:"Quality",value:quality}].map((m)=>(
+                    <div key={m.label} style={{background:C.bg("surf"),border:`1px solid ${C.bdr()}`,borderRadius:9,padding:"8px 6px",textAlign:"center"}}>
+                      <p style={{fontSize:14,fontWeight:800,color:C.txt("pri"),margin:0,fontFamily:"'DM Mono',monospace"}}>{Math.round(m.value)}%</p>
+                      <p style={{fontSize:9,fontWeight:700,color:C.txt("muted"),marginTop:4,textTransform:"uppercase",letterSpacing:"0.05em"}}>{m.label}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* —— TAB: History ————————————————————————————————————————————————————————————— */}
       {activeTab==="history" && (
         <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
           borderRadius:14,boxShadow:SHADOW,overflow:"hidden"}}>
-          <div style={{padding:20,borderBottom:`1px solid ${C.bdr()}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{padding:"16px 18px",borderBottom:`1px solid ${C.bdr(0.4)}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
             <SectionHead title="Production History" />
-            <button onClick={handleExportReport} style={{fontSize:11, fontWeight:700, color:C.navy(), background:C.navy(0.05), border:`1px solid ${C.navy(0.1)}`, borderRadius:6, px:10, py:4}}>
-               Download Excel
-            </button>
+            
           </div>
-          <div style={{overflowX:"auto"}}>
+          <div style={{padding:"14px 16px 18px"}}>
+          <div style={{overflowX:"auto",border:`1px solid ${C.bdr(0.5)}`,borderRadius:10}}>
             <table style={{width:"100%",borderCollapse:"collapse"}}>
               <thead>
                 <tr style={{background:C.bg("surf"),textAlign:"left"}}>
@@ -970,6 +1006,7 @@ const Dashboard = () => {
                 ))}
               </tbody>
             </table>
+          </div>
           </div>
         </div>
       )}

@@ -282,6 +282,12 @@ function normalizeHandshakeDirectionToSignalDirection(value) {
   return "PLC -> PC";
 }
 
+function normalizeFrameMode(value, fallback = "AUTO") {
+  const normalized = String(value || fallback).trim().toUpperCase();
+  if (["AUTO", "ASCII", "BINARY"].includes(normalized)) return normalized;
+  return fallback;
+}
+
 function parseMachineHandshakeMap(machine) {
   if (!machine?.plc_registers) return [];
   try {
@@ -296,6 +302,7 @@ function parseMachineHandshakeMap(machine) {
           device: parsedRegister.device,
           direction: normalizeHandshakeDirectionToSignalDirection(row?.direction),
           meaning: String(row?.meaning || row?.purpose || row?.description || "").trim() || null,
+          frameMode: normalizeFrameMode(row?.frameMode ?? row?.slmpFrameMode, "AUTO"),
         };
       })
       .filter((row) => row.signal && row.register !== null);
@@ -384,6 +391,7 @@ function parseMachineSignalMap(machine) {
       direction,
       writable: row?.writable === undefined ? direction !== "PLC -> PC" : Boolean(row.writable),
       description: String(row?.description || "").trim() || "Configured signal mapping",
+      frameMode: normalizeFrameMode(row?.frameMode ?? row?.slmpFrameMode, "AUTO"),
     });
   }
 
@@ -401,6 +409,7 @@ function parseMachineSignalMap(machine) {
       direction: row.direction,
       writable: row.direction !== "PLC -> PC",
       description: row.meaning || "Configured handshake signal",
+      frameMode: normalizeFrameMode(row.frameMode, "AUTO"),
     });
   }
 
@@ -432,6 +441,7 @@ function buildIoSignalRows(machine, registerValues, latestPlcStatus) {
       device: entry.device || null,
       direction: entry.direction,
       writable: Boolean(entry.writable),
+      frameMode: normalizeFrameMode(entry.frameMode, "AUTO"),
       currentValue,
       status: state.status,
       tone: state.tone,
@@ -2570,7 +2580,8 @@ exports.processScan = async (req, res) => {
       });
     }
 
-    if (manualResultEnabled && !rejectionBinConfirmed && !hasManualResultInput && !hasSpcResultInput) {
+    const isManualSubmitAttempt = req.body.submitManual === true || req.body.manualSubmit === true;
+    if (manualResultEnabled && isManualSubmitAttempt && !rejectionBinConfirmed && !hasManualResultInput && !hasSpcResultInput) {
       return res.status(400).json({
         error: `Manual OK/NG result is required for station ${normalizedStation}`,
       });
@@ -3646,13 +3657,18 @@ exports.submitManualResult = async (req, res) => {
       ng_reason: normalizedStatus === "NG" ? reason || "MANUAL_REJECT" : null,
     });
 
-    emitOperatorPopup(normalizedStatus === "OK" ? "SUCCESS" : "ERROR", {
+    emitOperatorPopup(normalizedStatus === "OK" ? "SUCCESS" : "WARNING", {
       partId: normalizedPartId,
       stationNo: targetStation,
       machineId: machine.id,
       machineName: machine.machine_name,
-      status: normalizedStatus === "OK" ? "PASSED" : "FAILED",
-      message: normalizedStatus === "OK" ? "Manual quality check passed" : `Manual quality check failed: ${reason || "Rejection"}`,
+      status: normalizedStatus === "OK" ? "PASSED" : "COMPLETED_NG",
+      operationStatus: normalizedStatus === "OK" ? "ENDED_OK" : "COMPLETED_NG",
+      plcStatus: normalizedStatus === "OK" ? "ENDED_OK" : "COMPLETED_NG",
+      qrStatus: "PASSED",
+      message: normalizedStatus === "OK"
+        ? "Manual quality check passed"
+        : `Manual quality check completed with NG: ${reason || "Rejection"}`,
     });
     emitRealtime("dashboard_refresh", { reason: "MANUAL_RESULT_SUBMITTED" });
 

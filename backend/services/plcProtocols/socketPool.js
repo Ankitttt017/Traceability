@@ -93,7 +93,7 @@ async function acquireSocket({ ip, port, timeoutMs }) {
     // No existing socket or it was destroyed, create a new one
     try {
       const qDepth = waiters.get(key)?.length || 0;
-      console.log(`[PLC:SocketPool] Creating new connection for ${key} (waiters: ${qDepth})`);
+      // Suppressed: was logging every socket creation
       const socket = await createSocketClient({ ip, port, timeoutMs: Math.max(300, deadline - Date.now()) });
       pool.set(key, {
         socket,
@@ -149,7 +149,7 @@ function releaseSocket({ socket, pooled, key }) {
     socket.removeAllListeners("error");
     socket.removeAllListeners("timeout");
   } catch (e) {
-    console.warn(`[PLC:SocketPool] Error cleaning up listeners for ${key}:`, e.message);
+    // Suppressed: listener cleanup warnings are not actionable
   }
 
   entry.inUse = false;

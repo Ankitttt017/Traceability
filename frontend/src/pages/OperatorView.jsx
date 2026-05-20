@@ -500,7 +500,16 @@ const OperatorView = () => {
   const scannerConfigured = String(scannerHealth?.status || "").toUpperCase() !== "NOT_CONFIGURED";
   const scannerConnected = Boolean(scannerHealth?.connected);
 
-  const opStatusSource = liveState?.machineState?.state || currentContext?.plcStatus;
+  const isManualResultStation = useMemo(() => stationFeatureConfig?.manualResult === true || String(selectedStation).toUpperCase() === "OP020", [stationFeatureConfig, selectedStation]);
+  const isOperationEnabled = useMemo(() => stationFeatureConfig?.operation !== false, [stationFeatureConfig]);
+
+  const opStatusSource = useMemo(() => {
+    if (!isOperationEnabled || isManualResultStation) {
+      return currentContext?.plcStatus || "WAIT";
+    }
+    return liveState?.machineState?.state || currentContext?.plcStatus || "WAIT";
+  }, [isOperationEnabled, isManualResultStation, liveState?.machineState?.state, currentContext?.plcStatus]);
+
   const opVariant = useMemo(() => getOperationVariant(opStatusSource), [opStatusSource]);
   const opLabel = useMemo(() => getOperationLabel(opStatusSource), [opStatusSource]);
 
@@ -675,23 +684,40 @@ const OperatorView = () => {
 
   const mergePopupPayload = useCallback((payload = {}) => {
     setPopup(prev => {
+      const nowMs = Date.now();
+      const prevShownAt = Number(prev?._shownAtMs || 0);
+      const prevType = String(prev?.type || "").trim().toUpperCase();
+      const nextType = String(payload?.type || "").trim().toUpperCase();
+      const prevPart = normalizePartId(prev?.partId || prev?.part_id);
+      const nextPart = normalizePartId(payload?.partId || payload?.part_id);
+      const prevStation = String(prev?.stationNo || prev?.station_no || "").trim().toUpperCase();
+      const nextStation = String(payload?.stationNo || payload?.station_no || "").trim().toUpperCase();
+      const sameContext = Boolean(prevPart && nextPart && prevPart === nextPart && prevStation && nextStation && prevStation === nextStation);
+      const freezeErrorWindowMs = 4000;
+      const keepExistingErrorVisible =
+        prevType === "ERROR" &&
+        nextType !== "ERROR" &&
+        sameContext &&
+        nowMs - prevShownAt < freezeErrorWindowMs;
+
       const iqr = payload.qrResult || payload.qr_result || "", iqrS = normalizeDecisionState(iqr), pqrS = normalizeDecisionState(prev?.qrResult || prev?.qr_result || "");
       const iplc = payload.plcStatus || payload.plc_status || "", iplcS = String(iplc || "").trim().toUpperCase(), pplcS = String(prev?.plcStatus || prev?.plc_status || "").trim().toUpperCase();
       const rl = isResetLikePayload(payload);
       const applyQr = Boolean(iqr) && (iqrS !== "WAIT" || !pqrS || pqrS === "WAIT" || rl);
       const applyPlc = Boolean(iplc) && (iplcS !== "WAIT" || !pplcS || pplcS === "WAIT" || rl);
       return {
-        ...prev, ...(payload.type && { type: payload.type }), ...(payload.title && { title: payload.title }),
+        ...prev, ...(!keepExistingErrorVisible && payload.type && { type: payload.type }), ...(!keepExistingErrorVisible && payload.title && { title: payload.title }),
         ...(applyQr && { qrResult: iqr }), ...(applyPlc && { plcStatus: iplc }),
         ...(payload.operationStatus && { operationStatus: payload.operationStatus }),
         ...(payload.status && { status: payload.status }),
-        ...(payload.message && { message: payload.message }), ...(payload.reason && { reason: payload.reason }),
+        ...(!keepExistingErrorVisible && payload.message && { message: payload.message }), ...(!keepExistingErrorVisible && payload.reason && { reason: payload.reason }),
         ...(payload.expectedStation && { expectedStation: payload.expectedStation }),
         ...((payload.partId || payload.part_id) && { partId: payload.partId || payload.part_id }),
         ...((payload.stationNo || payload.station_no) && { stationNo: payload.stationNo || payload.station_no }),
         ...((payload.machineId || payload.machine_id) && { machineId: payload.machineId || payload.machine_id }),
         ...(payload.machineName && { machineName: payload.machineName }),
         ...(payload.timestamp && { timestamp: payload.timestamp }),
+        ...(!prev?._shownAtMs || !keepExistingErrorVisible ? { _shownAtMs: nowMs } : {}),
       };
     });
   }, []);

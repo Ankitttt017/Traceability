@@ -87,23 +87,57 @@ function normalizeDirection(value, fallback = "READ") {
   return fallback;
 }
 
+function normalizeFrameMode(value, fallback = "AUTO") {
+  const normalized = String(value || fallback).trim().toUpperCase();
+  if (normalized === "ASCII" || normalized === "BINARY" || normalized === "AUTO") {
+    return normalized;
+  }
+  return fallback;
+}
+
 function normalizeHandshakeMap(value) {
   if (!Array.isArray(value)) return [];
   return value
     .map((row) => {
       const parsedRegister = parseRegisterToken(row?.register, null);
       return {
-      id: row?.id || null,
-      signal: toText(row?.signal || row?.label),
-      direction: normalizeDirection(row?.direction, "READ"),
-      register: parsedRegister.register,
-      value: toInt(row?.value),
-      meaning: toText(row?.meaning || row?.purpose || row?.description),
-      required: row?.required !== false,
-      category: toText(row?.category || "handshake") || "handshake",
-    };
+        id: row?.id || null,
+        signal: toText(row?.signal || row?.label),
+        direction: normalizeDirection(row?.direction, "READ"),
+        register: parsedRegister.register,
+        value: toInt(row?.value),
+        meaning: toText(row?.meaning || row?.purpose || row?.description),
+        required: row?.required !== false,
+        category: toText(row?.category || "handshake") || "handshake",
+        frameMode: normalizeFrameMode(row?.frameMode ?? row?.slmpFrameMode, "AUTO"),
+      };
     })
     .filter((row) => row.signal || row.register !== null);
+}
+
+function normalizeDataRegisterRanges(value, fallbackFrameMode = "AUTO") {
+  if (!Array.isArray(value)) return [];
+  return value.map((row, index) => {
+    const startReg = toInt(row?.startReg);
+    const count = toInt(row?.count) ?? 1;
+    const endFromCount = startReg !== null ? startReg + Math.max(count, 1) - 1 : null;
+    return {
+      id: row?.id || `range_${index + 1}`,
+      name: toText(row?.name || row?.label || `Range ${index + 1}`),
+      device: toText(row?.device || "D").toUpperCase() || "D",
+      startReg,
+      endReg: toInt(row?.endReg) ?? endFromCount,
+      count: Math.max(count, 1),
+      dataType: toText(row?.dataType || "INT16").toUpperCase() || "INT16",
+      scale: Number.isFinite(Number(row?.scale)) ? Number(row.scale) : 1,
+      unit: toText(row?.unit),
+      purpose: toText(row?.purpose),
+      formula: toText(row?.formula),
+      toleranceMin: row?.toleranceMin === "" ? null : toInt(row?.toleranceMin),
+      toleranceMax: row?.toleranceMax === "" ? null : toInt(row?.toleranceMax),
+      frameMode: normalizeFrameMode(row?.frameMode ?? row?.slmpFrameMode, fallbackFrameMode),
+    };
+  });
 }
 
 function normalizePlcSignalMap(value) {
@@ -180,6 +214,7 @@ function normalizeSpcConfig(value) {
 function buildParsedPlcSnapshot(machine) {
   const parsed = parseJson(machine?.plc_registers, {}) || {};
   const handshakeMap = normalizeHandshakeMap(parsed.handshakeMap);
+  const defaultFrameMode = normalizeFrameMode(parsed.slmpFrameMode || machine?.plc_slmp_frame_mode || "AUTO", "AUTO");
   const plcConfig = {
     rangeId: toInt(parsed.rangeId ?? machine?.plc_range_id),
     startRegister: toInt(parsed.startRegister ?? machine?.plc_start_register),
@@ -199,9 +234,9 @@ function buildParsedPlcSnapshot(machine) {
     endNgValue: toInt(parsed.endNgValue ?? machine?.plc_end_ng_value),
     blockValue: toInt(parsed.blockValue ?? machine?.plc_block_value),
     resetValue: toInt(parsed.resetValue ?? machine?.plc_reset_value),
-    slmpFrameMode: toText(parsed.slmpFrameMode || machine?.plc_slmp_frame_mode || "AUTO").toUpperCase() || "AUTO",
+    slmpFrameMode: defaultFrameMode,
     handshakeMap,
-    dataRegisterRanges: Array.isArray(parsed.dataRegisterRanges) ? parsed.dataRegisterRanges : [],
+    dataRegisterRanges: normalizeDataRegisterRanges(parsed.dataRegisterRanges, defaultFrameMode),
   };
 
   return {
@@ -329,7 +364,7 @@ function normalizePayload(body = {}, existing = null) {
     resetValue: toInt(cfgRaw.resetValue ?? body.plcResetValue ?? body.plc_reset_value ?? existing?.plc_reset_value ?? null),
     slmpFrameMode,
     handshakeMap: normalizeHandshakeMap(cfgRaw.handshakeMap),
-    dataRegisterRanges: Array.isArray(cfgRaw.dataRegisterRanges) ? cfgRaw.dataRegisterRanges : [],
+    dataRegisterRanges: normalizeDataRegisterRanges(cfgRaw.dataRegisterRanges, slmpFrameMode),
   };
 
   const spcConfig = normalizeSpcConfig(body.spcConfig || {});

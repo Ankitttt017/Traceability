@@ -5,6 +5,7 @@
  */
 
 const { Op } = require("sequelize");
+const sequelize = require("../../config/db");
 const OperationLog = require("../../models/OperationLog");
 const Machine = require("../../models/Machine");
 const Part = require("../../models/Part");
@@ -156,6 +157,25 @@ async function fetchProductionData(filters = {}) {
   }
   const deduplicatedLogs = [...bestByPartStation.values()];
 
+  // Attach PLC cycle readings by shot number when available
+  const shotNumbers = [...new Set(
+    deduplicatedLogs
+      .map((log) => String(log.shot_number || log.shotNumber || "").trim())
+      .filter(Boolean)
+  )];
+  const plcByShot = new Map();
+  for (const shot of shotNumbers) {
+    try {
+      const [rows] = await sequelize.query(
+        "SELECT TOP 1 * FROM PlcCycleReadings WHERE shot_number = :shot ORDER BY recorded_at DESC",
+        { replacements: { shot } }
+      );
+      if (rows && rows[0]) plcByShot.set(shot, rows[0]);
+    } catch (_) {
+      // Keep export resilient even if PlcCycleReadings schema differs
+    }
+  }
+
   // Enrich & Standardize
   const enriched = deduplicatedLogs.map((log, index) => {
     const part = partMap[log.part_id] || {};
@@ -191,7 +211,8 @@ async function fetchProductionData(filters = {}) {
       cycleTime:    cycleTime ? Number(cycleTime).toFixed(2) : "0.00",
       industrialResult,
       category,
-      reason: log.interlock_reason || "-"
+      reason: log.interlock_reason || "-",
+      plcReading: plcByShot.get(String(log.shot_number || log.shotNumber || "").trim()) || null
     };
   });
 
