@@ -263,7 +263,9 @@ export const traceabilityApi = {
     return data;
   },
   verify: async (payload) => {
-    const { data } = await apiClient.post(ENDPOINTS.traceability.verify, payload);
+    const { data } = await apiClient.post(ENDPOINTS.traceability.verify, payload, {
+      timeout: 8000,
+    });
     return data;
   },
   plcStart: async (payload) => {

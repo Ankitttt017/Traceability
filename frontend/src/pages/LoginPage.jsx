@@ -317,7 +317,8 @@ const LoginPage = () => {
     } catch(err) {
       setShake(true);
       setTimeout(()=>setShake(false), 500);
-      setError(err.response?.data?.error || "Invalid username or password. Please try again.");
+      const isNetworkError = !err.response || err.code === 'ERR_NETWORK';
+      setError(isNetworkError ? "Network Error: Cannot connect to the Traceability server." : (err.response?.data?.error || "Invalid username or password. Please try again."));
       toast.error("Login failed");
     } finally { setLoading(false); }
   };
@@ -395,7 +396,7 @@ const LoginPage = () => {
             lineHeight:1.1,marginBottom:6,
             color:C.txt("pri"),
           }}>
-            Indus<span style={{color:C.amber(),fontStyle:"italic"}}>Trace</span>
+            RICO AUTO INDUSTRY
           </h1>
 
           <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:4}}>

@@ -401,7 +401,11 @@ function parseModbusReadResponse(packet) {
   if (byteCount < 2 || packet.length < 9 + byteCount) {
     throw new Error("Invalid Modbus byte count");
   }
-  return packet.readUInt16BE(9);
+  const vals = [];
+  for (let i = 0; i < byteCount; i += 2) {
+    vals.push(packet.readUInt16BE(9 + i));
+  }
+  return vals;
 }
 
 function parseModbusWriteResponse(packet) {

@@ -376,29 +376,7 @@ const ProductionCharts=()=>{
     }
   };
 
-  const handlePartsExcel = async () => {
-    try {
-      const blob = await dashboardApi.exportPartsReport(query);
-      downloadBlob(
-        new Blob([blob], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
-        `Parts_List_${dateStr()}.xlsx`
-      );
-    } catch {
-      setError("Parts export failed.");
-    }
-  };
-
-  const handleAuditExcel = async () => {
-    try {
-      const blob = await dashboardApi.exportAuditReport(query);
-      downloadBlob(
-        new Blob([blob], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
-        `Audit_Report_${dateStr()}.xlsx`
-      );
-    } catch {
-      setError("Audit export failed.");
-    }
-  };
+  const handleDownloadReport = handleFullExcel;
 
   const axStyle={fontSize:11,fill:C.txt("muted"),fontFamily:"monospace"};
 
@@ -582,33 +560,13 @@ const ProductionCharts=()=>{
           >
             Filters Selected: {selectedFilterCount}
           </span>
-          {/* Full Excel */}
-          <button onClick={handleFullExcel}
+          <button onClick={handleDownloadReport}
             style={{display:"inline-flex",alignItems:"center",gap:6,height:36,padding:"0 14px",
               borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",
               background:C.steel(0.1),border:`1px solid ${C.steel(0.3)}`,color:C.steel(),transition:"all .15s"}}
             onMouseEnter={e=>e.currentTarget.style.background=C.steel(0.2)}
             onMouseLeave={e=>e.currentTarget.style.background=C.steel(0.1)}>
-            <Table2 size={13}/> Full Excel
-          </button>
-          {/* Parts Excel */}
-          <button onClick={handlePartsExcel} disabled={!partsList.length}
-            style={{display:"inline-flex",alignItems:"center",gap:6,height:36,padding:"0 14px",
-              borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",
-              background:C.ok(0.1),border:`1px solid ${C.ok(0.3)}`,color:C.ok(),
-              opacity:partsList.length?1:0.4,transition:"all .15s"}}
-            onMouseEnter={e=>{if(partsList.length)e.currentTarget.style.background=C.ok(0.2);}}
-            onMouseLeave={e=>e.currentTarget.style.background=C.ok(0.1)}>
-            <List size={13}/> Parts Excel
-          </button>
-          {/* Audit export */}
-          <button onClick={handleAuditExcel}
-            style={{display:"inline-flex",alignItems:"center",gap:6,height:36,padding:"0 14px",
-              borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",
-              background:C.navy(0.08),border:`1px solid ${C.navy(0.22)}`,color:C.navy(),transition:"all .15s"}}
-            onMouseEnter={e=>e.currentTarget.style.background=C.navy(0.16)}
-            onMouseLeave={e=>e.currentTarget.style.background=C.navy(0.08)}>
-            <Download size={13}/> Audit Excel
+            <Download size={13}/> Download Report
           </button>
         </div>
       </div>
@@ -671,7 +629,7 @@ const ProductionCharts=()=>{
               <div style={{display:"flex",alignItems:"center",gap:24,padding:"8px 0"}}>
                 {/* Donut */}
                 <div style={{position:"relative",width:160,height:160,flexShrink:0}}>
-                  <ResponsiveContainer width="100%" height="100%">
+                  <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                     <RePieChart>
                       <Pie data={qualityPie} cx="50%" cy="50%" innerRadius={52} outerRadius={72}
                         paddingAngle={3} dataKey="value" strokeWidth={0}>
@@ -777,7 +735,7 @@ const ProductionCharts=()=>{
               </div>
             ):(
               <div style={{height:350}}>
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                   {chartType==="area"?(
                     <AreaChart data={productionData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <defs>
@@ -835,7 +793,7 @@ const ProductionCharts=()=>{
               </div>
             ):(
               <div style={{height:260}}>
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                   <BarChart data={machineBarData} barGap={3} margin={{top:4,right:8,bottom:0,left:-10}}>
                     <CartesianGrid stroke={C.bdr(0.1)} strokeDasharray="3 4" vertical={false}/>
                     <XAxis dataKey="name" tick={{...axStyle,fontSize:10}} axisLine={false} tickLine={false}/>
@@ -868,7 +826,8 @@ const ProductionCharts=()=>{
                   ):(report.machineWise||[]).map((row,i)=>{
                     const t=(Number(row.ok||0))+(Number(row.ng||0));
                     const eff=t>0?Math.round(Number(row.ok||0)/t*100):0;
-                    const name=machineMap.get(Number(row.machine_id))||`Machine ${row.machine_id}`;
+                    const machine=machineMap.get(Number(row.machine_id));
+                    const name = String(machine?.machineName || machine?.machine_name || machine?.machineNumber || `Machine ${row.machine_id}`);
                     const v=eff>=85?"ok":eff>=60?"wip":"ng";
                     const vc=v==="ok"?C.ok():v==="wip"?C.wip():C.ng();
                     return(
@@ -994,13 +953,6 @@ const ProductionCharts=()=>{
               <span style={{fontSize:11,color:C.txt("muted")}}>
                 Showing <strong style={{color:C.txt("pri")}}>{filteredParts.length}</strong> of <strong style={{color:C.txt("pri")}}>{partsList.length}</strong> parts
               </span>
-              <button onClick={handlePartsExcel} disabled={!filteredParts.length}
-                style={{display:"inline-flex",alignItems:"center",gap:5,height:32,padding:"0 12px",
-                  borderRadius:7,fontSize:11,fontWeight:700,cursor:"pointer",
-                  background:C.ok(0.1),border:`1px solid ${C.ok(0.3)}`,color:C.ok(),
-                  opacity:filteredParts.length?1:0.4}}>
-                <Download size={11}/> Export Excel
-              </button>
             </div>
           </div>
 

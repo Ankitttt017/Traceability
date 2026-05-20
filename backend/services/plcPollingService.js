@@ -101,6 +101,9 @@ class PlcPollingService {
       const registers = await this.readAllRegisters(machine);
       if (!registers) return;
 
+      // Clear consecutive failure counter on success
+      if (this._failCounts) this._failCounts.delete(machine.id);
+
       // Update Snapshot (Point 14)
       plcSnapshotService.updateSnapshot(machine.plc_ip, machine.plc_port, registers);
 
@@ -120,14 +123,24 @@ class PlcPollingService {
       await this.driveStateMachine(machine, stableSignals);
 
     } catch (error) {
-      console.error(`[PollingService] Error polling machine ${machine.id}:`, error.message);
-      // Update state to PLC_ERROR if repeated
-      try {
-        await plcStateMachineService.transition(machine.id, plcStateMachineService.states.PLC_ERROR, {
-          error_message: error.message
-        });
-      } catch (transitionError) {
-        console.warn(`[PollingService] State transition suppressed for machine ${machine.id}: ${transitionError.message}`);
+      // Step 6: Suppress individual poll failures — log ONE warning after N consecutive failures
+      if (!this._failCounts) this._failCounts = new Map();
+      const prev = this._failCounts.get(machine.id) || 0;
+      const count = prev + 1;
+      this._failCounts.set(machine.id, count);
+      const FAIL_THRESHOLD = 5;
+      if (count === FAIL_THRESHOLD) {
+        console.warn(`[PLC] Machine ${machine.id} unreachable — polling suspended (${error.message})`);
+      }
+      // Only transition state once, not on every failure
+      if (count <= FAIL_THRESHOLD) {
+        try {
+          await plcStateMachineService.transition(machine.id, plcStateMachineService.states.PLC_ERROR, {
+            error_message: error.message
+          });
+        } catch (transitionError) {
+          // Suppress transition errors entirely
+        }
       }
     }
   }

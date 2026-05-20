@@ -499,13 +499,42 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       }
 
       if (!matchedRule) {
-        const expectedFormats = applicableRules.slice(0, 5).map((rule) => getRuleLabel(rule)).join(", ");
+        const expectedFormats = applicableRules
+          .slice(0, 5)
+          .map((rule) => getRuleLabel(rule))
+          .filter((label) => String(label || "").trim().length >= 3)
+          .join(", ");
         return {
           decision: "BLOCK",
           reason: "INVALID_QR_FORMAT",
           validationResult: "FAILED",
-          message: expectedFormats ? `QR format mismatch. Allowed: ${expectedFormats}` : "QR format mismatch.",
+          message: expectedFormats ? `QR format mismatch. Allowed rules: ${expectedFormats}` : "QR format mismatch.",
           currentStatus: "REJECTED_QR_FORMAT",
+        };
+      }
+    }
+
+    const sequence = await getActiveStations();
+    if (!sequence.includes(station)) {
+      return {
+        decision: "BLOCK",
+        reason: "STATION_NOT_CONFIGURED",
+        message: `BLOCKED\nStation Not Found\n\nStation: ${station}\nPlease check configuration.`,
+        currentStatus: "UNKNOWN"
+      };
+    }
+    const firstStation = sequence[0] || null;
+
+    // First operation gate: scanned QR must exist in PLC reading table.
+    if (station === firstStation) {
+      const plcMatch = await checkPlcCycleReading(normalizedPartId);
+      if (!plcMatch?.success) {
+        return {
+          decision: "BLOCK",
+          reason: "PART_NOT_FOUND",
+          validationResult: "FAILED",
+          message: "Part QR not found in moulding records. Verify part was recorded first.",
+          currentStatus: "REJECTED_PLC_MATCH",
         };
       }
     }
@@ -532,70 +561,19 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
 
     const stationFeatures = await getStationFeatureConfig(station);
 
-    const sequence = await getActiveStations();
-    if (!sequence.includes(station)) {
-      return {
-        decision: "BLOCK",
-        reason: "STATION_NOT_CONFIGURED",
-        message: `BLOCKED\nStation Not Found\n\nStation: ${station}\nPlease check configuration.`,
-        currentStatus: part.status
-      };
-    }
+    const expectedStation = getExpectedStation(part, sequence);
 
-    // 1. SEQUENCE VALIDATION
+    // 1. DUPLICATE VALIDATION
     const hasExistingSuccess = await OperationLog.findOne({
       where: { 
         part_id: normalizedPartId, 
         station_no: station,
-        plc_status: ["ENDED_OK", "PASSED", "COMPLETED_OK"] 
+        plc_status: ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"]
       }
     });
 
     const scanAttemptType = hasExistingSuccess ? "RE-SCAN" : "INITIAL";
 
-    if (!skipSequenceValidation && sequence.length > 0) {
-      const currentIdx = sequence.indexOf(station);
-      const expectedStation = await getExpectedNextStationForPart(part, sequence);
-
-      if (expectedStation && expectedStation !== station) {
-        const expectedIdx = sequence.indexOf(expectedStation);
-
-        // Allow rework parts to be rescanned/re-run at current/previous stages if they are in rework state
-        if (part.is_rework && currentIdx <= expectedIdx) {
-          // Allow
-        } else {
-          const blockedLog = await OperationLog.create({
-            part_id: normalizedPartId,
-            machine_id: mId || null,
-            operation_no: station,
-            station_no: station,
-            plc_status: "INTERLOCKED",
-            result: "BLOCK",
-            scan_attempt_type: scanAttemptType,
-            validation_result: "BLOCKED",
-            operation_result: "INTERLOCKED",
-            user_id: userId,
-            interlock_reason: "PREVIOUS_STATION_NOT_COMPLETED",
-          });
-          
-          part.last_validation_result = "BLOCKED";
-          await part.save();
-
-          return {
-            decision: "BLOCK",
-            reason: "PREVIOUS_STATION_NOT_COMPLETED",
-            qrStatus: "BLOCKED",
-            operationStatus: "INTERLOCKED",
-            message: `Previous station not completed with OP number ${expectedStation}.`,
-            expectedStation,
-            currentStatus: part.status,
-            operationLogId: blockedLog.id,
-          };
-        }
-      }
-    }
-
-    // 2. DUPLICATE VALIDATION
     if (part.status === "COMPLETED" && !part.is_rework) {
        part.last_validation_result = "DUPLICATE";
        await part.save();
@@ -636,6 +614,47 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
         currentStatus: part.status,
         operationLogId: blockedLog.id,
       };
+    }
+
+    // 2. SEQUENCE VALIDATION
+    if (!skipSequenceValidation && sequence.length > 0) {
+      const currentIdx = sequence.indexOf(station);
+      if (currentIdx > 0 && expectedStation && expectedStation !== station) {
+        const expectedIdx = sequence.indexOf(expectedStation);
+
+        // Allow rework parts to be rescanned/re-run at current/previous stages if they are in rework state
+        if (part.is_rework && currentIdx <= expectedIdx) {
+          // Allow
+        } else {
+          const blockedLog = await OperationLog.create({
+            part_id: normalizedPartId,
+            machine_id: mId || null,
+            operation_no: station,
+            station_no: station,
+            plc_status: "INTERLOCKED",
+            result: "BLOCK",
+            scan_attempt_type: scanAttemptType,
+            validation_result: "BLOCKED",
+            operation_result: "INTERLOCKED",
+            user_id: userId,
+            interlock_reason: "PREVIOUS_STATION_NOT_COMPLETED",
+          });
+          
+          part.last_validation_result = "BLOCKED";
+          await part.save();
+
+          return {
+            decision: "BLOCK",
+            reason: "PREVIOUS_STATION_NOT_COMPLETED",
+            qrStatus: "BLOCKED",
+            operationStatus: "INTERLOCKED",
+            message: `Previous station not completed with OP number ${expectedStation}.`,
+            expectedStation,
+            currentStatus: part.status,
+            operationLogId: blockedLog.id,
+          };
+        }
+      }
     }
 
     // 3. INTERLOCK / NG VALIDATION

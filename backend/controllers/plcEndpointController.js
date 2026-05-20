@@ -2,6 +2,7 @@ const { Op } = require("sequelize");
 const PlcEndpoint = require("../models/PlcEndpoint");
 const PlcRegisterRange = require("../models/PlcRegisterRange");
 const Machine = require("../models/Machine");
+const sequelize = require("../config/db");
 
 function toInt(value) {
   if (value === undefined || value === null || value === "") {
@@ -214,6 +215,32 @@ exports.updateEndpoint = async (req, res) => {
     endpoint.updated_by = req.user?.id || null;
 
     await endpoint.save();
+
+    await sequelize.transaction(async (transaction) => {
+      await Machine.update(
+        {
+          plc_ip: endpoint.plc_ip,
+          plc_port: endpoint.plc_port,
+          plc_protocol: endpoint.plc_protocol,
+        },
+        {
+          where: { plc_endpoint_id: endpoint.id },
+          transaction,
+        }
+      );
+
+      await PlcRegisterRange.update(
+        {
+          plc_ip: endpoint.plc_ip,
+          plc_port: endpoint.plc_port,
+          plc_protocol: endpoint.plc_protocol,
+        },
+        {
+          where: { plc_endpoint_id: endpoint.id },
+          transaction,
+        }
+      );
+    });
 
     res.json(toEndpointResponse(endpoint));
   } catch (error) {
