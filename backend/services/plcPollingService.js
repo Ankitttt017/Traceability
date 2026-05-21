@@ -256,7 +256,14 @@ class PlcPollingService {
       signals.TIMESTAMP = Date.now();
       return signals;
     } catch (error) {
-      console.error(`[PollingService] Live read failed for machine ${machine.id}:`, error.message);
+    // YAHAN CHANGE KARO
+const isNoIpConfigured = error.message?.includes('0.0.0.0') || 
+                         error.code === 'EADDRNOTAVAIL';
+
+if (!isNoIpConfigured) {
+  console.error(`[PollingService] Live read failed for machine ${machineId}: ${error.message}`);
+}
+// 0.0.0.0 error silently skip ho jayega
       return null;
     }
   }
