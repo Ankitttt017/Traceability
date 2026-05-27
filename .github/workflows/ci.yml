@@ -1,0 +1,10 @@
+name: Rico IoT CI
+on:
+  workflow_dispatch:
+jobs:
+  build-and-check:
+    name: Build frontend and check backend
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
