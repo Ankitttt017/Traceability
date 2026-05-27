@@ -1,8 +1,11 @@
-﻿name: Rico IoT - Auto Deploy
+name: Rico IoT - Auto Deploy
+
 on:
   push:
     branches:
+      - main
       - master
+
 jobs:
   deploy:
     name: Build and Deploy
@@ -10,17 +13,43 @@ jobs:
     defaults:
       run:
         shell: cmd
+    env:
+      PORT: 3000
+      VITE_API_BASE_URL: http://192.168.100.137:9090/api/v1
+      VITE_SOCKET_URL: http://192.168.100.137:9090
+      DEPLOY_ROOT: C:\Users\IOT1\Desktop\PROJECTS\Traceability
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Install Frontend Dependencies
-        working-directory: C:\Users\IOT1\Desktop\Rico_Main_Iot\Rico_main_iot\frontend
-        run: npm install
+        working-directory: frontend
+        run: npm ci
+
       - name: Build Frontend
-        working-directory: C:\Users\IOT1\Desktop\Rico_Main_Iot\Rico_main_iot\frontend
+        working-directory: frontend
         run: npm run build
+
+      - name: Deploy Frontend To Nginx Root
+        run: |
+          robocopy frontend\dist "%DEPLOY_ROOT%\frontend\dist" /MIR
+          if %ERRORLEVEL% LEQ 7 exit /B 0
+          exit /B %ERRORLEVEL%
+
+      - name: Deploy Backend Files
+        run: |
+          robocopy backend "%DEPLOY_ROOT%\backend" /MIR /XD node_modules /XF .env *.log
+          if %ERRORLEVEL% GTR 7 exit /B %ERRORLEVEL%
+          copy /Y ecosystem.config.cjs "%DEPLOY_ROOT%\ecosystem.config.cjs"
+
       - name: Install Backend Dependencies
-        working-directory: C:\Users\IOT1\Desktop\Rico_Main_Iot\Rico_main_iot\backend\rico-iot
-        run: npm install
+        run: cd /d "%DEPLOY_ROOT%\backend" && npm ci
+
       - name: Restart Backend
-        run: C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd restart rico-iot-backend
+        run: |
+          C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd delete rico-iot-backend
+          cd /d "%DEPLOY_ROOT%" && C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd start ecosystem.config.cjs --update-env
+          C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd save
+
       - name: Reload Nginx
         run: cd C:\nginx && nginx.exe -s reload

@@ -22,7 +22,7 @@ import {
 } from "../utils/stationSettings";
 
 // ── Constants ──────────────────────────────────────────────────────────────
-const SOCKET_URL                = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
+const SOCKET_URL                = import.meta.env.VITE_SOCKET_URL || "http://192.168.100.137:9090";
 const REALTIME_REFRESH_COOLDOWN = 350;
 const FALLBACK_POLL_INTERVAL    = 30000;
 const CATALOG_SYNC_INTERVAL     = 60000;

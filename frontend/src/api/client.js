@@ -10,8 +10,11 @@ import { clearAuthSession } from "../utils/authStorage";
 |--------------------------------------------------------------------------
 */
 
-// Local Development
-const BASE_URL = "http://localhost:4000/api/v1";
+const DEFAULT_SERVER_URL = "http://192.168.100.137:9090";
+
+// Local Development / Production override:
+// Set VITE_API_BASE_URL when building if the API host changes.
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || `${DEFAULT_SERVER_URL}/api/v1`;
 
 // Live Production / LAN
 // const BASE_URL = "http://172.16.9.110:4000/api/v1";
