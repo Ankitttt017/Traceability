@@ -97,11 +97,65 @@ const SHADOW = `0 2px 12px rgba(var(--db-navy),.08),0 1px 3px rgba(var(--db-navy
 const SHADOW_MD = `0 4px 20px rgba(var(--db-navy),.12),0 2px 6px rgba(var(--db-navy),.06)`;
 
 function normalizeRejectionType(reason = "") {
-  const r = String(reason || "").trim().toUpperCase();
+  const r = String(reason || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[_\-]+/g, " ")
+    .replace(/\s+/g, " ");
   if (!r) return "MR - MR Defects";
-  if (r.includes("DUPLICATE") || r.includes("FORMAT") || r.includes("QR") || r.includes("SCAN")) return "MR - MR Defects";
-  if (r.includes("CRAM") || r.includes("CHAMFER") || r.includes("ROUGHNESS") || r.includes("PROFILE") || r.includes("POSITION")) return "CRAM - Cram Defects";
-  if (r.includes("CR") || r.includes("CAST") || r.includes("POROSITY") || r.includes("BLOW HOLE") || r.includes("LEAK")) return "CR - Casting Defects";
+
+  // MR: scan/traceability/data flow or generic manual reject paths.
+  if (
+    r.includes("DUPLICATE") ||
+    r.includes("FORMAT") ||
+    r.includes("QR") ||
+    r.includes("SCAN") ||
+    r.includes("ALREADY COMPLETED") ||
+    r.includes("VALIDATION") ||
+    r.includes("MANUAL REJECT")
+  ) {
+    return "MR - MR Defects";
+  }
+
+  // CRAM: dimensional/geometry/chamfer/profile/surface-measurement style defects.
+  if (
+    r.includes("CRAM") ||
+    r.includes("CHAMFER") ||
+    r.includes("ROUGHNESS") ||
+    r.includes("PROFILE") ||
+    r.includes("POSITION") ||
+    r.includes("DIMENSION") ||
+    r.includes("DIA") ||
+    r.includes("DIAMETER") ||
+    r.includes("HEIGHT") ||
+    r.includes("WIDTH") ||
+    r.includes("LENGTH") ||
+    r.includes("RUNOUT") ||
+    r.includes("CONCENTRICITY")
+  ) {
+    return "CRAM - Cram Defects";
+  }
+
+  // CR: casting/process-body defects.
+  if (
+    r.includes(" CAST") ||
+    r.startsWith("CAST") ||
+    r.includes("POROSITY") ||
+    r.includes("BLOW HOLE") ||
+    r.includes("LEAK") ||
+    r.includes("SHRINKAGE") ||
+    r.includes("CRACK") ||
+    r.includes("FLASH") ||
+    r.includes("BURR") ||
+    r.includes("COLD SHUT") ||
+    r.includes("PIN HOLE") ||
+    r.includes("SAND")
+  ) {
+    return "CR - Casting Defects";
+  }
+
+  // Keep plain "CR" token check at the end to avoid false positives in other words.
+  if (/(^|\s)CR(\s|$)/.test(r)) return "CR - Casting Defects";
   return "MR - MR Defects";
 }
 
@@ -455,13 +509,22 @@ const Dashboard = () => {
     const historyRows = Array.isArray(report.interlockHistory) ? report.interlockHistory : [];
     if (historyRows.length > 0) {
       return historyRows.map((row) => ({
-        partId: row.partId || row.part_id || "—",
+        partId: row.partId || row.part_id || "-",
         reason: row.reason || row.interlock_reason || row.message || "Unknown reason",
         result: "NG",
+        createdAt: row.createdAt || row.timestamp || null,
       }));
     }
-    return (report.recentScans || []).filter((row) => String(row.result || "").toUpperCase() === "NG");
-  }, [report.interlockHistory, report.recentScans]);
+    const fallbackRows = Array.isArray(report.partsList) ? report.partsList : [];
+    return fallbackRows
+      .filter((row) => String(row.result || "").toUpperCase() === "NG")
+      .map((row) => ({
+        partId: row.partId || row.part_id || "-",
+        reason: row.reason || row.interlock_reason || row.message || "Unknown reason",
+        result: "NG",
+        createdAt: row.createdAt || row.timestamp || null,
+      }));
+  }, [report.interlockHistory, report.partsList]);
 
   const rejectionPieData = useMemo(() => {
     const grouped = rejectionAnalysisRows.reduce((acc, row) => {
