@@ -564,10 +564,17 @@ const OperatorView = () => {
   const isMobile = breakpoint === "sm" || breakpoint === "md";
   const isTablet = breakpoint === "lg";
   const isCompact = isMobile || isTablet;
+  const isTouchDevice =
+    typeof window !== "undefined" &&
+    (
+      ("ontouchstart" in window) ||
+      (typeof navigator !== "undefined" && Number(navigator.maxTouchPoints || 0) > 0) ||
+      window.matchMedia?.("(pointer: coarse)")?.matches
+    );
   const isAppDisplayMode = typeof window !== "undefined" && window.matchMedia?.("(display-mode: standalone)")?.matches;
   const isIosStandalone = typeof window !== "undefined" && typeof window.navigator !== "undefined" && window.navigator.standalone === true;
   const isStandaloneAppMode = Boolean(isAppDisplayMode || isIosStandalone);
-  const enforceStationLockMode = isCompact || isStandaloneAppMode;
+  const enforceStationLockMode = isCompact || isStandaloneAppMode || isTouchDevice;
   const hasLockedSelection = Boolean(stationLock?.machineId);
 
   useEffect(() => {
