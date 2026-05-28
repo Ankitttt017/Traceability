@@ -10,10 +10,12 @@ import { clearAuthSession } from "../utils/authStorage";
 |--------------------------------------------------------------------------
 */
 
-const DEFAULT_SERVER_URL = "http://192.168.100.137:9090";
+const DEFAULT_SERVER_URL =
+  typeof window !== "undefined" ? window.location.origin : "http://localhost:9090";
 
-// Local Development / Production override:
-// Set VITE_API_BASE_URL when building if the API host changes.
+// Production-safe default:
+// 1) Use VITE_API_BASE_URL when provided.
+// 2) Else call same-origin backend path (/api/v1), avoiding hardcoded LAN IP in live deploy.
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || `${DEFAULT_SERVER_URL}/api/v1`;
 
 // Live Production / LAN
