@@ -1,9 +1,18 @@
 // UPGRADE 7 COMPLETE — OEE Metrics: Quality × Performance × Availability per machine per shift
-const { Op, fn, col, literal } = require("sequelize");
+const { Op } = require("sequelize");
 const Machine      = require("../models/Machine");
 const ProductionLog = require("../models/ProductionLog");
 const Shift        = require("../models/Shift");
 const { parseTimeParts, toMinutes, isMinuteWithinShift } = require("../utils/time");
+const {
+  getProductionDate,
+  resolveShift,
+  getShiftDurationSeconds,
+  getEffectiveCycleTimeSeconds,
+  computeTargetProduction,
+  computeDowntimeFromLogs,
+  computeOeeAndOa,
+} = require("../services/metrics/productionMetricsService");
 
 /**
  * GET /api/dashboard/oee
@@ -20,17 +29,8 @@ async function getOeeMetrics(req, res) {
     const now  = new Date();
     const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
-    // Find the active shift for current time
     const shifts = await Shift.findAll({ where: { is_active: true }, raw: true });
-    let currentShift = null;
-    for (const s of shifts) {
-      const start = toMinutes(s.start_time);
-      const end = toMinutes(s.end_time);
-      if (isMinuteWithinShift(currentMinutes, start, end, { inclusiveEnd: true })) {
-        currentShift = s;
-        break;
-      }
-    }
+    let currentShift = resolveShift(now, shifts);
 
     // Determine shift start/end as Date objects
     let shiftStartDate, shiftEndDate, shiftDurationMs;
@@ -69,49 +69,54 @@ async function getOeeMetrics(req, res) {
       const total  = logs.length;
       const ok     = logs.filter((l) => l.status === "OK").length;
       
-      // Target based on daily target or calculated from CT+LT if available
-      const target = Number(machine.daily_target_qty || machine.target_qty || 0);
+      const target = computeTargetProduction({ machine, shift: currentShift });
 
       // Quality: OK / Total
       const quality = total > 0 ? ok / total : 0;
 
       // Availability — calculate downtime from scan gaps > 5 min
-      const GAP_THRESHOLD_MS = 5 * 60_000;
-      let downtimeMs = 0;
-      for (let i = 1; i < logs.length; i++) {
-        const gap = new Date(logs[i].createdAt) - new Date(logs[i - 1].createdAt);
-        if (gap > GAP_THRESHOLD_MS) downtimeMs += gap;
-      }
+      const { downtimeMs, downtimeMinutes, downtimeEvents } = computeDowntimeFromLogs(logs);
       const operatingTimeMs = shiftDurationMs - downtimeMs;
-      const availability = shiftDurationMs > 0 ? Math.max(0, operatingTimeMs / shiftDurationMs) : 1;
-
-      // Performance: (Total Produced * Standard Cycle Time) / Operating Time
-      // Standard Cycle Time = cycle_time + loading_time
-      const standardCT = (Number(machine.cycle_time || 0) + Number(machine.loading_time || 0)) || 0;
-      let performance = 0;
-      if (standardCT > 0 && operatingTimeMs > 0) {
-        performance = (total * standardCT * 1000) / operatingTimeMs;
-      } else {
-        // Fallback to simple target ratio if CT is not set
-        performance = target > 0 ? total / target : (total > 0 ? 1 : 0);
-      }
-      performance = Math.min(performance, 1.2); // Cap at 120% for extreme outliers
-
-      const oee = quality * performance * availability;
+      const plannedProductionMinutes = Math.max(0, Math.round(shiftDurationMs / 60000));
+      const downtimeEventRatio = (total + downtimeEvents) > 0
+        ? Number(((downtimeEvents / (total + downtimeEvents)) * 100).toFixed(2))
+        : 0;
+      const downtimeTimePct = plannedProductionMinutes > 0
+        ? Number(((downtimeMinutes / plannedProductionMinutes) * 100).toFixed(2))
+        : 0;
+      const idealCycleTimeSeconds = getEffectiveCycleTimeSeconds(machine);
+      const calc = computeOeeAndOa({
+        totalCount: total,
+        goodCount: ok,
+        runtimeSeconds: Math.max(0, Math.floor(operatingTimeMs / 1000)),
+        plannedProductionSeconds: Math.max(0, Math.floor(shiftDurationMs / 1000)),
+        idealCycleTimeSeconds,
+        downtimeSeconds: Math.max(0, Math.floor(downtimeMs / 1000)),
+      });
+      const productionDate = getProductionDate(now);
 
       result.push({
         machineId:    machine.id,
         machineName:  machine.machine_name,
         stationNo:    machine.station_no,
         lineName:     machine.line_name,
-        oee:          Math.round(oee * 100),
-        quality:      Math.round(quality * 100),
-        performance:  Math.round(performance * 100),
-        availability: Math.round(availability * 100),
+        oee:          calc.oeePct,
+        oa:           calc.oaPct,
+        quality:      calc.qualityPct,
+        performance:  calc.performancePct,
+        availability: calc.availabilityPct,
         ok,
         total,
         target,
-        downtimeMinutes: Math.round(downtimeMs / 60_000),
+        downtimeMinutes,
+        downtimeEvents,
+        plannedProductionMinutes,
+        downtimeEventRatio,
+        downtimeTimePct,
+        actualProduction: total,
+        achievementPct: target > 0 ? Math.round((total / target) * 100) : 0,
+        targetGap: target > 0 ? Math.max(target - total, 0) : 0,
+        productionDate: productionDate ? productionDate.toISOString().slice(0, 10) : null,
         shiftCode: currentShift?.shift_code || "CUSTOM",
       });
     }

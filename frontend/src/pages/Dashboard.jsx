@@ -5,6 +5,7 @@
 //  Supports: Dark + Light via [data-theme] on <html>
 // ============================================================
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useRef } from "react";
 import { io } from "socket.io-client";
 import { SOCKET_URL } from "../constants/network";
 import {
@@ -64,6 +65,17 @@ const DS = `
     --db-txt-muted:  84,119,146;
     --db-bdr:        84,119,146;
     --db-bop:        0.18;
+  }
+  @media (max-width: 1200px){
+    .db-tablet-grid-2 { grid-template-columns: 1fr !important; }
+    .db-tablet-cards { grid-template-columns: repeat(auto-fill,minmax(300px,1fr)) !important; }
+    .db-tablet-oeeoa { grid-template-columns: repeat(auto-fill,minmax(320px,1fr)) !important; }
+    .db-tablet-pad { padding: 16px !important; }
+    .db-tablet-chart-compact { height: 190px !important; }
+  }
+  @media (max-width: 900px){
+    .db-tablet-cards { grid-template-columns: 1fr !important; }
+    .db-tablet-oeeoa { grid-template-columns: 1fr !important; }
   }
 `;
 
@@ -257,7 +269,7 @@ const KpiCard = ({ label, value, icon:Icon, accent, sub }) => (
 );
 
 // —— Machine KPI Card ——————————————————————————————————————————————————————————
-const MachineCard = ({ row, plcOnline=true, nowMs=0 }) => {
+const MachineCard = ({ row, plcOnline=null, scannerOnline=null, nowMs=0 }) => {
   const acc   = Number(row.accuracy||0);
   const color = acc>=85 ? C.ok() : acc>=60 ? C.amber() : C.ng();
   const lastScan = row.lastScanTime ? new Date(row.lastScanTime) : null;
@@ -275,15 +287,19 @@ const MachineCard = ({ row, plcOnline=true, nowMs=0 }) => {
       onMouseEnter={e=>{e.currentTarget.style.borderColor=C.steel(0.5);e.currentTarget.style.boxShadow=SHADOW_MD;}}
       onMouseLeave={e=>{e.currentTarget.style.borderColor=C.bdr();e.currentTarget.style.boxShadow=SHADOW;}}
     >
-      {/* PLC Status Icon */}
-      <div style={{position:"absolute",top:14,right:14,display:"flex",alignItems:"center",gap:6}}
-        title={plcOnline ? "PLC Connection Active" : "PLC Connection Down"}>
-        <span style={{fontSize:8,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.08em"}}>PLC</span>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"center",
-          width:22,height:22,borderRadius:6,
-          background:plcOnline?C.ok(0.1):C.ng(0.1),
-          border:`1px solid ${plcOnline?C.ok(0.2):C.ng(0.2)}`}}>
-          {plcOnline ? <Wifi size={11} color={C.ok()}/> : <WifiOff size={11} color={C.ng()}/>}
+      {/* PLC + Scanner status */}
+      <div style={{position:"absolute",top:14,right:14,display:"flex",alignItems:"center",gap:6}}>
+        <div title={plcOnline === null ? "PLC status unknown / not assigned" : (plcOnline ? "PLC Connection Active" : "PLC Connection Down")} style={{display:"flex",alignItems:"center",gap:4}}>
+          <span style={{fontSize:8,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.08em"}}>PLC</span>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",width:22,height:22,borderRadius:6,background:plcOnline===null?C.steel(0.1):(plcOnline?C.ok(0.1):C.ng(0.1)),border:`1px solid ${plcOnline===null?C.steel(0.2):(plcOnline?C.ok(0.2):C.ng(0.2))}`}}>
+            {plcOnline ? <Wifi size={11} color={C.ok()}/> : <WifiOff size={11} color={plcOnline===null?C.steel():C.ng()}/>}
+          </div>
+        </div>
+        <div title={scannerOnline === null ? "Scanner status unknown" : (scannerOnline ? "Scanner Online" : "Scanner Offline")} style={{display:"flex",alignItems:"center",gap:4}}>
+          <span style={{fontSize:8,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.08em"}}>SCN</span>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",width:22,height:22,borderRadius:6,background:scannerOnline===null?C.steel(0.1):(scannerOnline?C.ok(0.1):C.ng(0.1)),border:`1px solid ${scannerOnline===null?C.steel(0.2):(scannerOnline?C.ok(0.2):C.ng(0.2))}`}}>
+            {scannerOnline ? <Wifi size={11} color={C.ok()}/> : <WifiOff size={11} color={scannerOnline===null?C.steel():C.ng()}/>}
+          </div>
         </div>
       </div>
 
@@ -291,7 +307,7 @@ const MachineCard = ({ row, plcOnline=true, nowMs=0 }) => {
       <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
         <OeeGauge value={acc} size={56} stroke={6}/>
         <div style={{minWidth:0,flex:1}}>
-          <p style={{fontSize:13,fontWeight:800,color:C.txt("pri"),
+          <p style={{fontSize:14,fontWeight:800,color:C.txt("pri"),
             overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:3}}>
             {row.machineName||"Machine"}
           </p>
@@ -306,14 +322,14 @@ const MachineCard = ({ row, plcOnline=true, nowMs=0 }) => {
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
         {[
           { label:"Produced",  value:row.processedCount,       color:C.txt("pri")  },
-          { label:"Target",    value:row.targetQty,            color:C.txt("muted")},
+          { label:"Target",    value:(row.targetProduction ?? row.targetQty ?? 0), color:C.txt("muted")},
           { label:"Achieved",  value:`${row.achievementPct||0}%`, color:color       },
         ].map((s,i)=>(
           <div key={i} style={{background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
             borderRadius:9,padding:"8px 6px",textAlign:"center"}}>
-            <p style={{fontSize:14,fontWeight:800,color:s.color,
+            <p style={{fontSize:16,fontWeight:800,color:s.color,
               fontFamily:"'DM Mono',monospace",lineHeight:1}}>{s.value}</p>
-            <p style={{fontSize:9,fontWeight:700,color:C.txt("muted"),
+            <p style={{fontSize:10,fontWeight:700,color:C.txt("muted"),
               textTransform:"uppercase",letterSpacing:"0.06em",marginTop:4}}>{s.label}</p>
           </div>
         ))}
@@ -324,15 +340,15 @@ const MachineCard = ({ row, plcOnline=true, nowMs=0 }) => {
         paddingTop:10,borderTop:`1px solid ${C.bdr()}`,flexWrap:"wrap",gap:6}}>
         <div style={{display:"flex",alignItems:"center",gap:5}}>
           <Clock size={10} color={C.txt("muted")}/>
-          <span style={{fontSize:10,color:scanColor,fontFamily:"'DM Mono',monospace"}}>
-            {lastScan ? lastScan.toLocaleTimeString() : "No scan"}
+          <span style={{fontSize:11,color:scanColor,fontFamily:"'DM Mono',monospace"}}>
+            {lastScan ? lastScan.toLocaleTimeString() : "—"}
           </span>
         </div>
         <div style={{display:"flex",gap:12}}>
-          <span style={{fontSize:10,fontWeight:700,color:C.amber()}}>
-            DT {row.downtimeRate||0}%
+          <span title="Duration-based downtime from production log gaps" style={{fontSize:11,fontWeight:700,color:C.steel()}}>
+            DT Min {Math.round(Number(row.downtimeMinutes || 0))}
           </span>
-          <span style={{fontSize:10,fontWeight:700,color:C.ng()}}>
+          <span style={{fontSize:11,fontWeight:700,color:C.ng(0.85)}}>
             RW {row.reworkCount||0}
           </span>
         </div>
@@ -409,6 +425,10 @@ const Dashboard = () => {
   const [chartModeHourly, setChartModeHourly] = useState("line");
   const [chartModeShift, setChartModeShift] = useState("bar");
   const [chartModeRejectTrend, setChartModeRejectTrend] = useState("area");
+  const refreshInFlightRef = useRef(false);
+  const refreshQueuedRef = useRef(false);
+  const refreshTimerRef = useRef(null);
+  const lastRefreshAtRef = useRef(0);
 
   const query = useMemo(()=>({
     dateFrom:   localDateTimeToIso(filters.dateFrom),
@@ -421,6 +441,11 @@ const Dashboard = () => {
   }),[filters]);
 
   const loadData = useCallback(async()=>{
+    if (refreshInFlightRef.current) {
+      refreshQueuedRef.current = true;
+      return;
+    }
+    refreshInFlightRef.current = true;
     try {
       setLoading(true);
       const [m,s,r,o] = await Promise.all([
@@ -435,10 +460,38 @@ const Dashboard = () => {
       if (o) setOeeData(o?.oee||[]);
     } catch(e){
       console.error("Dashboard load error",e);
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+      refreshInFlightRef.current = false;
+      if (refreshQueuedRef.current) {
+        refreshQueuedRef.current = false;
+        loadData();
+      }
+    }
   },[query]);
 
-  useEffect(()=>{ loadData(); const t=setInterval(loadData,15000); return()=>clearInterval(t); },[loadData]);
+  const scheduleRefresh = useCallback((cooldownMs = 300) => {
+    const elapsed = Date.now() - lastRefreshAtRef.current;
+    const delay = Math.max(0, cooldownMs - elapsed);
+    if (refreshTimerRef.current) return;
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      lastRefreshAtRef.current = Date.now();
+      loadData();
+    }, delay);
+  }, [loadData]);
+
+  useEffect(()=>{
+    scheduleRefresh(0);
+    const t=setInterval(()=>scheduleRefresh(200),15000);
+    return()=>{
+      clearInterval(t);
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  },[scheduleRefresh]);
   useEffect(()=>{ const t=setInterval(()=>setNowMs(Date.now()),30000); return()=>clearInterval(t); },[]);
 
   useEffect(()=>{
@@ -451,12 +504,12 @@ const Dashboard = () => {
       reconnectionDelayMax:5000,
       timeout:10000,
     });
-    sock.on("dashboard_refresh",()=>loadData());
+    sock.on("dashboard_refresh",()=>scheduleRefresh(350));
     sock.on("plc_connection_event",d=>{
       if (d.machineId) setPlcMap(p=>({...p,[d.machineId]:d.state==="COMPLETED"||d.state==="CLOSED"}));
     });
     return()=>sock.close();
-  },[loadData]);
+  },[scheduleRefresh]);
 
   const efficiency = useMemo(()=>{
     const t=(summary.quality?.ok||0)+(summary.quality?.ng||0);
@@ -486,21 +539,26 @@ const Dashboard = () => {
 
   // Shift bar data
   const shiftData = useMemo(() => {
-    const labelByCode = {
-      SHIFT_A: "Shift A",
-      SHIFT_B: "Shift B",
-      SHIFT_C: "Shift C",
-      UNASSIGNED: "Unassigned",
-    };
-    return Object.entries(report.shiftProduction || {})
-      .map(([k, v]) => ({
-        code: k,
-        name: labelByCode[k] || k.replace(/_/g, " "),
-        OK: v?.ok || 0,
-        NG: v?.ng || 0,
-      }))
-      .filter((row) => row.code !== "UNASSIGNED" || (row.OK + row.NG) > 0);
-  }, [report.shiftProduction]);
+    const grouped = Array.isArray(report.shiftWiseMetrics) ? report.shiftWiseMetrics : [];
+    if (grouped.length > 0) {
+      return grouped.map((row) => ({
+        code: row.shiftCode || "UNASSIGNED",
+        name: String(row.shiftCode || "UNASSIGNED").replace(/_/g, " "),
+        actual: Number(row.actualProduction || 0),
+        target: Number(row.targetProduction || 0),
+        oee: Number(row.oee || 0),
+        oa: Number(row.oa || 0),
+      }));
+    }
+    return Object.entries(report.shiftProduction || {}).map(([k, v]) => ({
+      code: k,
+      name: k.replace(/_/g, " "),
+      actual: Number((v?.ok || 0) + (v?.ng || 0)),
+      target: 0,
+      oee: 0,
+      oa: 0,
+    }));
+  }, [report.shiftProduction, report.shiftWiseMetrics]);
 
   const hasFilters = Object.values(filters).some(Boolean);
   const selectedFilterCount = useMemo(() => Object.values(filters).filter(Boolean).length, [filters]);
@@ -574,6 +632,7 @@ const Dashboard = () => {
     { id:"overview",  label:"Overview",          icon:BarChart3  },
     { id:"machines",  label:"Machine KPIs",      icon:Cpu        },
     { id:"oee",       label:"OEE Analysis",      icon:Activity   },
+    { id:"oa",        label:"OA Analysis",       icon:Target     },
     { id:"rejection", label:"Rejection Analysis",icon:AlertTriangle },
       ];
 
@@ -990,6 +1049,7 @@ const Dashboard = () => {
                 }
               />
               <SafeChart height={220}>
+                <div style={{ width: "100%", height: 220, minWidth: 1, minHeight: 1 }}>
                 <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                   {chartModeHourly === "line" && (
                     <LineChart data={report.hourlyProduction} margin={{top:4,right:8,bottom:0,left:-10}}>
@@ -1024,6 +1084,7 @@ const Dashboard = () => {
                     </AreaChart>
                   )}
                 </ResponsiveContainer>
+                </div>
               </SafeChart>
               <div style={{display:"flex",gap:16,marginTop:10,flexWrap:"wrap"}}>
                 {[
@@ -1040,6 +1101,26 @@ const Dashboard = () => {
             </div>
           </div>
 
+          <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
+            borderRadius:14,padding:20,boxShadow:SHADOW}}>
+            <SectionHead title="KPI Logic Snapshot"/>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10}}>
+              {[
+                { k:"Production Day", v:"06:00 to next day 06:00" },
+                { k:"Shift Mapping", v:"A 06:00-14:00, B 14:00-22:00, C 22:00-06:00" },
+                { k:"Target", v:"Cycle+Loading based dynamic target (fallback daily target)" },
+                { k:"OEE", v:"Availability, Performance, Quality combined" },
+                { k:"OA", v:"Operating effectiveness shown separately" },
+                { k:"Downtime", v:"Duration based downtime minutes (common method)" },
+              ].map((item) => (
+                <div key={item.k} style={{background:C.bg("surf"),border:`1px solid ${C.bdr()}`,borderRadius:10,padding:"10px 12px"}}>
+                  <div style={{fontSize:10,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.06em"}}>{item.k}</div>
+                  <div style={{fontSize:12,fontWeight:700,color:C.txt("pri"),marginTop:5,lineHeight:1.4}}>{item.v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}
             className="db-grid-2">
             <style>{`@media(max-width:800px){.db-grid-2{grid-template-columns:1fr!important}}`}</style>
@@ -1048,6 +1129,7 @@ const Dashboard = () => {
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
               <SectionHead title="Production by Shift" right={<ChartModeToggle mode={chartModeShift} onChange={setChartModeShift} />} />
               <SafeChart height={200}>
+                <div style={{ width: "100%", height: 200, minWidth: 1, minHeight: 1 }}>
                 <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                   {chartModeShift === "bar" && (
                     <BarChart data={shiftData} margin={{top:4,right:8,bottom:0,left:-10}}>
@@ -1055,8 +1137,8 @@ const Dashboard = () => {
                       <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <Tooltip {...TooltipStyle}/>
-                      <Bar dataKey="OK" fill={C.ok()} radius={[4,4,0,0]} barSize={24}/>
-                      <Bar dataKey="NG" fill={C.ng()} radius={[4,4,0,0]} barSize={24}/>
+                      <Bar dataKey="actual" fill={C.ok()} radius={[4,4,0,0]} barSize={24}/>
+                      <Bar dataKey="target" fill={C.steel(0.7)} radius={[4,4,0,0]} barSize={24}/>
                     </BarChart>
                   )}
                   {chartModeShift === "line" && (
@@ -1065,8 +1147,8 @@ const Dashboard = () => {
                       <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <Tooltip {...TooltipStyle}/>
-                      <Line type="monotone" dataKey="OK" stroke={C.ok()} strokeWidth={2.4} />
-                      <Line type="monotone" dataKey="NG" stroke={C.ng()} strokeWidth={2.2} />
+                      <Line type="monotone" dataKey="actual" stroke={C.ok()} strokeWidth={2.4} />
+                      <Line type="monotone" dataKey="target" stroke={C.steel()} strokeWidth={2.2} />
                     </LineChart>
                   )}
                   {chartModeShift === "area" && (
@@ -1075,17 +1157,18 @@ const Dashboard = () => {
                       <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <Tooltip {...TooltipStyle}/>
-                      <Area type="monotone" dataKey="OK" stroke={C.ok()} fill={C.ok(0.25)} />
-                      <Area type="monotone" dataKey="NG" stroke={C.ng()} fill={C.ng(0.2)} />
+                      <Area type="monotone" dataKey="actual" stroke={C.ok()} fill={C.ok(0.25)} />
+                      <Area type="monotone" dataKey="target" stroke={C.steel()} fill={C.steel(0.2)} />
                     </AreaChart>
                   )}
                 </ResponsiveContainer>
+                </div>
               </SafeChart>
             </div>
 
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title="Top Reject Reasons"/>
+              <SectionHead title="Top Rejection Reasons"/>
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 {(report.recentScans||[]).filter(r=>r.result==="NG").slice(0,5).map((row,i)=>(
                   <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
@@ -1110,16 +1193,22 @@ const Dashboard = () => {
 
       {/* —— TAB: Machines ——————————————————————————————————————————————————————————— */}
       {activeTab==="machines" && (
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:16}}>
+        <div className="db-tablet-cards" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:16}}>
           {report.machineCards.map((row)=>(
-            <MachineCard key={row.machineId} row={row} plcOnline={plcMap[row.machineId]!==false} nowMs={nowMs}/>
+            <MachineCard
+              key={row.machineId}
+              row={row}
+              plcOnline={Object.prototype.hasOwnProperty.call(plcMap, row.machineId) ? plcMap[row.machineId] : (row.plcConnected ?? null)}
+              scannerOnline={row.scannerConnected ?? null}
+              nowMs={nowMs}
+            />
           ))}
         </div>
       )}
 
       {activeTab==="oee" && (
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:16}}>
-          {(oeeData.length ? oeeData : [{stationNo:"OP100"},{stationNo:"OP110"},{stationNo:"OP120"}]).map((row, idx)=>{
+        <div className="db-tablet-oeeoa" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(340px,1fr))",gap:16}}>
+          {(oeeData.length ? oeeData : report.machineCards || []).map((row, idx)=>{
             const oee = Number(row?.oee ?? row?.OEE ?? 0);
             const availability = Number(row?.availability ?? row?.Availability ?? 0);
             const performance = Number(row?.performance ?? row?.Performance ?? 0);
@@ -1128,25 +1217,27 @@ const Dashboard = () => {
             const oeeClamped = Math.max(0, Math.min(100, oee));
             const makePie = (value) => {
               const v = Math.max(0, Math.min(100, Number(value || 0)));
-              return [{ name: "Value", value: v }, { name: "Gap", value: 100 - v }];
+              return [{ name: "Effective", value: v }, { name: "Loss", value: 100 - v }];
             };
             return (
-              <div key={`${stationName}-${idx}`} style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:16,boxShadow:SHADOW}}>
+              <div key={`${stationName}-${idx}`} className="db-tablet-pad" style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:16,boxShadow:SHADOW}}>
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
                   <p style={{fontSize:13,fontWeight:800,color:C.txt("pri"),margin:0}}>{stationName}</p>
                   <Badge variant={oee>=85 ? "ok" : oee>=60 ? "wip" : "ng"} label={`OEE ${Math.round(oee)}%`} />
                 </div>
                 <div style={{display:"flex",justifyContent:"center",marginBottom:12}}>
                   <div style={{width:150,height:150,position:"relative"}}>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie data={makePie(oeeClamped)} dataKey="value" innerRadius={46} outerRadius={66} startAngle={90} endAngle={-270} strokeWidth={0}>
-                          <Cell fill={oeeClamped>=85 ? C.ok() : oeeClamped>=60 ? C.amber() : C.ng()} />
-                          <Cell fill={C.bdr(0.18)} />
-                        </Pie>
-                        <Tooltip {...TooltipStyle} />
-                      </PieChart>
-                    </ResponsiveContainer>
+                    <div style={{ width: "100%", height: "100%", minWidth: 1, minHeight: 1 }}>
+                      <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
+                        <PieChart>
+                          <Pie data={makePie(oeeClamped)} dataKey="value" innerRadius={46} outerRadius={66} startAngle={90} endAngle={-270} strokeWidth={0}>
+                            <Cell fill={oeeClamped>=85 ? C.ok() : oeeClamped>=60 ? C.amber() : C.ng()} />
+                            <Cell fill={C.bdr(0.18)} />
+                          </Pie>
+                          <Tooltip {...TooltipStyle} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
                     <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
                       <span style={{fontSize:22,fontWeight:800,color:C.txt("pri"),fontFamily:"'DM Mono',monospace"}}>{Math.round(oeeClamped)}%</span>
                       <span style={{fontSize:10,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.06em"}}>Overall OEE</span>
@@ -1157,15 +1248,17 @@ const Dashboard = () => {
                   {[{label:"Availability",value:availability,color:C.steel()},{label:"Performance",value:performance,color:C.amber()},{label:"Quality",value:quality,color:C.ok()}].map((m)=>(
                     <div key={m.label} style={{background:C.bg("surf"),border:`1px solid ${C.bdr()}`,borderRadius:9,padding:"8px 6px",textAlign:"center"}}>
                       <div style={{width:66,height:66,margin:"0 auto 6px"}}>
-                        <ResponsiveContainer width="100%" height="100%">
-                          <PieChart>
-                            <Pie data={makePie(m.value)} dataKey="value" innerRadius={18} outerRadius={30} startAngle={90} endAngle={-270} strokeWidth={0}>
-                              <Cell fill={m.color} />
-                              <Cell fill={C.bdr(0.16)} />
-                            </Pie>
-                            <Tooltip {...TooltipStyle} />
-                          </PieChart>
-                        </ResponsiveContainer>
+                        <div style={{ width: "100%", height: "100%", minWidth: 1, minHeight: 1 }}>
+                          <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
+                            <PieChart>
+                              <Pie data={makePie(m.value)} dataKey="value" innerRadius={18} outerRadius={30} startAngle={90} endAngle={-270} strokeWidth={0}>
+                                <Cell fill={m.color} />
+                                <Cell fill={C.bdr(0.16)} />
+                              </Pie>
+                              <Tooltip {...TooltipStyle} />
+                            </PieChart>
+                          </ResponsiveContainer>
+                        </div>
                       </div>
                       <p style={{fontSize:14,fontWeight:800,color:C.txt("pri"),margin:0,fontFamily:"'DM Mono',monospace"}}>{Math.round(m.value)}%</p>
                       <p style={{fontSize:9,fontWeight:700,color:C.txt("muted"),marginTop:4,textTransform:"uppercase",letterSpacing:"0.05em"}}>{m.label}</p>
@@ -1177,12 +1270,50 @@ const Dashboard = () => {
           })}
         </div>
       )}
+      {activeTab==="oa" && (
+        <div className="db-tablet-oeeoa" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(340px,1fr))",gap:16}}>
+          {(oeeData.length ? oeeData : report.machineCards || []).map((row, idx)=>{
+            const oa = Number(row?.oa ?? row?.OA ?? 0);
+            const stationName = row?.stationNo || row?.station || row?.machineName || `Station ${idx + 1}`;
+            const oaClamped = Math.max(0, Math.min(100, oa));
+            const makePie = (value) => {
+              const v = Math.max(0, Math.min(100, Number(value || 0)));
+              return [{ name: "Effective", value: v }, { name: "Loss", value: 100 - v }];
+            };
+            return (
+              <div key={`${stationName}-oa-${idx}`} className="db-tablet-pad" style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:16,boxShadow:SHADOW}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+                  <p style={{fontSize:13,fontWeight:800,color:C.txt("pri"),margin:0}}>{stationName}</p>
+                  <Badge variant={oa>=85 ? "ok" : oa>=60 ? "wip" : "ng"} label={`OA ${Math.round(oa)}%`} />
+                </div>
+                <SafeChart height={180}>
+                  <div style={{ width: "100%", height: 180, minWidth: 1, minHeight: 1 }}>
+                    <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
+                      <PieChart>
+                        <Pie data={makePie(oaClamped)} dataKey="value" innerRadius={50} outerRadius={72} startAngle={90} endAngle={-270} strokeWidth={0}>
+                          <Cell fill={oaClamped>=85 ? C.ok() : oaClamped>=60 ? C.amber() : C.ng()} />
+                          <Cell fill={C.bdr(0.18)} />
+                        </Pie>
+                        <Tooltip {...TooltipStyle} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                </SafeChart>
+                <div style={{marginTop:8,display:"flex",gap:8,flexWrap:"wrap"}}>
+                  <Badge variant={oa>=85 ? "ok" : oa>=60 ? "wip" : "ng"} label={oa>=85 ? "Healthy" : oa>=60 ? "Watch" : "Critical"} />
+                  <Badge variant="idle" label={`Downtime ${Math.round(Number(row?.downtimeMinutes || 0))}m`} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {activeTab==="rejection" && (
         <div style={{display:"grid",gridTemplateColumns:"320px 1fr",gap:16}} className="db-grid-responsive">
           <style>{`@media(max-width:900px){.db-grid-responsive{grid-template-columns:1fr!important}}`}</style>
           <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
-            <SectionHead title="Rejection Type Split"/>
+            <SectionHead title="Rejection Distribution"/>
             <div style={{display:"flex",justifyContent:"center",marginBottom:16}}>
               <SafeChart height={200}>
                 <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
@@ -1214,7 +1345,7 @@ const Dashboard = () => {
 
           <div style={{display:"grid",gridTemplateRows:"220px auto",gap:16}}>
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title="Rejection Trend (Hourly)" right={<ChartModeToggle mode={chartModeRejectTrend} onChange={setChartModeRejectTrend} />} />
+              <SectionHead title="Rejection Trend by Hour" right={<ChartModeToggle mode={chartModeRejectTrend} onChange={setChartModeRejectTrend} />} />
               <SafeChart height={180}>
               <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                 {chartModeRejectTrend === "area" && (
@@ -1255,7 +1386,7 @@ const Dashboard = () => {
             </div>
 
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title="Top Reject Reasons"/>
+              <SectionHead title="Top Rejection Reasons"/>
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 {rejectionTopReasons.map((row,i)=>(
                   <div key={i} style={{display:"grid",gridTemplateColumns:"1fr auto",alignItems:"center",padding:"10px 12px",background:C.bg("surf"),borderRadius:10,border:`1px solid ${C.bdr()}`}}>

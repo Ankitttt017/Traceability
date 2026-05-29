@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { reportApi, machineApi, shiftApi } from '../../api/services';
 import { toDatetimeLocal } from '../../utils/time';
 import { loadReportConfig } from '../../utils/reportConfig';
@@ -58,27 +58,50 @@ const extractShotFromPartId = (partId) => {
 };
 
 const ReportsPage = () => {
+  const getMesDayRange = useCallback(() => {
+    const now = new Date();
+    const start = new Date(now);
+    start.setHours(6, 0, 0, 0);
+    if (now < start) start.setDate(start.getDate() - 1);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    return { start, end };
+  }, []);
+
   const [loading, setLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
   const [machines, setMachines] = useState([]);
   const [availableShifts, setAvailableShifts] = useState([]);
   const [data, setData] = useState({ rows: [], metrics: {}, availableShifts: [] });
   const [reportConfig, setReportConfig] = useState(() => loadReportConfig());
+  const fetchInFlightRef = useRef(false);
+  const fetchQueuedRef = useRef(false);
   
-  const [filters, setFilters] = useState({
-    dateFrom: toDatetimeLocal(new Date(new Date().setHours(0,0,0,0))),
-    dateTo: toDatetimeLocal(new Date(new Date().setHours(23,59,59,999))),
-    machineId: '',
-    lineName: '',
-    shiftCode: '',
-    status: '',
-    station: '',
-    barcode: '',
-    customerCode: '',
-    operatorId: '',
-    resultType: '',
-    modelCode: '',
-    operationNo: ''
+  const [filters, setFilters] = useState(() => {
+    const r = (() => {
+      const now = new Date();
+      const start = new Date(now);
+      start.setHours(6, 0, 0, 0);
+      if (now < start) start.setDate(start.getDate() - 1);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 1);
+      return { start, end };
+    })();
+    return {
+      dateFrom: toDatetimeLocal(r.start),
+      dateTo: toDatetimeLocal(r.end),
+      machineId: '',
+      lineName: '',
+      shiftCode: '',
+      status: '',
+      station: '',
+      barcode: '',
+      customerCode: '',
+      operatorId: '',
+      resultType: '',
+      modelCode: '',
+      operationNo: ''
+    };
   });
   const [quickRange, setQuickRange] = useState("today");
 
@@ -87,8 +110,9 @@ const ReportsPage = () => {
     const from = new Date(now);
     const to = new Date(now);
     if (key === "today") {
-      from.setHours(0, 0, 0, 0);
-      to.setHours(23, 59, 59, 999);
+      const r = getMesDayRange();
+      from.setTime(r.start.getTime());
+      to.setTime(r.end.getTime());
     } else if (key === "yesterday") {
       from.setDate(from.getDate() - 1);
       to.setDate(to.getDate() - 1);
@@ -106,9 +130,14 @@ const ReportsPage = () => {
       dateFrom: toDatetimeLocal(from),
       dateTo: toDatetimeLocal(to),
     }));
-  }, []);
+  }, [getMesDayRange]);
 
   const fetchData = useCallback(async () => {
+    if (fetchInFlightRef.current) {
+      fetchQueuedRef.current = true;
+      return;
+    }
+    fetchInFlightRef.current = true;
     setLoading(true);
     try {
       const response = await reportApi.getData(filters);
@@ -122,6 +151,11 @@ const ReportsPage = () => {
       toast.error("Failed to load production analytics");
     } finally {
       setLoading(false);
+      fetchInFlightRef.current = false;
+      if (fetchQueuedRef.current) {
+        fetchQueuedRef.current = false;
+        fetchData();
+      }
     }
   }, [filters]);
 
@@ -326,11 +360,6 @@ const ReportsPage = () => {
               <p className="db-header-subtitle">Production analytics and PLC cycle trace data</p>
             </div>
           </div>
-          {Boolean(reportConfig?.showLogo && reportConfig?.logoUrl) && (
-            <div className="bg-white/80 border border-border rounded-lg px-3 py-2">
-              <img src={reportConfig.logoUrl} alt="Report logo" className="h-10 w-auto object-contain" />
-            </div>
-          )}
         </div>
       </div>
 
@@ -428,8 +457,8 @@ const ReportsPage = () => {
         </select>
         <button
           onClick={() => setFilters({
-            dateFrom: toDatetimeLocal(new Date(new Date().setHours(0, 0, 0, 0))),
-            dateTo: toDatetimeLocal(new Date(new Date().setHours(23, 59, 59, 999))),
+            dateFrom: toDatetimeLocal(getMesDayRange().start),
+            dateTo: toDatetimeLocal(getMesDayRange().end),
             machineId: '', lineName: '', shiftCode: '', status: '', station: '', barcode: '', customerCode: '',
             operatorId: '', resultType: '', modelCode: '', operationNo: ''
           })}

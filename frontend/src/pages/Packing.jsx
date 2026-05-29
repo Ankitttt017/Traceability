@@ -371,11 +371,22 @@ const Packing=()=>{
   },[activeSession,overview.recentSessions,loadSession]));
 
   useEffect(()=>{
-    const socket=io(SOCKET_URL,{path:"/socket.io/",transports:["websocket","polling"]});
+    const socket=io(SOCKET_URL,{
+      path:"/socket.io/",
+      transports:["polling","websocket"],
+      reconnection:true,
+      reconnectionAttempts:Infinity,
+      reconnectionDelay:1000,
+      reconnectionDelayMax:5000,
+      timeout:10000,
+    });
     socket.on("packing_update",(payload={})=>{
       loadOverview(payload.boxNumber).catch(()=>{});
     });
-    return()=>socket.disconnect();
+    return()=>{
+      socket.off("packing_update");
+      if (socket.connected) socket.disconnect();
+    };
   },[loadOverview]);
 
   const handleSelectBox=(e)=>{

@@ -336,7 +336,15 @@ const ScannerMonitor = () => {
   useEffect(() => { loadConnections(true); }, [loadConnections]);
 
   useEffect(() => {
-    const socket = io(SOCKET_URL, { path: "/socket.io/", transports: ["websocket", "polling"] });
+    const socket = io(SOCKET_URL, {
+      path: "/socket.io/",
+      transports: ["polling", "websocket"],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 10000,
+    });
     const sched = () => {
       if (refreshTimerRef.current) return;
       refreshTimerRef.current = setTimeout(() => {
@@ -348,7 +356,9 @@ const ScannerMonitor = () => {
     socket.on("scanner_health",     sched);
     return () => {
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-      socket.disconnect();
+      socket.off("scanner_connection", sched);
+      socket.off("scanner_health", sched);
+      if (socket.connected) socket.disconnect();
     };
   }, [loadConnections]);
 

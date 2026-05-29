@@ -87,7 +87,7 @@ function App() {
           gutter={10}
           containerStyle={{ top: 16, right: 16 }}
           toastOptions={{
-            duration: 6000,
+            duration: 3500,
             style: {
               background: "var(--app-bg-card)",
               color: "var(--app-text-main)",
@@ -100,6 +100,7 @@ function App() {
               maxWidth: "380px",
             },
             success: {
+              duration: 2800,
               iconTheme: { primary: "var(--app-success)", secondary: "var(--app-bg-card)" },
               style: {
                 background:
@@ -112,6 +113,7 @@ function App() {
               },
             },
             error: {
+              duration: 3500,
               iconTheme: { primary: "var(--app-danger)", secondary: "var(--app-bg-card)" },
               style: {
                 background:

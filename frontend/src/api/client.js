@@ -90,14 +90,31 @@ apiClient.interceptors.response.use(
       status !== 401 &&
       status !== 403
     ) {
-      const errorMessage =
+      const rawMessage = String(
         error?.response?.data?.error ||
         error?.response?.data?.message ||
         error?.message ||
-        "An unexpected error occurred.";
+        ""
+      );
+      const normalized = rawMessage.toLowerCase();
+      const isTimeout =
+        error?.code === "ECONNABORTED" ||
+        normalized.includes("timeout") ||
+        normalized.includes("15000ms");
+      const isNetworkDown =
+        error?.message === "Network Error" ||
+        normalized.includes("failed to fetch");
+
+      let errorMessage = rawMessage || "An unexpected error occurred.";
+      if (isTimeout) {
+        errorMessage = "Server timeout. Check API/DB connection.";
+      } else if (isNetworkDown) {
+        errorMessage = "Unable to reach server. Please check network or backend service status.";
+      }
 
       toast.error(errorMessage, {
         id: "api-error",
+        duration: 3500,
       });
     }
 

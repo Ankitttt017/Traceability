@@ -1,11 +1,12 @@
 ﻿// ============================================================
 //  ProductionCharts.jsx — IndusTrace Premium v4
-//  ✓ Download bar at TOP
-//  ✓ Tabs: Overview | Hourly | Machine | Shift | Parts List
-//  ✓ Excel exports: Full / Parts / Audit
-//  ✓ Navy/Steel/Amber/Linen theme
+//  ? Download bar at TOP
+//  ? Tabs: Overview | Hourly | Machine | Shift | Parts List
+//  ? Excel exports: Full / Parts / Audit
+//  ? Navy/Steel/Amber/Linen theme
 // ============================================================
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { io } from "socket.io-client";
 import {
   TrendingUp, Download, RefreshCw, BarChart3,
   LineChart as LineChartIcon, AlertCircle, Clock,
@@ -23,8 +24,9 @@ import {
 import { dashboardApi, machineApi } from "../api/services";
 import { CHART_COLORS, STATUS_COLORS } from "../constants/chartTheme";
 import SafeChart from "../components/charts/SafeChart";
+import { SOCKET_URL } from "../constants/network";
 
-// ── Design tokens ──────────────────────────────────────────────────────────
+// -- Design tokens ----------------------------------------------------------
 const DS = `
   @keyframes pcSpin   { to{transform:rotate(360deg)} }
   @keyframes pcFadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
@@ -104,18 +106,33 @@ const DEFAULT_PLC_CYCLE_COLUMNS = [
   "time_for_stroke","stroke","shot_status"
 ];
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// -- Helpers ----------------------------------------------------------------
 function downloadBlob(blob,filename){
   const url=URL.createObjectURL(blob);
   const a=document.createElement("a");a.href=url;a.download=filename;
   document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
 }
 function toDateRange(r){
-  const now=new Date(),from=new Date(now);
-  if(r==="daily")from.setHours(0,0,0,0);
-  else if(r==="weekly")from.setDate(now.getDate()-7);
-  else from.setDate(now.getDate()-30);
-  return{dateFrom:from.toISOString(),dateTo:now.toISOString()};
+  const now = new Date();
+  const mesStart = new Date(now);
+  mesStart.setHours(6, 0, 0, 0);
+  if (now < mesStart) mesStart.setDate(mesStart.getDate() - 1);
+  const mesEnd = new Date(mesStart);
+  mesEnd.setDate(mesEnd.getDate() + 1);
+
+  const from = new Date(now);
+  if (r === "daily") {
+    from.setTime(mesStart.getTime());
+    return { dateFrom: from.toISOString(), dateTo: mesEnd.toISOString() };
+  }
+  if (r === "weekly") {
+    from.setDate(mesStart.getDate() - 6);
+    from.setHours(6, 0, 0, 0);
+  } else {
+    from.setDate(mesStart.getDate() - 29);
+    from.setHours(6, 0, 0, 0);
+  }
+  return { dateFrom: from.toISOString(), dateTo: now.toISOString() };
 }
 
 function formatPlcColumnLabel(key){
@@ -160,7 +177,7 @@ const localDateTimeToIso = (value) => {
   return parsed.toISOString();
 };
 
-// ── Tooltip ────────────────────────────────────────────────────────────────
+// -- Tooltip ----------------------------------------------------------------
 const TipBox=({active,payload,label})=>{
   if(!active||!payload?.length)return null;
   return(
@@ -177,7 +194,7 @@ const TipBox=({active,payload,label})=>{
   );
 };
 
-// ── Card ───────────────────────────────────────────────────────────────────
+// -- Card -------------------------------------------------------------------
 const Card=({title,subtitle,icon:Icon,accent,right,children,noPad})=>(
   <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
     borderRadius:14,overflow:"hidden",boxShadow:SH,
@@ -203,7 +220,7 @@ const Card=({title,subtitle,icon:Icon,accent,right,children,noPad})=>(
   </div>
 );
 
-// ── KPI card ───────────────────────────────────────────────────────────────
+// -- KPI card ---------------------------------------------------------------
 const KpiCard=({label,value,sub,color,bgC,bdC,icon:Icon})=>{
   const[h,setH]=useState(false);
   return(
@@ -225,7 +242,7 @@ const KpiCard=({label,value,sub,color,bgC,bdC,icon:Icon})=>{
   );
 };
 
-// ── Shift card ─────────────────────────────────────────────────────────────
+// -- Shift card -------------------------------------------------------------
 const ShiftCard=({label,row,colorFn,icon:SIcon})=>{
   const t=Number(row?.total||0),ok=Number(row?.ok||0),ng=t-ok,eff=t>0?Math.round(ok/t*100):0;
   return(
@@ -252,8 +269,8 @@ const ShiftCard=({label,row,colorFn,icon:SIcon})=>{
         <div style={{background:C.ng(),height:"100%",width:`${t>0?ng/t*100:0}%`,transition:"width .5s"}}/>
       </div>
       <div style={{display:"flex",justifyContent:"space-between",fontSize:11}}>
-        <span style={{color:C.ok(),fontWeight:700}}>✓ {ok} Pass</span>
-        <span style={{color:C.ng(),fontWeight:700}}>✗ {ng} Fail</span>
+        <span style={{color:C.ok(),fontWeight:700}}>? {ok} Pass</span>
+        <span style={{color:C.ng(),fontWeight:700}}>? {ng} Fail</span>
         <span style={{fontWeight:800,fontFamily:"'DM Mono',monospace",
           color:eff>=85?C.ok():eff>=60?C.wip():C.ng()}}>{eff}%</span>
       </div>
@@ -261,7 +278,7 @@ const ShiftCard=({label,row,colorFn,icon:SIcon})=>{
   );
 };
 
-// ── Badge ──────────────────────────────────────────────────────────────────
+// -- Badge ------------------------------------------------------------------
 const Bdg=({v="idle",l})=>{
   const m={ok:{fg:C.ok(),bg:C.ok(0.1),bd:C.ok(0.25)},ng:{fg:C.ng(),bg:C.ng(0.1),bd:C.ng(0.25)},
     wip:{fg:C.wip(),bg:C.wip(0.1),bd:C.wip(0.25)},idle:{fg:C.idle(),bg:C.idle(0.08),bd:C.idle(0.2)}};
@@ -271,9 +288,9 @@ const Bdg=({v="idle",l})=>{
     <span style={{width:5,height:5,borderRadius:"50%",background:s.fg}}/>{l}</span>;
 };
 
-// ══════════════════════════════════════════════════════════════════════════
+// --------------------------------------------------------------------------
 //  MAIN COMPONENT
-// ══════════════════════════════════════════════════════════════════════════
+// --------------------------------------------------------------------------
 const ProductionCharts=()=>{
   injectDS();
 
@@ -289,6 +306,10 @@ const ProductionCharts=()=>{
   const[partsFilter,setPartsFilter]=useState("all");
   const[partsPage,setPartsPage]=useState(1);
   const[partsPageSize,setPartsPageSize]=useState(25);
+  const refreshInFlightRef = useRef(false);
+  const refreshQueuedRef = useRef(false);
+  const refreshTimerRef = useRef(null);
+  const lastRefreshAtRef = useRef(0);
   const[filters,setFilters]=useState({
     machineId:"",
     lineName:"",
@@ -305,6 +326,9 @@ const ProductionCharts=()=>{
   const[report,setReport]=useState({
     machineWise:[],hourlyProduction:[],
     shiftProduction:{SHIFT_A:{total:0,ok:0,ng:0},SHIFT_B:{total:0,ok:0,ng:0},SHIFT_C:{total:0,ok:0,ng:0}},
+    shiftWiseMetrics:[],
+    dayWiseMetrics:[],
+    stationWiseMetrics:[],
     availableLines:[],
     availableShifts:[],
     partsList:[],
@@ -330,6 +354,11 @@ const ProductionCharts=()=>{
   },[timeRange,customDate,filters]);
 
   const loadData=useCallback(async()=>{
+    if (refreshInFlightRef.current) {
+      refreshQueuedRef.current = true;
+      return;
+    }
+    refreshInFlightRef.current = true;
     setLoading(true);setError("");
     try{
       const[s,r,m]=await Promise.all([
@@ -346,10 +375,50 @@ const ProductionCharts=()=>{
         setPartsList(parts);
       }catch{}
     }catch(e){setError(e.response?.data?.error||"Failed to load analytics data.");}
-    finally{setLoading(false);}
+    finally{
+      setLoading(false);
+      refreshInFlightRef.current = false;
+      if (refreshQueuedRef.current) {
+        refreshQueuedRef.current = false;
+        loadData();
+      }
+    }
   },[query]);
 
-  useEffect(()=>{loadData();},[loadData]);
+  const scheduleRefresh = useCallback((cooldownMs = 350) => {
+    const elapsed = Date.now() - lastRefreshAtRef.current;
+    const delay = Math.max(0, cooldownMs - elapsed);
+    if (refreshTimerRef.current) return;
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      lastRefreshAtRef.current = Date.now();
+      loadData();
+    }, delay);
+  }, [loadData]);
+
+  useEffect(()=>{
+    scheduleRefresh(0);
+    return () => {
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  },[scheduleRefresh]);
+
+  useEffect(() => {
+    const sock = io(SOCKET_URL, {
+      path: "/socket.io/",
+      transports: ["polling", "websocket"],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 10000,
+    });
+    sock.on("dashboard_refresh", () => scheduleRefresh(450));
+    return () => sock.close();
+  }, [scheduleRefresh]);
 
   const machineMap=useMemo(()=>new Map(machines.map(m=>[Number(m.id),m])),[machines]);
   const lineContextLabel = useMemo(() => {
@@ -410,6 +479,50 @@ const ProductionCharts=()=>{
       Pass: Number(r.ok || 0),
       Fail: Number(r.ng || 0),
     })),[machinePerformanceRows]);
+
+  const shiftRowsNormalized = useMemo(() => {
+    if (Array.isArray(report.shiftWiseMetrics) && report.shiftWiseMetrics.length > 0) {
+      const grouped = report.shiftWiseMetrics.reduce((acc, row) => {
+        const k = String(row.shiftCode || "UNASSIGNED").toUpperCase();
+        if (!acc[k]) {
+          acc[k] = { total: 0, ok: 0, ng: 0, target: 0, actual: 0, oee: 0, oa: 0, _count: 0 };
+        }
+        const actual = Number(row.actualProduction || 0);
+        const target = Number(row.targetProduction || 0);
+        const quality = Number(row.quality || 0);
+        const ok = Math.round((actual * quality) / 100);
+        const ng = Math.max(actual - ok, 0);
+        acc[k].total += actual;
+        acc[k].ok += ok;
+        acc[k].ng += ng;
+        acc[k].target += target;
+        acc[k].actual += actual;
+        acc[k].oee += Number(row.oee || 0);
+        acc[k].oa += Number(row.oa || 0);
+        acc[k]._count += 1;
+        return acc;
+      }, {});
+      Object.values(grouped).forEach((row) => {
+        row.oee = row._count > 0 ? Number((row.oee / row._count).toFixed(2)) : 0;
+        row.oa = row._count > 0 ? Number((row.oa / row._count).toFixed(2)) : 0;
+      });
+      return grouped;
+    }
+    const legacy = report.shiftProduction || {};
+    const normalized = {};
+    Object.entries(legacy).forEach(([k, v]) => {
+      normalized[k] = {
+        total: Number(v?.total || 0),
+        ok: Number(v?.ok || 0),
+        ng: Number(v?.ng || 0),
+        target: 0,
+        actual: Number(v?.total || 0),
+        oee: 0,
+        oa: 0,
+      };
+    });
+    return normalized;
+  }, [report.shiftProduction, report.shiftWiseMetrics]);
 
   const timeLabel=useMemo(()=>{
     if(timeRange==="daily")return"Today";
@@ -597,11 +710,11 @@ const ProductionCharts=()=>{
     {key:"parts",     label:`Parts List${partsList.length?` (${partsList.length})`:""}`, icon:List},
   ];
 
-  // ── RENDER ─────────────────────────────────────────────────────────────
+  // -- RENDER -------------------------------------------------------------
   return(
     <div style={{display:"flex",flexDirection:"column",gap:16,paddingBottom:32,animation:"pcFadeIn .3s ease"}}>
 
-      {/* ══ PAGE HEADER ════════════════════════════════════════════════ */}
+      {/* -- PAGE HEADER ------------------------------------------------ */}
       <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
         borderRadius:16,overflow:"hidden",boxShadow:SH}}>
         <div style={{height:3,background:`linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`}}/>
@@ -666,7 +779,7 @@ const ProductionCharts=()=>{
         </div>
       </div>
 
-      {/* ══ DOWNLOAD BAR — TOP ═══════════════════════════════════════ */}
+      {/* -- DOWNLOAD BAR — TOP --------------------------------------- */}
       <div style={{
         background:C.bg("card"),
         border:`1px solid ${C.bdr()}`,
@@ -788,7 +901,7 @@ const ProductionCharts=()=>{
         </div>
       )}
 
-      {/* ══ KPI ROW ════════════════════════════════════════════════════ */}
+      {/* -- KPI ROW ---------------------------------------------------- */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:11}}>
         <KpiCard label="Total Produced" value={totalUnits} sub={`Period: ${timeLabel}`} icon={Package}
           color={C.navy()} bgC={C.navy(0.07)} bdC={C.navy(0.22)}/>
@@ -806,7 +919,7 @@ const ProductionCharts=()=>{
           color={C.wip()} bgC={C.wip(0.07)} bdC={C.wip(0.22)}/>
       </div>
 
-      {/* ══ TABS ═══════════════════════════════════════════════════════ */}
+      {/* -- TABS ------------------------------------------------------- */}
       <div style={{display:"flex",gap:4,padding:4,background:C.bg("card"),
         border:`1px solid ${C.bdr()}`,borderRadius:12,
         overflowX:"auto",flexShrink:0}}>
@@ -829,7 +942,7 @@ const ProductionCharts=()=>{
         })}
       </div>
 
-      {/* ══ TAB: OVERVIEW ══════════════════════════════════════════════ */}
+      {/* -- TAB: OVERVIEW ---------------------------------------------- */}
       {activeTab==="overview"&&(
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(320px,1fr))",gap:14,alignItems:"start",animation:"pcFadeIn .2s ease"}}>
           {/* Quality donut + parts status */}
@@ -837,7 +950,8 @@ const ProductionCharts=()=>{
             <Card title="Quality Summary" subtitle="Pass vs Fail ratio" icon={PieIcon} accent={C.amber()}>
               <div style={{display:"flex",alignItems:"center",gap:24,padding:"8px 0",flexWrap:"wrap"}}>
                 {/* Donut */}
-                <div style={{position:"relative",width:160,height:160,flexShrink:0}}>
+                <div style={{position:"relative",width:160,height:160,flexShrink:0,minWidth:160,minHeight:160}}>
+                  <div style={{width:160,height:160,minWidth:1,minHeight:1}}>
                   <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                     <RePieChart>
                       <Pie data={qualityPie} cx="50%" cy="50%" innerRadius={52} outerRadius={72}
@@ -847,6 +961,7 @@ const ProductionCharts=()=>{
                       <Tooltip content={<TipBox/>}/>
                     </RePieChart>
                   </ResponsiveContainer>
+                  </div>
                   <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",
                     alignItems:"center",justifyContent:"center"}}>
                     <p style={{fontSize:22,fontWeight:900,lineHeight:1,
@@ -906,14 +1021,14 @@ const ProductionCharts=()=>{
               {key:"SHIFT_C",label:"Shift C — Night",    colorFn:C.idle, icon:Clock  }
             ].map(s=>(
               <ShiftCard key={s.key} label={s.label}
-                row={report.shiftProduction?.[s.key]}
+                row={shiftRowsNormalized?.[s.key]}
                 colorFn={s.colorFn} icon={s.icon}/>
             ))}
           </div>
         </div>
       )}
 
-      {/* ══ TAB: HOURLY ═══════════════════════════════════════════════ */}
+      {/* -- TAB: HOURLY ----------------------------------------------- */}
       {activeTab==="hourly"&&(
         <div style={{animation:"pcFadeIn .2s ease"}}>
           <Card title="Hourly Production" subtitle="Pass vs Fail per hour" icon={BarChart3} accent={C.steel()}
@@ -944,6 +1059,7 @@ const ProductionCharts=()=>{
               </div>
             ):(
               <SafeChart height={350}>
+                <div style={{width:"100%",height:350,minWidth:1,minHeight:1}}>
                 <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                   {chartType==="area"?(
                     <AreaChart data={productionData} margin={{top:4,right:8,bottom:0,left:-10}}>
@@ -984,13 +1100,14 @@ const ProductionCharts=()=>{
                     </BarChart>
                   )}
                 </ResponsiveContainer>
+                </div>
               </SafeChart>
             )}
           </Card>
         </div>
       )}
 
-      {/* ══ TAB: BY MACHINE ═══════════════════════════════════════════ */}
+      {/* -- TAB: BY MACHINE ------------------------------------------- */}
       {activeTab==="machine"&&(
         <div style={{display:"flex",flexDirection:"column",gap:14,animation:"pcFadeIn .2s ease"}}>
           {/* Chart */}
@@ -1002,6 +1119,7 @@ const ProductionCharts=()=>{
               </div>
             ):(
               <SafeChart height={260}>
+                <div style={{width:"100%",height:260,minWidth:1,minHeight:1}}>
                 <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                   <BarChart data={machineBarData} barGap={3} margin={{top:4,right:8,bottom:0,left:-10}}>
                     <CartesianGrid stroke={C.bdr(0.1)} strokeDasharray="3 4" vertical={false}/>
@@ -1013,12 +1131,13 @@ const ProductionCharts=()=>{
                     <Legend iconType="circle" iconSize={8} wrapperStyle={{fontSize:11,paddingTop:8,color:C.txt("muted")}}/>
                   </BarChart>
                 </ResponsiveContainer>
+                </div>
               </SafeChart>
             )}
           </Card>
           {/* Machine table */}
           <Card noPad title="Machine Performance Summary" subtitle="Quality rate per machine" icon={Cpu} accent={C.steel()}
-            right={<div style={{display:"flex",gap:8}}><Bdg v="ok" l="≥85%"/><Bdg v="wip" l="60-84%"/><Bdg v="ng" l="<60%"/></div>}>
+            right={<div style={{display:"flex",gap:8}}><Bdg v="ok" l="=85%"/><Bdg v="wip" l="60-84%"/><Bdg v="ng" l="<60%"/></div>}>
             <div style={{overflowX:"auto"}}>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                 <thead>
@@ -1067,7 +1186,7 @@ const ProductionCharts=()=>{
         </div>
       )}
 
-      {/* ══ TAB: BY SHIFT ═════════════════════════════════════════════ */}
+      {/* -- TAB: BY SHIFT --------------------------------------------- */}
       {activeTab==="shift"&&(
         <div style={{animation:"pcFadeIn .2s ease"}}>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14}}>
@@ -1076,7 +1195,7 @@ const ProductionCharts=()=>{
               {key:"SHIFT_C",label:"Shift C — Night",    colorFn:C.idle, icon:Clock  }
             ].map(s=>(
               <ShiftCard key={s.key} label={s.label}
-                row={report.shiftProduction?.[s.key]}
+                row={shiftRowsNormalized?.[s.key]}
                 colorFn={s.colorFn} icon={s.icon}/>
             ))}
           </div>
@@ -1093,7 +1212,7 @@ const ProductionCharts=()=>{
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(report.shiftProduction||{}).map(([sh,row],i)=>{
+                  {Object.entries(shiftRowsNormalized||{}).map(([sh,row],i)=>{
                     const t=Number(row.total||0),ok=Number(row.ok||0),ng=t-ok,eff=t>0?Math.round(ok/t*100):0;
                     const v=eff>=85?"ok":eff>=60?"wip":"ng";
                     const vc=v==="ok"?C.ok():v==="wip"?C.wip():C.ng();
@@ -1123,7 +1242,7 @@ const ProductionCharts=()=>{
         </div>
       )}
 
-      {/* ══ TAB: PARTS LIST ═══════════════════════════════════════════ */}
+      {/* -- TAB: PARTS LIST ------------------------------------------- */}
       {activeTab==="parts"&&(
         <div style={{display:"flex",flexDirection:"column",gap:12,animation:"pcFadeIn .2s ease"}}>
 
@@ -1144,8 +1263,8 @@ const ProductionCharts=()=>{
             <div style={{display:"flex",gap:5,padding:3,background:C.bg("surf"),
               border:`1px solid ${C.bdr()}`,borderRadius:8}}>
               {[{k:"all",l:"All"},
-                {k:"pass",l:`✓ Pass`},
-                {k:"fail",l:`✗ Fail`},
+                {k:"pass",l:`? Pass`},
+                {k:"fail",l:`? Fail`},
                 {k:"progress",l:"In Progress"}].map(f=>(
                 <button key={f.k} onClick={()=>setPartsFilter(f.k)}
                   style={{height:28,padding:"0 11px",borderRadius:5,fontSize:11,fontWeight:700,
@@ -1353,5 +1472,7 @@ const ProductionCharts=()=>{
 };
 
 export default ProductionCharts;
+
+
 
 

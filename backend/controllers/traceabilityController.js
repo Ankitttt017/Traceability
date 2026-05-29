@@ -40,6 +40,15 @@ const {
 } = require("../services/machineBypassService");
 const { normalizeIp, sameIp } = require("../utils/networkAddress");
 const { normalizeTimeValue, toMinutes: toShiftMinutes } = require("../utils/time");
+const {
+  getProductionDate,
+  resolveShift,
+  getShiftDurationSeconds,
+  getEffectiveCycleTimeSeconds,
+  computeTargetProduction,
+  computeDowntimeFromLogs,
+  computeOeeAndOa,
+} = require("../services/metrics/productionMetricsService");
 const { readPartIdFromScannerPlc } = require("../services/scannerPlcDataService");
 
 const IO_SNAPSHOT_MIN_INTERVAL_MS = Math.max(Number(process.env.IO_SNAPSHOT_MIN_INTERVAL_MS || 2500), 1000);
@@ -4501,7 +4510,7 @@ exports.getDashboardReport = async (req, res) => {
     };
     const allMachineRowsRaw = await Machine.findAll({
       where: machineWhere,
-      attributes: ["id", "machine_name", "line_name", "operation_no", "sequence_no", "daily_target_qty", "is_active", "machine_number", "updatedAt"],
+      attributes: ["id", "machine_name", "line_name", "operation_no", "sequence_no", "daily_target_qty", "cycle_time", "loading_time", "is_active", "machine_number", "updatedAt"],
       order: [["sequence_no", "ASC"], ["updatedAt", "DESC"]],
       raw: true,
     });
@@ -4593,6 +4602,8 @@ exports.getDashboardReport = async (req, res) => {
         sequenceNo: Number(machine.sequence_no || 0),
         isActive: Boolean(machine.is_active),
         targetQty: Number(machine.daily_target_qty || 0),
+        cycleTime: Number(machine.cycle_time || 0),
+        loadingTime: Number(machine.loading_time || 0),
       };
       return acc;
     }, {});
@@ -4647,22 +4658,67 @@ exports.getDashboardReport = async (req, res) => {
       }
     }
 
+    const logsByMachineId = productionOperationRows.reduce((acc, row) => {
+      const id = Number(row.machine_id || 0);
+      if (!id) return acc;
+      if (!acc[id]) acc[id] = [];
+      acc[id].push(row);
+      return acc;
+    }, {});
+
     const machineCards = Object.values(machineCardMap)
       .map((row) => {
+        const machineLogs = (logsByMachineId[Number(row.machineId)] || []).slice().sort(
+          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
         const processedCount = Number(row.okCount || 0) + Number(row.ngCount || 0);
-        const downtimeEvents = Number(row.interlockedCount || 0) + Number(row.commErrorCount || 0);
+        const downtime = computeDowntimeFromLogs(machineLogs);
+        const downtimeEvents = Number(downtime.downtimeEvents || 0);
+        const downtimeMinutes = Number(downtime.downtimeMinutes || 0);
+        const plannedProductionSeconds = Math.max(0, Math.floor((new Date(to).getTime() - new Date(from).getTime()) / 1000));
+        const plannedProductionMinutes = Math.max(0, Math.round(plannedProductionSeconds / 60));
+        const runtimeSeconds = Math.max(0, Math.floor((machineLogs.length > 0 ? (new Date(to).getTime() - new Date(from).getTime()) : 0) / 1000) - downtimeMinutes * 60);
         const qualityBase = processedCount > 0 ? processedCount : 0;
         const downtimeBase = processedCount + downtimeEvents;
-        const targetQty = Number(row.targetQty || 0);
+        const downtimeEventRatio = downtimeBase > 0 ? Number(((downtimeEvents / downtimeBase) * 100).toFixed(2)) : 0;
+        const downtimeTimePct = plannedProductionMinutes > 0 ? Number(((downtimeMinutes / plannedProductionMinutes) * 100).toFixed(2)) : 0;
+        const shiftForTarget = shiftCodeFilter
+          ? shifts.find((s) => String(s.shift_code || "").toUpperCase() === String(shiftCodeFilter || "").toUpperCase()) || null
+          : null;
+        const targetQty = computeTargetProduction({ machine: row, shift: shiftForTarget || resolveShift(from, shifts) || shifts[0] || null });
+        const idealCycleTimeSeconds = getEffectiveCycleTimeSeconds(row);
+        const calc = computeOeeAndOa({
+          totalCount: processedCount,
+          goodCount: Number(row.okCount || 0),
+          runtimeSeconds,
+          plannedProductionSeconds,
+          idealCycleTimeSeconds,
+          downtimeSeconds: downtimeMinutes * 60,
+        });
+        const shiftResolved = resolveShift(machineLogs[0]?.createdAt || from, shifts);
+        const productionDate = getProductionDate(machineLogs[0]?.createdAt || from);
         return {
           ...row,
+          targetProduction: targetQty,
+          actualProduction: processedCount,
           processedCount,
           downtimeEvents,
+          downtimeMinutes,
+          plannedProductionMinutes,
           accuracy: qualityBase > 0 ? Number(((Number(row.okCount || 0) / qualityBase) * 100).toFixed(2)) : 0,
-          downtimeRate: downtimeBase > 0 ? Number(((downtimeEvents / downtimeBase) * 100).toFixed(2)) : 0,
+          downtimeRate: downtimeEventRatio,
+          downtimeEventRatio,
+          downtimeTimePct,
           achievementPct:
             targetQty > 0 ? Number(((processedCount / targetQty) * 100).toFixed(2)) : null,
           targetGap: targetQty > 0 ? Math.max(targetQty - processedCount, 0) : null,
+          oee: calc.oeePct,
+          oa: calc.oaPct,
+          availability: calc.availabilityPct,
+          performance: calc.performancePct,
+          quality: calc.qualityPct,
+          productionDate: productionDate ? productionDate.toISOString().slice(0, 10) : null,
+          shiftCode: shiftResolved?.shift_code || "UNASSIGNED",
         };
       })
       .filter((row) => !req.query.machineId || Number(row.machineId) === Number(req.query.machineId))
@@ -4685,15 +4741,19 @@ exports.getDashboardReport = async (req, res) => {
           okCount: 0,
           ngCount: 0,
           downtimeEvents: 0,
+          downtimeMinutes: 0,
+          plannedProductionMinutes: 0,
         };
       }
       acc[stationNo].lineNames.add(String(card.lineName || "-"));
       acc[stationNo].machineCount += 1;
-      acc[stationNo].targetQty += Number(card.targetQty || 0);
+      acc[stationNo].targetQty += Number(card.targetProduction ?? card.targetQty ?? 0);
       acc[stationNo].processedCount += Number(card.processedCount || 0);
       acc[stationNo].okCount += Number(card.okCount || 0);
       acc[stationNo].ngCount += Number(card.ngCount || 0);
       acc[stationNo].downtimeEvents += Number(card.downtimeEvents || 0);
+      acc[stationNo].downtimeMinutes += Number(card.downtimeMinutes || 0);
+      acc[stationNo].plannedProductionMinutes += Number(card.plannedProductionMinutes || 0);
       return acc;
     }, {});
 
@@ -4701,11 +4761,17 @@ exports.getDashboardReport = async (req, res) => {
       .map((row) => {
         const processedBase = Number(row.processedCount || 0);
         const downtimeBase = processedBase + Number(row.downtimeEvents || 0);
+        const downtimeEventRatio = downtimeBase > 0 ? Number(((Number(row.downtimeEvents || 0) / downtimeBase) * 100).toFixed(2)) : 0;
+        const downtimeTimePct = Number(row.plannedProductionMinutes || 0) > 0
+          ? Number(((Number(row.downtimeMinutes || 0) / Number(row.plannedProductionMinutes || 0)) * 100).toFixed(2))
+          : 0;
         return {
           ...row,
           lineNames: Array.from(row.lineNames).sort((a, b) => a.localeCompare(b)),
           accuracy: processedBase > 0 ? Number(((Number(row.okCount || 0) / processedBase) * 100).toFixed(2)) : 0,
-          downtimeRate: downtimeBase > 0 ? Number(((Number(row.downtimeEvents || 0) / downtimeBase) * 100).toFixed(2)) : 0,
+          downtimeRate: downtimeEventRatio,
+          downtimeEventRatio,
+          downtimeTimePct,
           achievementPct:
             Number(row.targetQty || 0) > 0
               ? Number(((Number(row.processedCount || 0) / Number(row.targetQty || 0)) * 100).toFixed(2))
@@ -4928,6 +4994,119 @@ exports.getDashboardReport = async (req, res) => {
 
     const availableLines = uniqueStages(machineRows.map((row) => String(row.line_name || "").trim()).filter(Boolean));
 
+    const machineMetricsById = machineCards.reduce((acc, row) => {
+      acc[String(row.machineId)] = row;
+      return acc;
+    }, {});
+
+    const shiftWiseMetricsMap = {};
+    const dayWiseMetricsMap = {};
+    const stationWiseMetricsMap = {};
+
+    for (const row of productionOperationRows) {
+      const machineId = String(row.machine_id || "");
+      if (!machineId) continue;
+      const m = machineMetricsById[machineId];
+      if (!m) continue;
+
+      const shiftObj = resolveShift(row.createdAt, shifts);
+      const shiftCode = shiftObj?.shift_code || "UNASSIGNED";
+      const prodDate = getProductionDate(row.createdAt)?.toISOString().slice(0, 10) || null;
+      const stationNo = normalizeStation(row.station_no || row.operation_no || m.stationNo || "UNASSIGNED");
+
+      const shiftKey = `${prodDate || "NA"}|${shiftCode}`;
+      if (!shiftWiseMetricsMap[shiftKey]) {
+        shiftWiseMetricsMap[shiftKey] = {
+          productionDate: prodDate,
+          shiftCode,
+          targetProduction: 0,
+          actualProduction: 0,
+          downtimeMinutes: 0,
+          downtimeEvents: 0,
+          plannedProductionMinutes: 0,
+          machines: new Set(),
+        };
+      }
+      shiftWiseMetricsMap[shiftKey].machines.add(machineId);
+
+      if (!dayWiseMetricsMap[prodDate || "NA"]) {
+        dayWiseMetricsMap[prodDate || "NA"] = {
+          productionDate: prodDate,
+          targetProduction: 0,
+          actualProduction: 0,
+          downtimeMinutes: 0,
+          downtimeEvents: 0,
+          plannedProductionMinutes: 0,
+          machines: new Set(),
+        };
+      }
+      dayWiseMetricsMap[prodDate || "NA"].machines.add(machineId);
+
+      if (!stationWiseMetricsMap[stationNo]) {
+        stationWiseMetricsMap[stationNo] = {
+          stationNo,
+          targetProduction: 0,
+          actualProduction: 0,
+          downtimeMinutes: 0,
+          downtimeEvents: 0,
+          plannedProductionMinutes: 0,
+          machines: new Set(),
+        };
+      }
+      stationWiseMetricsMap[stationNo].machines.add(machineId);
+    }
+
+    const finalizeAggregate = (bucket) => {
+      const machines = [...bucket.machines];
+      let weightedOeeNumerator = 0;
+      let weightedOaNumerator = 0;
+      let weightedAvailabilityNumerator = 0;
+      let weightedPerformanceNumerator = 0;
+      let weightedQualityNumerator = 0;
+      let weightDenominator = 0;
+      for (const machineId of machines) {
+        const m = machineMetricsById[machineId];
+        if (!m) continue;
+        const target = Number(m.targetProduction ?? m.targetQty ?? 0);
+        const actual = Number(m.actualProduction ?? m.processedCount ?? 0);
+        bucket.targetProduction += target;
+        bucket.actualProduction += actual;
+        bucket.downtimeMinutes += Number(m.downtimeMinutes ?? 0);
+        bucket.downtimeEvents += Number(m.downtimeEvents ?? 0);
+        bucket.plannedProductionMinutes += Number(m.plannedProductionMinutes ?? 0);
+        const w = Math.max(actual, 0);
+        if (w > 0) {
+          weightedOeeNumerator += Number(m.oee ?? 0) * w;
+          weightedOaNumerator += Number(m.oa ?? 0) * w;
+          weightedAvailabilityNumerator += Number(m.availability ?? 0) * w;
+          weightedPerformanceNumerator += Number(m.performance ?? 0) * w;
+          weightedQualityNumerator += Number(m.quality ?? 0) * w;
+          weightDenominator += w;
+        }
+      }
+      return {
+        ...bucket,
+        machines: undefined,
+        achievementPct: bucket.targetProduction > 0 ? Number(((bucket.actualProduction / bucket.targetProduction) * 100).toFixed(2)) : 0,
+        targetGap: bucket.targetProduction > 0 ? Math.max(bucket.targetProduction - bucket.actualProduction, 0) : 0,
+        oee: weightDenominator > 0 ? Number((weightedOeeNumerator / weightDenominator).toFixed(2)) : 0,
+        oa: weightDenominator > 0 ? Number((weightedOaNumerator / weightDenominator).toFixed(2)) : 0,
+        availability: weightDenominator > 0 ? Number((weightedAvailabilityNumerator / weightDenominator).toFixed(2)) : 0,
+        performance: weightDenominator > 0 ? Number((weightedPerformanceNumerator / weightDenominator).toFixed(2)) : 0,
+        quality: weightDenominator > 0 ? Number((weightedQualityNumerator / weightDenominator).toFixed(2)) : 0,
+        downtimeEventRatio: (bucket.actualProduction + bucket.downtimeEvents) > 0
+          ? Number(((bucket.downtimeEvents / (bucket.actualProduction + bucket.downtimeEvents)) * 100).toFixed(2))
+          : 0,
+        downtimeTimePct: bucket.plannedProductionMinutes > 0
+          ? Number(((bucket.downtimeMinutes / bucket.plannedProductionMinutes) * 100).toFixed(2))
+          : 0,
+      };
+    };
+
+    const shiftWiseMetrics = Object.values(shiftWiseMetricsMap).map(finalizeAggregate);
+    const dayWiseMetrics = Object.values(dayWiseMetricsMap).map(finalizeAggregate);
+    const stationWiseMetrics = Object.values(stationWiseMetricsMap).map(finalizeAggregate);
+
     res.json({
       filters: {
         from,
@@ -4943,8 +5122,12 @@ exports.getDashboardReport = async (req, res) => {
       machineWise,
       machineCards,
       stationCards,
+      stationWiseMetrics,
       hourlyProduction: hourly,
       shiftProduction,
+      shiftWiseMetrics,
+      dayWiseMetrics,
+      productionDate: getProductionDate(from)?.toISOString().slice(0, 10),
       interlockHistory: filteredInterlocks,
       reworkCount,
       partJourney: pagedHistory,

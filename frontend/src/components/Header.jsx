@@ -7,6 +7,7 @@ import {
 import { clearAuthSession, getUserRole } from "../utils/authStorage";
 import { APP_ROUTES } from "../constants/routes";
 import ThemeToggleButton from "./ThemeToggleButton";
+import NetworkSignal from "./NetworkSignal";
 import { useNotifications } from "../context/NotificationContext";
 import { canAccessModule, getRoleAccessSettings } from "../utils/roleAccess";
 
@@ -259,6 +260,7 @@ const Header = ({ onMenuClick }) => {
             <Search size={18} />
           </button>
 
+        <NetworkSignal />
         <ThemeToggleButton className="px-2 sm:px-2" />
 
         <div className="relative">
