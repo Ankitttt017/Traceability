@@ -65,9 +65,17 @@ const {
 const { runStartupRecovery } = require("./services/startupRecoveryService");
 const {
   initializeIndustrialServices,
+  retrySkippedDbDependentServices,
   shutdownIndustrialServices,
+  getServiceRegistry,
   getStartupStatus,
 } = require("./services/industrialStartupManager");
+const {
+  refreshIndustrialCaches,
+  getIndustrialCaches,
+  setDbAvailabilityState,
+  warnOnce,
+} = require("./services/industrialConfigCacheService");
 
 const { startTcpServer, shutdownTcpServer } = require("./tcp/tcpServer");
 require("./models/AuditLog"); // UPGRADE 5 — auto-sync AuditLog table
@@ -83,7 +91,24 @@ const io = new Server(server, {
 });
 setSocketServer(io);
 
-app.use(cors());
+const corsOptions = {
+  origin: true,
+  credentials: false,
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
+};
+app.use(cors(corsOptions));
+app.use((req, res, next) => {
+  const origin = req.headers.origin || "*";
+  res.header("Access-Control-Allow-Origin", origin);
+  res.header("Vary", "Origin");
+  res.header("Access-Control-Allow-Methods", "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+  return next();
+});
 app.use(express.json());
 
 const { getAuditLog } = require("./controllers/auditController");
@@ -98,6 +123,20 @@ app.get("/api/v1/audit", getAuditLog);
 
 app.get("/", (_req, res) => {
   res.send("Traceability Backend Running");
+});
+app.get("/health/industrial", (_req, res) => {
+  const cacheState = getIndustrialCaches();
+  return res.json({
+    ok: true,
+    dbAvailable,
+    degradedMode: !dbAvailable,
+    reconnectIntervalMs,
+    lastDbCheckAt,
+    lastSuccessfulDbConnectAt,
+    cache: cacheState,
+    serviceRegistry: getServiceRegistry(),
+    timestamp: new Date().toISOString(),
+  });
 });
 
 app.use(errorHandler);
@@ -214,8 +253,16 @@ async function runStartupDbTask(label, taskFn) {
 
 let statusEmitterTimerRef = null;
 let shuttingDown = false;
+let statusEmitterRunning = false;
 let lastStatusEmitterDbErrorAt = 0;
 const STATUS_EMITTER_DB_ERROR_THROTTLE_MS = 60 * 1000;
+let dbAvailable = false;
+let dbReconnectTimerRef = null;
+let reconnectIntervalMs = 30000;
+let lastDbCheckAt = null;
+let lastSuccessfulDbConnectAt = null;
+const DEGRADED_RECONNECT_MS = 10000;
+const STABLE_RECONNECT_MS = 30000;
 
 function stopStatusEmitter() {
   if (statusEmitterTimerRef) {
@@ -227,42 +274,89 @@ function stopStatusEmitter() {
 function scheduleStatusEmitter() {
   stopStatusEmitter();
   statusEmitterTimerRef = setTimeout(async () => {
+    if (statusEmitterRunning) {
+      if (!shuttingDown) {
+        scheduleStatusEmitter();
+      }
+      return;
+    }
+    statusEmitterRunning = true;
     try {
-      const [machines, scanners] = await Promise.all([
-        Machine.findAll({ order: [["sequence_no", "ASC"]] }),
-        Scanner.findAll({ where: { is_active: true } }),
-      ]);
-      io.emit(
-        "machine_status",
-        machines.map((machine) => ({
-          ...machine.toJSON(),
-        }))
-      );
-      io.emit(
-        "scanner_status",
-        scanners.map((scanner) => scanner.toJSON())
-      );
+      if (dbAvailable) {
+        await refreshIndustrialCaches();
+      }
+      const { machinesCache, scannersCache } = getIndustrialCaches();
+      io.emit("machine_status", machinesCache || []);
+      io.emit("scanner_status", scannersCache || []);
     } catch (error) {
       const now = Date.now();
       const isDbConnError =
         String(error?.name || "").includes("SequelizeConnectionError") ||
-        String(error?.parent?.code || "").toUpperCase() === "ESOCKET";
+        String(error?.parent?.code || "").toUpperCase() === "ESOCKET" ||
+        String(error?.parent?.code || "").toUpperCase() === "ETIMEOUT" ||
+        String(error?.original?.code || "").toUpperCase() === "ETIMEOUT" ||
+        String(error?.name || "").includes("AggregateError");
       if (isDbConnError) {
         if (now - lastStatusEmitterDbErrorAt >= STATUS_EMITTER_DB_ERROR_THROTTLE_MS) {
           lastStatusEmitterDbErrorAt = now;
-          console.warn(
-            `[SocketStatus] DB connection issue while emitting status; will retry. ${error?.message || ""}`
-          );
+          warnOnce("socket_status_db_issue", `[SocketStatus] DB connection issue while emitting status; will retry. ${error?.message || ""}`, STATUS_EMITTER_DB_ERROR_THROTTLE_MS);
         }
       } else {
         console.error("Socket status emitter error:", error);
       }
     } finally {
+      statusEmitterRunning = false;
       if (!shuttingDown) {
         scheduleStatusEmitter();
       }
     }
   }, 5000);
+}
+
+function stopDbReconnectLoop() {
+  if (dbReconnectTimerRef) {
+    clearTimeout(dbReconnectTimerRef);
+    dbReconnectTimerRef = null;
+  }
+}
+
+function scheduleDbReconnectLoop(delayMs = 30000) {
+  stopDbReconnectLoop();
+  reconnectIntervalMs = Math.max(5000, Number(delayMs || STABLE_RECONNECT_MS));
+  dbReconnectTimerRef = setTimeout(async () => {
+    if (shuttingDown) return;
+    lastDbCheckAt = new Date().toISOString();
+    try {
+      await sequelize.authenticate();
+      const wasUnavailable = !dbAvailable;
+      dbAvailable = true;
+      setDbAvailabilityState(true);
+      lastSuccessfulDbConnectAt = new Date().toISOString();
+      if (wasUnavailable) {
+        console.log("[Startup] DB reconnected. Reloading industrial caches/config.");
+        io.emit("db:reconnected", { timestamp: new Date().toISOString() });
+      }
+      await refreshIndustrialCaches();
+      const recoveredRegistry = await retrySkippedDbDependentServices({ dbAvailable: true });
+      io.emit("industrial:services:recovered", {
+        timestamp: new Date().toISOString(),
+        serviceRegistry: recoveredRegistry,
+      });
+      reconnectIntervalMs = STABLE_RECONNECT_MS;
+    } catch (error) {
+      dbAvailable = false;
+      setDbAvailabilityState(false);
+      reconnectIntervalMs = DEGRADED_RECONNECT_MS;
+      const now = Date.now();
+      if (now - lastStatusEmitterDbErrorAt >= STATUS_EMITTER_DB_ERROR_THROTTLE_MS) {
+        lastStatusEmitterDbErrorAt = now;
+        warnOnce("db_reconnect_failed", `[Startup] DB reconnect attempt failed: ${error?.message || "unknown error"}`, STATUS_EMITTER_DB_ERROR_THROTTLE_MS);
+      }
+      io.emit("db:offline", { timestamp: new Date().toISOString(), reason: "DB_RECONNECTING" });
+    } finally {
+      if (!shuttingDown) scheduleDbReconnectLoop(reconnectIntervalMs);
+    }
+  }, reconnectIntervalMs);
 }
 
 async function performGracefulShutdown(signal = "SIGTERM") {
@@ -273,6 +367,7 @@ async function performGracefulShutdown(signal = "SIGTERM") {
   console.log(`[Shutdown] Received ${signal}. Stopping industrial services...`);
 
   stopStatusEmitter();
+  stopDbReconnectLoop();
 
   try {
     await shutdownIndustrialServices();
@@ -295,39 +390,64 @@ async function performGracefulShutdown(signal = "SIGTERM") {
 }
 
 async function startServer() {
+  let httpStarted = false;
   try {
-    await sequelize.authenticate();
-    try {
-      await sequelize.sync({ alter: syncAlter, force: syncForce });
-    } catch (syncError) {
-      const isMssql = sequelize.getDialect && sequelize.getDialect() === "mssql";
-      if (isMssql && syncAlter && !syncForce && isMssqlAlterUniqueSyntaxError(syncError)) {
-        console.warn("[Startup] MSSQL alter sync hit UNIQUE syntax issue; retrying with alter=false.");
-        await sequelize.sync({ alter: false, force: false });
-      } else {
-        throw syncError;
-      }
-    }
-    await runStartupDbTask("ensurePerformanceColumnsExist", () => ensurePerformanceColumnsExist());
-    await runStartupDbTask("ensureTraceabilityColumnsExist", () => ensureTraceabilityColumnsExist());
-    await runStartupDbTask("ensureScannerColumnsExist", () => ensureScannerColumnsExist());
-    await runStartupDbTask("ensurePlcLinkColumnsExist", () => ensurePlcLinkColumnsExist());
-    await runStartupDbTask("ensureMachineQrScannerUniqueness", () => ensureMachineQrScannerUniqueness());
-    await runStartupDbTask("resetAllMachineLocks", () => resetAllMachineLocks());
-    await runStartupDbTask("resetAllScannerConnectionStates", () => scannerService.resetAllScannerConnectionStates());
-    await runStartupDbTask("runStartupRecovery", () => runStartupRecovery());
-    await runStartupDbTask("ensureDefaultAdminUser", () => ensureDefaultAdminUser());
-    await runStartupDbTask("ensureDefaultShifts", () => ensureDefaultShifts());
-    await initializeIndustrialServices();
-    startTcpServer();
-
     server.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
       startAlarmMonitor();
       scheduleStatusEmitter();
-      const startup = getStartupStatus();
-      console.log(`[Startup] Industrial services initialized: ${startup.serviceCount}`);
+      io.emit("db:offline", { timestamp: new Date().toISOString(), reason: "DB_RECONNECTING" });
     });
+    httpStarted = true;
+
+    let startupDbAvailable = false;
+    lastDbCheckAt = new Date().toISOString();
+    try {
+      await sequelize.authenticate();
+      startupDbAvailable = true;
+      dbAvailable = true;
+      setDbAvailabilityState(true);
+      lastSuccessfulDbConnectAt = new Date().toISOString();
+      io.emit("db:connected", { timestamp: new Date().toISOString() });
+    } catch (_err) {
+      startupDbAvailable = false;
+      dbAvailable = false;
+      setDbAvailabilityState(false);
+      io.emit("db:offline", { timestamp: new Date().toISOString(), reason: "DB_STARTUP_UNAVAILABLE" });
+    }
+
+    await initializeIndustrialServices({ dbAvailable: startupDbAvailable });
+    startTcpServer();
+    const startup = getStartupStatus();
+    console.log(`[Startup] Industrial services initialized: ${startup.serviceCount}`);
+    if (startupDbAvailable) {
+      try {
+        await sequelize.sync({ alter: syncAlter, force: syncForce });
+      } catch (syncError) {
+        const isMssql = sequelize.getDialect && sequelize.getDialect() === "mssql";
+        if (isMssql && syncAlter && !syncForce && isMssqlAlterUniqueSyntaxError(syncError)) {
+          console.warn("[Startup] MSSQL alter sync hit UNIQUE syntax issue; retrying with alter=false.");
+          await sequelize.sync({ alter: false, force: false });
+        } else {
+          throw syncError;
+        }
+      }
+      await runStartupDbTask("ensurePerformanceColumnsExist", () => ensurePerformanceColumnsExist());
+      await runStartupDbTask("ensureTraceabilityColumnsExist", () => ensureTraceabilityColumnsExist());
+      await runStartupDbTask("ensureScannerColumnsExist", () => ensureScannerColumnsExist());
+      await runStartupDbTask("ensurePlcLinkColumnsExist", () => ensurePlcLinkColumnsExist());
+      await runStartupDbTask("ensureMachineQrScannerUniqueness", () => ensureMachineQrScannerUniqueness());
+      await runStartupDbTask("resetAllMachineLocks", () => resetAllMachineLocks());
+      await runStartupDbTask("resetAllScannerConnectionStates", () => scannerService.resetAllScannerConnectionStates());
+      await runStartupDbTask("runStartupRecovery", () => runStartupRecovery());
+      await runStartupDbTask("ensureDefaultAdminUser", () => ensureDefaultAdminUser());
+      await runStartupDbTask("ensureDefaultShifts", () => ensureDefaultShifts());
+      await refreshIndustrialCaches();
+      io.emit("db:connected", { timestamp: new Date().toISOString() });
+      scheduleDbReconnectLoop(STABLE_RECONNECT_MS);
+    } else {
+      scheduleDbReconnectLoop(DEGRADED_RECONNECT_MS);
+    }
 
     process.once("SIGINT", () => {
       performGracefulShutdown("SIGINT");
@@ -339,11 +459,23 @@ async function startServer() {
       performGracefulShutdown("SIGHUP");
     });
   } catch (error) {
+    dbAvailable = false;
+    setDbAvailabilityState(false);
     console.error("Failed to start server with DB connection:", error?.message || error);
-    console.warn("[Startup] Running in degraded mode (DB unavailable). Check MSSQL host/port and restart when DB is reachable.");
-    server.listen(PORT, () => {
-      console.log(`Server running on port ${PORT} (degraded mode, DB unavailable)`);
-    });
+    console.warn("[Startup] Running in degraded mode (DB unavailable). HTTP/TCP/Socket remain active, DB reconnect loop running.");
+    if (!httpStarted) {
+      server.listen(PORT, () => {
+        console.log(`Server running on port ${PORT} (degraded mode, DB unavailable)`);
+        startAlarmMonitor();
+        scheduleStatusEmitter();
+      });
+    }
+    try {
+      startTcpServer();
+    } catch (_e) {
+      // no-op; TCP may already be started
+    }
+    scheduleDbReconnectLoop(DEGRADED_RECONNECT_MS);
   }
 }
 

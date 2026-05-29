@@ -1,11 +1,11 @@
-// ============================================================
-//  ComponentJourney.jsx — IndusTrace Enhanced
+﻿// ============================================================
+//  ComponentJourney.jsx â€” IndusTrace Enhanced
 //  Changes:
-//  ✓ QR Feed & Last QR Result removed from header
-//  ✓ Parts list: QR code popup + Delete/Reset part button
-//  ✓ Cleaner header — search + 3 KPI cards only
-//  ✓ Latest QR shown inline on each station card instead
-//  ✓ Professional, easy to understand layout
+//  âœ“ QR Feed & Last QR Result removed from header
+//  âœ“ Parts list: QR code popup + Delete/Reset part button
+//  âœ“ Cleaner header â€” search + 3 KPI cards only
+//  âœ“ Latest QR shown inline on each station card instead
+//  âœ“ Professional, easy to understand layout
 // ============================================================
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
@@ -17,18 +17,18 @@ import {
   MapPin, Zap, Package, QrCode, Trash2, Eye, EyeOff, Download,
 } from "lucide-react";
 import { machineApi, shiftApi, stationSettingsApi, traceabilityApi } from "../api/services";
+import { SOCKET_URL } from "../constants/network";
 import {
   getStationFeatureSettings, getStationFeatures, saveStationFeatureSettings,
 } from "../utils/stationSettings";
 
-// ── Constants ──────────────────────────────────────────────────────────────
-const SOCKET_URL                = import.meta.env.VITE_SOCKET_URL || "http://192.168.100.137:9090";
+// â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const REALTIME_REFRESH_COOLDOWN = 350;
 const FALLBACK_POLL_INTERVAL    = 30000;
 const CATALOG_SYNC_INTERVAL     = 60000;
 const QR_DEDUPE_MS              = 3000;
 
-// ── CSS Design Tokens ──────────────────────────────────────────────────────
+// â”€â”€ CSS Design Tokens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const THEME_STYLES = `
   :root {
     --navy:    26,50,99;   --steel:  84,119,146;
@@ -78,7 +78,7 @@ function injectKeyframes() {
   const s = document.createElement("style"); s.textContent = KEYFRAMES; document.head.appendChild(s);
 }
 
-// ── Color helpers ──────────────────────────────────────────────────────────
+// â”€â”€ Color helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const C = {
   navy:   (o=1) => `rgba(var(--navy),${o})`,
   steel:  (o=1) => `rgba(var(--steel),${o})`,
@@ -100,7 +100,7 @@ const STATUS = {
   idle: { fg:C.idle(), bgLight:C.idle(0.08),border:C.idle(0.2)  },
 };
 
-// ── Unchanged utility functions ────────────────────────────────────────────
+// â”€â”€ Unchanged utility functions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function normalizePartId(v) { return String(v||"").trim(); }
 function extractQrDecision(payload={}) {
   const p=String(payload.qrResult||payload.decision||payload.outcome||payload.scanOutcome||payload.qrDecision||payload.qrStatus||"").trim().toUpperCase();
@@ -143,15 +143,15 @@ function hasDerivedQrSignal(station={}) {
   return s&&s!=="RESET";
 }
 function formatTime(v) {
-  if (!v) return "—";
+  if (!v) return "â€”";
   const d=new Date(v);
-  if (isNaN(d.getTime())) return "—";
+  if (isNaN(d.getTime())) return "â€”";
   return d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"});
 }
 function formatDate(v) {
-  if (!v) return "—";
+  if (!v) return "â€”";
   const d=new Date(v);
-  if (isNaN(d.getTime())) return "—";
+  if (isNaN(d.getTime())) return "â€”";
   return d.toLocaleDateString([],{day:"2-digit",month:"short"})+" "+formatTime(v);
 }
 function getStationMeta(status) {
@@ -170,10 +170,10 @@ function getPartMeta(status) {
   if (["PLC_COMM_ERROR", "COMM_ERROR", "PLC_TIMEOUT", "PLC_ERROR"].includes(s)) return {label:"Error", variant:"ng"};
   return {label:"Waiting",variant:"idle"};
 }
-// ── Mini QR code SVG generator (no external lib needed) ───────────────────
+// â”€â”€ Mini QR code SVG generator (no external lib needed) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Generates a simple visual QR-like pattern from the part ID string
 function generateQrPattern(text, size=80) {
-  // Deterministic hash → grid pattern
+  // Deterministic hash â†’ grid pattern
   let hash = 0;
   for (let i=0;i<text.length;i++) hash=((hash<<5)-hash)+text.charCodeAt(i), hash|=0;
   const cells = 7; const cell = Math.floor(size/cells);
@@ -213,7 +213,7 @@ function generateQrPattern(text, size=80) {
   );
 }
 
-// ── Atoms ──────────────────────────────────────────────────────────────────
+// â”€â”€ Atoms â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const Badge = ({ variant="idle", label, dot=true, pulse=false }) => {
   const s=STATUS[variant]||STATUS.idle;
   return (
@@ -289,8 +289,8 @@ const Divider = ({ label }) => (
   </div>
 );
 
-// ── Part Action Button — always clearly visible ───────────────────────────
-// Used in parts list for QR and Delete — has background + border so it's
+// â”€â”€ Part Action Button â€” always clearly visible â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Used in parts list for QR and Delete â€” has background + border so it's
 // always visible regardless of theme, not just on hover
 const PartActionBtn = ({ icon, label, color, bgColor, borderColor, hoverBg, onClick }) => {
   const [h, setH] = useState(false);
@@ -316,7 +316,7 @@ const PartActionBtn = ({ icon, label, color, bgColor, borderColor, hoverBg, onCl
   );
 };
 
-// ── QR Modal ──────────────────────────────────────────────────────────────
+// â”€â”€ QR Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const QrModal = ({ partId, onClose, onDeletePart }) => {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting,      setDeleting]      = useState(false);
@@ -407,7 +407,7 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
             <div style={{width:"100%",background:C.ng(0.07),border:`1px solid ${C.ng(0.25)}`,
               borderRadius:10,padding:"14px",animation:"itFadeIn .15s ease"}}>
               <p style={{fontSize:12,fontWeight:700,color:C.ng(),marginBottom:4}}>
-                ⚠ Remove Part from System?
+                âš  Remove Part from System?
               </p>
               <p style={{fontSize:11,color:C.txt("muted"),lineHeight:1.5,marginBottom:12}}>
                 This will remove <strong style={{color:C.txt("primary"),fontFamily:"'DM Mono',monospace"}}>{partId}</strong> and
@@ -421,7 +421,7 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
                 <Btn variant="danger" onClick={handleDelete}
                   disabled={deleting} loading={deleting}
                   style={{flex:1,justifyContent:"center",padding:"8px 0"}}>
-                  {deleting?"Removing…":"Yes, Remove"}
+                  {deleting?"Removingâ€¦":"Yes, Remove"}
                 </Btn>
               </div>
               {deleteError ? (
@@ -437,9 +437,9 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
   );
 };
 
-// ══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  MAIN COMPONENT
-// ══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const ComponentJourney = () => {
   useEffect(()=>{ injectTheme(); injectKeyframes(); },[]);
 
@@ -497,7 +497,7 @@ const ComponentJourney = () => {
     return acc;
   },{passed:0,failed:0,inProgress:0,pending:0}),[stationTimeline]);
 
-  // ── Data / socket logic (100% unchanged logic) ─────────────────────────
+  // â”€â”€ Data / socket logic (100% unchanged logic) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const loadPartCatalog = useCallback(async(search)=>{
     const rows=await traceabilityApi.partCatalog({
       search,
@@ -799,7 +799,7 @@ const ComponentJourney = () => {
   useEffect(()=>{ refreshJourneyNow(true); },[selectedPartId,refreshJourneyNow]);
 
   useEffect(()=>{
-    const socket=io(SOCKET_URL,{path:"/socket.io/",transports:["websocket","polling"],reconnectionDelay:200,reconnectionDelayMax:1200});
+    const socket=io(SOCKET_URL,{path:"/socket.io/",transports:["polling","websocket"],reconnectionDelay:200,reconnectionDelayMax:1200,timeout:10000});
     socketRef.current=socket;
     socket.on("journey_update",(p={})=>{
       patchPartFromRealtime(p);
@@ -814,7 +814,8 @@ const ComponentJourney = () => {
     return()=>{
       if (realtimeTimerRef.current){clearTimeout(realtimeTimerRef.current);realtimeTimerRef.current=null;}
       if (subscribedPartRef.current){socket.emit("unsubscribe_part",{partId:subscribedPartRef.current});subscribedPartRef.current="";}
-      socketRef.current=null;socket.disconnect();
+      socketRef.current=null;
+      if (socket.connected) socket.disconnect();
     };
   },[scheduleRealtimeRefresh,patchPartFromRealtime,processQrSignal]);
 
@@ -872,13 +873,13 @@ const ComponentJourney = () => {
     };
   }, []);
 
-  // ─────────────────────────────────────────────────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   //  RENDER
-  // ─────────────────────────────────────────────────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   return (
     <div style={{display:"flex",flexDirection:"column",gap:20,padding:"4px 2px"}}>
 
-      {/* ── QR Modal ─────────────────────────────────────────────────── */}
+      {/* â”€â”€ QR Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {qrModalPartId && (
         <QrModal
           partId={qrModalPartId}
@@ -887,7 +888,7 @@ const ComponentJourney = () => {
         />
       )}
 
-      {/* ── Reset Confirm Modal ──────────────────────────────────────── */}
+      {/* â”€â”€ Reset Confirm Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {resetConfirm && (
         <div style={{position:"fixed",inset:0,zIndex:1100,display:"flex",alignItems:"center",
           justifyContent:"center",padding:16,background:"rgba(0,0,0,0.75)",backdropFilter:"blur(6px)"}}>
@@ -933,7 +934,7 @@ const ComponentJourney = () => {
                 <Btn variant="danger" onClick={confirmResetStation}
                   disabled={Boolean(resettingStation)} loading={Boolean(resettingStation)}
                   style={{flex:1,justifyContent:"center",padding:"9px 0"}}>
-                  {resettingStation?"Resetting…":"Confirm Reset"}
+                  {resettingStation?"Resettingâ€¦":"Confirm Reset"}
                 </Btn>
               </div>
             </div>
@@ -941,7 +942,7 @@ const ComponentJourney = () => {
         </div>
       )}
 
-      {/* ── Page Header ─────────────────────────────────────────────── */}
+      {/* â”€â”€ Page Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {/* CLEAN: only title + search + 3 KPI cards. QR Feed removed. */}
       <div style={{background:C.bg("card"),border:`1px solid ${C.border()}`,
         borderRadius:16,boxShadow:"var(--shadow)",overflow:"hidden"}}>
@@ -972,7 +973,7 @@ const ComponentJourney = () => {
               </Btn>
               <Btn variant="ghost" onClick={handleRefresh} disabled={refreshing||loading} loading={refreshing}>
                 {!refreshing&&<RefreshCw size={13}/>}
-                {refreshing?"Refreshing…":"Refresh"}
+                {refreshing?"Refreshingâ€¦":"Refresh"}
               </Btn>
             </div>
           </div>
@@ -987,7 +988,7 @@ const ComponentJourney = () => {
               <Search size={14} color={C.txt("muted")} style={{position:"absolute",left:12,
                 top:"50%",transform:"translateY(-50%)"}}/>
               <input value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
-                placeholder="Scan barcode or type part serial number…"
+                placeholder="Scan barcode or type part serial numberâ€¦"
                 style={{width:"100%",height:40,paddingLeft:36,paddingRight:12,
                   background:C.bg("input"),border:`1px solid ${C.border()}`,
                   borderRadius:10,fontSize:13,color:C.txt("primary"),
@@ -1079,7 +1080,7 @@ const ComponentJourney = () => {
             </button>
           </div>
 
-          {/* 3 KPI stat cards — only shown when a part is selected */}
+          {/* 3 KPI stat cards â€” only shown when a part is selected */}
           {stationTimeline.length>0&&(
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
               <StatCard label="Stations Passed"      value={statusSummary.passed}     variant="ok"   icon={CheckCircle2}/>
@@ -1090,10 +1091,10 @@ const ComponentJourney = () => {
         </div>
       </div>
 
-      {/* ── Main content: parts list + timeline ─────────────────────── */}
+      {/* â”€â”€ Main content: parts list + timeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div style={{display:"grid",gridTemplateColumns:"290px 1fr",gap:16,alignItems:"start"}}>
 
-        {/* ── Parts List ────────────────────────────────────────────── */}
+        {/* â”€â”€ Parts List â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
         <div style={{
           background:C.bg("card"),border:`1px solid ${C.border()}`,
           borderRadius:16,boxShadow:"var(--shadow)",
@@ -1138,10 +1139,10 @@ const ComponentJourney = () => {
                   boxShadow: active?`0 0 0 3px ${C.navy(0.08)}`:"none",
                   transition:"all 0.15s ease",
                   animation:"itSlideIn 0.18s ease",
-                  flexShrink: 0,          /* never compress — always full height */
+                  flexShrink: 0,          /* never compress â€” always full height */
                 }}>
 
-                  {/* ── Clickable top area ── */}
+                  {/* â”€â”€ Clickable top area â”€â”€ */}
                   <button
                     onClick={()=>setSelectedPartId(part.partId)}
                     style={{
@@ -1188,7 +1189,7 @@ const ComponentJourney = () => {
                     )}
                   </button>
 
-                  {/* ── Single action button ── */}
+                  {/* â”€â”€ Single action button â”€â”€ */}
                   <div style={{
                     padding:"5px 8px 7px",
                     borderTop:`1px solid ${C.border()}`,
@@ -1211,7 +1212,7 @@ const ComponentJourney = () => {
           </div>
         </div>
 
-        {/* ── Station Timeline ──────────────────────────────────────── */}
+        {/* â”€â”€ Station Timeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
         <div style={{background:C.bg("card"),border:`1px solid ${C.border()}`,
           borderRadius:16,boxShadow:"var(--shadow)",overflow:"hidden"}}>
 
@@ -1386,7 +1387,7 @@ const ComponentJourney = () => {
 
                       {/* Right: QR + Op status + Reset */}
                       <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                        {/* QR status — shown inline on station */}
+                        {/* QR status â€” shown inline on station */}
                         {qrMeta && (
                           <Badge variant={qrMeta.variant} label={qrMeta.label} pulse={qrMeta.variant==="wip"}/>
                         )}
@@ -1398,7 +1399,7 @@ const ComponentJourney = () => {
                           loading={isReset}
                           style={{padding:"4px 10px",fontSize:11}}>
                           {!isReset&&<RotateCcw size={10}/>}
-                          {isReset?"Resetting…":"Reset"}
+                          {isReset?"Resettingâ€¦":"Reset"}
                         </Btn>
                       </div>
                     </div>
@@ -1423,7 +1424,7 @@ const ComponentJourney = () => {
                           {station.attempts.map((att,ai)=>{
                             const am=getStationMeta(att.plcStatus||att.status);
                             return (
-                              <div key={ai} title={`Attempt ${ai+1} · ${formatDate(att.createdAt)}`}
+                              <div key={ai} title={`Attempt ${ai+1} Â· ${formatDate(att.createdAt)}`}
                                 style={{display:"flex",alignItems:"center",gap:5,
                                   padding:"3px 8px",borderRadius:6,fontSize:10,fontWeight:700,
                                   background:STATUS[am.variant]?.bgLight||C.bg("hover"),
@@ -1461,3 +1462,4 @@ const ComponentJourney = () => {
 };
 
 export default ComponentJourney;
+

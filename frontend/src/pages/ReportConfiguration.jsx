@@ -8,7 +8,6 @@ import {
   saveReportConfig,
 } from "../utils/reportConfig";
 import { reportApi, machineApi } from "../api/services";
-import sidebarLogo from "../assets/images/logo.jpg";
 
 const inputCls = "w-full bg-bg-dark border border-border rounded-lg px-3 py-2.5 text-sm text-text-main outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/20 transition-all placeholder:text-text-muted/40";
 
@@ -86,19 +85,6 @@ const ReportConfiguration = () => {
       toast.error("Unable to read logo file");
     } finally {
       if (event.target) event.target.value = "";
-    }
-  };
-
-  const handleUseSidebarLogo = async () => {
-    try {
-      const response = await fetch(sidebarLogo);
-      const blob = await response.blob();
-      const dataUrl = await toDataUrl(blob);
-      updateField("logoUrl", dataUrl);
-      updateField("showLogo", true);
-      toast.success("Sidebar logo applied to reports");
-    } catch {
-      toast.error("Could not load sidebar logo");
     }
   };
 
@@ -219,9 +205,6 @@ const ReportConfiguration = () => {
                   />
                   <button type="button" onClick={() => logoFileInputRef.current?.click()} className="db-secondary-btn">
                     Browse Logo
-                  </button>
-                  <button type="button" onClick={handleUseSidebarLogo} className="db-secondary-btn">
-                    Use Sidebar Logo
                   </button>
                   <button
                     type="button"

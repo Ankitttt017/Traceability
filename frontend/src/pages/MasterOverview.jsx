@@ -68,7 +68,8 @@ const MasterOverview = () => {
       const matchesSearch = m.machineName.toUpperCase().includes(searchTerm.toUpperCase()) || 
                           (m.operationNo || "").toUpperCase().includes(searchTerm.toUpperCase());
       const card = machineMap.get(m.id);
-      const isFault = card?.downtimeRate > 15;
+      const downtimeTimePct = Number(card?.downtimeTimePct ?? card?.downtimeRate ?? 0);
+      const isFault = downtimeTimePct > 15;
       const status = isFault ? "FAULT" : (card?.processedCount > 0 ? "ACTIVE" : "IDLE");
       const matchesStatus = filterStatus === "ALL" || filterStatus === status;
       return matchesSearch && matchesStatus;
@@ -80,7 +81,7 @@ const MasterOverview = () => {
     let active = 0, fault = 0, production = 0, target = 0;
     (report.machineCards || []).forEach(c => {
       if (c.processedCount > 0) active++;
-      if (c.downtimeRate > 15) fault++;
+      if (Number(c.downtimeTimePct ?? c.downtimeRate ?? 0) > 15) fault++;
       production += (c.processedCount || 0);
       target += (c.targetQty || 0);
     });
@@ -174,7 +175,7 @@ const MasterOverview = () => {
                  const p = card?.processedCount || 0;
                  const t = card?.targetQty || 100;
                  const pct = Math.min(100, (p/t)*100).toFixed(0);
-                 const isFault = card?.downtimeRate > 15;
+                 const isFault = Number(card?.downtimeTimePct ?? card?.downtimeRate ?? 0) > 15;
                  const status = isFault ? "FAULT" : (p > 0 ? "ACTIVE" : "IDLE");
 
                  return (

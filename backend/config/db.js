@@ -13,6 +13,18 @@ const dialectOptions = {
   trustServerCertificate: process.env.DB_TRUST_SERVER_CERT !== "false",
   enableArithAbort: true,
 };
+const parsedRequestTimeout = Number(process.env.DB_REQUEST_TIMEOUT_MS);
+if (Number.isFinite(parsedRequestTimeout) && parsedRequestTimeout > 0) {
+  dialectOptions.requestTimeout = parsedRequestTimeout;
+} else {
+  dialectOptions.requestTimeout = 60000;
+}
+const parsedConnectTimeout = Number(process.env.DB_CONNECT_TIMEOUT_MS);
+if (Number.isFinite(parsedConnectTimeout) && parsedConnectTimeout > 0) {
+  dialectOptions.connectTimeout = parsedConnectTimeout;
+} else {
+  dialectOptions.connectTimeout = 60000;
+}
 
 if (instanceName) {
   dialectOptions.instanceName = instanceName;
@@ -23,6 +35,12 @@ const sequelizeConfig = {
   dialect: "mssql",
   dialectOptions: {
     options: dialectOptions,
+  },
+  pool: {
+    max: Number(process.env.DB_POOL_MAX || 20),
+    min: Number(process.env.DB_POOL_MIN || 2),
+    acquire: Number(process.env.DB_POOL_ACQUIRE_MS || 60000),
+    idle: Number(process.env.DB_POOL_IDLE_MS || 10000),
   },
   logging: false,
 };

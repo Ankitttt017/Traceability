@@ -43,6 +43,55 @@ function getMachineIcon(machineName) {
   return machineIcons.DEFAULT;
 }
 
+function isLeakTestNode(node = {}) {
+  const n = String(node.machineName || node.machine_name || "").toLowerCase();
+  // Use OR so naming variants like "Leak-1", "Air Test", "Leak Check"
+  // are still grouped when OP/sequence are the same.
+  return n.includes("leak") || n.includes("test");
+}
+
+function mergeGroupedStatus(nodes = []) {
+  const states = nodes.map((n) => String(n.status || "").toUpperCase());
+  if (states.some((s) => ["FAILED", "NG", "ENDED_NG", "BLOCKED", "INTERLOCKED"].includes(s))) return "FAILED";
+  if (states.some((s) => ["RUNNING", "STARTED", "IN_PROGRESS"].includes(s))) return "RUNNING";
+  if (states.some((s) => ["PASSED", "ENDED_OK", "COMPLETED_OK"].includes(s))) return "PASSED";
+  return states[0] || "IDLE";
+}
+
+function groupLineNodes(nodes = []) {
+  const direct = [];
+  const leakBuckets = new Map();
+  for (const node of nodes) {
+    const station = String(node.stationNo || node.operationNo || "").trim().toUpperCase();
+    // Group leak-test nodes by station only so all parallel leak machines
+    // appear as one process block for the same operation/station.
+    const key = `${station}`;
+    if (isLeakTestNode(node)) {
+      if (!leakBuckets.has(key)) leakBuckets.set(key, []);
+      leakBuckets.get(key).push(node);
+    } else {
+      direct.push(node);
+    }
+  }
+  for (const [key, bucket] of leakBuckets.entries()) {
+    if (!bucket.length) continue;
+    if (bucket.length === 1) {
+      direct.push(bucket[0]);
+      continue;
+    }
+    const base = bucket[0];
+    direct.push({
+      ...base,
+      machineId: `LEAK_GROUP_${key}`,
+      machineName: `${base.machineName || "Leak Test"} (${bucket.length})`,
+      status: mergeGroupedStatus(bucket),
+      groupedMachineCount: bucket.length,
+      groupedMachineNames: bucket.map((x) => x.machineName).filter(Boolean),
+    });
+  }
+  return direct.sort((a, b) => Number(a.sequenceNo || 0) - Number(b.sequenceNo || 0));
+}
+
 function StatusBadge({ status, showIcon = true, size = "sm" }) {
   const normalized = String(status || "IDLE").trim().toUpperCase();
   const style = statusStyle[normalized] || statusStyle.IDLE;
@@ -453,18 +502,41 @@ export default function ProcessFlow() {
   }, [loadFlow]);
 
   useEffect(() => {
-    const socket = io(SOCKET_URL, { path: "/socket.io/", transports: ["websocket", "polling"] });
-    socket.on("dashboard_refresh", () => loadFlow());
-    return () => socket.disconnect();
+    let refreshTimer = null;
+    const socket = io(SOCKET_URL, {
+      path: "/socket.io/",
+      transports: ["polling", "websocket"],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 10000,
+    });
+    socket.on("dashboard_refresh", () => {
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        loadFlow();
+      }, 400);
+    });
+    return () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      socket.off("dashboard_refresh");
+      if (socket.connected) socket.disconnect();
+    };
   }, [loadFlow]);
 
   const visibleLines = useMemo(() => flow.lines || [], [flow.lines]);
+  const preparedLines = useMemo(
+    () => (visibleLines || []).map((line) => ({ ...line, preparedNodes: groupLineNodes(line.nodes || []) })),
+    [visibleLines]
+  );
 
   // Calculate line statistics
   const lineStats = useMemo(() => {
     const stats = {};
-    visibleLines.forEach(line => {
-      const nodes = line.nodes || [];
+    preparedLines.forEach(line => {
+      const nodes = line.preparedNodes || [];
       stats[line.lineName] = {
         totalMachines: nodes.length,
         activeMachines: nodes.filter(n => n.status === "RUNNING").length,
@@ -472,7 +544,7 @@ export default function ProcessFlow() {
       };
     });
     return stats;
-  }, [visibleLines]);
+  }, [preparedLines]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20, paddingBottom: 30 }}>
@@ -651,7 +723,7 @@ export default function ProcessFlow() {
       </div>
 
       {/* Flow Diagram */}
-      {visibleLines.length === 0 ? (
+      {preparedLines.length === 0 ? (
         <div
           style={{
             background: "linear-gradient(135deg, var(--app-bg-card), var(--app-bg-surface))",
@@ -668,7 +740,7 @@ export default function ProcessFlow() {
           <p style={{ fontSize: 12, opacity: 0.6 }}>Select a production line or check machine configurations</p>
         </div>
       ) : (
-        visibleLines.map((line, lineIndex) => (
+        preparedLines.map((line, lineIndex) => (
           <div
             key={line.lineName}
             className="flow-line"
@@ -727,20 +799,20 @@ export default function ProcessFlow() {
                 </div>
 
                 {/* Nodes with arrows */}
-                {(line.nodes || []).map((node, index) => (
+                {(line.preparedNodes || []).map((node, index) => (
                   <div key={node.machineId} style={{ display: "flex", alignItems: "center" }}>
                     <NodeCard
                       node={node}
                       index={index}
                       isFirst={index === 0}
-                      isLast={index === (line.nodes || []).length - 1}
-                      totalNodes={(line.nodes || []).length}
+                      isLast={index === (line.preparedNodes || []).length - 1}
+                      totalNodes={(line.preparedNodes || []).length}
                     />
                     <EnhancedArrowConnector
-                      isLast={index === (line.nodes || []).length - 1}
+                      isLast={index === (line.preparedNodes || []).length - 1}
                       status={node.status}
                       fromNode={node}
-                      toNode={(line.nodes || [])[index + 1]}
+                      toNode={(line.preparedNodes || [])[index + 1]}
                     />
                   </div>
                 ))}
