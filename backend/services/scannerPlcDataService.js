@@ -31,8 +31,23 @@ function normalizeDevice(value) {
 
 function normalizeDataType(value) {
   const type = toText(value, "ASCII").toUpperCase();
-  if (["ASCII", "ALPHANUM", "HEX", "INT16", "UINT16"].includes(type)) return type;
+  if (["ASCII", "ALPHANUM", "HEX", "INT16", "UINT16", "DEC", "BOOL", "BIT", "FLOAT32", "REAL32BIT"].includes(type)) return type;
   return "ASCII";
+}
+
+function toSigned16(value) {
+  const v = Number(value || 0) & 0xffff;
+  return v > 0x7fff ? v - 0x10000 : v;
+}
+
+function toFloat32FromWords(lowWord, highWord) {
+  const low = Number(lowWord || 0) & 0xffff;
+  const high = Number(highWord || 0) & 0xffff;
+  const buf = Buffer.allocUnsafe(4);
+  // Mitsubishi 16-bit words: low-word first, high-word second.
+  buf.writeUInt16LE(low, 0);
+  buf.writeUInt16LE(high, 2);
+  return buf.readFloatLE(0);
 }
 
 function decodeRegisterWords(words, dataType) {
@@ -44,7 +59,25 @@ function decodeRegisterWords(words, dataType) {
   }
 
   if (mode === "INT16" || mode === "UINT16") {
-    return words.map((value) => String(Number(value || 0))).join("");
+    if (words.length === 1) {
+      return mode === "INT16" ? String(toSigned16(words[0])) : String(Number(words[0] || 0));
+    }
+    return words.map((value) => String(mode === "INT16" ? toSigned16(value) : Number(value || 0))).join(",");
+  }
+
+  if (mode === "DEC") {
+    return String(Number(words[0] || 0));
+  }
+
+  if (mode === "BOOL" || mode === "BIT") {
+    return Number(words[0] || 0) > 0 ? "1" : "0";
+  }
+
+  if (mode === "FLOAT32" || mode === "REAL32BIT") {
+    if (words.length < 2) return "";
+    const f = toFloat32FromWords(words[0], words[1]);
+    if (!Number.isFinite(f)) return "";
+    return String(f);
   }
 
   // ASCII decode: each 16-bit register contains two ASCII bytes (low byte first, then high byte).
