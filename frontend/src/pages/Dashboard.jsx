@@ -403,6 +403,22 @@ const TooltipStyle = {
   allowEscapeViewBox:{ x: true, y: true },
 };
 
+const getPresetRange = (preset) => {
+  const now = new Date();
+  const end = new Date(now);
+  const start = new Date(now);
+  if (preset === "today") {
+    start.setHours(0, 0, 0, 0);
+  } else if (preset === "last7") {
+    start.setDate(start.getDate() - 7);
+  } else if (preset === "last30") {
+    start.setMonth(start.getMonth() - 1);
+  } else {
+    return { start: "", end: "" };
+  }
+  return { start: start.toISOString(), end: end.toISOString() };
+};
+
 // ==============================================================================
 //  DASHBOARD
 // ==============================================================================
@@ -419,9 +435,8 @@ const Dashboard = () => {
   const [plcMap,       setPlcMap]       = useState({});
   const [nowMs,        setNowMs]        = useState(Date.now());
   const [filters,      setFilters]      = useState({
-    dateFrom:"", dateTo:"", machineId:"", lineName:"", partId:"", status:"", shiftCode:"",
+    dateFrom:"", dateTo:"", datePreset:"", machineId:"", lineName:"", partId:"", status:"", shiftCode:"",
   });
-  const [dateDraft, setDateDraft] = useState({ from: "", to: "" });
   const [chartModeHourly, setChartModeHourly] = useState("line");
   const [chartModeShift, setChartModeShift] = useState("bar");
   const [chartModeRejectTrend, setChartModeRejectTrend] = useState("area");
@@ -430,15 +445,20 @@ const Dashboard = () => {
   const refreshTimerRef = useRef(null);
   const lastRefreshAtRef = useRef(0);
 
-  const query = useMemo(()=>({
-    dateFrom:   localDateTimeToIso(filters.dateFrom),
-    dateTo:     localDateTimeToIso(filters.dateTo),
+  const query = useMemo(() => {
+    const presetRange = getPresetRange(filters.datePreset);
+    const dateFrom = presetRange.start || localDateTimeToIso(filters.dateFrom);
+    const dateTo = presetRange.end || localDateTimeToIso(filters.dateTo);
+    return {
+    dateFrom,
+    dateTo,
     machineId:  filters.machineId  || undefined,
     lineName:   filters.lineName   || undefined,
     partId:     filters.partId     || undefined,
     status:     filters.status     || undefined,
     shiftCode:  filters.shiftCode  || undefined,
-  }),[filters]);
+  };
+  },[filters]);
 
   const loadData = useCallback(async()=>{
     if (refreshInFlightRef.current) {
@@ -540,20 +560,44 @@ const Dashboard = () => {
   // Shift bar data
   const shiftData = useMemo(() => {
     const grouped = Array.isArray(report.shiftWiseMetrics) ? report.shiftWiseMetrics : [];
+    const shiftOrder = ["SHIFT_A", "SHIFT_B", "SHIFT_C"];
+    const shiftLabel = {
+      SHIFT_A: "Shift A",
+      SHIFT_B: "Shift B",
+      SHIFT_C: "Shift C",
+    };
     if (grouped.length > 0) {
-      return grouped.map((row) => ({
-        code: row.shiftCode || "UNASSIGNED",
-        name: String(row.shiftCode || "UNASSIGNED").replace(/_/g, " "),
-        actual: Number(row.actualProduction || 0),
-        target: Number(row.targetProduction || 0),
-        oee: Number(row.oee || 0),
-        oa: Number(row.oa || 0),
+      const normalizedMap = grouped.reduce((acc, row) => {
+        const code = String(row.shiftCode || "UNASSIGNED").toUpperCase();
+        if (!acc[code]) {
+          acc[code] = { code, actual: 0, target: 0, oee: 0, oa: 0, count: 0 };
+        }
+        acc[code].actual += Number(row.actualProduction || 0);
+        acc[code].target += Number(row.targetProduction || 0);
+        acc[code].oee += Number(row.oee || 0);
+        acc[code].oa += Number(row.oa || 0);
+        acc[code].count += 1;
+        return acc;
+      }, {});
+      return shiftOrder.map((code) => ({
+        code,
+        name: shiftLabel[code],
+        actual: Number(normalizedMap[code]?.actual || 0),
+        target: Number(normalizedMap[code]?.target || 0),
+        oee: Number((normalizedMap[code]?.oee || 0) / Math.max(1, normalizedMap[code]?.count || 0)),
+        oa: Number((normalizedMap[code]?.oa || 0) / Math.max(1, normalizedMap[code]?.count || 0)),
       }));
     }
-    return Object.entries(report.shiftProduction || {}).map(([k, v]) => ({
-      code: k,
-      name: k.replace(/_/g, " "),
-      actual: Number((v?.ok || 0) + (v?.ng || 0)),
+    const fallbackMap = Object.entries(report.shiftProduction || {}).reduce((acc, [k, v]) => {
+      acc[String(k).toUpperCase()] = {
+        actual: Number((v?.ok || 0) + (v?.ng || 0)),
+      };
+      return acc;
+    }, {});
+    return shiftOrder.map((code) => ({
+      code,
+      name: shiftLabel[code],
+      actual: Number(fallbackMap[code]?.actual || 0),
       target: 0,
       oee: 0,
       oa: 0,
@@ -730,8 +774,8 @@ const Dashboard = () => {
               <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>From Date/Time</label>
               <input
                 type="datetime-local"
-                value={dateDraft.from}
-                onChange={e => setDateDraft(prev => ({ ...prev, from: e.target.value }))}
+                value={filters.dateFrom}
+                onChange={e => setFilters(prev => ({ ...prev, dateFrom: e.target.value, datePreset: "" }))}
                 style={{
                   height:36,padding:"0 12px",
                   background:C.bg("input"),
@@ -746,8 +790,8 @@ const Dashboard = () => {
               <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>To Date/Time</label>
               <input
                 type="datetime-local"
-                value={dateDraft.to}
-                onChange={e => setDateDraft(prev => ({ ...prev, to: e.target.value }))}
+                value={filters.dateTo}
+                onChange={e => setFilters(prev => ({ ...prev, dateTo: e.target.value, datePreset: "" }))}
                 style={{
                   height:36,padding:"0 12px",
                   background:C.bg("input"),
@@ -758,17 +802,26 @@ const Dashboard = () => {
                 }}
               />
             </div>
-            <div style={{display:"flex", alignItems:"flex-end"}}>
-              <button
-                onClick={() => setFilters(prev => ({ ...prev, dateFrom: dateDraft.from, dateTo: dateDraft.to }))}
+            <div style={{display:"flex", flexDirection:"column", gap:5}}>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Date Range</label>
+              <select
+                value={filters.datePreset}
+                onChange={e=>setFilters(prev=>({...prev,datePreset:e.target.value, dateFrom:"", dateTo:""}))}
                 style={{
-                  height:36,width:"100%",borderRadius:8,
-                  background:C.ok(0.12),border:`1px solid ${C.ok(0.35)}`,
-                  color:C.ok(),fontSize:12,fontWeight:800,cursor:"pointer",
-                }}
-              >
-                Apply Date Filter
-              </button>
+                  height:36,padding:"0 12px",
+                  background:C.bg("input"),
+                  border:`1px solid ${C.bdr()}`,
+                  borderRadius:8,fontSize:12,
+                  color:C.txt("pri"),outline:"none",
+                  fontFamily:"var(--font-db)",
+                  cursor:"pointer",
+                  appearance:"auto",
+                }}>
+               
+                <option value="today">Today</option>
+                <option value="last7">Last 7 Days</option>
+                <option value="last30">Last 1 Month</option>
+              </select>
             </div>
 
             <div style={{display:"flex", flexDirection:"column", gap:5}}>
@@ -912,8 +965,9 @@ const Dashboard = () => {
               Active Filters
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {filters.dateFrom && <Badge variant="idle" label={`From: ${new Date(filters.dateFrom).toLocaleString()}`} />}
-              {filters.dateTo && <Badge variant="idle" label={`To: ${new Date(filters.dateTo).toLocaleString()}`} />}
+              {filters.datePreset && <Badge variant="idle" label={`Range: ${filters.datePreset === "today" ? "Today" : filters.datePreset === "last7" ? "Last 7 Days" : "Last 1 Month"}`} />}
+              {filters.dateFrom && !filters.datePreset && <Badge variant="idle" label={`From: ${new Date(filters.dateFrom).toLocaleString()}`} />}
+              {filters.dateTo && !filters.datePreset && <Badge variant="idle" label={`To: ${new Date(filters.dateTo).toLocaleString()}`} />}
               {filters.lineName && <Badge variant="idle" label={`Line: ${filters.lineName}`} />}
               {filters.machineId && <Badge variant="idle" label={`Machine: ${machines.find(m => String(m.id) === String(filters.machineId))?.machineName || filters.machineId}`} />}
               {filters.partId && <Badge variant="idle" label={`Part: ${filters.partId}`} />}
@@ -923,8 +977,7 @@ const Dashboard = () => {
           </div>
           <button 
             onClick={() => {
-              setFilters({dateFrom:"",dateTo:"",machineId:"",lineName:"",partId:"",status:"",shiftCode:""});
-              setDateDraft({ from: "", to: "" });
+              setFilters({dateFrom:"",dateTo:"",datePreset:"",machineId:"",lineName:"",partId:"",status:"",shiftCode:""});
             }}
             style={{
               background: "transparent",
@@ -951,7 +1004,7 @@ const Dashboard = () => {
         <KpiCard label="Completed (Pass)" value={summary.parts.completed}          icon={CheckCircle2} accent={C.ok()}     sub="Total OK this period"/>
         <KpiCard label="Failed (NG)"      value={summary.quality?.ng||0}           icon={XCircle}      accent={C.ng()}     sub="Requires attention"/>
         <KpiCard label="Interlocked"      value={summary.parts.interlocked||0}     icon={AlertTriangle}accent={C.amber()}  sub="PLC blocked"/>
-        <KpiCard label="Pass Rate"        value={`${efficiency}%`}                 icon={TrendingUp}   accent={efficiency>=85?C.ok():efficiency>=60?C.amber():C.ng()} sub="Overall quality rate"/>
+        <KpiCard label="Quality Rate"        value={`${efficiency}%`}                 icon={TrendingUp}   accent={efficiency>=85?C.ok():efficiency>=60?C.amber():C.ng()} sub="Overall quality rate"/>
       </div>
 
       {/* —— Tabs ————————————————————————————————————————————————————————————————————— */}
@@ -1014,7 +1067,7 @@ const Dashboard = () => {
                     flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
                     <p style={{fontSize:22,fontWeight:800,color:C.txt("pri"),
                       fontFamily:"'DM Mono',monospace",lineHeight:1}}>{efficiency}%</p>
-                    <p style={{fontSize:10,color:C.txt("muted"),marginTop:2}}>Pass Rate</p>
+                    <p style={{fontSize:10,color:C.txt("muted"),marginTop:2}}>Quality Rate</p>
                   </div>
                 </div>
               </div>
@@ -1098,26 +1151,6 @@ const Dashboard = () => {
                   </div>
                 ))}
               </div>
-            </div>
-          </div>
-
-          <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
-            borderRadius:14,padding:20,boxShadow:SHADOW}}>
-            <SectionHead title="KPI Logic Snapshot"/>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10}}>
-              {[
-                { k:"Production Day", v:"06:00 to next day 06:00" },
-                { k:"Shift Mapping", v:"A 06:00-14:00, B 14:00-22:00, C 22:00-06:00" },
-                { k:"Target", v:"Cycle+Loading based dynamic target (fallback daily target)" },
-                { k:"OEE", v:"Availability, Performance, Quality combined" },
-                { k:"OA", v:"Operating effectiveness shown separately" },
-                { k:"Downtime", v:"Duration based downtime minutes (common method)" },
-              ].map((item) => (
-                <div key={item.k} style={{background:C.bg("surf"),border:`1px solid ${C.bdr()}`,borderRadius:10,padding:"10px 12px"}}>
-                  <div style={{fontSize:10,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.06em"}}>{item.k}</div>
-                  <div style={{fontSize:12,fontWeight:700,color:C.txt("pri"),marginTop:5,lineHeight:1.4}}>{item.v}</div>
-                </div>
-              ))}
             </div>
           </div>
 

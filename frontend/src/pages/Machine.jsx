@@ -24,7 +24,21 @@ const PROTOCOLS = [
 
 const DEVICES = ["D", "W", "R", "M", "ZR", "X", "Y"];
 
-const DATA_TYPES = ["INT16", "UINT16", "INT32", "UINT32", "FLOAT32", "BOOL", "STRING"];
+const DATA_TYPES = [
+  "ASCII",
+  "ALPHANUM",
+  "HEX",
+  "INT16",
+  "UINT16",
+  "DEC",
+  "BIT",
+  "BOOL",
+  "FLOAT32",
+  "REAL32BIT",
+  "INT32",
+  "UINT32",
+  "STRING",
+];
 
 const MACHINE_TYPES = [
   { value: "HPDC",    label: "HPDC / Die Cast Machine" },
