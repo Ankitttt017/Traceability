@@ -31,7 +31,7 @@ function normalizeDevice(value) {
 
 function normalizeDataType(value) {
   const type = toText(value, "ASCII").toUpperCase();
-  if (["ASCII", "ALPHANUM", "HEX", "INT16", "UINT16", "DEC", "BOOL", "BIT", "FLOAT32", "REAL32BIT"].includes(type)) return type;
+  if (["ASCII", "ALPHANUM", "HEX", "INT16", "UINT16", "DEC", "BOOL", "BIT", "FLOAT32", "REAL32BIT", "INT32", "UINT32", "STRING"].includes(type)) return type;
   return "ASCII";
 }
 
@@ -78,6 +78,29 @@ function decodeRegisterWords(words, dataType) {
     const f = toFloat32FromWords(words[0], words[1]);
     if (!Number.isFinite(f)) return "";
     return String(f);
+  }
+
+  if (mode === "INT32" || mode === "UINT32") {
+    const vals = [];
+    for (let i = 0; i + 1 < words.length; i += 2) {
+      const low = Number(words[i] || 0) & 0xffff;
+      const high = Number(words[i + 1] || 0) & 0xffff;
+      const combined = (high << 16) | low;
+      if (mode === "INT32") {
+        vals.push((combined >> 0).toString());
+      } else {
+        vals.push((combined >>> 0).toString());
+      }
+    }
+    return vals.join(",");
+  }
+
+  if (mode === "STRING") {
+    return words
+      .map((value) => String.fromCharCode(Number(value || 0) & 0xff))
+      .join("")
+      .replace(/\0/g, "")
+      .trim();
   }
 
   // ASCII decode: each 16-bit register contains two ASCII bytes (low byte first, then high byte).
@@ -146,6 +169,11 @@ async function readPartIdFromScannerPlc(configInput = {}) {
   const start = config.plcStartRegister;
   const end = Math.max(start, Number(config.plcEndRegister ?? start));
   const count = Math.min(Math.max(1, end - start + 1), 64);
+  const source = String(configInput.__configSource || "unknown");
+  const requestSource = String(configInput.__requestSource || "unknown");
+  console.log(
+    `[PLC_EFFECTIVE][scanner-read] source=${source} requestSource=${requestSource} machineId=${configInput.mapped_machine_id || configInput.mappedMachineId || "-"} ip=${config.plcIp} port=${config.plcPort} protocol=${config.plcProtocol} device=${config.plcDevice} start=${start} end=${end} length=${count} frameMode=${config.plcFrameMode} dataType=${config.plcDataType} timeoutMs=${config.plcTimeoutMs} retryCount=${config.plcReadRetryCount}`
+  );
   const registers = Array.from({ length: count }, (_, index) => start + index);
   let values = {};
   let errors = [];
@@ -181,6 +209,9 @@ async function readPartIdFromScannerPlc(configInput = {}) {
       break;
     } catch (error) {
       lastError = error;
+      console.warn(
+        `[PLC_READ][scanner-read] fail attempt=${attempt} source=${source} requestSource=${requestSource} error=${String(error?.message || error)}`
+      );
       if (attempt >= attempts || !isRetryableReadError(error)) {
         throw error;
       }
@@ -217,6 +248,22 @@ async function readPartIdFromScannerPlc(configInput = {}) {
       protocol: config.plcProtocol,
       timeoutMs: config.plcTimeoutMs,
       retryCount: config.plcReadRetryCount,
+    },
+    effectiveConfig: {
+      machineId: configInput.mapped_machine_id || configInput.mappedMachineId || null,
+      ip: config.plcIp,
+      port: config.plcPort,
+      protocol: config.plcProtocol,
+      device: config.plcDevice,
+      startRegister: start,
+      endRegister: end,
+      blockLength: count,
+      frameMode: config.plcFrameMode,
+      dataType: config.plcDataType,
+      timeoutMs: config.plcTimeoutMs,
+      retryCount: config.plcReadRetryCount,
+      requestSource,
+      configSource: source,
     },
   };
 }

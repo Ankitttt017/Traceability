@@ -113,6 +113,44 @@ function validateScannerPayload(payload) {
   return null;
 }
 
+async function resolveScannerReadConfig(payload = {}) {
+  const merged = { ...payload };
+  const machineId = Number(payload.mapped_machine_id || payload.mappedMachineId || 0);
+  if (!machineId) return merged;
+  const machine = await Machine.findByPk(machineId);
+  if (!machine) {
+    merged.__configSource = "scanner-page-config";
+    return merged;
+  }
+  const m = machine.get({ plain: true });
+  const sourceParts = [];
+  sourceParts.push("scanner-page-config");
+  merged.plc_ip = merged.plc_ip || m.plc_ip || m.machine_ip || null;
+  if (!payload.plc_ip && (m.plc_ip || m.machine_ip)) sourceParts.push("database-machine-config:ip");
+  merged.plc_port = merged.plc_port || m.plc_port || null;
+  if (!payload.plc_port && m.plc_port) sourceParts.push("database-machine-config:port");
+  merged.plc_protocol = merged.plc_protocol || m.plc_protocol || "MODBUS_TCP";
+  if (!payload.plc_protocol && m.plc_protocol) sourceParts.push("database-machine-config:protocol");
+  merged.plc_unit_id = merged.plc_unit_id || m.plc_unit_id || 1;
+  if (!payload.plc_unit_id && m.plc_unit_id) sourceParts.push("database-machine-config:unitId");
+  merged.plc_device = merged.plc_device || "D";
+  if (!payload.plc_device) sourceParts.push("fallback/default-config:device");
+  merged.plc_timeout_ms = merged.plc_timeout_ms || m.plc_test_timeout_ms || 12000;
+  if (!payload.plc_timeout_ms && (m.plc_test_timeout_ms || 12000)) sourceParts.push("database-machine-config:timeout");
+  merged.plc_read_retry_count = merged.plc_read_retry_count || m.plc_test_retry_count || 3;
+  if (!payload.plc_read_retry_count && (m.plc_test_retry_count || 3)) sourceParts.push("database-machine-config:retry");
+  if (merged.plc_start_register === null || merged.plc_start_register === undefined) {
+    merged.plc_start_register = m.plc_part_register ?? m.plc_start_register ?? null;
+    sourceParts.push("database-machine-config:startRegister");
+  }
+  if (merged.plc_end_register === null || merged.plc_end_register === undefined) {
+    merged.plc_end_register = merged.plc_start_register;
+    sourceParts.push("fallback/default-config:endRegister");
+  }
+  merged.__configSource = sourceParts.join("|");
+  return merged;
+}
+
 function toConnectionResponse(connection) {
   if (!connection) {
     return {
@@ -153,6 +191,12 @@ function mergeConnectionWithHealth(connection, health) {
 }
 
 function handleError(error, res) {
+  const message = String(error?.message || "");
+  if (/timeout|plc packet timeout|connect timeout|econnrefused|ehostunreach|enetunreach/i.test(message)) {
+    return res.status(504).json({
+      error: `Scanner/PLC read timeout: ${message}`,
+    });
+  }
   if (error.name === "SequelizeUniqueConstraintError") {
     return res.status(409).json({
       error: "Scanner configuration already exists",
@@ -321,7 +365,8 @@ exports.testScannerConnection = async (req, res) => {
 
 exports.testScannerRead = async (req, res) => {
   try {
-    const payload = toPayload(req.body);
+    let payload = toPayload(req.body);
+    payload = await resolveScannerReadConfig(payload);
     const validationError = validateScannerPayload(payload);
     if (validationError) {
       return res.status(400).json({ error: validationError });
@@ -336,17 +381,27 @@ exports.testScannerRead = async (req, res) => {
       });
     }
 
+    payload.__requestSource = "scanner-page";
     const read = await readPartIdFromScannerPlc(payload);
+    const partIdText = String(read.partId || "").trim();
+    const waitingForPartId = !partIdText || /^0+$/.test(partIdText);
+    const hasLiveData = Object.keys(read.rawValues || {}).length > 0;
     return res.json({
       success: true,
       scannerMode: mode,
-      partIdPreview: read.partId || null,
+      partIdPreview: partIdText || null,
+      waitingForPartId,
+      hasLiveData,
       read,
-      message: read.partId
-        ? "PLC read success. Part ID decoded."
-        : "PLC read success but decoded part ID is empty.",
+      message: waitingForPartId
+        ? "PLC is live. Waiting for non-zero part ID."
+        : "PLC read success. Part ID decoded.",
     });
   } catch (error) {
+    const message = String(error?.message || "");
+    if (/timeout|plc packet timeout|connect timeout|econnrefused|ehostunreach|enetunreach/i.test(message)) {
+      return res.status(504).json({ error: "PLC read timeout. Please verify scanner PLC mapping and try again." });
+    }
     return res.status(500).json({ error: error.message });
   }
 };

@@ -1519,13 +1519,64 @@ const IoMonitor = () => {
       {activeTab==="data" && (
         <div style={{display:"flex",flexDirection:"column",gap:14, animation:"ioFadeIn .3s ease"}}>
           <SCard title="Machine Data Registers" subtitle="Numeric Process Data">
-            {(!selectedMachine?.plcSignalMap || selectedMachine.plcSignalMap.length === 0) ? (
+            {(() => {
+              const rangeRows = Array.isArray(selectedMachine?.plcConfig?.dataRegisterRanges)
+                ? selectedMachine.plcConfig.dataRegisterRanges
+                : [];
+              const signalRows = Array.isArray(selectedMachine?.plcSignalMap)
+                ? selectedMachine.plcSignalMap
+                : [];
+              const mergedRows = rangeRows.length > 0
+                ? rangeRows.map((r, idx) => ({
+                    id: r.id || `range-${idx}`,
+                    register: toIntOrNull(r.startReg),
+                    endRegister: toIntOrNull(r.endReg) ?? toIntOrNull(r.startReg),
+                    count: Math.max(1, toIntOrNull(r.count) || ((toIntOrNull(r.endReg) ?? toIntOrNull(r.startReg) ?? 0) - (toIntOrNull(r.startReg) ?? 0) + 1)),
+                    device: String(r.device || selectedMachine?.plcSlmpDevice || "D").toUpperCase(),
+                    label: r.name || `Range ${idx + 1}`,
+                    unit: r.unit || "",
+                    meaning: r.purpose || r.meaning || "",
+                    dataType: r.dataType || "",
+                  }))
+                : signalRows.map((r, idx) => ({
+                    id: r.id || `signal-${idx}`,
+                    register: toIntOrNull(r.register),
+                    endRegister: toIntOrNull(r.register),
+                    count: 1,
+                    device: String(r.device || selectedMachine?.plcSlmpDevice || "D").toUpperCase(),
+                    label: r.label || r.signal || `Signal ${idx + 1}`,
+                    unit: r.unit || "",
+                    meaning: r.meaning || r.description || "",
+                    dataType: r.dataType || "",
+                  }));
+
+              if (mergedRows.length === 0) return (
               <div style={{padding:"28px 20px",textAlign:"center", color:C.txt("muted")}}>
                 <TableProperties size={24} style={{margin:"0 auto 10px", opacity:0.6}}/>
                 <p style={{fontSize:12}}>No data registers mapped for this machine.</p>
                 <p style={{fontSize:11, marginTop:4}}>Configure 'Data Register Ranges' in Machine Settings.</p>
               </div>
-            ) : (
+              );
+
+              const scannerContext = snapshot?.scanner || null;
+              return (
+              <>
+              {scannerContext && String(scannerContext.scannerMode || "").toUpperCase() === "PLC_REGISTER" && (
+                <div style={{ marginBottom: 10, padding: "8px 10px", borderRadius: 8, background: C.bg("surf"), border: `1px solid ${C.bdr()}` }}>
+                  <p style={{ margin: 0, fontSize: 10, color: C.txt("muted"), fontWeight: 700 }}>
+                    Scanner PLC Mode: <span style={{ color: C.txt("pri"), fontWeight: 800 }}>{scannerContext.scannerMode}</span>
+                    {" · "}IP: <span style={{ color: C.steel(), fontFamily: "'DM Mono',monospace" }}>{scannerContext.scannerIp || "—"}</span>
+                  </p>
+                  <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 999, background: C.bg("base"), border: `1px solid ${C.bdr()}`, color: C.txt("muted") }}>
+                      Live Source: PLC Register
+                    </span>
+                    <span style={{ fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 999, background: C.bg("base"), border: `1px solid ${C.bdr()}`, color: snapshot?.plcConnection?.connected ? C.ok() : C.danger() }}>
+                      {snapshot?.plcConnection?.connected ? "PLC Online" : "PLC Offline"}
+                    </span>
+                  </div>
+                </div>
+              )}
               <div style={{overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                   <thead>
@@ -1536,10 +1587,26 @@ const IoMonitor = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {selectedMachine.plcSignalMap.map((reg, i)=>{
-                      const rKey = `${String(reg.device||selectedMachine.plcSlmpDevice||"D").toUpperCase()}${reg.register}`;
-                      // Look up the live value from snapshot or registers
-                      const liveVal = snapshot?.registers?.[reg.register] !== undefined ? snapshot.registers[reg.register] : "—";
+                    {mergedRows.map((reg, i)=>{
+                      const deviceCode = String(reg.device||selectedMachine.plcSlmpDevice||"D").toUpperCase();
+                      const start = Number(reg.register);
+                      const end = Number(reg.endRegister ?? reg.register);
+                      const rKey = Number.isFinite(start) && Number.isFinite(end) && end > start
+                        ? `${deviceCode}${start}-${end}`
+                        : `${deviceCode}${reg.register}`;
+                      // ioSnapshot payload provides live values under rows[].currentValue
+                      const registerMap = snapshot?.registerValues && typeof snapshot.registerValues === "object"
+                        ? snapshot.registerValues
+                        : {};
+                      const collected = [];
+                      if (Number.isFinite(start) && Number.isFinite(end)) {
+                        for (let addr = start; addr <= end; addr += 1) {
+                          if (Object.prototype.hasOwnProperty.call(registerMap, addr)) {
+                            collected.push(registerMap[addr]);
+                          }
+                        }
+                      }
+                      const liveVal = collected.length <= 1 ? (collected[0] ?? "—") : JSON.stringify(collected);
                       return (
                         <tr key={i} style={{borderBottom:`1px solid ${C.bdr()}`,background:i%2===1?C.bg("surf"):"transparent"}}>
                           <td style={{padding:"9px 12px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.steel()}}>{rKey}</td>
@@ -1553,7 +1620,9 @@ const IoMonitor = () => {
                   </tbody>
                 </table>
               </div>
-            )}
+              </>
+              );
+            })()}
           </SCard>
         </div>
       )}
@@ -1753,3 +1822,4 @@ const IoMonitor = () => {
 };
 
 export default IoMonitor;
+

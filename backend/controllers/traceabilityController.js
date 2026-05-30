@@ -11,6 +11,8 @@ const QrFormatRule = require("../models/QrFormatRule");
 const PartCodeMapping = require("../models/PartCodeMapping");
 const MachineRuntimeState = require("../models/MachineRuntimeState");
 const { saveScan } = require("../services/scanService");
+const { captureLeakReadingsForScan } = require("../services/leakTestCaptureService");
+const LeakTestReading = require("../models/LeakTestReading");
 const { getPlcCircuitSnapshot } = require("../services/plcCommunicationService");
 const plcHandshakeEngine = require("../services/plcHandshakeEngine");
 const scannerConnectionManager = require("../services/scannerConnectionManager");
@@ -86,6 +88,30 @@ async function resolveMappedPartId(inputCode) {
 
 function getMachineOperationStage(machine) {
   return normalizeStation(machine?.operation_no);
+}
+
+function parseMachineDataRegisterRanges(machine) {
+  try {
+    const parsed = machine?.plc_registers ? JSON.parse(machine.plc_registers) : {};
+    const ranges = Array.isArray(parsed?.dataRegisterRanges) ? parsed.dataRegisterRanges : [];
+    return ranges
+      .map((row) => {
+        const start = toIntegerOrNull(row?.startReg);
+        const end = toIntegerOrNull(row?.endReg);
+        if (start === null) return null;
+        const from = start;
+        const to = end === null ? start : end;
+        const min = Math.min(from, to);
+        const max = Math.max(from, to);
+        const device = String(row?.device || parsed?.slmpDevice || machine?.plc_slmp_device || "D")
+          .trim()
+          .toUpperCase();
+        return { min, max, device: device || "D" };
+      })
+      .filter(Boolean);
+  } catch (_error) {
+    return [];
+  }
 }
 
 function getIoSnapshotCacheKey(machineId, plcIp) {
@@ -1960,17 +1986,31 @@ exports.getIoSnapshot = async (req, res) => {
       const plcUnitId = toIntegerOrNull(machine.plc_unit_id) || 1;
       const timeoutMs = toIntegerOrNull(machine.plc_test_timeout_ms) || 2000;
       const signalMapEntries = parseMachineSignalMap(machine);
-      const registerList = signalMapEntries
-        .map((entry) => toIntegerOrNull(entry.register))
-        .filter((entry, index, array) => entry !== null && array.indexOf(entry) === index);
+      const rangeEntries = parseMachineDataRegisterRanges(machine);
+      const registerSpecsMap = new Map();
+      for (const entry of signalMapEntries) {
+        const reg = toIntegerOrNull(entry.register);
+        if (reg === null) continue;
+        const dev = String(entry?.device || machine?.plc_slmp_device || "D").trim().toUpperCase() || "D";
+        const key = `${dev}:${reg}`;
+        if (!registerSpecsMap.has(key)) {
+          registerSpecsMap.set(key, { register: reg, device: dev });
+        }
+      }
+      for (const range of rangeEntries) {
+        for (let reg = range.min; reg <= range.max; reg += 1) {
+          const dev = String(range.device || machine?.plc_slmp_device || "D").trim().toUpperCase() || "D";
+          const key = `${dev}:${reg}`;
+          if (!registerSpecsMap.has(key)) {
+            registerSpecsMap.set(key, { register: reg, device: dev });
+          }
+        }
+      }
+      const registerList = Array.from(
+        new Set(Array.from(registerSpecsMap.values()).map((spec) => spec.register))
+      );
       const slmpDefaultDevice = String(machine.plc_slmp_device || "D").trim().toUpperCase() || "D";
-      const slmpRegisterSpecs = registerList.map((registerNo) => {
-        const mapped = signalMapEntries.find((entry) => toIntegerOrNull(entry.register) === registerNo);
-        return {
-          register: registerNo,
-          device: String(mapped?.device || slmpDefaultDevice).trim().toUpperCase() || slmpDefaultDevice,
-        };
-      });
+      const slmpRegisterSpecs = Array.from(registerSpecsMap.values()).sort((a, b) => a.register - b.register);
 
       const errors = [];
       const registerValues = {};
@@ -2157,6 +2197,7 @@ exports.getIoSnapshot = async (req, res) => {
           }
           : null,
         rows,
+        registerValues,
         errors,
         monitorPolicy: {
           minIntervalMs: IO_SNAPSHOT_MIN_INTERVAL_MS,
@@ -2701,11 +2742,32 @@ exports.processScan = async (req, res) => {
 
     const machine = await resolveMachineFromRequest(req.body, req);
     if (!machine) {
+      emitOperatorPopup("ERROR", {
+        partId: String(partId || "").trim(),
+        stationNo: normalizeStation(stationNo || operation),
+        machineId: req.body?.machineId || null,
+        status: "BLOCKED",
+        plcStatus: "BLOCKED",
+        qrResult: "FAIL",
+        reason: "MACHINE_NOT_FOUND",
+        message: "Machine not found for scanner/IP mapping",
+      });
       return res.status(404).json({ error: "Machine not found for scanner/IP mapping" });
     }
 
     const bound = await enforceScannerProtocolBinding({ machine, body: req.body, req });
     if (!bound.ok) {
+      emitOperatorPopup("ERROR", {
+        partId: String(partId || "").trim(),
+        stationNo: normalizeStation(stationNo || operation) || getMachineOperationStage(machine),
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "BLOCKED",
+        plcStatus: "BLOCKED",
+        qrResult: "FAIL",
+        reason: "SCANNER_BINDING_FAILED",
+        message: bound.error,
+      });
       return res.status(bound.status).json({ error: bound.error });
     }
     const roleGuard = await enforceStartQrScannerRoleIfConfigured({ machine, sourceIp: bound.sourceIp });
@@ -2714,14 +2776,29 @@ exports.processScan = async (req, res) => {
     }
 
     let scannerRead = null;
-    if (!normalizedPartId) {
-      const scanner = bound.scanner;
-      const mode = String(scanner?.scanner_mode || "").trim().toUpperCase();
-      if (scanner && mode === "PLC_REGISTER") {
-        try {
-          scannerRead = await readPartIdFromScannerPlc(scanner.get({ plain: true }));
-          normalizedPartId = String(scannerRead.partId || "").trim();
-        } catch (error) {
+    const scanner = bound.scanner;
+    const mode = String(scanner?.scanner_mode || "").trim().toUpperCase();
+    if (scanner && mode === "PLC_REGISTER") {
+      try {
+        scannerRead = await readPartIdFromScannerPlc(scanner.get({ plain: true }));
+        const livePartId = String(scannerRead.partId || "").trim();
+        if (livePartId) {
+          normalizedPartId = livePartId;
+        }
+      } catch (error) {
+        emitOperatorPopup("ERROR", {
+          partId: String(partId || "").trim(),
+          stationNo: getMachineOperationStage(machine) || normalizeStation(stationNo || operation),
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          status: "BLOCKED",
+          plcStatus: "COMM",
+          qrResult: "WAIT",
+          reason: "PLC_SCANNER_READ_FAILED",
+          message: `PLC scanner read failed: ${error.message}`,
+          scannerMode: "PLC_REGISTER",
+        });
+        if (!normalizedPartId) {
           return res.status(400).json({
             error: `PLC scanner read failed: ${error.message}`,
           });
@@ -2730,6 +2807,18 @@ exports.processScan = async (req, res) => {
     }
 
     if (!normalizedPartId) {
+      emitOperatorPopup("ERROR", {
+        partId: "",
+        stationNo: getMachineOperationStage(machine) || normalizeStation(stationNo || operation),
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "BLOCKED",
+        plcStatus: "WAIT",
+        qrResult: "WAIT",
+        reason: "PART_ID_MISSING",
+        message: "Part ID not available from scanner/PLC. Waiting for next part.",
+        scannerMode: mode || null,
+      });
       return res.status(400).json({
         error: "partId is required (or configure scanner mode PLC_REGISTER with valid register range)",
       });
@@ -2909,6 +2998,19 @@ exports.processScan = async (req, res) => {
 
     if (response.decision === "ALLOW") {
       emitRealtime("QR_VALIDATED", { partId: normalizedPartId, machineId: machine.id, stationNo: normalizedStation });
+      try {
+        const leakRecord = await captureLeakReadingsForScan({
+          machineId: machine.id,
+          partId: normalizedPartId,
+          stationNo: normalizedStation,
+          operationLogId: response.operationLogId || null,
+        });
+        if (leakRecord?.payload_json) {
+          response.leakTestReading = JSON.parse(leakRecord.payload_json);
+        }
+      } catch (_leakCaptureError) {
+        // Leak capture is non-blocking; keep scan flow stable.
+      }
     } else if (response.reason === "DUPLICATE_SCAN") {
       emitRealtime("DUPLICATE_SCAN_BLOCKED", { partId: normalizedPartId, machineId: machine.id, stationNo: normalizedStation });
     }
@@ -4893,9 +4995,34 @@ exports.getDashboardReport = async (req, res) => {
     } catch (_plcJoinError) {
       // Keep dashboard report resilient even when PlcCycleReadings schema/table differs.
     }
+    const partIdsHistory = [...new Set(partHistory.map((r) => String(r.part_id || "").trim()).filter(Boolean))];
+    const leakRowsHistory = partIdsHistory.length > 0
+      ? await LeakTestReading.findAll({
+        where: { part_id: partIdsHistory },
+        attributes: ["part_id", "payload_json", "createdAt"],
+        order: [["createdAt", "DESC"]],
+        raw: true,
+      })
+      : [];
+    const leakByPartHistory = leakRowsHistory.reduce((acc, row) => {
+      const key = String(row.part_id || "").trim();
+      if (!key || acc[key]) return acc;
+      try {
+        acc[key] = row.payload_json ? JSON.parse(row.payload_json) : null;
+      } catch (_e) {
+        acc[key] = null;
+      }
+      return acc;
+    }, {});
+
     const historyTotal = partHistory.length;
     const historyStart = (page - 1) * pageSize;
-    const pagedHistory = partHistory.slice(historyStart, historyStart + pageSize);
+    const pagedHistory = partHistory
+      .slice(historyStart, historyStart + pageSize)
+      .map((row) => ({
+        ...row,
+        leakTestReading: leakByPartHistory[String(row.part_id || "").trim()] || null,
+      }));
 
     const normalizeShotToken = (value) => {
       const raw = String(value ?? "").trim();
@@ -4936,6 +5063,26 @@ exports.getDashboardReport = async (req, res) => {
       else if (shotStatus === 5) next.shot_status_text = "OFFSET_SHOT";
       return next;
     };
+
+    const partIdsForLeak = [...new Set(partHistory.slice(0, 3000).map((r) => String(r.part_id || "").trim()).filter(Boolean))];
+    const leakRows = partIdsForLeak.length > 0
+      ? await LeakTestReading.findAll({
+        where: { part_id: partIdsForLeak },
+        attributes: ["part_id", "payload_json", "createdAt"],
+        order: [["createdAt", "DESC"]],
+        raw: true,
+      })
+      : [];
+    const leakByPart = leakRows.reduce((acc, row) => {
+      const key = String(row.part_id || "").trim();
+      if (!key || acc[key]) return acc;
+      try {
+        acc[key] = row.payload_json ? JSON.parse(row.payload_json) : null;
+      } catch (_e) {
+        acc[key] = null;
+      }
+      return acc;
+    }, {});
 
     const partsList = partHistory.slice(0, 3000).map((row) => {
       const machine = machineMetaById[Number(row.machine_id)] || machineRowMapById[Number(row.machine_id)] || {};
@@ -4989,6 +5136,7 @@ exports.getDashboardReport = async (req, res) => {
         createdAt: row.createdAt,
         shotNumber: shotKey || null,
         plcReading,
+        leakTestReading: leakByPart[String(row.part_id || "").trim()] || null,
       };
     });
 

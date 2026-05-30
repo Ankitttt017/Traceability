@@ -95,6 +95,61 @@ function normalizeFrameMode(value, fallback = "AUTO") {
   return fallback;
 }
 
+function isTransientReadError(error) {
+  const msg = String(error?.message || "").toLowerCase();
+  return msg.includes("timeout") || msg.includes("econn") || msg.includes("socket") || msg.includes("unreach");
+}
+
+function mergeContinuousSlmpRegisters(registerRows = []) {
+  const normalized = registerRows
+    .map((row) => {
+      const token = parseRegisterToken(row?.register, row?.device || "D");
+      return {
+        register: token.register,
+        device: String(token.device || "D").trim().toUpperCase() || "D",
+      };
+    })
+    .filter((row) => row.register !== null)
+    .sort((a, b) => a.device.localeCompare(b.device) || a.register - b.register);
+
+  const blocks = [];
+  for (const row of normalized) {
+    const last = blocks[blocks.length - 1];
+    if (last && last.device === row.device && row.register === last.end + 1) {
+      last.end = row.register;
+      continue;
+    }
+    blocks.push({ device: row.device, start: row.register, end: row.register });
+  }
+  return blocks;
+}
+
+function buildEffectivePlcDebugConfig({ reqBody = {}, machine = null, machineSnapshot = null, ip, port, protocol, mappedRegisters = [], frameMode = "BINARY", timeoutMs = 20000, retryCount = 2 }) {
+  const blocks = mergeContinuousSlmpRegisters(mappedRegisters);
+  const first = blocks[0] || null;
+  const source = [];
+  if (reqBody?.ip || reqBody?.port || reqBody?.protocol || reqBody?.plcSlmpDevice || reqBody?.plcSlmpFrameMode || reqBody?.timeoutMs) source.push("request-body");
+  if (machine) source.push("database-machine-config");
+  if (!source.length) source.push("fallback/default-config");
+  return {
+    machineId: machine?.id || reqBody?.machineId || null,
+    ip,
+    port,
+    protocol,
+    device: reqBody?.plcSlmpDevice || first?.device || "D",
+    startRegister: first?.start || null,
+    endRegister: first?.end || null,
+    blockLength: first ? (first.end - first.start + 1) : 0,
+    frameMode,
+    dataType: reqBody?.dataType || "N/A",
+    timeoutMs,
+    retryCount,
+    requestSource: reqBody?.requestSource || "machine-page",
+    configSource: source.join("|"),
+    mergedBlocks: blocks,
+  };
+}
+
 function normalizeHandshakeMap(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -1045,35 +1100,95 @@ exports.readPlcRegisters = async (req, res) => {
       return res.status(400).json({ error: "registers array is required" });
     }
 
-    const timeoutMs = toPositiveInt(req.body.timeoutMs ?? machineSnapshot?.plc_test_timeout_ms) || 8000;
+    const timeoutMs = toPositiveInt(req.body.timeoutMs ?? machineSnapshot?.plc_test_timeout_ms) || 20000;
     const normalizedProtocol = normalizeProtocol(protocol);
 
     let values = {};
     let errors = [];
+    let optimization = null;
 
     if (normalizedProtocol === "SLMP") {
       const defaultDevice = toText(req.body.plcSlmpDevice || "D").toUpperCase() || "D";
-      const frameMode = toText(req.body.plcSlmpFrameMode || machineSnapshot?.plc_slmp_frame_mode || "AUTO").toUpperCase() || "AUTO";
-      const mappedRegisters = registers.map(r => {
+      const frameMode = toText(req.body.plcSlmpFrameMode || machineSnapshot?.plc_slmp_frame_mode || "BINARY").toUpperCase() || "BINARY";
+      const mappedRegisters = registers.map((r) => {
         const token = parseRegisterToken(r.register, r.device || defaultDevice);
-        return {
-          register: token.register,
-          device: token.device || defaultDevice
-        };
-      }).filter(r => r.register !== null);
+        return { register: token.register, device: token.device || defaultDevice };
+      }).filter((r) => r.register !== null);
 
       if (mappedRegisters.length === 0) return res.status(400).json({ error: "No valid registers provided" });
-
-      const result = await readSlmpRegisters({
+      const blocks = mergeContinuousSlmpRegisters(mappedRegisters);
+      let strategy = "single-block";
+      const effectiveConfig = buildEffectivePlcDebugConfig({
+        reqBody: req.body,
+        machine,
+        machineSnapshot,
         ip,
         port,
-        registers: mappedRegisters,
-        timeoutMs,
-        defaultDevice,
+        protocol: normalizedProtocol,
+        mappedRegisters,
         frameMode,
+        timeoutMs,
+        retryCount: 2,
       });
-      values = result?.values || {};
-      errors = Array.isArray(result?.errors) ? result.errors : [];
+      console.log(`[PLC_EFFECTIVE][machine-read] ${JSON.stringify(effectiveConfig)}`);
+      console.log(`[PLC_READ] start machine=${machine?.id || "-"} protocol=SLMP frame=${frameMode} timeoutMs=${timeoutMs} blocks=${JSON.stringify(blocks)}`);
+      const readWithRetry = async (rows, tag) => {
+        let attempt = 0;
+        let lastErr = null;
+        while (attempt < 2) {
+          attempt += 1;
+          const startedAt = Date.now();
+          try {
+            const result = await readSlmpRegisters({
+              ip,
+              port,
+              registers: rows,
+              timeoutMs,
+              defaultDevice,
+              frameMode,
+            });
+            console.log(`[PLC_READ] success machine=${machine?.id || "-"} tag=${tag} attempt=${attempt} ms=${Date.now() - startedAt}`);
+            return result;
+          } catch (err) {
+            lastErr = err;
+            console.warn(`[PLC_READ] fail machine=${machine?.id || "-"} tag=${tag} attempt=${attempt} error=${String(err?.message || err)}`);
+            if (attempt >= 2 || !isTransientReadError(err)) throw err;
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+        }
+        throw lastErr;
+      };
+      try {
+        const blockRows = blocks.flatMap((b) =>
+          Array.from({ length: b.end - b.start + 1 }, (_, i) => ({ register: b.start + i, device: b.device }))
+        );
+        const result = await readWithRetry(blockRows, "single-block");
+        values = result?.values || {};
+        errors = Array.isArray(result?.errors) ? result.errors : [];
+      } catch (firstErr) {
+        strategy = "chunk-fallback";
+        console.warn(`[PLC_READ] fallback chunk-read machine=${machine?.id || "-"} reason=${String(firstErr?.message || firstErr)}`);
+        const chunkRows = [];
+        for (const b of blocks) {
+          let cursor = b.start;
+          while (cursor <= b.end) {
+            const nextEnd = Math.min(cursor + 3, b.end);
+            for (let reg = cursor; reg <= nextEnd; reg += 1) {
+              chunkRows.push({ register: reg, device: b.device });
+            }
+            cursor = nextEnd + 1;
+          }
+        }
+        const result = await readWithRetry(chunkRows, "chunk-fallback");
+        values = result?.values || {};
+        errors = Array.isArray(result?.errors) ? result.errors : [];
+      }
+      optimization = {
+        frameMode,
+        strategy,
+        mergedBlocks: blocks,
+        effectiveConfig,
+      };
     } else if (normalizedProtocol === "MODBUS_TCP") {
       const unitId = toInt(req.body.plcUnitId ?? machineSnapshot?.plc_unit_id ?? 1) || 1;
       const mappedRegisters = registers.map(r => {
@@ -1101,16 +1216,51 @@ exports.readPlcRegisters = async (req, res) => {
       machineId: machine?.id || null,
       plc: { ip, port, protocol: normalizedProtocol },
       values,
-      errors
+      errors,
+      optimization,
     });
   } catch (error) {
     if (/plc packet timeout/i.test(String(error?.message || ""))) {
       return res.status(504).json({
-        error: "PLC packet timeout.",
+        error: `PLC timeout on ${req.body?.ip || "unknown"}:${req.body?.port || "unknown"}, frameMode=${req.body?.plcSlmpFrameMode || "AUTO"}, device=${req.body?.plcSlmpDevice || "D"}, start=${req.body?.registers?.[0]?.register ?? "?"}, length=${Array.isArray(req.body?.registers) ? req.body.registers.length : 0}, dataType=${req.body?.dataType || "N/A"}.`,
         details: String(error?.message || ""),
       });
     }
     res.status(500).json({ error: error.message });
+  }
+};
+
+exports.debugPlcEffectiveConfig = async (req, res) => {
+  try {
+    const machine = await resolveMachineForPlc(req.body);
+    const { ip, port, protocol } = resolvePlcEndpoint(req.body, machine);
+    const machineSnapshot = buildPlcMachineSnapshot(machine, req.body);
+    const registers = Array.isArray(req.body?.registers) ? req.body.registers : [];
+    const defaultDevice = toText(req.body.plcSlmpDevice || "D").toUpperCase() || "D";
+    const mappedRegisters = registers
+      .map((r) => {
+        const token = parseRegisterToken(r?.register, r?.device || defaultDevice);
+        return { register: token.register, device: token.device || defaultDevice };
+      })
+      .filter((r) => r.register !== null);
+    const timeoutMs = toPositiveInt(req.body.timeoutMs ?? machineSnapshot?.plc_test_timeout_ms) || 20000;
+    const frameMode = toText(req.body.plcSlmpFrameMode || machineSnapshot?.plc_slmp_frame_mode || "BINARY").toUpperCase() || "BINARY";
+    const effectiveConfig = buildEffectivePlcDebugConfig({
+      reqBody: req.body,
+      machine,
+      machineSnapshot,
+      ip,
+      port,
+      protocol: normalizeProtocol(protocol),
+      mappedRegisters,
+      frameMode,
+      timeoutMs,
+      retryCount: 2,
+    });
+    console.log(`[PLC_EFFECTIVE][machine-debug] ${JSON.stringify(effectiveConfig)}`);
+    return res.json({ success: true, effectiveConfig });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
   }
 };
 

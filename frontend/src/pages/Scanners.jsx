@@ -41,8 +41,16 @@ const PLC_DATA_TYPES = [
   { value: "ASCII", label: "ASCII (all printable chars)" },
   { value: "ALPHANUM", label: "Alphanumeric (A-Z,0-9,-_./:)" },
   { value: "HEX", label: "HEX (4-digit words)" },
-  { value: "INT16", label: "INT16 (concat ints)" },
-  { value: "UINT16", label: "UINT16 (concat ints)" },
+  { value: "INT16", label: "INT16" },
+  { value: "UINT16", label: "UINT16" },
+  { value: "DEC", label: "DEC (decimal)" },
+  { value: "BIT", label: "BIT (0/1)" },
+  { value: "BOOL", label: "BOOL (true/false from bit)" },
+  { value: "FLOAT32", label: "FLOAT32 (2 words)" },
+  { value: "REAL32BIT", label: "REAL32BIT (2 words)" },
+  { value: "INT32", label: "INT32" },
+  { value: "UINT32", label: "UINT32" },
+  { value: "STRING", label: "STRING" },
 ];
 
 /* ─── component ────────────────────────────────────────────── */
@@ -124,11 +132,19 @@ const Scanners = () => {
         mappedMachineId: form.mappedMachineId ? Number(form.mappedMachineId) : null,
         scannerRole: form.scannerRole || null,
       };
-      if (editingId) await scannerApi.update(editingId, payload);
-      else await scannerApi.create(payload);
+      let saved = null;
+      if (editingId) saved = await scannerApi.update(editingId, payload);
+      else saved = await scannerApi.create(payload);
       toast.success(editingId ? "Scanner updated" : "Scanner registered successfully");
+      if (saved?.id) {
+        setScanners((prev) => {
+          const exists = prev.some((row) => Number(row.id) === Number(saved.id));
+          if (exists) return prev.map((row) => (Number(row.id) === Number(saved.id) ? saved : row));
+          return [...prev, saved];
+        });
+      }
       resetForm();
-      await loadData(true);
+      await loadData(false);
     } catch (err) {
       toast.error(err.response?.data?.error || "Failed to save scanner");
     } finally { setLoading(false); }
@@ -177,12 +193,15 @@ const Scanners = () => {
         plcUnitId: form.plcUnitId ? Number(form.plcUnitId) : null,
         plcStartRegister: form.plcStartRegister ? Number(form.plcStartRegister) : null,
         plcEndRegister: form.plcEndRegister ? Number(form.plcEndRegister) : null,
-        plcTimeoutMs: form.plcTimeoutMs ? Number(form.plcTimeoutMs) : null,
+        plcTimeoutMs: isPlcRegisterMode ? 20000 : (form.plcTimeoutMs ? Number(form.plcTimeoutMs) : null),
         plcReadRetryCount: form.plcReadRetryCount ? Number(form.plcReadRetryCount) : null,
         plcReadRetryDelayMs: form.plcReadRetryDelayMs ? Number(form.plcReadRetryDelayMs) : null,
         mappedMachineId: form.mappedMachineId ? Number(form.mappedMachineId) : null,
         scannerRole: form.scannerRole || null,
       };
+      if (isPlcRegisterMode) {
+        payload.plcFrameMode = "BINARY";
+      }
       const result = await scannerApi.testRead(payload);
       setTestReadResult(result);
       toast.success("Scanner read test completed");
@@ -440,8 +459,15 @@ const Scanners = () => {
                         <span className="text-danger font-semibold">{testReadResult.error}</span>
                       ) : (
                         <span className="text-accent font-semibold">
-                          Preview: {testReadResult.partIdPreview || "(empty)"}
+                          {testReadResult.waitingForPartId
+                            ? `Live read OK (waiting part id). Current: ${testReadResult.partIdPreview || "0"}`
+                            : `Preview: ${testReadResult.partIdPreview || "(empty)"}`}
                         </span>
+                      )}
+                      {testReadResult?.read?.registerRange && (
+                        <div className="mt-1 text-[10px] text-text-muted font-mono">
+                          {`Range: ${form.plcDevice || "D"}${testReadResult.read.registerRange.start}-${form.plcDevice || "D"}${testReadResult.read.registerRange.end} · Frame: ${testReadResult?.read?.decode?.frameMode || "BINARY"} · Timeout: ${testReadResult?.read?.decode?.timeoutMs || 20000}ms`}
+                        </div>
                       )}
                     </div>
                   )}

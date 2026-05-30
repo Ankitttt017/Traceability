@@ -25,19 +25,19 @@ const PROTOCOLS = [
 const DEVICES = ["D", "W", "R", "M", "ZR", "X", "Y"];
 
 const DATA_TYPES = [
-  "ASCII",
-  "ALPHANUM",
-  "HEX",
-  "INT16",
-  "UINT16",
-  "DEC",
-  "BIT",
-  "BOOL",
-  "FLOAT32",
-  "REAL32BIT",
-  "INT32",
-  "UINT32",
-  "STRING",
+  { value: "ASCII", label: "ASCII (all printable chars)" },
+  { value: "ALPHANUM", label: "Alphanumeric (A-Z,0-9,-_./:)" },
+  { value: "HEX", label: "HEX (4-digit words)" },
+  { value: "INT16", label: "INT16" },
+  { value: "UINT16", label: "UINT16" },
+  { value: "DEC", label: "DEC (decimal)" },
+  { value: "BIT", label: "BIT (0/1)" },
+  { value: "BOOL", label: "BOOL (true/false from bit)" },
+  { value: "FLOAT32", label: "FLOAT32 (2 words)" },
+  { value: "REAL32BIT", label: "REAL32BIT (2 words)" },
+  { value: "INT32", label: "INT32" },
+  { value: "UINT32", label: "UINT32" },
+  { value: "STRING", label: "STRING" },
 ];
 
 const MACHINE_TYPES = [
@@ -859,7 +859,7 @@ function DataRangeRow({ row, index, onUpdate, onRemove, device }) {
         <div>
           <Label>Data Type</Label>
           <FSelect value={row.dataType} onChange={(e) => onUpdate(index, "dataType", e.target.value)}>
-            {DATA_TYPES.map((d) => <option key={d} value={d}>{d}</option>)}
+            {DATA_TYPES.map((d) => <option key={d.value} value={d.value}>{d.label}</option>)}
           </FSelect>
         </div>
         <div>
@@ -1108,26 +1108,18 @@ export default function MachinePage() {
         return;
       }
       
-      const mergedValues = {};
-      
-      // Call readPlcRegisters for each block
-      for (const block of blocks) {
-        const isBitDevice = ["M", "X", "Y"].includes(block.device.toUpperCase());
-        const payload = {
-          machineId: editingId,
-          ip: form.plcIp,
-          port: Number(form.plcPort),
-          protocol: form.plcProtocol,
-          registers: block.registers,
-          timeoutMs: 8000,
-          plcSlmpDevice: block.device,
-          plcSlmpFrameMode: isBitDevice ? "BINARY" : (form.plcFrameMode || "ASCII"),
-        };
-        
-        const res = await machineApi.readPlcRegisters(payload);
-        const vals = res.values || res.read?.value || {};
-        Object.assign(mergedValues, vals);
-      }
+      const payload = {
+        machineId: editingId,
+        ip: form.plcIp,
+        port: Number(form.plcPort),
+        protocol: form.plcProtocol,
+        registers: allRegisters,
+        timeoutMs: 20000,
+        plcSlmpDevice: form.plcDevice || "D",
+        plcSlmpFrameMode: "BINARY",
+      };
+      const res = await machineApi.readPlcRegisters(payload, { timeout: 30000 });
+      const mergedValues = res.values || res.read?.value || {};
       
       // Group the merged values by range names
       const groupedResult = {};
@@ -1162,6 +1154,7 @@ export default function MachinePage() {
       setTestResult({
         message: "Data registers read successfully from PLC",
         payload: finalPayload,
+        optimization: res?.optimization || null,
         outcome: "PASS"
       });
       toast.success("Registers read successfully!");
@@ -2307,6 +2300,17 @@ export default function MachinePage() {
                       {JSON.stringify(testResult.payload, null, 2)}
                     </pre>
                   </div>
+
+                  {testResult.optimization && (
+                    <div style={{ padding: "10px 12px", background: C.blueLt, border: `1px solid ${C.blueBd}`, borderRadius: 8 }}>
+                      <p style={{ margin: 0, fontSize: 11, fontWeight: 700, color: C.blue }}>PLC Read Optimization</p>
+                      <p style={{ margin: "4px 0 0", fontSize: 10, color: C.sec }}>
+                        Strategy: <b>{testResult.optimization.strategy || "single-block"}</b> ·
+                        Frame: <b>{testResult.optimization.frameMode || "BINARY"}</b> ·
+                        Blocks: <b>{Array.isArray(testResult.optimization.mergedBlocks) ? testResult.optimization.mergedBlocks.length : 0}</b>
+                      </p>
+                    </div>
+                  )}
 
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8 }}>
                     <div>

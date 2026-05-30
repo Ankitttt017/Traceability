@@ -655,18 +655,21 @@ const ProductionCharts=()=>{
     if (part?.plcReadings && typeof part.plcReadings === "object" && key in part.plcReadings) {
       return part.plcReadings[key];
     }
+    if (part?.leakTestReading && typeof part.leakTestReading === "object" && key in part.leakTestReading) {
+      return part.leakTestReading[key];
+    }
     if (key === "shot_time") {
-      const hh = part?.plcReading?.shot_hour ?? part?.plcReadings?.shot_hour;
-      const mm = part?.plcReading?.shot_minute ?? part?.plcReadings?.shot_minute;
-      const ss = part?.plcReading?.shot_second ?? part?.plcReadings?.shot_second;
+      const hh = part?.plcReading?.shot_hour ?? part?.plcReadings?.shot_hour ?? part?.leakTestReading?.shot_hour;
+      const mm = part?.plcReading?.shot_minute ?? part?.plcReadings?.shot_minute ?? part?.leakTestReading?.shot_minute;
+      const ss = part?.plcReading?.shot_second ?? part?.plcReadings?.shot_second ?? part?.leakTestReading?.shot_second;
       if ([hh, mm, ss].every((v) => v !== null && v !== undefined && v !== "")) {
         return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
       }
     }
     if (key === "shot_date") {
-      const y = part?.plcReading?.shot_year ?? part?.plcReadings?.shot_year;
-      const m = part?.plcReading?.shot_month ?? part?.plcReadings?.shot_month;
-      const d = part?.plcReading?.shot_day ?? part?.plcReadings?.shot_day;
+      const y = part?.plcReading?.shot_year ?? part?.plcReadings?.shot_year ?? part?.leakTestReading?.shot_year;
+      const m = part?.plcReading?.shot_month ?? part?.plcReadings?.shot_month ?? part?.leakTestReading?.shot_month;
+      const d = part?.plcReading?.shot_day ?? part?.plcReadings?.shot_day ?? part?.leakTestReading?.shot_day;
       if ([y, m, d].every((v) => v !== null && v !== undefined && v !== "")) {
         return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
       }

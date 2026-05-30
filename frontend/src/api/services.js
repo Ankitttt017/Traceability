@@ -123,11 +123,11 @@ export const scannerApi = {
     return data;
   },
   testRead: async (payload) => {
-    const { data } = await apiClient.post(ENDPOINTS.scannerTestRead, payload);
+    const { data } = await apiClient.post(ENDPOINTS.scannerTestRead, payload, { timeout: 30000 });
     return data;
   },
   testConnection: async (id) => {
-    const { data } = await apiClient.post(ENDPOINTS.scannerTestConnection(id));
+    const { data } = await apiClient.post(ENDPOINTS.scannerTestConnection(id), {}, { timeout: 30000 });
     return data;
   },
   markUsbActivity: async (payload) => {

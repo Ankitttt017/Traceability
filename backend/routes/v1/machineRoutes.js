@@ -12,6 +12,7 @@ router.post("/reset-plc", verifyToken, isAdminOrEngineerStrict, machineControlle
 router.post("/plc-command", verifyToken, isAdminOrEngineerStrict, machineController.sendPlcCommand);
 router.post("/read-plc-value", verifyToken, isAdminOrEngineerStrict, machineController.readPlcValue);
 router.post("/read-plc-registers", verifyToken, isAdminOrEngineerStrict, machineController.readPlcRegisters);
+router.post("/debug-plc-effective-config", verifyToken, isAdminOrEngineerStrict, machineController.debugPlcEffectiveConfig);
 router.post("/write-plc-value", verifyToken, isAdminOrEngineerStrict, machineController.writePlcValue);
 router.patch("/:id/target", verifyToken, isAdminOrEngineerStrict, machineController.updateMachineTarget);
 router.post("/", verifyToken, isAdmin, machineController.createMachine);

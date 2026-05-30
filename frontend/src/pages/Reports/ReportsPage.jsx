@@ -208,6 +208,7 @@ const ReportsPage = () => {
         ...(r.plcReadings || {}),
         ...(r.plcCycleReadings || {}),
         ...(r.plc_cycle_readings || {}),
+        ...(r.leakTestReading || {}),
       };
       const shot = String(
         merged.shot_number || r.shot_number || r.shotNumber || extractShotFromPartId(r.partId || r.part_id || "")
@@ -287,6 +288,7 @@ const ReportsPage = () => {
         Object.assign(plcData, row.plcReadings || {});
         Object.assign(plcData, row.plcCycleReadings || {});
         Object.assign(plcData, row.plc_cycle_readings || {});
+        Object.assign(plcData, row.leakTestReading || {});
       });
       if (!Object.keys(plcData).length) {
         const shot = String(first.shot_number || first.shotNumber || extractShotFromPartId(partKey) || "").trim();
