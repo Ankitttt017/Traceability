@@ -798,11 +798,9 @@ async function readSlmpRegisters({
       }
     }
   }
-  const routeDesc = routes.map(describeRoute).join(" | ");
-  const modeDesc = frameModes.map(describeSlmpFrameMode).join(",");
-  const timeoutIndicator = String(lastError?.message || "").toLowerCase().includes("timeout") 
-    ? " — No PLC response. Verify: (1) Port 5000/5006 is correct for SLMP, (2) PLC service enabled, (3) Firewall allows access"
-    : " — PLC rejected request. Check: (1) Frame mode (BINARY/ASCII), (2) Route params, (3) Unit ID";
+  const timeoutIndicator = String(lastError?.message || "").toLowerCase().includes("timeout")
+    ? ` — PLC timeout on ${ip}:${port}, frameMode=${frameModes[0] || "AUTO"}, device=${unique?.[0]?.device || defaultDevice}, start=${unique?.[0]?.register ?? "?"}, length=${unique?.length || 0}, dataType=N/A.`
+    : " — PLC rejected request.";
   throw new Error(
     `Register read failed: ${String(lastError?.message || "PLC packet timeout")}${timeoutIndicator}`
   );
@@ -873,11 +871,9 @@ async function writeSlmpRegister({
     }
   }
   if (!usedRoute) {
-    const routeDesc = routes.map(describeRoute).join(" | ");
-    const modeDesc = frameModes.map(describeSlmpFrameMode).join(",");
-    const timeoutIndicator = String(lastError?.message || "").toLowerCase().includes("timeout") 
-      ? " — No PLC response. Verify: (1) Port 5000/5006 is correct for SLMP, (2) PLC service enabled, (3) Firewall allows access"
-      : " — PLC rejected request. Check: (1) Frame mode (BINARY/ASCII), (2) Route params, (3) Unit ID";
+    const timeoutIndicator = String(lastError?.message || "").toLowerCase().includes("timeout")
+      ? ` — PLC timeout on ${ip}:${port}, frameMode=${frameModes[0] || "AUTO"}, device=${slmpDevice}, start=${Math.trunc(registerNo)}, length=1, dataType=N/A.`
+      : " — PLC rejected request.";
     throw new Error(
       `Register write failed: ${String(lastError?.message || "PLC packet timeout")}${timeoutIndicator}`
     );

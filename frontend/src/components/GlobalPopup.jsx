@@ -1291,6 +1291,21 @@ const GlobalPopup = ({
 
   const hour = new Date().getHours();
   const shiftText = hour >= 6 && hour < 14 ? "A Shift" : hour >= 14 && hour < 22 ? "B Shift" : "C Shift";
+  const scannerConnected = (() => {
+    const raw = String(
+      scannerInfo?.status ||
+      scannerInfo?.scannerStatus ||
+      scannerInfo?.connectionStatus ||
+      ""
+    ).trim().toUpperCase();
+    if (["ONLINE", "CONNECTED", "ACTIVE", "OK"].includes(raw)) return true;
+    if (["OFFLINE", "DISCONNECTED", "ERROR", "DOWN"].includes(raw)) return false;
+    if (typeof scannerInfo?.connected === "boolean") return scannerInfo.connected;
+    if (typeof scannerInfo?.isOnline === "boolean") return scannerInfo.isOnline;
+    return false;
+  })();
+  const plcOnline = !["COMM", "BLOCKED"].includes(String(liveOperationState || "").trim().toUpperCase());
+  const plcReadingPreview = popup?.leakTestReading || popup?.plcReading || popup?.plcReadings || null;
 
   const reasonUpper = String(popup?.reason || popup?.qrReason || "").trim().toUpperCase();
   const needsResetByReason = ["DUPLICATE_SCAN", "RESET_REQUIRED_AFTER_PLC_COMM_ERROR"].some(r => reasonUpper.startsWith(r)) || reasonUpper.startsWith("PLC_TIMEOUT");
@@ -1424,7 +1439,7 @@ const GlobalPopup = ({
           </div>
 
           {/* Compact Stats */}
-          <div className="grid grid-cols-4 gap-2 mt-3">
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-2 mt-3">
             <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
               <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">Machine</p>
               <p className="text-white text-m font-bold truncate">{popup?.machineName || "N/A"}</p>
@@ -1440,6 +1455,18 @@ const GlobalPopup = ({
             <div className="rounded-lg p-2" style={allPassed ? { background: "#064e3b" } : { background: "#0f172a" }}>
               <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5" >Pass</p>
               <p className="text-m font-bold" style={{ color: allPassed ? "#4ade80" : "#fff" }}>{passCount}/{totalCount}</p>
+            </div>
+            <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
+              <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">PLC</p>
+              <p className="text-m font-bold" style={{ color: plcOnline ? "#4ade80" : "#f87171" }}>
+                {plcOnline ? "Online" : "Offline"}
+              </p>
+            </div>
+            <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
+              <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">Scanner</p>
+              <p className="text-m font-bold" style={{ color: scannerConnected ? "#4ade80" : "#f87171" }}>
+                {scannerConnected ? "Online" : "Offline"}
+              </p>
             </div>
           </div>
 
@@ -1475,6 +1502,20 @@ const GlobalPopup = ({
               <span className={`inline-flex items-center justify-center px-2 py-1 rounded-md text-[15px] font-bold border whitespace-nowrap ${qrStripTheme.badge}`}>
                 {qrStripTheme.badgeText}
               </span>
+            </div>
+          )}
+
+          {plcReadingPreview && (
+            <div className="mb-3 rounded-lg border border-sky-500/30 bg-sky-950/20 p-3">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <p className="text-[10px] font-bold text-sky-200 uppercase tracking-widest">PLC Reading</p>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${plcOnline ? "bg-emerald-500/20 text-emerald-200" : "bg-rose-500/20 text-rose-200"}`}>
+                  {plcOnline ? "ONLINE" : "OFFLINE"}
+                </span>
+              </div>
+              <pre className="text-[11px] text-slate-100 bg-slate-900/70 rounded-md p-2 overflow-auto max-h-36">
+                {JSON.stringify(plcReadingPreview, null, 2)}
+              </pre>
             </div>
           )}
 
