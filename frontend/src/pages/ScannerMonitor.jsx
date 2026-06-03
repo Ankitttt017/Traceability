@@ -338,7 +338,7 @@ const ScannerMonitor = () => {
   useEffect(() => {
     const socket = io(SOCKET_URL, {
       path: "/socket.io/",
-      transports: ["polling", "websocket"],
+      transports: ["polling"], upgrade: false,
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,

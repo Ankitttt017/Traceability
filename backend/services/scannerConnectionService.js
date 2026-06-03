@@ -173,6 +173,32 @@ class ScannerService {
     );
   }
 
+  async clearScannerConnection(scannerIp) {
+    const normalizedIp = normalizeIp(scannerIp);
+    if (!normalizedIp) return null;
+
+    const existing = this.connectedScanners.get(normalizedIp) || null;
+    this.connectedScanners.delete(normalizedIp);
+
+    await ScannerConnection.update(
+      { status: "DISCONNECTED" },
+      { where: { scanner_ip: normalizedIp } }
+    );
+
+    const payload = this.toPublicSnapshot(
+      {
+        scannerIp: normalizedIp,
+        status: "DISCONNECTED",
+        connectedAt: existing?.connectedAt || null,
+        lastDataAt: existing?.lastDataAt || null,
+        openSockets: 0,
+      },
+      "MEMORY"
+    );
+    if (payload) emitRealtime("scanner_connection", payload);
+    return payload;
+  }
+
   async listScannerConnectionSnapshots() {
     const rows = await ScannerConnection.findAll({ order: [["scanner_ip", "ASC"]] });
     const dbMap = new Map(

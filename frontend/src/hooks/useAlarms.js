@@ -15,7 +15,7 @@ export function useAlarms() {
   const idRef = useRef(0);
 
   useEffect(() => {
-    const socket = io(SOCKET_URL, { path: "/socket.io/", transports: ["websocket", "polling"] });
+    const socket = io(SOCKET_URL, { path: "/socket.io/", transports: ["polling"], upgrade: false });
 
     const push = (type) => (data) => {
       const _id = ++idRef.current;

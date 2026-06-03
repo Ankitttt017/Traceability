@@ -699,12 +699,14 @@ function isJourneyNoiseLog(log) {
   const reason = String(log.interlock_reason || "").trim().toUpperCase();
   const result = String(log.result || "").trim().toUpperCase();
 
+  if (Boolean(log.is_bypassed)) return !(result === "OK" || plcStatus === "ENDED_OK");
   if (plcStatus === "VALIDATION_ONLY") return true;
+  if (["FAILED", "DUPLICATE", "BLOCKED"].includes(validationResult)) return true;
   if (JOURNEY_NOISE_REASONS.has(reason)) return true;
 
   if (plcStatus === "INTERLOCKED") {
     if (validationResult === "DUPLICATE" || validationResult === "BLOCKED") return true;
-    if (result === "BLOCK" && reason !== "NG_SHOT_STATUS") return true;
+    if (result === "BLOCK") return true;
   }
 
   return false;
@@ -1827,10 +1829,12 @@ exports.getLiveMachineState = async (req, res) => {
     const lastEvent = logs[0] || null;
     const plcHealth = getPlcHealthSnapshot(machine.id);
     const plcCircuit = getPlcCircuitSnapshot().find((entry) => entry.key === `machine:${machine.id}`) || null;
-    const scannerHealth = scannerConnectionManager.getStableSnapshot({
-      machineId: machine.id,
-      scannerIp: scanner?.scanner_ip
-    }) || (await buildScannerHealth(scanner, machine.id));
+    const scannerHealth = scanner
+      ? scannerConnectionManager.getStableSnapshot({
+        machineId: machine.id,
+        scannerIp: scanner.scanner_ip,
+      }) || (await buildScannerHealth(scanner, machine.id))
+      : await buildScannerHealth(null, machine.id);
     const machineState = plcHandshakeEngine.getState(machine.id);
 
     res.json({
@@ -2146,8 +2150,10 @@ exports.getIoSnapshot = async (req, res) => {
       const rows = buildIoSignalRows(machine, registerValues, latestPlcStatus);
       const plcHealth = getPlcHealthSnapshot(machine.id) || null;
       const plcCircuit = getPlcCircuitSnapshot().find((entry) => entry.key === `machine:${machine.id}`) || null;
-      const scannerHealth = scannerConnectionManager.getStableSnapshot({ machineId: machine.id })
-        || (await buildScannerHealth(scanner, machine.id));
+      const scannerHealth = scanner
+        ? scannerConnectionManager.getStableSnapshot({ machineId: machine.id, scannerIp: scanner.scanner_ip })
+          || (await buildScannerHealth(scanner, machine.id))
+        : await buildScannerHealth(null, machine.id);
       const machineState = plcHandshakeEngine.getState(machine.id);
 
       const payload = {
@@ -2823,6 +2829,7 @@ exports.processScan = async (req, res) => {
         error: "partId is required (or configure scanner mode PLC_REGISTER with valid register range)",
       });
     }
+    const scannedQrRaw = String(normalizedPartId || "").trim();
     const resolvedCode = await resolveMappedPartId(normalizedPartId);
     normalizedPartId = resolvedCode.resolvedPartId;
     customerQrCode = resolvedCode.customerQrCode;
@@ -2929,8 +2936,9 @@ exports.processScan = async (req, res) => {
             : finalResult,
       qualityPayload,
       customerCodePattern: stationFeatures.customerCodePattern || "",
-      skipQrFormatValidation: !qrValidationEnabled || !validateQrFormat || skipAllBypassValidations,
-      skipShotValidation: !validateShotNumber || skipAllBypassValidations,
+      shotValidationPartId: scannedQrRaw,
+      skipQrFormatValidation: !qrValidationEnabled || !validateQrFormat,
+      skipShotValidation: !validateShotNumber,
       skipCustomerCodeValidation: !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
       skipInterlockValidation: skipAllBypassValidations,
       skipDuplicateValidation: false,
@@ -3064,6 +3072,7 @@ exports.verifyScanForOperator = async (req, res) => {
     if (!inputCode || !machineId) {
       return res.status(400).json({ error: "qrCode and machineId are required" });
     }
+    const scannedQrRaw = String(inputCode || "").trim();
     const resolvedCode = await resolveMappedPartId(inputCode);
     const normalizedPartId = resolvedCode.resolvedPartId;
 
@@ -3157,8 +3166,9 @@ exports.verifyScanForOperator = async (req, res) => {
             : finalResult,
       qualityPayload,
       customerCodePattern: stationFeatures.customerCodePattern || "",
-      skipQrFormatValidation: !qrValidationEnabled || !validateQrFormat || skipAllBypassValidations,
-      skipShotValidation: !validateShotNumber || skipAllBypassValidations,
+      shotValidationPartId: scannedQrRaw,
+      skipQrFormatValidation: !qrValidationEnabled || !validateQrFormat,
+      skipShotValidation: !validateShotNumber,
       skipCustomerCodeValidation: !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
       skipInterlockValidation: skipAllBypassValidations,
       skipDuplicateValidation: false,
@@ -4277,6 +4287,13 @@ function getDateRangeFromQuery(query) {
   return { from, to };
 }
 
+function normalizeReportYear(value) {
+  const year = Number(value);
+  if (!Number.isFinite(year)) return year;
+  if (year >= 0 && year < 100) return 2000 + year;
+  return year;
+}
+
 function toMinutes(timeValue) {
   return toShiftMinutes(timeValue);
 }
@@ -4606,6 +4623,7 @@ exports.getDashboardReport = async (req, res) => {
     const page = Math.max(Number(req.query.page || 1), 1);
     const pageSize = Math.min(Math.max(Number(req.query.pageSize || 100), 1), 500);
 
+    const requestedPartId = String(req.query.partId || "").trim();
     const machineWhere = {
       is_active: true,
       ...(lineNameFilter ? { line_name: lineNameFilter } : {}),
@@ -4618,41 +4636,44 @@ exports.getDashboardReport = async (req, res) => {
     });
     const machineRows = dedupeMachines(allMachineRowsRaw);
     const machineIdScope = machineRows.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
-    const productionWhere = {
-      createdAt: { [Op.gte]: from, [Op.lte]: to },
-      ...(machineIdScope.length ? { machine_id: { [Op.in]: machineIdScope } } : {}),
+    const buildProductionWhere = ({ includeDateRange = true } = {}) => {
+      const where = {
+        ...(includeDateRange ? { createdAt: { [Op.gte]: from, [Op.lte]: to } } : {}),
+        ...(machineIdScope.length ? { machine_id: { [Op.in]: machineIdScope } } : {}),
+      };
+      if (req.query.machineId) {
+        where.machine_id = Number(req.query.machineId);
+      }
+      if (requestedPartId) {
+        where.part_id = { [Op.like]: `%${requestedPartId}%` };
+      }
+      if (req.query.status) {
+        where.status = String(req.query.status).toUpperCase();
+      }
+      return where;
     };
-
-    if (req.query.machineId) {
-      productionWhere.machine_id = Number(req.query.machineId);
-    }
-    if (req.query.partId) {
-      productionWhere.part_id = req.query.partId;
-    }
-    if (req.query.status) {
-      productionWhere.status = String(req.query.status).toUpperCase();
-    }
-
-    const operationWhere = {
-      createdAt: { [Op.gte]: from, [Op.lte]: to },
+    const buildOperationWhere = ({ includeDateRange = true } = {}) => ({
+      ...(includeDateRange ? { createdAt: { [Op.gte]: from, [Op.lte]: to } } : {}),
       ...(machineIdScope.length ? { machine_id: { [Op.in]: machineIdScope } } : {}),
       ...(req.query.machineId ? { machine_id: Number(req.query.machineId) } : {}),
-      ...(req.query.partId ? { part_id: req.query.partId } : {}),
+      ...(requestedPartId ? { part_id: { [Op.like]: `%${requestedPartId}%` } } : {}),
       ...(stationNoFilter ? { station_no: stationNoFilter } : {}),
       ...(operatorIdFilter ? { user_id: operatorIdFilter } : {}),
-    };
+    });
+    const fetchProductionRows = (where) => ProductionLog.findAll({
+      where,
+      attributes: ["id", "part_id", "machine_id", "status", "createdAt"],
+      raw: true,
+    });
+    const fetchOperationRows = (where) => OperationLog.findAll({
+      where,
+      attributes: ["id", "part_id", "machine_id", "station_no", "operation_no", "plc_status", "result", "user_id", "interlock_reason", "plc_start_time", "plc_start_at", "plc_end_time", "plc_end_at", "createdAt"],
+      raw: true,
+    });
 
-    const [productionRows, operationRows, interlocks, reworkCount, shifts] = await Promise.all([
-      ProductionLog.findAll({
-        where: productionWhere,
-        attributes: ["id", "part_id", "machine_id", "status", "createdAt"],
-        raw: true,
-      }),
-      OperationLog.findAll({
-        where: operationWhere,
-        attributes: ["id", "part_id", "machine_id", "station_no", "operation_no", "plc_status", "result", "user_id", "interlock_reason", "plc_start_time", "plc_start_at", "plc_end_time", "plc_end_at", "createdAt"],
-        raw: true,
-      }),
+    const [initialProductionRows, initialOperationRows, interlocks, reworkCount, shifts] = await Promise.all([
+      fetchProductionRows(buildProductionWhere({ includeDateRange: true })),
+      fetchOperationRows(buildOperationWhere({ includeDateRange: true })),
       OperationLog.findAll({
         where: {
           interlock_reason: { [Op.ne]: null },
@@ -4670,6 +4691,9 @@ exports.getDashboardReport = async (req, res) => {
       }),
       getActiveShiftDefinitions(),
     ]);
+
+    const productionRows = initialProductionRows;
+    const operationRows = initialOperationRows;
 
     const filteredRows = applyShiftFilter(productionRows, shiftCodeFilter, shifts);
     const filteredOperationRows = applyShiftFilter(operationRows, shiftCodeFilter, shifts);
@@ -4923,6 +4947,7 @@ exports.getDashboardReport = async (req, res) => {
     // Lookup priority: shot_number from operation logs.
     const plcReadingByShot = new Map();
     const plcReadingByUid = new Map();
+    const plcReadingByCompactQr = new Map();
     const plcReadingColumns = [];
     try {
       const sequelize = require("../config/db");
@@ -4961,12 +4986,55 @@ exports.getDashboardReport = async (req, res) => {
         }
         return [...candidates];
       };
+      const parseCompactQrPartId = (value) => {
+        const raw = String(value || "").trim();
+        const match = raw.match(/^(?<day>\d{2})(?<month>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machine_code>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+        if (!match?.groups) return null;
+        const day = Number(match.groups.day);
+        const month = Number(match.groups.month);
+        const hour = Number(match.groups.hour);
+        const minute = Number(match.groups.minute);
+        const shot = Number(match.groups.shot);
+        if (![day, month, hour, minute, shot].every(Number.isFinite)) return null;
+        return { key: `${day}|${month}|${hour}|${minute}|${shot}`, day, month, hour, minute, shot, shotRaw: String(match.groups.shot || "").trim() };
+      };
       const shotValuesSet = new Set();
+      const compactValuesMap = new Map();
       for (const row of partHistory) {
         const directShot = normalizeShotToken(row.shot_number || row.shotNumber || "");
         if (directShot) shotValuesSet.add(directShot);
         const fromPart = extractShotCandidatesFromPartId(row.part_id);
         for (const c of fromPart) shotValuesSet.add(c);
+        const compact = parseCompactQrPartId(row.part_id);
+        if (compact && !compactValuesMap.has(compact.key)) {
+          compactValuesMap.set(compact.key, compact);
+        }
+      }
+      for (const compact of compactValuesMap.values()) {
+        const [rows] = await sequelize.query(`
+          SELECT TOP 1 * FROM PlcCycleReadings
+          WHERE TRY_CONVERT(INT, shot_day) = :day
+            AND TRY_CONVERT(INT, shot_month) = :month
+            AND TRY_CONVERT(INT, shot_hour) = :hour
+            AND TRY_CONVERT(INT, shot_minute) = :minute
+            AND (
+              TRY_CONVERT(INT, shot_number) = :shot
+              OR LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) = :shotRaw
+            )
+          ORDER BY recorded_at DESC
+        `, {
+          replacements: {
+            day: compact.day,
+            month: compact.month,
+            hour: compact.hour,
+            minute: compact.minute,
+            shot: compact.shot,
+            shotRaw: compact.shotRaw,
+          },
+        });
+        if (rows && rows[0]) {
+          plcReadingByCompactQr.set(compact.key, rows[0]);
+        }
       }
       const shotValues = [...shotValuesSet];
       if (shotValues.length > 0) {
@@ -5032,6 +5100,25 @@ exports.getDashboardReport = async (req, res) => {
       const noLead = digits.replace(/^0+/, "");
       return (noLead || "0").toUpperCase();
     };
+    const parseCompactQrPartId = (value) => {
+      const raw = String(value || "").trim();
+      const match = raw.match(/^(?<day>\d{2})(?<month>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machine_code>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+      if (!match?.groups) return null;
+      const day = Number(match.groups.day);
+      const month = Number(match.groups.month);
+      const hour = Number(match.groups.hour);
+      const minute = Number(match.groups.minute);
+      const shot = Number(match.groups.shot);
+      if (![day, month, hour, minute, shot].every(Number.isFinite)) return null;
+      return {
+        key: `${day}|${month}|${hour}|${minute}|${shot}`,
+        day,
+        month,
+        hour,
+        minute,
+        shot,
+      };
+    };
     const extractYymmddhhmmss = (value) => {
       const s = String(value || "").toUpperCase();
       const m = s.match(/(\d{12})/);
@@ -5039,13 +5126,17 @@ exports.getDashboardReport = async (req, res) => {
     };
     const extractShotSuffix = (value) => {
       const s = String(value || "").toUpperCase().replace(/\s+/g, "");
+      // New compact QR format: DDMMHHMM + MACHINE_ID(1) + SHOT(1..6)
+      // Ignore machine id while resolving shot for PlcCycleReadings lookup.
+      const compact = s.match(/^(\d{8})([A-Z0-9])(\d{1,6})$/);
+      if (compact?.[3]) return compact[3];
       const m = s.match(/(\d{12})(\d+)$/);
       return m ? m[2] : "";
     };
     const enrichPlcReadingDisplay = (row) => {
       if (!row || typeof row !== "object") return row;
       const next = { ...row };
-      const y = Number(next.shot_year);
+      const y = normalizeReportYear(next.shot_year);
       const m = Number(next.shot_month);
       const d = Number(next.shot_day);
       const hh = Number(next.shot_hour);
@@ -5108,10 +5199,12 @@ exports.getDashboardReport = async (req, res) => {
 
       const shotKey = normalizeShotToken(row.shot_number || row.shotNumber || "");
       const fullPartId = String(row.part_id || "").trim();
+      const compactQrKey = parseCompactQrPartId(fullPartId)?.key || "";
       const fromPartIdTs = extractYymmddhhmmss(fullPartId);
       const fromPartIdShot = normalizeShotToken(extractShotSuffix(fullPartId));
       const allPartDigitGroups = (fullPartId.match(/\d+/g) || []).map((g) => normalizeShotToken(g)).filter(Boolean);
-      const plcReadingRaw = (fullPartId && plcReadingByUid.get(fullPartId))
+      const plcReadingRaw = (compactQrKey && plcReadingByCompactQr.get(compactQrKey))
+        || (fullPartId && plcReadingByUid.get(fullPartId))
         || (shotKey && plcReadingByShot.get(shotKey))
         || (fromPartIdShot && plcReadingByShot.get(fromPartIdShot))
         || (fromPartIdTs && plcReadingByShot.get(normalizeShotToken(fromPartIdTs)))

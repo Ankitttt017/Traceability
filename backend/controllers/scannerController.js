@@ -3,8 +3,7 @@ const Scanner = require("../models/Scanner");
 const Machine = require("../models/Machine");
 const { normalizeIp } = require("../utils/networkAddress");
 const scannerService = require("../services/scannerConnectionService");
-const { getScannerHealthSnapshot } = require("../services/scannerHealthService");
-const { markScannerHeartbeat } = require("../services/scannerHealthService");
+const { getScannerHealthSnapshot, markScannerHeartbeat, clearScannerHealth } = require("../services/scannerHealthService");
 const { emitRealtime } = require("../services/realtimeService");
 const { normalizeScannerConfig, readPartIdFromScannerPlc } = require("../services/scannerPlcDataService");
 const CONNECTION_GRACE_MS = Math.max(Number(process.env.SCANNER_CONNECTION_GRACE_MS || 15000), 3000);
@@ -111,6 +110,29 @@ function validateScannerPayload(payload) {
     return "scannerIp is required for selected scanner mode";
   }
   return null;
+}
+
+async function syncMachineScannerIp(machineId, scannerIp) {
+  const id = Number(machineId || 0);
+  if (!id) return;
+  await Machine.update(
+    { qr_scanner_ip: normalizeIp(scannerIp) || null },
+    { where: { id } }
+  );
+}
+
+async function clearMachineScannerIpIfMatched(machineId, scannerIp) {
+  const id = Number(machineId || 0);
+  if (!id) return;
+  const machine = await Machine.findByPk(id);
+  if (!machine) return;
+  if (!scannerIp || sameScannerIp(machine.qr_scanner_ip, scannerIp)) {
+    await machine.update({ qr_scanner_ip: null });
+  }
+}
+
+function sameScannerIp(left, right) {
+  return normalizeIp(left) === normalizeIp(right);
 }
 
 async function resolveScannerReadConfig(payload = {}) {
@@ -461,7 +483,8 @@ exports.createScanner = async (req, res) => {
     }
 
     const created = await Scanner.create(payload);
-    emitRealtime("dashboard_refresh", { reason: "SCANNER_CREATED", scannerId: created.id });
+    await syncMachineScannerIp(created.mapped_machine_id, created.scanner_ip);
+    emitRealtime("dashboard_refresh", { reason: "SCANNER_CREATED", scannerId: created.id, machineId: created.mapped_machine_id || null });
     res.status(201).json(await toResponse(created));
   } catch (error) {
     handleError(error, res);
@@ -484,8 +507,18 @@ exports.updateScanner = async (req, res) => {
       return res.status(404).json({ error: "Mapped machine not found" });
     }
 
+    const previousMachineId = scanner.mapped_machine_id;
+    const previousScannerIp = scanner.scanner_ip;
     await scanner.update(payload);
-    emitRealtime("dashboard_refresh", { reason: "SCANNER_UPDATED", scannerId: scanner.id });
+    if (Number(previousMachineId || 0) !== Number(scanner.mapped_machine_id || 0)) {
+      await clearMachineScannerIpIfMatched(previousMachineId, previousScannerIp);
+    }
+    await syncMachineScannerIp(scanner.mapped_machine_id, scanner.scanner_ip);
+    if (!sameScannerIp(previousScannerIp, scanner.scanner_ip)) {
+      clearScannerHealth({ scannerIp: previousScannerIp, machineId: previousMachineId });
+      await scannerService.clearScannerConnection(previousScannerIp);
+    }
+    emitRealtime("dashboard_refresh", { reason: "SCANNER_UPDATED", scannerId: scanner.id, machineId: scanner.mapped_machine_id || null });
     res.json(await toResponse(scanner));
   } catch (error) {
     handleError(error, res);
@@ -499,8 +532,20 @@ exports.deleteScanner = async (req, res) => {
       return res.status(404).json({ error: "Scanner not found" });
     }
     const id = scanner.id;
+    const machineId = scanner.mapped_machine_id || null;
+    const scannerIp = scanner.scanner_ip;
+    clearScannerHealth({ scannerIp: scanner.scanner_ip, machineId: scanner.mapped_machine_id });
+    await clearMachineScannerIpIfMatched(machineId, scannerIp);
+    await scannerService.clearScannerConnection(scannerIp);
     await scanner.destroy();
-    emitRealtime("dashboard_refresh", { reason: "SCANNER_DELETED", scannerId: id });
+    emitRealtime("scanner_health", {
+      scannerId: id,
+      scannerIp,
+      machineId,
+      status: "NOT_CONFIGURED",
+      connected: false,
+    });
+    emitRealtime("dashboard_refresh", { reason: "SCANNER_DELETED", scannerId: id, machineId });
     res.status(204).send();
   } catch (error) {
     handleError(error, res);

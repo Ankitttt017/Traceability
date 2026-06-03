@@ -53,7 +53,7 @@ const extractShotFromPartId = (partId) => {
   const s = String(partId || "").trim();
   if (!s) return "";
   const digits = s.replace(/\D/g, "");
-  if (digits.length > 10) return digits.slice(10);
+  if (digits.length > 8) return digits.slice(8);
   return "";
 };
 

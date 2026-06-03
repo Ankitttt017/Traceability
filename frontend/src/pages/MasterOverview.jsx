@@ -48,7 +48,7 @@ const MasterOverview = () => {
 
   useEffect(() => {
     loadData();
-    const socket = io(SOCKET_URL, { path: "/socket.io/", transports: ["websocket", "polling"] });
+    const socket = io(SOCKET_URL, { path: "/socket.io/", transports: ["polling"], upgrade: false });
     socket.on("dashboard_refresh", () => loadData());
     socket.on("operator_popup", (payload) => {
       const msg = `Alert: ${payload.machineName || payload.machineId} reported ${payload.type}`;

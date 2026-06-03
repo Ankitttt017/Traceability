@@ -1,5 +1,5 @@
-ï»¿// ============================================================
-//  ProductionCharts.jsx â€” IndusTrace Premium v4
+// ============================================================
+//  ProductionCharts.jsx — IndusTrace Premium v4
 //  ? Download bar at TOP
 //  ? Tabs: Overview | Hourly | Machine | Shift | Parts List
 //  ? Excel exports: Full / Parts / Audit
@@ -157,7 +157,7 @@ function formatPlcColumnLabel(key){
 }
 
 function renderCellValue(value){
-  if (value === null || value === undefined || value === "") return "â€”";
+  if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "object") {
     try {
       return JSON.stringify(value);
@@ -335,6 +335,25 @@ const ProductionCharts=()=>{
     plcReadingColumns:[],
   });
 
+  const consolidatePartsList = useCallback((rows = []) => {
+    const map = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const partId = String(row?.partId || row?.part_id || "").trim();
+      if (!partId) continue;
+      const prev = map.get(partId);
+      const rowTs = new Date(row?.createdAt || row?.createdAtRaw || 0).getTime() || 0;
+      const prevTs = prev ? (new Date(prev?.createdAt || prev?.createdAtRaw || 0).getTime() || 0) : -1;
+      if (!prev || rowTs >= prevTs) {
+        map.set(partId, row);
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => {
+      const ta = new Date(a?.createdAt || a?.createdAtRaw || 0).getTime() || 0;
+      const tb = new Date(b?.createdAt || b?.createdAtRaw || 0).getTime() || 0;
+      return tb - ta;
+    });
+  }, []);
+
   const query=useMemo(()=>{
     const commonFilters = {
       machineId: filters.machineId || undefined,
@@ -372,7 +391,7 @@ const ProductionCharts=()=>{
       // Load parts list if available
       try{
         const parts=await dashboardApi.partsList?.(query)||r?.partsList||[];
-        setPartsList(parts);
+        setPartsList(consolidatePartsList(parts));
       }catch{}
     }catch(e){setError(e.response?.data?.error||"Failed to load analytics data.");}
     finally{
@@ -383,7 +402,7 @@ const ProductionCharts=()=>{
         loadData();
       }
     }
-  },[query]);
+  },[query, consolidatePartsList]);
 
   const scheduleRefresh = useCallback((cooldownMs = 350) => {
     const elapsed = Date.now() - lastRefreshAtRef.current;
@@ -409,7 +428,7 @@ const ProductionCharts=()=>{
   useEffect(() => {
     const sock = io(SOCKET_URL, {
       path: "/socket.io/",
-      transports: ["polling", "websocket"],
+      transports: ["polling"], upgrade: false,
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
@@ -543,7 +562,13 @@ const ProductionCharts=()=>{
 
   // Filtered parts for Parts tab
   const filteredParts=useMemo(()=>{
-    let p=partsList;
+    const seen = new Set();
+    let p = (partsList || []).filter((row) => {
+      const key = String(row?.partId || row?.part_id || "").trim();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     if(partsSearch){
       const s=partsSearch.toLowerCase();
       p=p.filter(x=>(x.partId||"").toLowerCase().includes(s)||(x.batchNo||x.batch||"").toLowerCase().includes(s));
@@ -741,7 +766,7 @@ const ProductionCharts=()=>{
                     border:`1px solid ${C.amber(0.3)}`}}>LIVE</span>
                 </div>
                 <p style={{fontSize:11,color:C.txt("muted"),marginTop:3}}>
-                  {timeLabel} Â· {fmtNow()} Â· {lineContextLabel}
+                  {timeLabel} · {fmtNow()} · {lineContextLabel}
                 </p>
               </div>
             </div>
@@ -764,7 +789,7 @@ const ProductionCharts=()=>{
                 <input type="datetime-local" value={customDate.from||""}
                   onChange={e=>{setCustomDate(p=>({...p,from:e.target.value}));setTimeRange("custom");}}
                   style={{height:22,background:"transparent",border:"none",fontSize:11,color:C.txt("pri"),outline:"none",cursor:"pointer"}}/>
-                <span style={{fontSize:11,color:C.txt("muted")}}>â€“</span>
+                <span style={{fontSize:11,color:C.txt("muted")}}>–</span>
                 <input type="datetime-local" value={customDate.to||""}
                   onChange={e=>{setCustomDate(p=>({...p,to:e.target.value}));setTimeRange("custom");}}
                   style={{height:22,background:"transparent",border:"none",fontSize:11,color:C.txt("pri"),outline:"none",cursor:"pointer"}}/>
@@ -775,14 +800,14 @@ const ProductionCharts=()=>{
                   color:C.txt("sec"),opacity:loading?0.5:1,
                   display:"inline-flex",alignItems:"center",gap:5,transition:"all .15s"}}>
                 <RefreshCw size={12} style={{animation:loading?"pcSpin .9s linear infinite":"none"}}/>
-                {loading?"Loadingâ€¦":"Refresh"}
+                {loading?"Loading…":"Refresh"}
               </button>
             </div>
           </div>
         </div>
       </div>
 
-      {/* -- DOWNLOAD BAR â€” TOP --------------------------------------- */}
+      {/* -- DOWNLOAD BAR — TOP --------------------------------------- */}
       <div style={{
         background:C.bg("card"),
         border:`1px solid ${C.bdr()}`,
@@ -864,7 +889,7 @@ const ProductionCharts=()=>{
           <div>
             <p style={{fontSize:13,fontWeight:800,color:C.txt("pri")}}>Export & Filters</p>
             <p style={{fontSize:10,color:C.txt("muted")}}>
-              {timeLabel} Â· {totalUnits} units Â· {efficiency}% quality rate
+              {timeLabel} · {totalUnits} units · {efficiency}% quality rate
             </p>
           </div>
         </div>
@@ -1019,9 +1044,9 @@ const ProductionCharts=()=>{
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <p style={{fontSize:9,fontWeight:800,textTransform:"uppercase",
               letterSpacing:"0.1em",color:C.txt("muted")}}>Shift Performance</p>
-            {[{key:"SHIFT_A",label:"Shift A â€” Morning",  colorFn:C.steel,icon:Zap    },
-              {key:"SHIFT_B",label:"Shift B â€” Afternoon",colorFn:C.amber,icon:Activity},
-              {key:"SHIFT_C",label:"Shift C â€” Night",    colorFn:C.idle, icon:Clock  }
+            {[{key:"SHIFT_A",label:"Shift A — Morning",  colorFn:C.steel,icon:Zap    },
+              {key:"SHIFT_B",label:"Shift B — Afternoon",colorFn:C.amber,icon:Activity},
+              {key:"SHIFT_C",label:"Shift C — Night",    colorFn:C.idle, icon:Clock  }
             ].map(s=>(
               <ShiftCard key={s.key} label={s.label}
                 row={shiftRowsNormalized?.[s.key]}
@@ -1193,9 +1218,9 @@ const ProductionCharts=()=>{
       {activeTab==="shift"&&(
         <div style={{animation:"pcFadeIn .2s ease"}}>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14}}>
-            {[{key:"SHIFT_A",label:"Shift A â€” Morning",  colorFn:C.steel,icon:Zap    },
-              {key:"SHIFT_B",label:"Shift B â€” Afternoon",colorFn:C.amber,icon:Activity},
-              {key:"SHIFT_C",label:"Shift C â€” Night",    colorFn:C.idle, icon:Clock  }
+            {[{key:"SHIFT_A",label:"Shift A — Morning",  colorFn:C.steel,icon:Zap    },
+              {key:"SHIFT_B",label:"Shift B — Afternoon",colorFn:C.amber,icon:Activity},
+              {key:"SHIFT_C",label:"Shift C — Night",    colorFn:C.idle, icon:Clock  }
             ].map(s=>(
               <ShiftCard key={s.key} label={s.label}
                 row={shiftRowsNormalized?.[s.key]}
@@ -1256,7 +1281,7 @@ const ProductionCharts=()=>{
             {/* Search */}
             <div style={{position:"relative",flex:"1 1 200px",minWidth:160}}>
               <input value={partsSearch} onChange={e=>setPartsSearch(e.target.value)}
-                placeholder="Search part serial or batchâ€¦"
+                placeholder="Search part serial or batch…"
                 style={{width:"100%",height:36,paddingLeft:14,paddingRight:12,
                   background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
                   borderRadius:8,fontSize:12,color:C.txt("pri"),outline:"none",
@@ -1299,7 +1324,7 @@ const ProductionCharts=()=>{
             </div>
           ):(
             <>
-            <Card noPad title={`Production Parts List â€” ${filteredParts.length} records`}
+            <Card noPad title={`Production Parts List — ${filteredParts.length} records`}
               subtitle="All scanned parts this period" icon={List} accent={C.navy()}>
               <div className="pc-thin-scroll" style={{overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,fontFamily:"inherit"}}>
@@ -1343,18 +1368,18 @@ const ProductionCharts=()=>{
                           <td style={{padding:"9px 13px",color:C.txt("muted"),fontSize:11,fontWeight:500}}>{((partsPage - 1) * partsPageSize) + i + 1}</td>
                           <td style={{padding:"9px 13px"}}>
                             <span style={{fontFamily:"inherit",fontSize:11,
-                              fontWeight:700,color:"#111827"}}>{p.partId||"â€”"}</span>
+                              fontWeight:700,color:"#111827"}}>{p.partId||"—"}</span>
                           </td>
                           <td style={{padding:"9px 13px",fontSize:11,color:"#111827",
                             fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>
                             {p.createdAt?new Date(p.createdAt).toLocaleString("en-IN",{
-                              day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):"â€”"}
+                              day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):"—"}
                           </td>
                           <td style={{padding:"9px 13px",fontSize:11,color:"#111827",fontWeight:600,whiteSpace:"nowrap"}}>
-                            {getPlcValue(p, "part_name") || p.partName || p.modelName || p.componentName || "â€”"}
+                            {getPlcValue(p, "part_name") || p.partName || p.modelName || p.componentName || "—"}
                           </td>
                           <td style={{padding:"9px 13px",fontSize:11,color:C.txt("sec")}}>
-                            {p.customerQrCode || p.customerQR || p.markingCode || "â€”"}
+                            {p.customerQrCode || p.customerQR || p.markingCode || "—"}
                           </td>
                           {stationColumns.map((col) => {
                             const st = statusMap.get(col.key) || "";
@@ -1368,7 +1393,7 @@ const ProductionCharts=()=>{
                                     : null;
                             return (
                               <td key={`${i}-${col.key}`} style={{padding:"9px 13px"}}>
-                                {badge ? <Bdg v={badge.v} l={badge.l}/> : <span style={{color:"#111827"}}>â€”</span>}
+                                {badge ? <Bdg v={badge.v} l={badge.l}/> : <span style={{color:"#111827"}}>—</span>}
                               </td>
                             );
                           })}
@@ -1381,7 +1406,7 @@ const ProductionCharts=()=>{
                               <div style={{display:"flex",alignItems:"center",gap:6}}>
                                 <span style={{fontFamily:"inherit",fontSize:11,fontWeight:600,
                                   color:p.cycleTime ? "#111827" : C.txt("muted")}}>
-                                  {p.cycleTime || "â€”"}
+                                  {p.cycleTime || "—"}
                                 </span>
                                 {p.cycleTime && (() => {
                                   const m = machineMap.get(Number(p.machineId));
@@ -1423,7 +1448,7 @@ const ProductionCharts=()=>{
                           ))}
                           <td style={{padding:"9px 13px",fontSize:10,color:isNg?C.ng():C.txt("muted"),
                             maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                            {p.interlockReason||p.reason||"â€”"}
+                            {p.interlockReason||p.reason||"—"}
                           </td>
                         </tr>
                       );
@@ -1475,7 +1500,3 @@ const ProductionCharts=()=>{
 };
 
 export default ProductionCharts;
-
-
-
-
