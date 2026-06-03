@@ -139,8 +139,27 @@ function getLatestAttempt(station={}) {
 function hasDerivedQrSignal(station={}) {
   const la=getLatestAttempt(station);
   if (!la) return false;
+  if (la.isBypassed) return true;
   const s=String(la.plcStatus||station.latestStatus||"").trim().toUpperCase();
   return s&&s!=="RESET";
+}
+function isStationBypassed(station={}) {
+  return Array.isArray(station.attempts) && station.attempts.some((att) => att?.isBypassed === true);
+}
+function getJourneyStationState(station={}, qrMeta=null, settings={}) {
+  if (isStationBypassed(station)) return "COMPLETED";
+  const qrState = String(station.qrVerification || "").trim().toUpperCase();
+  const liveQrLabel = String(qrMeta?.label || "").trim().toUpperCase();
+  const hasPassQrSignal = qrState === "PASS" || liveQrLabel.includes("QR PASS");
+  const opState = String(station.operation || "").trim().toUpperCase();
+  const opFailLike = ["FAIL", "FAILED", "NG", "COMM", "COMM_ERROR", "PLC_COMM_ERROR", "TIMEOUT", "PLC_TIMEOUT"].includes(opState);
+  const qrFailLike = ["FAIL", "FAILED", "NG", "BLOCK", "REJECT", "INVALID"].includes(qrState);
+  const forcePassForAutoStations =
+    settings.manualResult !== true &&
+    hasPassQrSignal &&
+    !opFailLike &&
+    !qrFailLike;
+  return forcePassForAutoStations ? "COMPLETED" : station.stageState;
 }
 function formatTime(v) {
   if (!v) return "—";
@@ -489,13 +508,13 @@ const ComponentJourney = () => {
   );
   const stationTimeline = useMemo(()=>journeyData?.stationTimeline||[],[journeyData?.stationTimeline]);
   const statusSummary   = useMemo(()=>stationTimeline.reduce((acc,st)=>{
-    const s=String(st.stageState||"").toUpperCase();
-    if (s==="PASSED") acc.passed++;
-    else if (["FAILED","INTERLOCKED","COMM_ERROR"].includes(s)) acc.failed++;
-    else if (s==="IN_PROGRESS") acc.inProgress++;
+    const s=String(getJourneyStationState(st, qrByStation[st.stationNo], getStationFeatures(st.stationNo, stationSettings))||"").toUpperCase();
+    if (s==="PASSED" || s==="COMPLETED") acc.passed++;
+    else if (["FAILED","INTERLOCKED","COMM_ERROR","NG","COMPLETED_NG"].includes(s)) acc.failed++;
+    else if (["IN_PROGRESS","RUNNING","REWORK"].includes(s)) acc.inProgress++;
     else acc.pending++;
     return acc;
-  },{passed:0,failed:0,inProgress:0,pending:0}),[stationTimeline]);
+  },{passed:0,failed:0,inProgress:0,pending:0}),[stationTimeline, qrByStation, stationSettings]);
 
   // ── Data / socket logic (100% unchanged logic) ─────────────────────────
   const loadPartCatalog = useCallback(async(search)=>{
@@ -602,12 +621,17 @@ const ComponentJourney = () => {
       const latest = Array.isArray(station.attempts) && station.attempts.length > 0
         ? station.attempts[station.attempts.length - 1]
         : null;
+      const effectiveStageState = getJourneyStationState(station, null, {});
+      const latestResult = latest?.result || station.latestResult || "";
+      const latestRemark = latest?.isBypassed
+        ? (latest?.bypassReason || "BYPASSED_AUTO_OK")
+        : (station.latestInterlockReason || latest?.interlockReason || "");
       return {
         stationNo: station.stationNo || "",
-        stageState: station.stageState || "PENDING",
+        stageState: effectiveStageState || station.stageState || "PENDING",
         latestStatus: station.latestStatus || "",
-        latestResult: latest?.result || station.latestResult || "",
-        interlockReason: station.latestInterlockReason || latest?.interlockReason || "",
+        latestResult: latest?.isBypassed ? "OK" : latestResult,
+        interlockReason: latestRemark,
         completedAt: station.latestAt || latest?.createdAt || "",
         cycleStartTime: station.cycleStartTime || "",
         cycleEndTime: station.cycleEndTime || "",
@@ -1297,7 +1321,7 @@ const ComponentJourney = () => {
                 {/* Dot indicators */}
                 <div style={{display:"flex",gap:4,marginTop:6,flexWrap:"wrap"}}>
                   {stationTimeline.map((st,i)=>{
-                    const m=getStationMeta(st.stageState);
+                    const m=getStationMeta(getJourneyStationState(st, qrByStation[st.stationNo], getStationFeatures(st.stationNo, stationSettings)));
                     return (
                       <div key={i} title={st.stationNo} style={{
                         width:8,height:8,borderRadius:"50%",flexShrink:0,
@@ -1313,21 +1337,11 @@ const ComponentJourney = () => {
               {stationTimeline.map((station,idx)=>{
                 const settings = getStationFeatures(station.stationNo,stationSettings);
                 const qrMeta   = qrByStation[station.stationNo];
-                const qrState = String(station.qrVerification || "").trim().toUpperCase();
-                const liveQrLabel = String(qrMeta?.label || "").trim().toUpperCase();
-                const hasPassQrSignal = qrState === "PASS" || liveQrLabel.includes("QR PASS");
-                const opState = String(station.operation || "").trim().toUpperCase();
-                const opFailLike = ["FAIL", "FAILED", "NG", "COMM", "COMM_ERROR", "PLC_COMM_ERROR", "TIMEOUT", "PLC_TIMEOUT"].includes(opState);
-                const qrFailLike = ["FAIL", "FAILED", "NG", "BLOCK", "REJECT", "INVALID"].includes(qrState);
-                const forcePassForAutoStations =
-                  settings.manualResult !== true &&
-                  hasPassQrSignal &&
-                  !opFailLike &&
-                  !qrFailLike;
-                const effectiveStageState = forcePassForAutoStations ? "COMPLETED" : station.stageState;
+                const effectiveStageState = getJourneyStationState(station, qrMeta, settings);
                 const meta     = getStationMeta(effectiveStageState);
                 const sColor   = STATUS[meta.variant]||STATUS.idle;
                 const isReset  = resettingStation===station.stationNo;
+                const bypassed = isStationBypassed(station);
                 const modules  = [
                   settings.qr          ?"QR Scan"  :null,
                   settings.operation   ?"Operation":null,
@@ -1391,6 +1405,9 @@ const ComponentJourney = () => {
                         {qrMeta && (
                           <Badge variant={qrMeta.variant} label={qrMeta.label} pulse={qrMeta.variant==="wip"}/>
                         )}
+                        {bypassed && (
+                          <Badge variant="ok" label="Bypassed" />
+                        )}
                         {/* Operation status */}
                         <Badge variant={meta.variant} label={`Op: ${meta.label}`} pulse={meta.variant==="wip"}/>
                         {/* Reset button */}
@@ -1440,7 +1457,7 @@ const ComponentJourney = () => {
                     )}
 
                     {/* Interlock warning */}
-                    {settings.rejectionBin&&(station.latestInterlockReason||station.stageState==="FAILED")&&(
+                    {settings.rejectionBin&&!bypassed&&(station.latestInterlockReason||station.stageState==="FAILED")&&(
                       <div style={{display:"flex",alignItems:"flex-start",gap:10,
                         borderRadius:8,padding:"9px 12px",marginTop:4,
                         background:C.ng(0.08),border:`1px solid ${C.ng(0.25)}`}}>

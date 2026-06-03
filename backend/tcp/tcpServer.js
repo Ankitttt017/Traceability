@@ -35,6 +35,14 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
     return;
   }
 
+  const scannerRole = String(scanner.scanner_role || "GENERAL").trim().toUpperCase() || "GENERAL";
+  markScannerHeartbeat({
+    scannerId: scanner.id,
+    scannerIp,
+    scannerName: scanner.scanner_name,
+    machineId: scanner.mapped_machine_id || null,
+  });
+
   const machine = await Machine.findByPk(scanner.mapped_machine_id);
   if (!machine || machine.is_active === false) {
     const msg = `Scanner ${scanner.id} mapped machine is missing/inactive.`;
@@ -79,7 +87,9 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
     return;
   }
 
-  console.log(`[TCP] Routing payload to scanner=${scanner.id} machine=${machine.id} station=${stationNo} partId=${partId}`);
+  console.log(
+    `[TCP] Routing payload scanner=${scanner.id} name=${scanner.scanner_name} role=${scannerRole} machine=${machine.id} station=${stationNo} payload=${partId}`
+  );
   const response = await saveScan(partId, stationNo, "OK", machine.id, null, {
     resultSource: "TCP_PUSH_SCANNER",
     resultInput: "OK",
@@ -91,6 +101,9 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
     stationNo,
     machineId: machine.id,
     machineName: machine.machine_name,
+    scannerId: scanner.id,
+    scannerName: scanner.scanner_name,
+    scannerRole,
     scannerIp,
     decision: response?.decision || "BLOCK",
     reason: response?.reason || null,
@@ -102,7 +115,7 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
   });
 
   console.log(
-    `[TCP] Scan decision machine=${machine.id} station=${stationNo} partId=${partId} decision=${response?.decision || "BLOCK"} reason=${response?.reason || "NA"}`
+    `[TCP] Scan decision scanner=${scanner.id} role=${scannerRole} machine=${machine.id} station=${stationNo} payload=${partId} decision=${response?.decision || "BLOCK"} reason=${response?.reason || "NA"}`
   );
   emitRealtime("operator_popup", {
     type: response?.decision === "ALLOW" ? "INFO" : "ERROR",
@@ -110,6 +123,9 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
     stationNo,
     machineId: machine.id,
     machineName: machine.machine_name,
+    scannerId: scanner.id,
+    scannerName: scanner.scanner_name,
+    scannerRole,
     scannerIp,
     qrStatus: response?.qrStatus || (response?.decision === "ALLOW" ? "PASSED" : "FAILED"),
     operationStatus: response?.operationStatus || (response?.decision === "ALLOW" ? "WAITING" : "BLOCKED"),

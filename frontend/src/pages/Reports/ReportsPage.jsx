@@ -19,14 +19,31 @@ const DEFAULT_PLC_CYCLE_COLUMNS = [
   "average_die_clamp_tonnage_count","time_for_stroke","stroke","shot_status"
 ];
 
-const normResult = (v, reason = "") => {
+const normResult = (v, reason = "", row = null) => {
   const s = String(v || "").toUpperCase().trim();
   const r = String(reason || "").toUpperCase().trim();
+  const bypassStatus = Boolean(row?.bypassStatus || row?.is_bypassed || row?.isBypassed);
+  const bypassReason = String(row?.bypassReason || row?.bypass_reason || "").toUpperCase().trim();
+  if (bypassStatus || ["MACHINE_BYPASS_AUTO_OK", "STATION_BYPASS_AUTO_OK", "STATION_OPERATION_DISABLED_AUTO_OK"].includes(bypassReason)) {
+    return "OK";
+  }
   if (r === "NG_SHOT_STATUS" && ["BLOCK", "INTERLOCKED"].includes(s)) return "NG";
   if (["OK", "PASS", "COMPLETED", "ENDED_OK"].includes(s)) return "OK";
   if (["NG", "FAIL", "FAILED", "ENDED_NG", "INTERLOCKED"].includes(s)) return "NG";
   if (!s || s === "-" || s === "UNKNOWN") return "";
   return "IN_PROGRESS";
+};
+const resultRank = (value) => {
+  if (value === "NG") return 3;
+  if (value === "OK") return 2;
+  if (value === "IN_PROGRESS") return 1;
+  return 0;
+};
+const pickPreferredResult = (current, candidate) => {
+  const currentRank = resultRank(current);
+  const candidateRank = resultRank(candidate);
+  if (candidateRank > currentRank) return candidate;
+  return current || candidate;
 };
 const formatPlcColumnLabel = (key) => {
   const raw = String(key || "").trim();
@@ -277,18 +294,27 @@ const ReportsPage = () => {
         const stationMachine = String(row.machineName || "").trim();
         const stationKey = stationMachine && stationOp ? `${stationMachine}__${stationOp}` : "";
         if (stationKey) {
-          stationResults[stationKey] = normResult(
+          const normalizedStationResult = normResult(
             String(row.industrialResult || row.statusLabel || row.result || "-").toUpperCase(),
-            row.reason || row.interlock_reason
+            row.reason || row.interlock_reason,
+            row
           );
+          stationResults[stationKey] = pickPreferredResult(stationResults[stationKey], normalizedStationResult);
           stationCycleTimes[stationKey] = row.cycleTime || "-";
         }
-        Object.assign(plcData, row.plcReading || {});
-        Object.assign(plcData, row.plc_reading || {});
-        Object.assign(plcData, row.plcReadings || {});
-        Object.assign(plcData, row.plcCycleReadings || {});
-        Object.assign(plcData, row.plc_cycle_readings || {});
-        Object.assign(plcData, row.leakTestReading || {});
+        const nextPlcData = {
+          ...(row.plcReading || {}),
+          ...(row.plc_reading || {}),
+          ...(row.plcReadings || {}),
+          ...(row.plcCycleReadings || {}),
+          ...(row.plc_cycle_readings || {}),
+          ...(row.leakTestReading || {}),
+        };
+        Object.keys(nextPlcData).forEach((key) => {
+          if (plcData[key] === undefined || plcData[key] === null || plcData[key] === "" || plcData[key] === "-") {
+            plcData[key] = nextPlcData[key];
+          }
+        });
       });
       if (!Object.keys(plcData).length) {
         const shot = String(first.shot_number || first.shotNumber || extractShotFromPartId(partKey) || "").trim();

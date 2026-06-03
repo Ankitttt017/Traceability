@@ -657,17 +657,65 @@ const OperatorView = () => {
   const plcHealth = hasLiveState ? liveState?.plcHealth || null : stationStats?.plcHealth || null;
   const scannerHealth = hasLiveState ? liveState?.scannerHealth || null : stationStats?.scannerHealth || null;
   const scannerInfo = hasLiveState ? liveState?.scanner || null : stationStats?.scanner || null;
+  const scannerListRaw = hasLiveState ? liveState?.scanners || [] : stationStats?.scanners || [];
+  const scannerHealthListRaw = hasLiveState ? liveState?.scannerHealthList || [] : stationStats?.scannerHealthList || [];
+  const scannerEntries = useMemo(() => {
+    const rows = Array.isArray(scannerListRaw) ? scannerListRaw : [];
+    const healthRows = Array.isArray(scannerHealthListRaw) ? scannerHealthListRaw : [];
+    const merged = rows.map((scanner) => {
+      const health =
+        healthRows.find((row) => Number(row?.scannerId || 0) === Number(scanner?.id || 0)) ||
+        healthRows.find((row) => String(row?.scannerIp || "").trim() === String(scanner?.scannerIp || "").trim()) ||
+        null;
+      const scannerModeLocal = String(scanner?.scannerMode || scanner?.mode || "").trim().toUpperCase();
+      const usbLike = ["USB_SERIAL", "USB", "USB_HID", "HID"].includes(scannerModeLocal);
+      const lastSeenAtRaw = health?.lastSeenAt || health?.lastDataAt || scanner?.lastSeenAt || scanner?.lastDataAt || null;
+      const lastSeenAtMs = lastSeenAtRaw ? new Date(lastSeenAtRaw).getTime() : 0;
+      const usbActivityGraceMs = 90 * 1000;
+      const usbConnectedLocal = Boolean(lastSeenAtMs && (Date.now() - lastSeenAtMs) <= usbActivityGraceMs);
+      const connected = usbLike ? usbConnectedLocal : Boolean(health?.connected);
+      const configured = String(health?.status || "CONFIGURED").toUpperCase() !== "NOT_CONFIGURED";
+      return {
+        scanner,
+        health,
+        configured,
+        connected,
+        scannerMode: scannerModeLocal,
+        statusLabel: !configured ? "Not Set" : usbLike ? (connected ? "USB Active" : "USB Idle") : (connected ? "Online" : "Offline"),
+      };
+    });
+    if (!merged.length && (scannerInfo || scannerHealth)) {
+      const scannerModeLocal = String(scannerInfo?.scannerMode || scannerInfo?.mode || "").trim().toUpperCase();
+      const usbLike = ["USB_SERIAL", "USB", "USB_HID", "HID"].includes(scannerModeLocal);
+      const lastSeenAtRaw = scannerHealth?.lastSeenAt || scannerHealth?.lastDataAt || scannerInfo?.lastSeenAt || scannerInfo?.lastDataAt || null;
+      const lastSeenAtMs = lastSeenAtRaw ? new Date(lastSeenAtRaw).getTime() : 0;
+      const usbActivityGraceMs = 90 * 1000;
+      const connected = usbLike
+        ? Boolean(lastSeenAtMs && (Date.now() - lastSeenAtMs) <= usbActivityGraceMs)
+        : Boolean(scannerHealth?.connected);
+      merged.push({
+        scanner: scannerInfo || null,
+        health: scannerHealth || null,
+        configured: String(scannerHealth?.status || "").toUpperCase() !== "NOT_CONFIGURED",
+        connected,
+        scannerMode: scannerModeLocal,
+        statusLabel: usbLike ? (connected ? "USB Active" : "USB Idle") : (connected ? "Online" : "Offline"),
+      });
+    }
+    return merged;
+  }, [hasLiveState, scannerListRaw, scannerHealthListRaw, scannerInfo, scannerHealth]);
+  const primaryScannerEntry = scannerEntries.find((entry) => String(entry?.scanner?.scannerRole || "").trim().toUpperCase() === "START_QR") || scannerEntries[0] || null;
   const plcHealthKnown = typeof plcHealth?.healthy === "boolean";
   const plcConnected = plcHealthKnown ? Boolean(plcHealth?.healthy) : null;
-  const scannerConfigured = String(scannerHealth?.status || "").toUpperCase() !== "NOT_CONFIGURED";
-  const scannerConnected = Boolean(scannerHealth?.connected);
-  const scannerMode = String(scannerInfo?.scannerMode || scannerInfo?.mode || "").trim().toUpperCase();
+  const scannerConfigured = scannerEntries.length > 0 ? scannerEntries.some((entry) => entry.configured) : String(scannerHealth?.status || "").toUpperCase() !== "NOT_CONFIGURED";
+  const scannerConnected = scannerEntries.length > 0 ? scannerEntries.some((entry) => entry.connected) : Boolean(scannerHealth?.connected);
+  const scannerMode = String(primaryScannerEntry?.scanner?.scannerMode || scannerInfo?.scannerMode || scannerInfo?.mode || "").trim().toUpperCase();
   const isUsbScannerMode = ["USB_SERIAL", "USB", "USB_HID", "HID"].includes(scannerMode);
-  const scannerLastSeenAtRaw = scannerHealth?.lastSeenAt || scannerHealth?.lastDataAt || scannerInfo?.lastSeenAt || scannerInfo?.lastDataAt || null;
+  const scannerLastSeenAtRaw = primaryScannerEntry?.health?.lastSeenAt || primaryScannerEntry?.health?.lastDataAt || scannerHealth?.lastSeenAt || scannerHealth?.lastDataAt || scannerInfo?.lastSeenAt || scannerInfo?.lastDataAt || null;
   const scannerLastSeenAtMs = scannerLastSeenAtRaw ? new Date(scannerLastSeenAtRaw).getTime() : 0;
   const usbActivityGraceMs = 90 * 1000;
   const usbConnected = Boolean(scannerConfigured && scannerLastSeenAtMs && (Date.now() - scannerLastSeenAtMs) <= usbActivityGraceMs);
-  const effectiveScannerConnected = isUsbScannerMode ? usbConnected : scannerConnected;
+  const effectiveScannerConnected = scannerEntries.length > 0 ? scannerConnected : (isUsbScannerMode ? usbConnected : scannerConnected);
   const scannerStatusLabel = !scannerConfigured ? "Not Set" : isUsbScannerMode ? (usbConnected ? "USB Active" : "USB Idle") : (scannerConnected ? "Online" : "Offline");
 
   useEffect(() => {
@@ -1728,10 +1776,10 @@ const OperatorView = () => {
                       <ConnDot connected={effectiveScannerConnected} />
                       <div style={{ minWidth: 0 }}>
                         <p style={{ fontSize: isCompact ? 11 : 12, fontWeight: 700, color: C.txt("pri") }}>
-                          {scannerInfo?.scannerName || "Scanner"}
+                          {primaryScannerEntry?.scanner?.scannerName || scannerInfo?.scannerName || "Scanner"}
                         </p>
                           <p style={{ fontSize: 9, color: C.txt("muted"), fontFamily: "'DM Mono',monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {scannerInfo?.scannerIp || scannerHealth?.scannerIp || "—"}
+                          {primaryScannerEntry?.scanner?.scannerIp || primaryScannerEntry?.health?.scannerIp || scannerInfo?.scannerIp || scannerHealth?.scannerIp || "—"}
                         </p>
                       </div>
                     </div>
@@ -1742,6 +1790,46 @@ const OperatorView = () => {
                       size={isCompact ? "sm" : "sm"}
                     />
                   </div>
+                  {scannerEntries.length > 1 && (
+                    <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+                      {scannerEntries.map((entry, idx) => (
+                        <div
+                          key={`${entry?.scanner?.id || entry?.scanner?.scannerIp || idx}`}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 8,
+                            padding: "7px 9px",
+                            borderRadius: 8,
+                            background: entry.connected ? C.ok(0.05) : C.idle(0.06),
+                            border: `1px solid ${entry.connected ? C.ok(0.18) : C.bdr()}`,
+                          }}
+                        >
+                          <div style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                            <ConnDot connected={entry.connected} />
+                            <div style={{ minWidth: 0 }}>
+                              <p style={{ fontSize: 10, fontWeight: 700, color: C.txt("pri"), display: "flex", gap: 6, alignItems: "center" }}>
+                                <span>{entry?.scanner?.scannerName || "Scanner"}</span>
+                                <span style={{ fontSize: 9, color: C.txt("muted"), fontFamily: "'DM Mono',monospace" }}>
+                                  {entry?.scanner?.scannerRole || "GENERAL"}
+                                </span>
+                              </p>
+                              <p style={{ fontSize: 9, color: C.txt("muted"), fontFamily: "'DM Mono',monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {entry?.scanner?.scannerIp || entry?.health?.scannerIp || "—"}
+                              </p>
+                            </div>
+                          </div>
+                          <Badge
+                            variant={entry.connected ? "ok" : "ng"}
+                            label={entry.statusLabel}
+                            pulse={entry.connected}
+                            size={isCompact ? "sm" : "sm"}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </Card>
 

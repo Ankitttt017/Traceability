@@ -186,13 +186,19 @@ async function checkPlcCycleReading(barcode) {
 
   // Priority path for compact QR format:
   // Compact format: DDMMHHMM + SHOT(1..6)
-  const compactMatch = String(barcode || "").trim().match(/^(\d{2})(\d{2})(\d{2})(\d{2})(\d{1,6})$/);
+  // Also support DPM-style compact code: DDMMHHMM + MACHINE_CODE(1) + SHOT(1..6),
+  // where machine code is ignored for PlcCycleReadings lookup.
+  const compactBarcode = String(barcode || "").trim();
+  const compactMatch =
+    compactBarcode.match(/^(\d{2})(\d{2})(\d{2})(\d{2})(\d{1,6})$/) ||
+    compactBarcode.match(/^(\d{2})(\d{2})(\d{2})(\d{2})([A-Z0-9]{1})(\d{1,6})$/i);
   if (compactMatch) {
     const day = Number(compactMatch[1]);
     const month = Number(compactMatch[2]);
     const hour = Number(compactMatch[3]);
     const minute = Number(compactMatch[4]);
-    const shotNumber = String(parseInt(compactMatch[5], 10));
+    const shotGroupIndex = compactMatch.length >= 7 ? 6 : 5;
+    const shotNumber = String(parseInt(compactMatch[shotGroupIndex], 10));
     try {
       const [rows] = await sequelize.query(
         `
@@ -229,17 +235,8 @@ async function checkPlcCycleReading(barcode) {
         }
         return { success: true, reading, shotNumber, shotStatus };
       }
-      return {
-        success: false,
-        reason: "PART_NOT_FOUND",
-        message: `Part not found in PlcCycleReadings for DDMMHHMM+SHOT (${day}/${month} ${hour}:${minute}, shot ${shotNumber}).`,
-      };
     } catch (error) {
-      return {
-        success: false,
-        reason: "PART_NOT_FOUND",
-        message: `Part lookup failed for DDMMHHMM+SHOT pattern: ${error.message}`,
-      };
+      console.warn("[PLC_CYCLE_AUDIT] compact format query failed:", error.message);
     }
   }
   const parsed = parseBarcodeToCycleReadingFields(barcode);
@@ -324,10 +321,10 @@ async function checkPlcCycleReading(barcode) {
   let compactParts = null;
   if (matchResult && matchResult.groups) {
     shotNumber = matchResult.groups.shot_number || matchResult.groups.shot || matchResult.groups.sequence;
-    const day = Number(matchResult.groups.day);
-    const month = Number(matchResult.groups.month);
-    const hour = Number(matchResult.groups.hour);
-    const minute = Number(matchResult.groups.minute);
+    const month = Number(matchResult.groups.month ?? matchResult.groups.mm);
+    const day = Number(matchResult.groups.day ?? matchResult.groups.dd);
+    const hour = Number(matchResult.groups.hour ?? matchResult.groups.hh);
+    const minute = Number(matchResult.groups.minute ?? matchResult.groups.min);
     if (
       Number.isFinite(day) && day >= 1 && day <= 31 &&
       Number.isFinite(month) && month >= 1 && month <= 12 &&
@@ -350,6 +347,7 @@ async function checkPlcCycleReading(barcode) {
   }
 
   // Strict compact-format matching: DDMMHHMM + shot
+  // If rule parsing extracted shot/day/month/hour/minute, prefer that over the generic compact parse.
   if (compactParts) {
     try {
       const compactQuery = `
@@ -388,7 +386,7 @@ async function checkPlcCycleReading(barcode) {
       return {
         success: false,
         reason: "PART_NOT_FOUND",
-        message: `Part not found in PlcCycleReadings for DDMMHHMM+SHOT (${compactParts.day}/${compactParts.month} ${compactParts.hour}:${compactParts.minute}, shot ${shotNumber}).`,
+        message: `Part not found in PlcCycleReadings for rule-derived date/time (${compactParts.day}/${compactParts.month} ${compactParts.hour}:${compactParts.minute}, shot ${shotNumber}).`,
       };
     } catch (error) {
       console.warn("[PLC_CYCLE_AUDIT] compact format query failed:", error.message);

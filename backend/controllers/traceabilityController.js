@@ -1809,14 +1809,6 @@ exports.getLiveMachineState = async (req, res) => {
     if (!machine) {
       return res.status(404).json({ error: "Machine not found" });
     }
-    const scanner = await Scanner.findOne({
-      where: {
-        mapped_machine_id: machine.id,
-        is_active: true,
-      },
-      order: [["updatedAt", "DESC"]],
-    });
-
     const stationNo = getMachineOperationStage(machine);
 
     const logs = await OperationLog.findAll({
@@ -1829,12 +1821,7 @@ exports.getLiveMachineState = async (req, res) => {
     const lastEvent = logs[0] || null;
     const plcHealth = getPlcHealthSnapshot(machine.id);
     const plcCircuit = getPlcCircuitSnapshot().find((entry) => entry.key === `machine:${machine.id}`) || null;
-    const scannerHealth = scanner
-      ? scannerConnectionManager.getStableSnapshot({
-        machineId: machine.id,
-        scannerIp: scanner.scanner_ip,
-      }) || (await buildScannerHealth(scanner, machine.id))
-      : await buildScannerHealth(null, machine.id);
+    const scannerBundle = await buildMachineScannerBundle(machine.id);
     const machineState = plcHandshakeEngine.getState(machine.id);
 
     res.json({
@@ -1859,18 +1846,10 @@ exports.getLiveMachineState = async (req, res) => {
       plcHealth: plcHealth || null,
       plcCircuit,
       plcQueue: plcConnectionManager.getQueueSnapshot(),
-      scanner: scanner
-        ? {
-          id: scanner.id,
-          scannerName: scanner.scanner_name,
-          scannerIp: scanner.scanner_ip,
-          scannerPort: scanner.scanner_port,
-          scannerMode: scanner.scanner_mode || "TCP_CLIENT",
-          isActive: scanner.is_active,
-          isSimulation: Boolean(scanner.is_simulation),
-        }
-        : null,
-      scannerHealth,
+      scanner: scannerBundle.primaryScanner,
+      scannerHealth: scannerBundle.primaryHealth,
+      scanners: scannerBundle.scanners,
+      scannerHealthList: scannerBundle.scannerHealth,
       machineState,
       current: current
         ? {
@@ -2683,7 +2662,7 @@ exports.getMachineStationStats = async (req, res) => {
     }));
     const plcHealth = getPlcHealthSnapshot(machine.id);
     const plcCircuit = getPlcCircuitSnapshot().find((entry) => entry.key === `machine:${machine.id}`) || null;
-    const scannerHealth = await buildScannerHealth(scanner, machine.id);
+    const scannerBundle = await buildMachineScannerBundle(machine.id);
 
     res.json({
       machine: {
@@ -2699,18 +2678,10 @@ exports.getMachineStationStats = async (req, res) => {
       },
       plcHealth: plcHealth || null,
       plcCircuit,
-      scanner: scanner
-        ? {
-          id: scanner.id,
-          scannerName: scanner.scanner_name,
-          scannerIp: scanner.scanner_ip,
-          scannerPort: scanner.scanner_port,
-          scannerMode: scanner.scanner_mode || "TCP_CLIENT",
-          isActive: scanner.is_active,
-          isSimulation: Boolean(scanner.is_simulation),
-        }
-        : null,
-      scannerHealth,
+      scanner: scannerBundle.primaryScanner,
+      scannerHealth: scannerBundle.primaryHealth,
+      scanners: scannerBundle.scanners,
+      scannerHealthList: scannerBundle.scannerHealth,
       summary,
       trend,
       current: current
@@ -2833,6 +2804,7 @@ exports.processScan = async (req, res) => {
     const resolvedCode = await resolveMappedPartId(normalizedPartId);
     normalizedPartId = resolvedCode.resolvedPartId;
     customerQrCode = resolvedCode.customerQrCode;
+    const isMappedCustomerQrScan = Boolean(customerQrCode) && customerQrCode === scannedQrRaw;
 
     const machineStage = getMachineOperationStage(machine);
     const requestedStage = normalizeStation(stationNo || operation);
@@ -2936,10 +2908,10 @@ exports.processScan = async (req, res) => {
             : finalResult,
       qualityPayload,
       customerCodePattern: stationFeatures.customerCodePattern || "",
-      shotValidationPartId: scannedQrRaw,
-      skipQrFormatValidation: !qrValidationEnabled || !validateQrFormat,
-      skipShotValidation: !validateShotNumber,
-      skipCustomerCodeValidation: !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
+      shotValidationPartId: normalizedPartId,
+      skipQrFormatValidation: isMappedCustomerQrScan || !qrValidationEnabled || !validateQrFormat,
+      skipShotValidation: isMappedCustomerQrScan || !validateShotNumber,
+      skipCustomerCodeValidation: isMappedCustomerQrScan || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
       skipInterlockValidation: skipAllBypassValidations,
       skipDuplicateValidation: false,
       skipSequenceValidation: !validatePreviousStation || skipAllBypassValidations,
@@ -3075,6 +3047,8 @@ exports.verifyScanForOperator = async (req, res) => {
     const scannedQrRaw = String(inputCode || "").trim();
     const resolvedCode = await resolveMappedPartId(inputCode);
     const normalizedPartId = resolvedCode.resolvedPartId;
+    const customerQrCode = resolvedCode.customerQrCode;
+    const isMappedCustomerQrScan = Boolean(customerQrCode) && customerQrCode === scannedQrRaw;
 
     const machine = await Machine.findByPk(machineId);
     if (!machine) {
@@ -3166,10 +3140,10 @@ exports.verifyScanForOperator = async (req, res) => {
             : finalResult,
       qualityPayload,
       customerCodePattern: stationFeatures.customerCodePattern || "",
-      shotValidationPartId: scannedQrRaw,
-      skipQrFormatValidation: !qrValidationEnabled || !validateQrFormat,
-      skipShotValidation: !validateShotNumber,
-      skipCustomerCodeValidation: !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
+      shotValidationPartId: normalizedPartId,
+      skipQrFormatValidation: isMappedCustomerQrScan || !qrValidationEnabled || !validateQrFormat,
+      skipShotValidation: isMappedCustomerQrScan || !validateShotNumber,
+      skipCustomerCodeValidation: isMappedCustomerQrScan || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
       skipInterlockValidation: skipAllBypassValidations,
       skipDuplicateValidation: false,
       skipSequenceValidation: !validatePreviousStation || skipAllBypassValidations,
@@ -4285,6 +4259,52 @@ function getDateRangeFromQuery(query) {
   const from = Number.isNaN(fromCandidate.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : fromCandidate;
   const to = Number.isNaN(toCandidate.getTime()) ? now : toCandidate;
   return { from, to };
+}
+
+function toScannerResponse(scanner) {
+  if (!scanner) return null;
+  return {
+    id: scanner.id,
+    scannerName: scanner.scanner_name,
+    scannerIp: scanner.scanner_ip,
+    scannerPort: scanner.scanner_port,
+    scannerMode: scanner.scanner_mode || "TCP_CLIENT",
+    scannerRole: scanner.scanner_role || null,
+    isActive: scanner.is_active,
+    isSimulation: Boolean(scanner.is_simulation),
+  };
+}
+
+async function getMachineScanners(machineId) {
+  if (!machineId) return [];
+  return Scanner.findAll({
+    where: { mapped_machine_id: machineId, is_active: true },
+    order: [["updatedAt", "DESC"], ["id", "ASC"]],
+  });
+}
+
+async function buildMachineScannerBundle(machineId) {
+  const scanners = await getMachineScanners(machineId);
+  if (!scanners.length) {
+    return {
+      primaryScanner: null,
+      primaryHealth: await buildScannerHealth(null, machineId),
+      scanners: [],
+      scannerHealth: [],
+    };
+  }
+
+  const scannerRows = scanners.map((scanner) => toScannerResponse(scanner));
+  const scannerHealthRows = await Promise.all(scanners.map((scanner) => buildScannerHealth(scanner, machineId)));
+  const startIndex = scanners.findIndex((scanner) => String(scanner.scanner_role || "").trim().toUpperCase() === "START_QR");
+  const primaryIndex = startIndex >= 0 ? startIndex : 0;
+
+  return {
+    primaryScanner: scannerRows[primaryIndex] || scannerRows[0] || null,
+    primaryHealth: scannerHealthRows[primaryIndex] || scannerHealthRows[0] || null,
+    scanners: scannerRows,
+    scannerHealth: scannerHealthRows,
+  };
 }
 
 function normalizeReportYear(value) {

@@ -18,6 +18,17 @@ const DEFAULT_PLC_CYCLE_COLUMNS = [
   "average_die_clamp_tonnage_count","time_for_stroke","stroke","shot_status"
 ];
 
+function stationResultRank(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "NG") return 3;
+  if (normalized === "OK") return 2;
+  return 0;
+}
+
+function pickPreferredStationResult(currentValue, nextValue) {
+  return stationResultRank(nextValue) > stationResultRank(currentValue) ? nextValue : (currentValue || nextValue);
+}
+
 function nowStamp() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
@@ -179,9 +190,15 @@ async function generateIndustrialExcel(res, {
     const resolved = row.industrialResult ? { status: row.industrialResult } : resolveIndustrialResult(row);
     const status = String(resolved.status || "").toUpperCase();
     if (stationKey) {
-      bucket.stationResults[stationKey] = status === "OK" || status === "NG" ? status : "-";
+      const normalizedStatus = status === "OK" || status === "NG" ? status : "-";
+      bucket.stationResults[stationKey] = pickPreferredStationResult(bucket.stationResults[stationKey], normalizedStatus);
     }
-    Object.assign(bucket.plcReading, row.plcReading || {});
+    const nextPlcReading = row.plcReading || {};
+    Object.keys(nextPlcReading).forEach((key) => {
+      if (bucket.plcReading[key] === undefined || bucket.plcReading[key] === null || bucket.plcReading[key] === "" || bucket.plcReading[key] === "-") {
+        bucket.plcReading[key] = nextPlcReading[key];
+      }
+    });
   });
 
   const matrixRows = [...grouped.values()];
