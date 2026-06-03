@@ -82,7 +82,24 @@ function getScannerHealthSnapshot({ machineId, scannerIp } = {}) {
   return all.filter((entry) => Number(entry.machineId || 0) === target);
 }
 
+function clearScannerHealth({ scannerIp, machineId } = {}) {
+  const normalizedIp = normalizeIp(scannerIp);
+  if (normalizedIp) {
+    scannerStateMap.delete(normalizedIp);
+    return;
+  }
+
+  if (!machineId) return;
+  const target = Number(machineId);
+  for (const [ip, entry] of scannerStateMap.entries()) {
+    if (Number(entry.machineId || 0) === target) {
+      scannerStateMap.delete(ip);
+    }
+  }
+}
+
 module.exports = {
   markScannerHeartbeat,
   getScannerHealthSnapshot,
+  clearScannerHealth,
 };

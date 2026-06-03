@@ -166,15 +166,82 @@ async function ensurePlcCycleReadingExists(parsed) {
 }
 
 async function checkPlcCycleReading(barcode) {
-  const isOkShotStatus = (value) => Number(value) === 1;
-  const getShotStatusCode = (row) => Number(row?.shot_status);
+  const isOkShotStatus = (value) => {
+    const normalized = String(value ?? "").trim().toUpperCase();
+    if (!normalized) return false;
+    if (["1", "OK", "PASS", "PASSED"].includes(normalized)) return true;
+    return Number(value) === 1;
+  };
+  const getShotStatusCode = (row) => row?.shot_status ?? row?.status ?? row?.result ?? row?.shot_result ?? null;
   const getShotStatusLabel = (value) => {
+    const normalized = String(value ?? "").trim().toUpperCase();
+    if (["OK", "PASS", "PASSED"].includes(normalized)) return "OK";
+    if (["NG", "FAIL", "FAILED"].includes(normalized)) return "NG";
     const code = Number(value);
     if (code === 1) return "OK";
     if (code === 3) return "WARM_UP_SHOT";
     if (code === 5) return "OFFSET_SHOT";
     return Number.isFinite(code) ? `UNKNOWN_${code}` : "UNKNOWN";
   };
+
+  // Priority path for compact QR format:
+  // Compact format: DDMMHHMM + SHOT(1..6)
+  const compactMatch = String(barcode || "").trim().match(/^(\d{2})(\d{2})(\d{2})(\d{2})(\d{1,6})$/);
+  if (compactMatch) {
+    const day = Number(compactMatch[1]);
+    const month = Number(compactMatch[2]);
+    const hour = Number(compactMatch[3]);
+    const minute = Number(compactMatch[4]);
+    const shotNumber = String(parseInt(compactMatch[5], 10));
+    try {
+      const [rows] = await sequelize.query(
+        `
+          SELECT TOP 1 * FROM PlcCycleReadings
+          WHERE TRY_CONVERT(INT, shot_day) = :day
+            AND TRY_CONVERT(INT, shot_month) = :month
+            AND TRY_CONVERT(INT, shot_hour) = :hour
+            AND TRY_CONVERT(INT, shot_minute) = :minute
+            AND shot_number = :shot
+          ORDER BY recorded_at DESC
+        `,
+        {
+          replacements: {
+            day,
+            month,
+            hour,
+            minute,
+            shot: parseInt(shotNumber, 10),
+          },
+        }
+      );
+      if (rows && rows.length > 0) {
+        const reading = rows[0];
+        const shotStatus = getShotStatusCode(reading);
+        if (!isOkShotStatus(shotStatus)) {
+          return {
+            success: false,
+            reason: "NG_SHOT_STATUS",
+            message: `Shot status ${shotStatus} (${getShotStatusLabel(shotStatus)}) is not allowed.`,
+            reading,
+            shotNumber,
+            shotStatus,
+          };
+        }
+        return { success: true, reading, shotNumber, shotStatus };
+      }
+      return {
+        success: false,
+        reason: "PART_NOT_FOUND",
+        message: `Part not found in PlcCycleReadings for DDMMHHMM+SHOT (${day}/${month} ${hour}:${minute}, shot ${shotNumber}).`,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        reason: "PART_NOT_FOUND",
+        message: `Part lookup failed for DDMMHHMM+SHOT pattern: ${error.message}`,
+      };
+    }
+  }
   const parsed = parseBarcodeToCycleReadingFields(barcode);
 
   if (parsed.success) {
@@ -186,7 +253,12 @@ async function checkPlcCycleReading(barcode) {
 
     const query = `
       SELECT TOP 1 * FROM PlcCycleReadings 
-      WHERE shot_year = :shot_year
+      WHERE (
+          shot_year = :shot_year
+          OR shot_year = :shot_year_short
+          OR CAST(shot_year AS NVARCHAR(10)) = :shot_year_text
+          OR CAST(shot_year AS NVARCHAR(10)) = :shot_year_short_text
+        )
         AND shot_month = :shot_month
         AND shot_day = :shot_day
         AND shot_hour = :shot_hour
@@ -198,6 +270,9 @@ async function checkPlcCycleReading(barcode) {
       const [results] = await sequelize.query(query, {
         replacements: {
           shot_year: parsed.shot_year,
+          shot_year_short: Number(parsed.shot_year) % 100,
+          shot_year_text: String(parsed.shot_year),
+          shot_year_short_text: String(Number(parsed.shot_year) % 100).padStart(2, "0"),
           shot_month: parsed.shot_month,
           shot_day: parsed.shot_day,
           shot_hour: parsed.shot_hour,
@@ -246,8 +321,21 @@ async function checkPlcCycleReading(barcode) {
   }
 
   let shotNumber = null;
+  let compactParts = null;
   if (matchResult && matchResult.groups) {
     shotNumber = matchResult.groups.shot_number || matchResult.groups.shot || matchResult.groups.sequence;
+    const day = Number(matchResult.groups.day);
+    const month = Number(matchResult.groups.month);
+    const hour = Number(matchResult.groups.hour);
+    const minute = Number(matchResult.groups.minute);
+    if (
+      Number.isFinite(day) && day >= 1 && day <= 31 &&
+      Number.isFinite(month) && month >= 1 && month <= 12 &&
+      Number.isFinite(hour) && hour >= 0 && hour <= 23 &&
+      Number.isFinite(minute) && minute >= 0 && minute <= 59
+    ) {
+      compactParts = { day, month, hour, minute };
+    }
   }
   if (!shotNumber && matchResult && matchResult.length > 1) {
     shotNumber = matchResult[matchResult.length - 1];
@@ -259,6 +347,53 @@ async function checkPlcCycleReading(barcode) {
 
   if (!shotNumber) {
     return { success: false, reason: "NO_SHOT_NUMBER", message: "Could not extract shot number from barcode." };
+  }
+
+  // Strict compact-format matching: DDMMHHMM + shot
+  if (compactParts) {
+    try {
+      const compactQuery = `
+        SELECT TOP 1 * FROM PlcCycleReadings
+        WHERE TRY_CONVERT(INT, shot_day) = :day
+          AND TRY_CONVERT(INT, shot_month) = :month
+          AND TRY_CONVERT(INT, shot_hour) = :hour
+          AND TRY_CONVERT(INT, shot_minute) = :minute
+          AND shot_number = :shot
+        ORDER BY recorded_at DESC
+      `;
+      const [rows] = await sequelize.query(compactQuery, {
+        replacements: {
+          day: compactParts.day,
+          month: compactParts.month,
+          hour: compactParts.hour,
+          minute: compactParts.minute,
+          shot: parseInt(shotNumber, 10),
+        },
+      });
+      if (rows && rows.length > 0) {
+        const reading = rows[0];
+        const shotStatus = getShotStatusCode(reading);
+        if (!isOkShotStatus(shotStatus)) {
+          return {
+            success: false,
+            reason: "NG_SHOT_STATUS",
+            message: `Shot status ${shotStatus} (${getShotStatusLabel(shotStatus)}) is not allowed.`,
+            reading,
+            shotNumber,
+            shotStatus,
+          };
+        }
+        return { success: true, reading, shotNumber, shotStatus };
+      }
+      return {
+        success: false,
+        reason: "PART_NOT_FOUND",
+        message: `Part not found in PlcCycleReadings for DDMMHHMM+SHOT (${compactParts.day}/${compactParts.month} ${compactParts.hour}:${compactParts.minute}, shot ${shotNumber}).`,
+      };
+    } catch (error) {
+      console.warn("[PLC_CYCLE_AUDIT] compact format query failed:", error.message);
+      // Continue to fallback queries below.
+    }
   }
 
   let query = `SELECT TOP 1 * FROM PlcCycleReadings WHERE shot_number = :shotNumber`;
@@ -337,6 +472,37 @@ async function checkPlcCycleReading(barcode) {
   return { success: false, reason: "PART_NOT_FOUND", message: `Part not found in database for shot number ${shotNumber}.` };
 }
 
+async function hasRealCompletedOperationBefore(partId, currentStation, sequence) {
+  const stationIndex = Array.isArray(sequence) ? sequence.indexOf(currentStation) : -1;
+  if (!partId || stationIndex <= 0) return false;
+
+  const previousStations = sequence.slice(0, stationIndex);
+  const row = await OperationLog.findOne({
+    where: {
+      part_id: partId,
+      station_no: { [Op.in]: previousStations },
+      [Op.and]: [
+        {
+          [Op.or]: [
+            { is_bypassed: false },
+            { is_bypassed: null },
+          ],
+        },
+        {
+          [Op.or]: [
+            { plc_status: { [Op.in]: ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"] } },
+            { result: { [Op.in]: ["OK", "NG", "PASS", "FAIL"] } },
+          ],
+        },
+      ],
+    },
+    attributes: ["id"],
+    order: [["createdAt", "DESC"]],
+  });
+
+  return Boolean(row);
+}
+
 function normalizeResult(result) {
   return String(result || "OK").trim().toUpperCase() === "OK" ? "OK" : "NG";
 }
@@ -403,7 +569,7 @@ async function getActiveQrRules() {
   });
 }
 
-async function getActiveStations() {
+async function getStationValidationPlan() {
   const machines = await Machine.findAll({
     where: { is_active: true },
     order: [["sequence_no", "ASC"]],
@@ -412,14 +578,25 @@ async function getActiveStations() {
     .map((machine) => ({ machine, stage: getMachineOperationStage(machine) }))
     .filter((row) => Boolean(row.stage));
   const staged = uniqueStages(machineStageRows.map((row) => row.stage));
-  if (staged.length === 0) return [];
+  if (staged.length === 0) {
+    return { physicalSequence: [], validationSequence: [], skippedStages: new Set(), stageMeta: {} };
+  }
 
   const settings = await StationFeatureSetting.findAll({
     where: { station_no: staged },
-    attributes: ["station_no", "operation_enabled"],
+    attributes: ["station_no", "operation_enabled", "config"],
   });
   const byStation = settings.reduce((acc, row) => {
-    acc[normalizeStation(row.station_no)] = row.operation_enabled !== false;
+    let config = {};
+    try {
+      config = typeof row.config === "string" ? JSON.parse(row.config || "{}") : (row.config || {});
+    } catch (_error) {
+      config = {};
+    }
+    acc[normalizeStation(row.station_no)] = {
+      operationEnabled: row.operation_enabled !== false,
+      stationBypassEnabled: config.bypass === true || config.bypassEnabled === true,
+    };
     return acc;
   }, {});
 
@@ -429,19 +606,126 @@ async function getActiveStations() {
     return acc;
   }, {});
 
-  return staged.filter((stage) => {
-    if (byStation[stage] === false) return false;
+  const stageMeta = {};
+  const validationSequence = staged.filter((stage) => {
+    const stationSetting = byStation[stage] || {};
+    const operationEnabled = stationSetting.operationEnabled !== false;
+    const stationBypassEnabled = stationSetting.stationBypassEnabled === true;
     const stageMachines = machinesByStage[stage] || [];
-    if (stageMachines.length === 0) return false;
-    // If all machines at this stage are bypassed, skip this stage in validation sequence.
-    // This allows downstream stations to scan without "previous station not completed" blocks.
-    const hasAtLeastOneNonBypassedMachine = stageMachines.some((machine) => {
+    const allMachinesBypassed = stageMachines.length > 0 && stageMachines.every((machine) => {
       const runtimeBypass = isMachineBypassEnabled(machine.id);
       const persistedBypass = machine.bypass_enabled === true;
-      return !(runtimeBypass || persistedBypass);
+      return runtimeBypass || persistedBypass;
     });
-    return hasAtLeastOneNonBypassedMachine;
+    const stageBypassed = !operationEnabled || stationBypassEnabled || allMachinesBypassed;
+
+    stageMeta[stage] = {
+      operationEnabled,
+      stationBypassEnabled,
+      allMachinesBypassed,
+      stageBypassed,
+      machineIds: stageMachines.map((machine) => Number(machine.id)).filter(Boolean),
+    };
+
+    return !stageBypassed;
   });
+
+  const validationSet = new Set(validationSequence);
+  const skippedStages = new Set(staged.filter((stage) => !validationSet.has(stage)));
+
+  return {
+    physicalSequence: staged,
+    validationSequence,
+    skippedStages,
+    stageMeta,
+  };
+}
+
+async function getActiveStations() {
+  const plan = await getStationValidationPlan();
+  return plan.validationSequence;
+}
+
+async function autoPassSkippedStationsBefore({
+  part,
+  partId,
+  currentStation,
+  plan,
+  userId,
+}) {
+  if (!part || !partId || !currentStation || !plan?.physicalSequence?.length) {
+    return [];
+  }
+  const currentPhysicalIndex = plan.physicalSequence.indexOf(currentStation);
+  if (currentPhysicalIndex <= 0) return [];
+
+  const created = [];
+  const priorSkippedStations = plan.physicalSequence
+    .slice(0, currentPhysicalIndex)
+    .filter((station) => plan.skippedStages?.has(station));
+
+  for (const skippedStation of priorSkippedStations) {
+    const existing = await OperationLog.findOne({
+      where: {
+        part_id: partId,
+        station_no: skippedStation,
+      },
+      order: [["createdAt", "DESC"]],
+    });
+    if (existing) {
+      const plcStatus = String(existing.plc_status || "").trim().toUpperCase();
+      const result = String(existing.result || "").trim().toUpperCase();
+      const reason = String(existing.interlock_reason || "").trim().toUpperCase();
+      const isTerminal =
+        ["ENDED_OK", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"].includes(plcStatus) ||
+        ["OK", "NG", "PASS", "FAIL"].includes(result) ||
+        existing.is_bypassed === true;
+      const isRealInterlock = plcStatus === "INTERLOCKED" && reason && !["PREVIOUS_STATION_NOT_COMPLETED", "STATION_NOT_CONFIGURED"].includes(reason);
+      if (isTerminal || isRealInterlock) continue;
+    }
+
+    const meta = plan.stageMeta?.[skippedStation] || {};
+    const machineId = Number(meta.machineIds?.[0] || 0) || null;
+    const bypassReason = meta.allMachinesBypassed
+      ? "MACHINE_BYPASS_AUTO_OK"
+      : meta.stationBypassEnabled
+        ? "STATION_BYPASS_AUTO_OK"
+        : "STATION_OPERATION_DISABLED_AUTO_OK";
+
+    const log = await OperationLog.create({
+      part_id: partId,
+      machine_id: machineId,
+      operation_no: skippedStation,
+      station_no: skippedStation,
+      plc_status: "ENDED_OK",
+      plc_start_time: new Date(),
+      plc_start_at: new Date(),
+      plc_end_time: new Date(),
+      plc_end_at: new Date(),
+      result: "OK",
+      scan_attempt_type: "BYPASS",
+      validation_result: "PASSED",
+      operation_result: "PASSED",
+      user_id: userId,
+      interlock_reason: null,
+      is_bypassed: true,
+      bypass_reason: bypassReason,
+    });
+    created.push(log);
+  }
+
+  if (created.length > 0) {
+    const latestSkippedStation = created[created.length - 1].station_no;
+    part.current_operation = latestSkippedStation;
+    part.current_station = latestSkippedStation;
+    part.status = "IN_PROGRESS";
+    part.last_validation_result = "PASSED";
+    part.is_interlocked = false;
+    part.interlock_reason = null;
+    await part.save();
+  }
+
+  return created;
 }
 
 async function saveAuditLog(partId, machineId, status, reason, userId = null) {
@@ -577,6 +861,7 @@ function endScanInflight(key) {
 exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = null, options = {}) => {
   const now = new Date();
   const normalizedPartId = String(partId || "").trim();
+  const shotValidationPartId = String(options?.shotValidationPartId || normalizedPartId).trim();
   const station = normalizeStation(stationNo);
   const normalizedResult = normalizeResult(result);
   const resultSource = normalizeResultSource(options?.resultSource);
@@ -619,6 +904,16 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     const applicableRules = activeRules.filter((rule) => isRuleApplicableToStation(rule, station));
     let matchedRule = null;
 
+    if (!skipQrFormatValidation && applicableRules.length === 0) {
+      return {
+        decision: "BLOCK",
+        reason: "QR_RULE_NOT_FOUND_FOR_STATION",
+        validationResult: "FAILED",
+        message: `No active QR rule configured for station ${station}.`,
+        currentStatus: "REJECTED_QR_RULE",
+      };
+    }
+
     if (!skipQrFormatValidation && applicableRules.length > 0) {
       for (const rule of applicableRules) {
         try {
@@ -652,20 +947,47 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       }
     }
 
-    const sequence = await getActiveStations();
+    const validationPlan = await getStationValidationPlan();
+    const sequence = validationPlan.validationSequence;
     if (!sequence.includes(station)) {
       return {
         decision: "BLOCK",
         reason: "STATION_NOT_CONFIGURED",
-        message: `Station ${station} is not configured in active station sequence.`,
+        message: validationPlan.physicalSequence.includes(station)
+          ? `Station ${station} is bypassed or scanner is inactive. Scan at the next active station.`
+          : `Station ${station} is not configured in active station sequence.`,
         currentStatus: "UNKNOWN"
       };
     }
-    const firstStation = sequence[0] || null;
+    const firstValidationStation = sequence[0] || null;
+    const stationSequenceIndex = sequence.indexOf(station);
+    const hasPreviousRealCompletion = await hasRealCompletedOperationBefore(normalizedPartId, station, sequence);
+    const shouldValidateShot =
+      !skipShotValidation &&
+      (station === firstValidationStation || stationSequenceIndex === 0 || !hasPreviousRealCompletion);
 
-    // First operation gate: scanned QR must exist in PLC reading table.
-    if (!skipShotValidation && station === firstStation) {
-      const plcMatch = await checkPlcCycleReading(normalizedPartId);
+    let part = await Part.findOne({ where: { part_id: normalizedPartId } });
+    if (!part) {
+      part = await Part.create({
+        part_id: normalizedPartId,
+        month: now.getMonth() + 1,
+        year: now.getFullYear(),
+        current_operation: null,
+        current_station: null,
+        status: "IN_PROGRESS",
+      });
+    }
+
+    await autoPassSkippedStationsBefore({
+      part,
+      partId: normalizedPartId,
+      currentStation: station,
+      plan: validationPlan,
+      userId,
+    });
+
+    if (shouldValidateShot) {
+      const plcMatch = await checkPlcCycleReading(shotValidationPartId);
       if (!plcMatch?.success) {
         const blockedPart = await Part.findOne({ where: { part_id: normalizedPartId } }) || await Part.create({
           part_id: normalizedPartId,
@@ -729,18 +1051,6 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       }
     }
 
-    let part = await Part.findOne({ where: { part_id: normalizedPartId } });
-    if (!part) {
-      part = await Part.create({
-        part_id: normalizedPartId,
-        month: now.getMonth() + 1,
-        year: now.getFullYear(),
-        current_operation: null,
-        current_station: null,
-        status: "IN_PROGRESS",
-      });
-    }
-
     if (matchedRule) {
       const formatName = matchedRule.format_name || matchedRule.model_code || "ACTIVE_RULE";
       if (part.qr_format_name !== formatName) {
@@ -768,7 +1078,6 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     }
 
     // 1. DUPLICATE VALIDATION (cycle-aware + latest-station-log aware)
-    const stationSequenceIndex = sequence.indexOf(station);
     const firstStationInSequence = sequence[0] || null;
     let cycleAnchorAt = null;
 

@@ -634,7 +634,7 @@ export default function QrFormatRules() {
                   <div className="hidden lg:block">
                     {form.segments.length > 0 && (
                       <div className="grid gap-2 px-2 text-[10px] font-bold text-text-muted uppercase tracking-wider"
-                        style={{ gridTemplateColumns: "28px minmax(100px, 1fr) 70px 110px 140px 60px 50px 32px" }}>
+                        style={{ gridTemplateColumns: "28px minmax(120px, 1fr) minmax(72px, 0.38fr) minmax(136px, 0.7fr) minmax(220px, 1fr) 48px 44px 32px" }}>
                         <span></span>
                         <span>Field</span>
                         <span>Display</span>
@@ -649,7 +649,7 @@ export default function QrFormatRules() {
                     {form.segments.map((seg, i) => (
                       <div key={i}
                         className={`grid gap-2 items-center p-2 bg-bg-dark/40 border rounded-xl transition-all ${seg.enabled ? 'border-border' : 'border-border/40 opacity-60'}`}
-                        style={{ gridTemplateColumns: "28px minmax(100px, 1fr) 70px 110px 140px 60px 50px 32px" }}
+                        style={{ gridTemplateColumns: "28px minmax(120px, 1fr) minmax(72px, 0.38fr) minmax(136px, 0.7fr) minmax(220px, 1fr) 48px 44px 32px" }}
                         draggable
                         onDragStart={() => setDragIndex(i)}
                         onDragOver={(e) => e.preventDefault()}
@@ -659,11 +659,11 @@ export default function QrFormatRules() {
                           <GripVertical size={14} />
                         </div>
 
-                        <input value={seg.field} onChange={(e) => updateSeg(i, "field", e.target.value.toLowerCase().replace(/\s+/g, "_"))} placeholder="name" className={seg_inp} />
-                        <input value={seg.displayName || ""} onChange={(e) => updateSeg(i, "displayName", e.target.value.toUpperCase().slice(0, 6))} placeholder="YY" className={seg_inp} />
+                        <input value={seg.field} onChange={(e) => updateSeg(i, "field", e.target.value.toLowerCase().replace(/\s+/g, "_"))} placeholder="name" className={`${seg_inp} min-w-0`} />
+                        <input value={seg.displayName || ""} onChange={(e) => updateSeg(i, "displayName", e.target.value.toUpperCase().slice(0, 6))} placeholder="YY" className={`${seg_inp} min-w-0`} />
 
                         <div className="relative">
-                          <select value={seg.type} onChange={(e) => updateSeg(i, "type", e.target.value)} className={seg_inp}>
+                          <select value={seg.type} onChange={(e) => updateSeg(i, "type", e.target.value)} className={`${seg_inp} min-w-0`}>
                             {FIELD_TYPES.map(t => (<option key={t.value} value={t.value}>{t.label}</option>))}
                           </select>
                           <button type="button" className="absolute right-1 top-1/2 -translate-y-1/2 text-text-muted/30 hover:text-text-muted"
@@ -672,20 +672,20 @@ export default function QrFormatRules() {
                           </button>
                         </div>
 
-                        <div className="flex gap-1 items-center">
-                          <select value={seg.mode} onChange={(e) => updateSeg(i, "mode", e.target.value)} className="bg-bg-dark border border-border rounded-md px-1 py-1.5 text-xs text-text-main outline-none focus:border-accent/60 w-20">
+                        <div className="flex gap-1 items-center min-w-0 overflow-hidden">
+                          <select value={seg.mode} onChange={(e) => updateSeg(i, "mode", e.target.value)} className="bg-bg-dark border border-border rounded-md px-1 py-1.5 text-xs text-text-main outline-none focus:border-accent/60 w-16 min-w-0">
                             <option value="FIXED">Fixed</option>
                             <option value="RANGE">Range</option>
                             <option value="UNTIL_SEPARATOR">Until sep</option>
                           </select>
                           {seg.mode === "FIXED" && (
-                            <input type="number" value={seg.length} onChange={(e) => updateSeg(i, "length", Number(e.target.value))} min={1} max={20} className="w-14 bg-bg-dark border border-border rounded-md px-2 py-1.5 text-xs text-text-main font-mono outline-none focus:border-accent/60 text-center" />
+                            <input type="number" value={seg.length} onChange={(e) => updateSeg(i, "length", Number(e.target.value))} min={1} max={20} className="w-10 bg-bg-dark border border-border rounded-md px-1 py-1.5 text-xs text-text-main font-mono outline-none focus:border-accent/60 text-center" />
                           )}
                           {seg.mode === "RANGE" && (
-                            <div className="flex gap-1 items-center">
-                              <input type="number" value={seg.minLength} onChange={(e) => updateSeg(i, "minLength", Number(e.target.value))} min={1} className="w-12 bg-bg-dark border border-border rounded-md px-1 py-1.5 text-xs text-text-main font-mono outline-none focus:border-accent/60 text-center" />
+                            <div className="flex gap-1 items-center min-w-0 overflow-hidden">
+                              <input type="number" value={seg.minLength} onChange={(e) => updateSeg(i, "minLength", Number(e.target.value))} min={1} className="w-9 bg-bg-dark border border-border rounded-md px-1 py-1.5 text-xs text-text-main font-mono outline-none focus:border-accent/60 text-center" />
                               <span className="text-text-muted text-xs">to</span>
-                              <input type="number" value={seg.maxLength} onChange={(e) => updateSeg(i, "maxLength", Number(e.target.value))} min={1} className="w-12 bg-bg-dark border border-border rounded-md px-1 py-1.5 text-xs text-text-main font-mono outline-none focus:border-accent/60 text-center" />
+                              <input type="number" value={seg.maxLength} onChange={(e) => updateSeg(i, "maxLength", Number(e.target.value))} min={1} className="w-9 bg-bg-dark border border-border rounded-md px-1 py-1.5 text-xs text-text-main font-mono outline-none focus:border-accent/60 text-center" />
                             </div>
                           )}
                           {seg.mode === "UNTIL_SEPARATOR" && <span className="text-[10px] text-text-muted px-1">(until sep)</span>}

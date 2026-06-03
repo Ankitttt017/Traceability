@@ -62,7 +62,7 @@ export const NotificationProvider = ({ children }) => {
 
     const socket = io(SOCKET_URL, {
       path: "/socket.io/",
-      transports: ["polling", "websocket"],
+      transports: ["polling"], upgrade: false,
       autoConnect: false,
     });
     const connectTimer = setTimeout(() => {

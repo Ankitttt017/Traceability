@@ -45,7 +45,7 @@ export function useAlarmToasts() {
   useEffect(() => {
     const socket = io(SOCKET_URL, {
       path: "/socket.io/",
-      transports: ["polling", "websocket"],
+      transports: ["polling"], upgrade: false,
       autoConnect: false,
       reconnectionAttempts: 5,
     });

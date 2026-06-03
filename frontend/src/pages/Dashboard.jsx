@@ -287,22 +287,6 @@ const MachineCard = ({ row, plcOnline=null, scannerOnline=null, nowMs=0 }) => {
       onMouseEnter={e=>{e.currentTarget.style.borderColor=C.steel(0.5);e.currentTarget.style.boxShadow=SHADOW_MD;}}
       onMouseLeave={e=>{e.currentTarget.style.borderColor=C.bdr();e.currentTarget.style.boxShadow=SHADOW;}}
     >
-      {/* PLC + Scanner status */}
-      <div style={{position:"absolute",top:14,right:14,display:"flex",alignItems:"center",gap:6}}>
-        <div title={plcOnline === null ? "PLC status unknown / not assigned" : (plcOnline ? "PLC Connection Active" : "PLC Connection Down")} style={{display:"flex",alignItems:"center",gap:4}}>
-          <span style={{fontSize:8,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.08em"}}>PLC</span>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"center",width:22,height:22,borderRadius:6,background:plcOnline===null?C.steel(0.1):(plcOnline?C.ok(0.1):C.ng(0.1)),border:`1px solid ${plcOnline===null?C.steel(0.2):(plcOnline?C.ok(0.2):C.ng(0.2))}`}}>
-            {plcOnline ? <Wifi size={11} color={C.ok()}/> : <WifiOff size={11} color={plcOnline===null?C.steel():C.ng()}/>}
-          </div>
-        </div>
-        <div title={scannerOnline === null ? "Scanner status unknown" : (scannerOnline ? "Scanner Online" : "Scanner Offline")} style={{display:"flex",alignItems:"center",gap:4}}>
-          <span style={{fontSize:8,fontWeight:800,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.08em"}}>SCN</span>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"center",width:22,height:22,borderRadius:6,background:scannerOnline===null?C.steel(0.1):(scannerOnline?C.ok(0.1):C.ng(0.1)),border:`1px solid ${scannerOnline===null?C.steel(0.2):(scannerOnline?C.ok(0.2):C.ng(0.2))}`}}>
-            {scannerOnline ? <Wifi size={11} color={C.ok()}/> : <WifiOff size={11} color={scannerOnline===null?C.steel():C.ng()}/>}
-          </div>
-        </div>
-      </div>
-
       {/* Header */}
       <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
         <OeeGauge value={acc} size={56} stroke={6}/>
@@ -345,6 +329,14 @@ const MachineCard = ({ row, plcOnline=null, scannerOnline=null, nowMs=0 }) => {
           </span>
         </div>
         <div style={{display:"flex",gap:12}}>
+          <span title={plcOnline === null ? "PLC status unknown / not assigned" : (plcOnline ? "PLC online" : "PLC offline")} style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:11,fontWeight:700,color:plcOnline===null?C.txt("muted"):(plcOnline?C.ok():C.ng())}}>
+            {plcOnline ? <Wifi size={11} color={C.ok()}/> : <WifiOff size={11} color={plcOnline===null?C.steel():C.ng()}/>}
+            PLC
+          </span>
+          <span title={scannerOnline === null ? "Scanner status unknown / not assigned" : (scannerOnline ? "Scanner online" : "Scanner offline")} style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:11,fontWeight:700,color:scannerOnline===null?C.txt("muted"):(scannerOnline?C.ok():C.ng())}}>
+            {scannerOnline ? <Wifi size={11} color={C.ok()}/> : <WifiOff size={11} color={scannerOnline===null?C.steel():C.ng()}/>}
+            SCN
+          </span>
           <span title="Duration-based downtime from production log gaps" style={{fontSize:11,fontWeight:700,color:C.steel()}}>
             DT Min {Math.round(Number(row.downtimeMinutes || 0))}
           </span>
@@ -517,7 +509,7 @@ const Dashboard = () => {
   useEffect(()=>{
     const sock=io(SOCKET_URL,{
       path:"/socket.io/",
-      transports:["polling","websocket"],
+      transports: ["polling"], upgrade: false,
       reconnection:true,
       reconnectionAttempts:Infinity,
       reconnectionDelay:1000,
@@ -532,9 +524,11 @@ const Dashboard = () => {
   },[scheduleRefresh]);
 
   const efficiency = useMemo(()=>{
-    const t=(summary.quality?.ok||0)+(summary.quality?.ng||0);
-    return t>0 ? Math.round((summary.quality.ok/t)*100) : 0;
-  },[summary.quality]);
+    const ok = Number(summary.parts?.completed || 0);
+    const ng = Number(summary.parts?.ng || 0);
+    const t = ok + ng;
+    return t > 0 ? Math.round((ok / t) * 100) : 0;
+  },[summary.parts]);
   const lineContextLabel = useMemo(() => {
     const selectedMachineId = Number(filters.machineId || 0);
     if (selectedMachineId) {
@@ -552,10 +546,10 @@ const Dashboard = () => {
 
   // Pie data
   const pieData = useMemo(()=>[
-    { name:"Pass",    value:summary.quality?.ok||0          },
-    { name:"Fail",    value:summary.quality?.ng||0          },
-    { name:"Blocked", value:summary.quality?.interlocked||0 },
-  ],[summary.quality]);
+    { name:"Pass",    value:Number(summary.parts?.completed || 0)          },
+    { name:"Fail",    value:Number(summary.parts?.ng || 0)                 },
+    { name:"Blocked", value:Number(summary.parts?.interlocked || 0)        },
+  ],[summary.parts]);
 
   // Shift bar data
   const shiftData = useMemo(() => {
@@ -670,6 +664,53 @@ const Dashboard = () => {
     }, {});
     return Object.values(bucket).sort((a, b) => String(a.slot).localeCompare(String(b.slot)));
   }, [rejectionAnalysisRows]);
+
+  const isMultiDayRange = useMemo(() => {
+    if (filters.datePreset === "last7" || filters.datePreset === "last30") return true;
+    if (filters.dateFrom && filters.dateTo) {
+      const fromMs = new Date(filters.dateFrom).getTime();
+      const toMs = new Date(filters.dateTo).getTime();
+      if (Number.isFinite(fromMs) && Number.isFinite(toMs)) {
+        return (toMs - fromMs) > 36 * 60 * 60 * 1000;
+      }
+    }
+    return false;
+  }, [filters.datePreset, filters.dateFrom, filters.dateTo]);
+
+  const productionTrendData = useMemo(() => {
+    if (!isMultiDayRange) return report.hourlyProduction || [];
+    const rows = Array.isArray(report.partsList) ? report.partsList : [];
+    const bucket = rows.reduce((acc, row) => {
+      const ts = new Date(row.createdAt || row.createdAtRaw || Date.now());
+      if (Number.isNaN(ts.getTime())) return acc;
+      const key = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}-${String(ts.getDate()).padStart(2, "0")}`;
+      if (!acc[key]) acc[key] = { date: key, ok: 0, ng: 0, total: 0 };
+      const result = String(row.result || row.status || "").toUpperCase();
+      if (result === "OK" || result === "PASSED") acc[key].ok += 1;
+      else if (result === "NG" || result === "FAILED") acc[key].ng += 1;
+      acc[key].total += 1;
+      return acc;
+    }, {});
+    return Object.values(bucket).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  }, [isMultiDayRange, report.hourlyProduction, report.partsList]);
+
+  const rejectionTrendData = useMemo(() => {
+    if (!isMultiDayRange) return rejectionTrend;
+    const rows = rejectionAnalysisRows.map((row) => {
+      const ts = new Date(row.createdAt || Date.now());
+      const key = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}-${String(ts.getDate()).padStart(2, "0")}`;
+      return { key, category: normalizeRejectionType(row.reason || row.interlock_reason || "") };
+    });
+    const bucket = rows.reduce((acc, row) => {
+      if (!acc[row.key]) acc[row.key] = { date: row.key, total: 0, cr: 0, cram: 0, mr: 0 };
+      acc[row.key].total += 1;
+      if (row.category === "CR - Casting Defects") acc[row.key].cr += 1;
+      else if (row.category === "CRAM - Cram Defects") acc[row.key].cram += 1;
+      else acc[row.key].mr += 1;
+      return acc;
+    }, {});
+    return Object.values(bucket).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  }, [isMultiDayRange, rejectionTrend, rejectionAnalysisRows]);
 
   // —— Tabs config ——
   const TABS = [
@@ -999,10 +1040,10 @@ const Dashboard = () => {
       {/* —— KPI Row —————————————————————————————————————————————————————————————— */}
       <div style={{display:"grid",
         gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
-        <KpiCard label="Active Machines"  value={summary.machines.active}         icon={Cpu}          accent={C.steel()}  sub={`Out of ${summary.machines.total} total machines`}/>
+        <KpiCard label="Total Stations"  value={summary.machines.active}         icon={Cpu}          accent={C.steel()}  sub={`Out of ${summary.machines.total} total machines`}/>
         <KpiCard label="In Progress"      value={summary.parts.inProgress}         icon={Zap}          accent={C.wip()}    sub="Parts being processed"/>
         <KpiCard label="Completed (Pass)" value={summary.parts.completed}          icon={CheckCircle2} accent={C.ok()}     sub="Total OK this period"/>
-        <KpiCard label="Failed (NG)"      value={summary.quality?.ng||0}           icon={XCircle}      accent={C.ng()}     sub="Requires attention"/>
+        <KpiCard label="Failed (NG)"      value={summary.parts.ng||0}              icon={XCircle}      accent={C.ng()}     sub="Requires attention"/>
         <KpiCard label="Interlocked"      value={summary.parts.interlocked||0}     icon={AlertTriangle}accent={C.amber()}  sub="PLC blocked"/>
         <KpiCard label="Quality Rate"        value={`${efficiency}%`}                 icon={TrendingUp}   accent={efficiency>=85?C.ok():efficiency>=60?C.amber():C.ng()} sub="Overall quality rate"/>
       </div>
@@ -1073,9 +1114,9 @@ const Dashboard = () => {
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
                 {[
-                  { label:"Pass",    value:summary.quality?.ok||0,          color:C.ok()    },
-                  { label:"Fail",    value:summary.quality?.ng||0,          color:C.ng()    },
-                  { label:"Blocked", value:summary.quality?.interlocked||0, color:C.amber() },
+                  { label:"Pass",    value:summary.parts?.completed||0,  color:C.ok()    },
+                  { label:"Fail",    value:summary.parts?.ng||0,         color:C.ng()    },
+                  { label:"Blocked", value:summary.parts?.interlocked||0,color:C.amber() },
                 ].map(s=>(
                   <div key={s.label} style={{background:C.bg("surf"),
                     border:`1px solid ${C.bdr()}`,borderRadius:10,
@@ -1091,7 +1132,7 @@ const Dashboard = () => {
 
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title="Hourly Production"
+              <SectionHead title={isMultiDayRange ? "Production Trend" : "Hourly Production"}
                 right={
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
                     <ChartModeToggle mode={chartModeHourly} onChange={setChartModeHourly} />
@@ -1105,33 +1146,33 @@ const Dashboard = () => {
                 <div style={{ width: "100%", height: 220, minWidth: 1, minHeight: 1 }}>
                 <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                   {chartModeHourly === "line" && (
-                    <LineChart data={report.hourlyProduction} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <LineChart data={productionTrendData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
-                      <XAxis dataKey="hour" tickFormatter={h=>`${String(h).padStart(2,"0")}:00`} tick={{fontSize:11,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
+                      <XAxis dataKey={isMultiDayRange ? "date" : "hour"} tickFormatter={h=>isMultiDayRange ? String(h).slice(5) : `${String(h).padStart(2,"0")}:00`} tick={{fontSize:11,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                      <Tooltip {...TooltipStyle} labelFormatter={h=>`${String(h).padStart(2,"0")}:00`}/>
+                      <Tooltip {...TooltipStyle} labelFormatter={h=>isMultiDayRange ? String(h) : `${String(h).padStart(2,"0")}:00`}/>
                       <Line type="monotone" dataKey="ok" stroke={C.ok()} strokeWidth={2.5} dot={false} activeDot={{r:4,fill:C.ok()}}/>
                       <Line type="monotone" dataKey="ng" stroke={C.ng()} strokeWidth={2} dot={false} strokeDasharray="4 3" activeDot={{r:4,fill:C.ng()}}/>
                       <Line type="monotone" dataKey="total" stroke={C.steel()} strokeWidth={1.5} dot={false} strokeDasharray="2 4" activeDot={{r:4,fill:C.steel()}}/>
                     </LineChart>
                   )}
                   {chartModeHourly === "bar" && (
-                    <BarChart data={report.hourlyProduction} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <BarChart data={productionTrendData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
-                      <XAxis dataKey="hour" tickFormatter={h=>`${String(h).padStart(2,"0")}:00`} tick={{fontSize:11,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
+                      <XAxis dataKey={isMultiDayRange ? "date" : "hour"} tickFormatter={h=>isMultiDayRange ? String(h).slice(5) : `${String(h).padStart(2,"0")}:00`} tick={{fontSize:11,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                      <Tooltip {...TooltipStyle} labelFormatter={h=>`${String(h).padStart(2,"0")}:00`}/>
+                      <Tooltip {...TooltipStyle} labelFormatter={h=>isMultiDayRange ? String(h) : `${String(h).padStart(2,"0")}:00`}/>
                       <Bar dataKey="ok" fill={C.ok()} radius={[4,4,0,0]} />
                       <Bar dataKey="ng" fill={C.ng()} radius={[4,4,0,0]} />
                       <Bar dataKey="total" fill={C.steel(0.6)} radius={[4,4,0,0]} />
                     </BarChart>
                   )}
                   {chartModeHourly === "area" && (
-                    <AreaChart data={report.hourlyProduction} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <AreaChart data={productionTrendData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
-                      <XAxis dataKey="hour" tickFormatter={h=>`${String(h).padStart(2,"0")}:00`} tick={{fontSize:11,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
+                      <XAxis dataKey={isMultiDayRange ? "date" : "hour"} tickFormatter={h=>isMultiDayRange ? String(h).slice(5) : `${String(h).padStart(2,"0")}:00`} tick={{fontSize:11,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                      <Tooltip {...TooltipStyle} labelFormatter={h=>`${String(h).padStart(2,"0")}:00`}/>
+                      <Tooltip {...TooltipStyle} labelFormatter={h=>isMultiDayRange ? String(h) : `${String(h).padStart(2,"0")}:00`}/>
                       <Area type="monotone" dataKey="ok" stroke={C.ok()} fill={C.ok(0.25)} />
                       <Area type="monotone" dataKey="ng" stroke={C.ng()} fill={C.ng(0.2)} />
                     </AreaChart>
@@ -1378,13 +1419,13 @@ const Dashboard = () => {
 
           <div style={{display:"grid",gridTemplateRows:"220px auto",gap:16}}>
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title="Rejection Trend by Hour" right={<ChartModeToggle mode={chartModeRejectTrend} onChange={setChartModeRejectTrend} />} />
+              <SectionHead title={isMultiDayRange ? "Rejection Trend by Day" : "Rejection Trend by Hour"} right={<ChartModeToggle mode={chartModeRejectTrend} onChange={setChartModeRejectTrend} />} />
               <SafeChart height={180}>
               <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                 {chartModeRejectTrend === "area" && (
-                  <AreaChart data={rejectionTrend} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
+                  <AreaChart data={rejectionTrendData} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
                     <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
-                    <XAxis dataKey="slot" tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
+                    <XAxis dataKey={isMultiDayRange ? "date" : "slot"} tickFormatter={(v)=>isMultiDayRange ? String(v).slice(5) : v} tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                     <YAxis tick={{fontSize:10,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                     <Tooltip {...TooltipStyle}/>
                     <Area type="monotone" dataKey="cr" stackId="1" stroke={C.ng()} fill={C.ng(0.35)} />
@@ -1393,9 +1434,9 @@ const Dashboard = () => {
                   </AreaChart>
                 )}
                 {chartModeRejectTrend === "line" && (
-                  <LineChart data={rejectionTrend} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
+                  <LineChart data={rejectionTrendData} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
                     <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
-                    <XAxis dataKey="slot" tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
+                    <XAxis dataKey={isMultiDayRange ? "date" : "slot"} tickFormatter={(v)=>isMultiDayRange ? String(v).slice(5) : v} tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                     <YAxis tick={{fontSize:10,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                     <Tooltip {...TooltipStyle}/>
                     <Line type="monotone" dataKey="cr" stroke={C.ng()} strokeWidth={2.2} />
@@ -1404,9 +1445,9 @@ const Dashboard = () => {
                   </LineChart>
                 )}
                 {chartModeRejectTrend === "bar" && (
-                  <BarChart data={rejectionTrend} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
+                  <BarChart data={rejectionTrendData} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
                     <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
-                    <XAxis dataKey="slot" tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
+                    <XAxis dataKey={isMultiDayRange ? "date" : "slot"} tickFormatter={(v)=>isMultiDayRange ? String(v).slice(5) : v} tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                     <YAxis tick={{fontSize:10,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                     <Tooltip {...TooltipStyle}/>
                     <Bar dataKey="cr" fill={C.ng()} radius={[3,3,0,0]} />

@@ -1439,7 +1439,7 @@ const GlobalPopup = ({
           </div>
 
           {/* Compact Stats */}
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-2 mt-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3">
             <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
               <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">Machine</p>
               <p className="text-white text-m font-bold truncate">{popup?.machineName || "N/A"}</p>
@@ -1455,18 +1455,6 @@ const GlobalPopup = ({
             <div className="rounded-lg p-2" style={allPassed ? { background: "#064e3b" } : { background: "#0f172a" }}>
               <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5" >Pass</p>
               <p className="text-m font-bold" style={{ color: allPassed ? "#4ade80" : "#fff" }}>{passCount}/{totalCount}</p>
-            </div>
-            <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
-              <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">PLC</p>
-              <p className="text-m font-bold" style={{ color: plcOnline ? "#4ade80" : "#f87171" }}>
-                {plcOnline ? "Online" : "Offline"}
-              </p>
-            </div>
-            <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
-              <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">Scanner</p>
-              <p className="text-m font-bold" style={{ color: scannerConnected ? "#4ade80" : "#f87171" }}>
-                {scannerConnected ? "Online" : "Offline"}
-              </p>
             </div>
           </div>
 

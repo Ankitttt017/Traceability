@@ -653,9 +653,10 @@ const OperatorView = () => {
   const machineClock = formatElapsed(liveState?.current?.createdAt || liveState?.lastEvent?.createdAt, clockTick);
 
   const currentContext = liveState?.current || stationStats?.current || liveState?.lastEvent || stationStats?.lastEvent || null;
-  const plcHealth = liveState?.plcHealth || stationStats?.plcHealth || null;
-  const scannerHealth = liveState?.scannerHealth || stationStats?.scannerHealth || null;
-  const scannerInfo = liveState?.scanner || stationStats?.scanner || null;
+  const hasLiveState = Boolean(liveState);
+  const plcHealth = hasLiveState ? liveState?.plcHealth || null : stationStats?.plcHealth || null;
+  const scannerHealth = hasLiveState ? liveState?.scannerHealth || null : stationStats?.scannerHealth || null;
+  const scannerInfo = hasLiveState ? liveState?.scanner || null : stationStats?.scanner || null;
   const plcHealthKnown = typeof plcHealth?.healthy === "boolean";
   const plcConnected = plcHealthKnown ? Boolean(plcHealth?.healthy) : null;
   const scannerConfigured = String(scannerHealth?.status || "").toUpperCase() !== "NOT_CONFIGURED";
@@ -668,6 +669,21 @@ const OperatorView = () => {
   const usbConnected = Boolean(scannerConfigured && scannerLastSeenAtMs && (Date.now() - scannerLastSeenAtMs) <= usbActivityGraceMs);
   const effectiveScannerConnected = isUsbScannerMode ? usbConnected : scannerConnected;
   const scannerStatusLabel = !scannerConfigured ? "Not Set" : isUsbScannerMode ? (usbConnected ? "USB Active" : "USB Idle") : (scannerConnected ? "Online" : "Offline");
+
+  useEffect(() => {
+    if (!selectedMachineId || scannerConfigured) return;
+    setQrSignal(null);
+    setQrFeed([]);
+    try {
+      const saved = JSON.parse(localStorage.getItem(QR_STORAGE_KEY) || "{}");
+      if (Object.prototype.hasOwnProperty.call(saved, String(selectedMachineId))) {
+        delete saved[String(selectedMachineId)];
+        localStorage.setItem(QR_STORAGE_KEY, JSON.stringify(saved));
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, [selectedMachineId, scannerConfigured]);
 
   const isManualResultStation = useMemo(() => stationFeatureConfig?.manualResult === true, [stationFeatureConfig]);
   const isOperationEnabled = useMemo(() => stationFeatureConfig?.operation !== false, [stationFeatureConfig]);
@@ -1116,7 +1132,7 @@ const OperatorView = () => {
   useEffect(() => {
     const socket = io(SOCKET_URL, {
       path: "/socket.io/",
-      transports: ["polling", "websocket"],
+      transports: ["polling"], upgrade: false,
       autoConnect: false,
     });
     const connectTimer = setTimeout(() => {

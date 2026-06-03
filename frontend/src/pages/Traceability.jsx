@@ -52,7 +52,7 @@ const Traceability = () => {
   }, []);
 
   useEffect(() => {
-    const socket = io(SOCKET_URL, { path: "/socket.io/", transports: ["websocket", "polling"] });
+    const socket = io(SOCKET_URL, { path: "/socket.io/", transports: ["polling"], upgrade: false });
     const pushFeed = (entry) => {
       setFeed((prev) => [{ id: `${Date.now()}-${Math.random()}`, timestamp: new Date().toISOString(), ...entry }, ...prev].slice(0, 25));
     };
