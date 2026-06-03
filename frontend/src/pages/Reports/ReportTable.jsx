@@ -25,10 +25,11 @@ const ReportTable = ({ rows = [], columns = [], loading }) => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
   const pagedRows = useMemo(() => {
-    const start = (page - 1) * pageSize;
+    const start = (currentPage - 1) * pageSize;
     return rows.slice(start, start + pageSize);
-  }, [rows, page, pageSize]);
+  }, [rows, currentPage, pageSize]);
 
   if (loading) {
     return (
@@ -121,9 +122,9 @@ const ReportTable = ({ rows = [], columns = [], loading }) => {
           </select>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1} className="px-3 py-1 text-xs border border-border rounded disabled:opacity-50">Prev</button>
-          <span className="px-3 py-1 rounded bg-primary text-on-primary text-xs font-bold">Page {page}/{totalPages}</span>
-          <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages} className="px-3 py-1 text-xs border border-border rounded disabled:opacity-50">Next</button>
+          <button onClick={() => setPage(Math.max(1, currentPage - 1))} disabled={currentPage <= 1} className="px-3 py-1 text-xs border border-border rounded disabled:opacity-50">Prev</button>
+          <span className="px-3 py-1 rounded bg-primary text-on-primary text-xs font-bold">Page {currentPage}/{totalPages}</span>
+          <button onClick={() => setPage(Math.min(totalPages, currentPage + 1))} disabled={currentPage >= totalPages} className="px-3 py-1 text-xs border border-border rounded disabled:opacity-50">Next</button>
         </div>
       </div>
     </div>

@@ -543,7 +543,7 @@ const ScannerMonitor = () => {
               <thead>
                 <tr style={{ background: C.bg("surf"), borderBottom: `1px solid ${C.bdr()}` }}>
                   {[
-                    "Connection","Scanner Name","IP Address : Port",
+                    "Connection","Scanner Name","Role","IP Address : Port",
                     "Linked Machine","Online Since","Last Data Received","Action",
                   ].map(h => (
                     <th key={h} style={{
@@ -604,6 +604,13 @@ const ScannerMonitor = () => {
                         <p style={{ fontSize: 10, color: C.txt("muted") }}>
                           {isUsbMode ? "USB Scanner" : "TCP Barcode / QR"}
                         </p>
+                      </td>
+
+                      <td style={{ padding: "12px 16px" }}>
+                        <Badge
+                          variant={String(row.scannerRole || "").toUpperCase() === "CUSTOMER_QR" ? "ok" : "idle"}
+                          label={row.scannerRole || "GENERAL"}
+                        />
                       </td>
 
                       {/* IP : Port */}
