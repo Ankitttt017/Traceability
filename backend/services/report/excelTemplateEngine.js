@@ -260,7 +260,7 @@ async function generateIndustrialExcel(res, {
       row.partSerial,
       row.cycleStart,
       (row.plcReading && row.plcReading.part_name) || "-",
-      "-",
+      row.customerQrCode || row.customer_qr || "-",
       ...stationResults,
       overall,
       ...plcColumns.map((c) => {

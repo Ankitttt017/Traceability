@@ -609,21 +609,58 @@ async function enforceScannerProtocolBinding({ machine, body, req, scanner }) {
   };
 }
 
-async function enforceStartQrScannerRoleIfConfigured({ machine, sourceIp }) {
+async function enforceScannerRoleIfConfigured({ machine, sourceIp, allowedRoles = [] }) {
   const srcIp = normalizeIp(sourceIp || "");
   if (!machine || !srcIp) return { ok: true };
+  const normalizedRoles = Array.isArray(allowedRoles)
+    ? allowedRoles
+      .map((role) => String(role || "").trim().toUpperCase())
+      .filter(Boolean)
+    : [];
+  if (normalizedRoles.length === 0) {
+    return { ok: true };
+  }
   const roleScanners = await Scanner.findAll({
     where: { mapped_machine_id: machine.id, is_active: true },
   });
-  const startRoleScanners = roleScanners.filter(
-    (s) => String(s.scanner_role || "").trim().toUpperCase() === "START_QR"
+  const scopedRoleScanners = roleScanners.filter(
+    (s) => normalizedRoles.includes(String(s.scanner_role || "").trim().toUpperCase())
   );
-  if (startRoleScanners.length === 0) return { ok: true };
-  const matched = startRoleScanners.some((s) => sameIp(s.scanner_ip, srcIp));
+  if (scopedRoleScanners.length === 0) return { ok: true };
+  const matched = scopedRoleScanners.some((s) => sameIp(s.scanner_ip, srcIp));
   if (!matched) {
-    return { ok: false, status: 403, error: "Scan source is not authorized as START_QR for this machine" };
+    return {
+      ok: false,
+      status: 403,
+      error: `Scan source is not authorized for scanner role ${normalizedRoles.join("/")}`,
+    };
   }
   return { ok: true };
+}
+
+async function resolveActivePartIdForMachine(machine, stationNo) {
+  if (!machine) {
+    return "";
+  }
+
+  const machineRunningPartId = String(machine.running_part_id || "").trim();
+  const machineRunningStation = normalizeStation(machine.running_station_no);
+  const targetStation = normalizeStation(stationNo);
+
+  if (machineRunningPartId && (!targetStation || !machineRunningStation || machineRunningStation === targetStation)) {
+    return machineRunningPartId;
+  }
+
+  const activeLog = await OperationLog.findOne({
+    where: {
+      machine_id: machine.id,
+      ...(targetStation ? { station_no: targetStation } : {}),
+      plc_status: { [Op.in]: ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING"] },
+    },
+    order: [["createdAt", "DESC"]],
+  });
+
+  return String(activeLog?.part_id || "").trim();
 }
 
 async function getActiveStationSequence() {
@@ -2747,14 +2784,10 @@ exports.processScan = async (req, res) => {
       });
       return res.status(bound.status).json({ error: bound.error });
     }
-    const roleGuard = await enforceStartQrScannerRoleIfConfigured({ machine, sourceIp: bound.sourceIp });
-    if (!roleGuard.ok) {
-      return res.status(roleGuard.status).json({ error: roleGuard.error });
-    }
-
     let scannerRead = null;
     const scanner = bound.scanner;
     const mode = String(scanner?.scanner_mode || "").trim().toUpperCase();
+    const scannerRole = String(scanner?.scanner_role || "").trim().toUpperCase();
     if (scanner && mode === "PLC_REGISTER") {
       try {
         scannerRead = await readPartIdFromScannerPlc(scanner.get({ plain: true }));
@@ -2801,11 +2834,6 @@ exports.processScan = async (req, res) => {
       });
     }
     const scannedQrRaw = String(normalizedPartId || "").trim();
-    const resolvedCode = await resolveMappedPartId(normalizedPartId);
-    normalizedPartId = resolvedCode.resolvedPartId;
-    customerQrCode = resolvedCode.customerQrCode;
-    const isMappedCustomerQrScan = Boolean(customerQrCode) && customerQrCode === scannedQrRaw;
-
     const machineStage = getMachineOperationStage(machine);
     const requestedStage = normalizeStation(stationNo || operation);
     if (requestedStage && machineStage && requestedStage !== machineStage) {
@@ -2818,6 +2846,99 @@ exports.processScan = async (req, res) => {
     if (!normalizedStation) {
       return res.status(400).json({ error: "stationNo/operation is required" });
     }
+
+    if (scannerRole === "CUSTOMER_QR") {
+      const customerRoleGuard = await enforceScannerRoleIfConfigured({
+        machine,
+        sourceIp: bound.sourceIp,
+        allowedRoles: ["CUSTOMER_QR"],
+      });
+      if (!customerRoleGuard.ok) {
+        return res.status(customerRoleGuard.status).json({ error: customerRoleGuard.error });
+      }
+
+      const activePartId = await resolveActivePartIdForMachine(machine, normalizedStation);
+      if (!activePartId) {
+        emitOperatorPopup("ERROR", {
+          partId: "",
+          stationNo: normalizedStation,
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          status: "BLOCKED",
+          plcStatus: "WAIT",
+          qrResult: "FAIL",
+          reason: "START_QR_REQUIRED",
+          message: "Scan the start QR first so the customer QR can be mapped to the active part.",
+        });
+        return res.status(409).json({
+          error: "No active part found for customer QR mapping. Scan the start QR first.",
+        });
+      }
+
+      const existingMapping = await PartCodeMapping.findOne({
+        where: {
+          customer_qr: scannedQrRaw,
+          is_active: true,
+        },
+      });
+      if (existingMapping && String(existingMapping.old_part_id || "").trim() !== activePartId) {
+        return res.status(409).json({
+          error: "Customer QR already mapped to another part",
+        });
+      }
+
+      await PartCodeMapping.upsert({
+        old_part_id: activePartId,
+        customer_qr: scannedQrRaw,
+        machine_id: machine.id,
+        station_no: normalizedStation || null,
+        is_active: true,
+      });
+
+      emitOperatorPopup("INFO", {
+        partId: activePartId,
+        stationNo: normalizedStation,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "SCANNED",
+        plcStatus: "WAITING_PLC",
+        qrResult: "PASS",
+        reason: "CUSTOMER_QR_MAPPED",
+        message: "Customer QR mapped successfully to active part.",
+      });
+
+      return res.json({
+        status: "OK",
+        decision: "ALLOW",
+        qrStatus: "PASS",
+        operationStatus: "WAITING",
+        reason: "CUSTOMER_QR_MAPPED",
+        message: "Customer QR mapped successfully",
+        mapped: true,
+        partId: activePartId,
+        customerQrCode: scannedQrRaw,
+        scannerRead,
+        machine: {
+          id: machine.id,
+          machineName: machine.machine_name,
+          stationNo: normalizedStation,
+        },
+      });
+    }
+
+    const roleGuard = await enforceScannerRoleIfConfigured({
+      machine,
+      sourceIp: bound.sourceIp,
+      allowedRoles: ["START_QR"],
+    });
+    if (!roleGuard.ok) {
+      return res.status(roleGuard.status).json({ error: roleGuard.error });
+    }
+
+    const resolvedCode = await resolveMappedPartId(normalizedPartId);
+    normalizedPartId = resolvedCode.resolvedPartId;
+    customerQrCode = resolvedCode.customerQrCode;
+    const isMappedCustomerQrScan = Boolean(customerQrCode) && customerQrCode === scannedQrRaw;
 
     const stationFeatures = await getStationFeatureConfig(normalizedStation);
     const spcConfig = getMachineSpcConfig(machine);
@@ -3058,7 +3179,11 @@ exports.verifyScanForOperator = async (req, res) => {
     if (!bound.ok) {
       return res.status(bound.status).json({ error: bound.error });
     }
-    const roleGuard = await enforceStartQrScannerRoleIfConfigured({ machine, sourceIp: bound.sourceIp });
+    const roleGuard = await enforceScannerRoleIfConfigured({
+      machine,
+      sourceIp: bound.sourceIp,
+      allowedRoles: ["START_QR"],
+    });
     if (!roleGuard.ok) {
       return res.status(roleGuard.status).json({ error: roleGuard.error });
     }

@@ -9,6 +9,7 @@ const sequelize = require("../../config/db");
 const OperationLog = require("../../models/OperationLog");
 const Machine = require("../../models/Machine");
 const Part = require("../../models/Part");
+const PartCodeMapping = require("../../models/PartCodeMapping");
 const Shift = require("../../models/Shift");
 const QrFormatRule = require("../../models/QrFormatRule");
 const { calculateProductionMetrics } = require("./reportMetricsService");
@@ -133,9 +134,12 @@ function normalizeShotToken(value) {
 function extractShotFromPartId(partId) {
   const raw = String(partId || "").trim();
   if (!raw) return "";
-  // Compact QR format: DDMMHHMM + SHOT(1..6)
+  // Compact QR format: MMDDHHMM + MACHINE_CODE(1) + SHOT(1..6)
+  const machineCompact = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+  if (machineCompact?.groups?.shot) return String(machineCompact.groups.shot).trim();
+  // Legacy compact QR format: MMDDHHMM + SHOT(1..6)
   const compact = raw.match(/^(\d{8})(\d{1,6})$/);
-  if (compact?.[3]) return compact[3];
+  if (compact?.[2]) return compact[2];
   const digits = raw.replace(/\D/g, "");
   if (!digits) return "";
   // Common production format: YYMMDDHHMMSS + SHOT_SUFFIX
@@ -146,22 +150,24 @@ function extractShotFromPartId(partId) {
 }
 function parseCompactQrPartId(partId) {
   const raw = String(partId || "").trim();
-  const match = raw.match(/^(?<day>\d{2})(?<month>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<shot>\d{1,6})$/);
-  if (!match?.groups) return null;
-  const day = Number(match.groups.day);
-  const month = Number(match.groups.month);
-  const hour = Number(match.groups.hour);
-  const minute = Number(match.groups.minute);
-  const shot = Number(match.groups.shot);
+  const machineCompact = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+  const legacyCompact = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<shot>\d{1,6})$/);
+  const groups = machineCompact?.groups || legacyCompact?.groups;
+  if (!groups) return null;
+  const month = Number(groups.month);
+  const day = Number(groups.day);
+  const hour = Number(groups.hour);
+  const minute = Number(groups.minute);
+  const shot = Number(groups.shot);
   if (![day, month, hour, minute, shot].every(Number.isFinite)) return null;
   return {
-    key: `${day}|${month}|${hour}|${minute}|${shot}`,
+    key: `${month}|${day}|${hour}|${minute}|${shot}`,
     day,
     month,
     hour,
     minute,
     shot,
-    shotRaw: String(match.groups.shot || "").trim(),
+    shotRaw: String(groups.shot || "").trim(),
   };
 }
 function deriveShotCandidates(log) {
@@ -517,9 +523,22 @@ async function fetchProductionData(filters = {}, options = {}) {
     attributes: ["part_id", "qr_format_name"],
     raw: true
   });
+  const partCodeMappings = await PartCodeMapping.findAll({
+    where: {
+      old_part_id: { [Op.in]: partIds },
+      is_active: true,
+    },
+    attributes: ["old_part_id", "customer_qr"],
+    raw: true,
+  });
 
   const partMap = parts.reduce((acc, p) => {
-    acc[p.part_id] = p;
+    acc[normalizeKey(p.part_id)] = p;
+    return acc;
+  }, {});
+  const partCodeMap = partCodeMappings.reduce((acc, row) => {
+    if (!row?.old_part_id) return acc;
+    acc[normalizeKey(row.old_part_id)] = String(row.customer_qr || "").trim();
     return acc;
   }, {});
 
@@ -591,7 +610,8 @@ async function fetchProductionData(filters = {}, options = {}) {
 
   // Enrich & Standardize
   const enriched = deduplicatedLogs.map((log, index) => {
-    const part = partMap[log.part_id] || {};
+    const normalizedPartIdKey = normalizeKey(log.part_id);
+    const part = partMap[normalizedPartIdKey] || {};
     const { status: industrialResult, category } = resolveIndustrialResult({
       result: log.result,
       plc_status: log.plc_status,
@@ -610,10 +630,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     }
 
     const partIdValue = String(log.part_id || "").trim();
-    const normalizedPartId = partIdValue.toUpperCase();
-    const derivedCustomerCode = normalizedPartId.includes("-")
-      ? normalizedPartId.split("-")[0]
-      : normalizedPartId.slice(0, 8) || "-";
+    const mappedCustomerQr = String(partCodeMap[normalizeKey(partIdValue)] || "").trim();
 
     const partLookupKey = normalizeKey(partIdValue);
     const compactQrKey = parseCompactQrPartId(partIdValue)?.key || "";
@@ -633,7 +650,8 @@ async function fetchProductionData(filters = {}, options = {}) {
       ...log,
       srNo: index + 1,
       partId:      partIdValue || "-",
-      customerCode: derivedCustomerCode,
+      customerCode: mappedCustomerQr || "-",
+      customerQrCode: mappedCustomerQr || "-",
       machineName: log.Machine?.machine_name || "-",
       lineName:    log.Machine?.line_name    || "-",
       operationNo: log.operation_no || log.Machine?.operation_no || "-",

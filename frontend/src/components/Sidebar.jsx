@@ -77,6 +77,13 @@ const Sidebar = ({ onClose }) => {
   // ── TRACEABILITY OPERATIONAL PAGES ──────────
   const traceabilityNavigation = useMemo(
     () => [
+
+       {
+        name: "Process Flow",
+        path: APP_ROUTES.processFlow,
+        icon: Route,
+        moduleKey: "process_flow",
+      },
       {
         name: "Dashboard",
         path: APP_ROUTES.dashboard,
@@ -114,12 +121,7 @@ const Sidebar = ({ onClose }) => {
         icon: Wrench,
         moduleKey: "part_journey",
       },
-      {
-        name: "Process Flow",
-        path: APP_ROUTES.processFlow,
-        icon: Route,
-        moduleKey: "process_flow",
-      },
+     
       {
         name: "I/O Monitor",
         path: APP_ROUTES.ioMonitor,

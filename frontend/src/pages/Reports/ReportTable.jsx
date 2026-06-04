@@ -73,7 +73,7 @@ const ReportTable = ({ rows = [], columns = [], loading }) => {
               <tr key={`${row.barcode || "row"}-${idx}`} className={`${idx % 2 === 0 ? "bg-transparent" : "bg-white/[0.02]"} hover:bg-primary/5 transition-colors group`}>
                 {columns.map((column) => {
                   const value = row[column.key];
-                  const text = value === null || value === undefined || value === "" ? "�" : String(value);
+                  const text = value === null || value === undefined || value === "" ? "-" : String(value);
                   if (isStatusLike(column.key)) {
                     return (
                       <td key={column.key} className="px-3 py-3 text-center whitespace-nowrap">
