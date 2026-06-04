@@ -5,7 +5,7 @@ import {
   AlertTriangle, CheckCircle2, Clock3, Factory,
   Gauge, RefreshCw, ShieldCheck, Wrench,
   Wifi, WifiOff, Activity, TrendingUp,
-  BarChart2, Target, Cpu, Radio, Maximize2,
+  BarChart2, Target, Cpu, Radio, Maximize2, Minimize2,
   ChevronDown, ChevronUp, Menu, X
 } from "lucide-react";
 import {
@@ -24,6 +24,7 @@ const QR_EVENT_DEDUPE_MS = 3000;
 const POPUP_EVENT_DEDUPE_MS = 1800;
 const QR_STORAGE_KEY = "operator-last-qr-signal";
 const OPERATOR_STATION_LOCK_KEY = "operator-view-station-lock-v1";
+const OPERATOR_FULLSCREEN_KEY = "operator-view-fullscreen-v1";
 const USB_FOCUS_INTERVAL_MS = 300;
 const USB_IDLE_FLUSH_MS = 120;
 const USB_SCAN_MAX_GAP_MS = 80;
@@ -538,6 +539,10 @@ const OperatorView = () => {
   });
   const [showStationSelectModal, setShowStationSelectModal] = useState(false);
   const [pendingMachineId, setPendingMachineId] = useState("");
+  const [isFullscreen, setIsFullscreen] = useState(() => {
+    if (typeof document === "undefined") return false;
+    return Boolean(document.fullscreenElement);
+  });
   const [, setUsbDebug] = useState("");
 
   // Responsive breakpoints
@@ -554,6 +559,7 @@ const OperatorView = () => {
   const selectedMachineIdRef = useRef("");
   const selectedStationRef = useRef("");
   const machinesRef = useRef([]);
+  const operatorViewRootRef = useRef(null);
   const liveRefreshTimerRef = useRef(null);
   const operatorViewBootAtRef = useRef(Date.now());
   const lastLiveRefreshRef = useRef(0);
@@ -607,6 +613,36 @@ const OperatorView = () => {
       // ignore storage errors
     }
   }, [stationLock]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const handleFullscreenChange = () => {
+      const active = document.fullscreenElement === operatorViewRootRef.current;
+      setIsFullscreen(active);
+      try {
+        localStorage.setItem(OPERATOR_FULLSCREEN_KEY, active ? "1" : "0");
+      } catch {
+        // ignore storage errors
+      }
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    handleFullscreenChange();
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    try {
+      if (localStorage.getItem(OPERATOR_FULLSCREEN_KEY) !== "1") return;
+    } catch {
+      return;
+    }
+    if (document.fullscreenElement) return;
+    const root = operatorViewRootRef.current;
+    if (typeof root?.requestFullscreen !== "function") return;
+    root.requestFullscreen().catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!enforceStationLockMode) return;
@@ -705,6 +741,15 @@ const OperatorView = () => {
     return merged;
   }, [hasLiveState, scannerListRaw, scannerHealthListRaw, scannerInfo, scannerHealth]);
   const primaryScannerEntry = scannerEntries.find((entry) => String(entry?.scanner?.scannerRole || "").trim().toUpperCase() === "START_QR") || scannerEntries[0] || null;
+  const secondaryScannerEntries = useMemo(() => {
+    if (!primaryScannerEntry) return scannerEntries;
+    return scannerEntries.filter((entry) => {
+      const primaryId = Number(primaryScannerEntry?.scanner?.id || 0);
+      const entryId = Number(entry?.scanner?.id || 0);
+      if (primaryId && entryId) return entryId !== primaryId;
+      return String(entry?.scanner?.scannerIp || "") !== String(primaryScannerEntry?.scanner?.scannerIp || "");
+    });
+  }, [scannerEntries, primaryScannerEntry]);
   const plcHealthKnown = typeof plcHealth?.healthy === "boolean";
   const plcConnected = plcHealthKnown ? Boolean(plcHealth?.healthy) : null;
   const scannerConfigured = scannerEntries.length > 0 ? scannerEntries.some((entry) => entry.configured) : String(scannerHealth?.status || "").toUpperCase() !== "NOT_CONFIGURED";
@@ -717,6 +762,24 @@ const OperatorView = () => {
   const usbConnected = Boolean(scannerConfigured && scannerLastSeenAtMs && (Date.now() - scannerLastSeenAtMs) <= usbActivityGraceMs);
   const effectiveScannerConnected = scannerEntries.length > 0 ? scannerConnected : (isUsbScannerMode ? usbConnected : scannerConnected);
   const scannerStatusLabel = !scannerConfigured ? "Not Set" : isUsbScannerMode ? (usbConnected ? "USB Active" : "USB Idle") : (scannerConnected ? "Online" : "Offline");
+  const fullscreenGap = isTablet ? 8 : (isCompact ? 10 : 14);
+  const fullscreenBottomPadding = isTablet ? 10 : (isCompact ? 14 : 18);
+  const contentGap = isFullscreen ? fullscreenGap : (isTablet ? 10 : (isCompact ? 12 : 20));
+  const contentBottomPadding = isFullscreen ? fullscreenBottomPadding : (isTablet ? 16 : (isCompact ? 24 : 32));
+  const overviewGridColumns = isMobile ? "1fr" : (isTablet ? "repeat(2, 1fr)" : (isFullscreen ? "250px 1fr 240px" : "280px 1fr 260px"));
+  const overviewGridGap = isFullscreen ? (isTablet ? 8 : (isCompact ? 10 : 12)) : (isTablet ? 10 : (isCompact ? 12 : 16));
+  const headerPadding = isTablet ? "12px 14px" : (isCompact ? "12px 16px" : "16px 20px");
+  const headerStripeMargin = isTablet ? "-12px -14px 12px" : (isCompact ? "-12px -16px 12px" : "-16px -20px 14px");
+  const headerDirection = isMobile ? "column" : (isTablet ? "column" : "row");
+  const headerControlsWidth = isMobile || isTablet ? "100%" : "auto";
+  const metricGridColumns = isMobile ? "repeat(2,1fr)" : ((isTablet && isFullscreen) ? "repeat(2,1fr)" : "repeat(4,1fr)");
+  const operatorInfoColumns = (isMobile || (isTablet && isFullscreen)) ? "1fr" : "repeat(2,1fr)";
+  const bottomSectionColumns = (isMobile || (isTablet && isFullscreen)) ? "1fr" : "1fr 1fr";
+  const trendChartHeight = isFullscreen ? (isTablet ? 220 : (isCompact ? 230 : 260)) : (isTablet ? 190 : (isCompact ? 220 : 250));
+  const recentEventsMaxHeight = isFullscreen ? (isTablet ? 280 : (isCompact ? 300 : 340)) : (isTablet ? 220 : (isCompact ? 280 : 320));
+  const recentEventsVisibleRows = isMobile ? 4 : ((isTablet && isFullscreen) ? 6 : 8);
+  const fullscreenPadding = isCompact ? 12 : 20;
+  const fullscreenTopPadding = isCompact ? 20 : 28;
 
   useEffect(() => {
     if (!selectedMachineId || scannerConfigured) return;
@@ -783,6 +846,30 @@ const OperatorView = () => {
       return same ? prev : nextPopup;
     });
   }, [selectedMachineId, selectedStation, selectedMachine?.machineName, scannerInfo?.isSimulation, scannerInfo?.scannerMode, scannerInfo?.mode]);
+
+  const toggleFullscreen = useCallback(async () => {
+    if (typeof document === "undefined") return;
+    try {
+      if (document.fullscreenElement) {
+        if (typeof document.exitFullscreen === "function") {
+          await document.exitFullscreen();
+        }
+        return;
+      }
+      const root = operatorViewRootRef.current;
+      if (typeof root?.requestFullscreen === "function") {
+        await root.requestFullscreen();
+      }
+    } catch {
+      const next = !isFullscreen;
+      setIsFullscreen(next);
+      try {
+        localStorage.setItem(OPERATOR_FULLSCREEN_KEY, next ? "1" : "0");
+      } catch {
+        // ignore storage errors
+      }
+    }
+  }, [isFullscreen]);
 
   useEffect(() => {
     if (!selectedMachineId || !selectedStation) return;
@@ -1424,11 +1511,14 @@ const OperatorView = () => {
   //  RENDER
   // ─────────────────────────────────────────────────────────────────────
   return (
-    <div style={{
-      display: "flex", flexDirection: "column", gap: isTablet ? 10 : (isCompact ? 12 : 20),
-      paddingBottom: isTablet ? 16 : (isCompact ? 24 : 32),
+    <div ref={operatorViewRootRef} style={{
+      display: "flex", flexDirection: "column", gap: contentGap,
+      paddingBottom: contentBottomPadding,
       animation: "ovFadeIn .3s ease",
       maxWidth: "100%", overflowX: "hidden",
+      background: C.bg("surf"),
+      minHeight: isFullscreen ? "100vh" : undefined,
+      padding: isFullscreen ? `${fullscreenTopPadding}px ${fullscreenPadding}px ${fullscreenPadding}px` : undefined,
     }}>
       <input
         ref={usbScannerInputRef}
@@ -1578,19 +1668,20 @@ const OperatorView = () => {
       {/* ── Page Header ───────────────────────────────────────────── */}
       <div style={{
         background: C.bg("card"), border: `1px solid ${C.bdr()}`,
-        borderRadius: isCompact ? 12 : 16, padding: isTablet ? "10px 12px" : (isCompact ? "12px 16px" : "16px 20px"),
-        boxShadow: SH, overflow: "hidden"
+        borderRadius: isCompact ? 12 : 16, padding: headerPadding,
+        boxShadow: SH, overflow: "visible",
+        minHeight: isTablet ? 96 : undefined,
       }}>
         <div style={{
           height: 3, background: `linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`,
-          margin: `-${isCompact ? "12px -16px 12px" : "16px -20px 14px"}`,
+          margin: headerStripeMargin,
           marginBottom: isCompact ? 12 : 14,
         }} />
 
         <div style={{
           display: "flex", alignItems: isCompact ? "flex-start" : "center",
           justifyContent: "space-between", flexWrap: "wrap", gap: 12,
-          flexDirection: isMobile ? "column" : "row",
+          flexDirection: headerDirection,
         }}>
           {/* Machine info */}
           <div style={{ display: "flex", alignItems: "center", gap: isCompact ? 10 : 14, flex: 1, minWidth: 0 }}>
@@ -1604,15 +1695,16 @@ const OperatorView = () => {
             </div>
             <div style={{ minWidth: 0, flex: 1 }}>
               <h1 style={{
-                fontSize: isCompact ? 16 : 18, fontWeight: 800, color: C.txt("pri"),
+                fontSize: isTablet ? 17 : (isCompact ? 16 : 18), fontWeight: 800, color: C.txt("pri"),
                 letterSpacing: "-0.02em", lineHeight: 1.2,
-                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: isTablet ? "normal" : "nowrap",
               }}>
                 {selectedMachine?.machineName || "Select a Machine"}
               </h1>
               <p style={{
-                fontSize: isCompact ? 10 : 12, color: C.txt("muted"), marginTop: 3,
-                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"
+                fontSize: isTablet ? 11 : (isCompact ? 10 : 12), color: C.txt("muted"), marginTop: 3,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: isTablet ? "normal" : "nowrap",
+                lineHeight: isTablet ? 1.45 : 1.2,
               }}>
                 {selectedMachine?.lineName || "—"}
                 {selectedStation && <> · Station <span style={{ color: C.amber(), fontWeight: 700 }}>{selectedStation}</span></>}
@@ -1652,11 +1744,16 @@ const OperatorView = () => {
           </div>
 
           {/* Controls */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", width: isMobile ? "100%" : "auto" }}>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+            width: headerControlsWidth,
+            justifyContent: isMobile ? "stretch" : (isTablet ? "space-between" : "flex-end"),
+          }}>
             {/* Machine selector - always visible for stable behavior on all screens */}
             <div style={{
-              minWidth: isMobile ? "100%" : (isTablet ? 200 : 220),
-              maxWidth: isMobile ? "100%" : (isTablet ? 280 : 360),
+              minWidth: isMobile ? "100%" : (isTablet ? 0 : 220),
+              maxWidth: isMobile ? "100%" : (isTablet ? "calc(100% - 96px)" : 360),
+              flex: isTablet ? 1 : undefined,
               display: "block",
             }}>
               <select value={selectedMachineId}
@@ -1676,7 +1773,7 @@ const OperatorView = () => {
                 style={{
                   height: isMobile ? 36 : 38, padding: "0 10px", width: "100%",
                   background: C.bg("input"), border: `1px solid ${C.bdr()}`,
-                  borderRadius: 9, fontSize: isMobile ? 12 : 13, color: C.txt("pri"),
+                  borderRadius: 9, fontSize: isTablet ? 12 : (isMobile ? 12 : 13), color: C.txt("pri"),
                   outline: "none", fontFamily: "'DM Sans',sans-serif",
                   minWidth: 0,
                 }}>
@@ -1688,6 +1785,19 @@ const OperatorView = () => {
                 {machines.length === 0 && <option value="">No machine available</option>}
               </select>
             </div>
+
+            <button
+              onClick={toggleFullscreen}
+              title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+              style={{
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                height: isMobile ? 36 : 38, width: isMobile ? 36 : 38, borderRadius: 9,
+                cursor: "pointer", background: "transparent", border: `1px solid ${C.bdr()}`,
+                color: C.txt("sec"), transition: "all .15s",
+              }}
+            >
+              {isFullscreen ? <Minimize2 size={isMobile ? 14 : 15} /> : <Maximize2 size={isMobile ? 14 : 15} />}
+            </button>
 
             {/* Refresh button */}
             <button onClick={handleRefreshWithPopup}
@@ -1733,8 +1843,8 @@ const OperatorView = () => {
           {/* ── Row 1: Status + Gauge + Station Rules (Responsive Grid) ── */}
           <div style={{
             display: "grid",
-            gridTemplateColumns: isMobile ? "1fr" : (isTablet ? "repeat(2, 1fr)" : "280px 1fr 260px"),
-            gap: isTablet ? 10 : (isCompact ? 12 : 16),
+            gridTemplateColumns: overviewGridColumns,
+            gap: overviewGridGap,
             alignItems: "start",
           }}>
             {/* ── Left: Station Status (Connections + QR + Operation) ── */}
@@ -1790,9 +1900,9 @@ const OperatorView = () => {
                       size={isCompact ? "sm" : "sm"}
                     />
                   </div>
-                  {scannerEntries.length > 1 && (
+                  {secondaryScannerEntries.length > 0 && (
                     <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
-                      {scannerEntries.map((entry, idx) => (
+                      {secondaryScannerEntries.map((entry, idx) => (
                         <div
                           key={`${entry?.scanner?.id || entry?.scanner?.scannerIp || idx}`}
                           style={{
@@ -1886,7 +1996,7 @@ const OperatorView = () => {
               {/* OK / NG counters - responsive grid */}
               <div style={{
                 display: "grid",
-                gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)",
+                gridTemplateColumns: metricGridColumns,
                 gap: isCompact ? 8 : 10,
                 marginBottom: isCompact ? 12 : 16,
               }}>
@@ -1921,7 +2031,7 @@ const OperatorView = () => {
               }}>
                 <div style={{
                   display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "repeat(2,1fr)",
+                  gridTemplateColumns: operatorInfoColumns,
                   gap: isMobile ? 4 : 0,
                 }}>
                   <InfoRow label="Operator" value={user.username || "Operator"} />
@@ -1998,7 +2108,7 @@ const OperatorView = () => {
           {/* ── Row 2: Hourly Trend + Recent Events (Responsive) ────── */}
           <div style={{
             display: "grid",
-            gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+            gridTemplateColumns: bottomSectionColumns,
             gap: isCompact ? 12 : 16,
           }}>
             {/* Hourly trend */}
@@ -2007,7 +2117,7 @@ const OperatorView = () => {
                 <p style={{ fontSize: 11, color: C.txt("muted") }}>No trend data for this station.</p>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <SafeChart height={isTablet ? 190 : (isCompact ? 220 : 250)}>
+                  <SafeChart height={trendChartHeight}>
                     <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                       <ComposedChart data={trendChartData} margin={{ top: 6, right: 8, left: -14, bottom: 0 }}>
                         <CartesianGrid stroke={C.bdr(0.18)} strokeDasharray="3 4" vertical={false} />
@@ -2046,9 +2156,9 @@ const OperatorView = () => {
               ) : (
                 <div style={{
                   display: "flex", flexDirection: "column", gap: 6,
-                  maxHeight: isTablet ? 220 : (isCompact ? 280 : 320), overflowY: "auto",
+                  maxHeight: recentEventsMaxHeight, overflowY: "auto",
                 }}>
-                  {(stationStats?.recentParts || []).slice(0, isMobile ? 4 : 8).map((row, i) => {
+                  {(stationStats?.recentParts || []).slice(0, recentEventsVisibleRows).map((row, i) => {
                     const res = String(row.result || "").toUpperCase();
                     const variant = ["OK", "PASS", "SUCCESS"].includes(res) ? "ok" : ["NG", "FAIL", "FAILED", "BLOCK", "REJECTED"].includes(res) ? "ng" : "idle";
                     return (

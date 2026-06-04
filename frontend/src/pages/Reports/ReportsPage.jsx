@@ -69,8 +69,12 @@ const formatPlcColumnLabel = (key) => {
 const extractShotFromPartId = (partId) => {
   const s = String(partId || "").trim();
   if (!s) return "";
+  const machineCompact = s.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+  if (machineCompact?.groups?.shot) return String(machineCompact.groups.shot).trim();
+  const legacyCompact = s.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<shot>\d{1,6})$/);
+  if (legacyCompact?.groups?.shot) return String(legacyCompact.groups.shot).trim();
   const digits = s.replace(/\D/g, "");
-  if (digits.length > 8) return digits.slice(8);
+  if (digits.length > 12) return digits.slice(12);
   return "";
 };
 
@@ -325,7 +329,7 @@ const ReportsPage = () => {
         barcode: partKey || "—",
         createdAt: first.createdAt ? new Date(first.createdAt).toLocaleString("en-IN") : "-",
         partName: plcData.part_name || first.partName || first.modelName || first.componentName || "-",
-        customerCode: "-",
+        customerCode: first.customerQrCode || first.customer_qr || "-",
         overallStatus: (() => {
           const vals = stationPairs.map((s) => normResult(stationResults[s.key]));
           if (vals.some((v) => v === "NG")) return "NG";

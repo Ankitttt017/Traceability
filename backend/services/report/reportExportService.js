@@ -9,6 +9,7 @@ const sequelize = require("../../config/db");
 const OperationLog = require("../../models/OperationLog");
 const Machine = require("../../models/Machine");
 const Part = require("../../models/Part");
+const PartCodeMapping = require("../../models/PartCodeMapping");
 const Shift = require("../../models/Shift");
 const QrFormatRule = require("../../models/QrFormatRule");
 const { calculateProductionMetrics } = require("./reportMetricsService");
@@ -37,7 +38,7 @@ const PLC_SHOT_CANDIDATE_COLUMNS = [
 ];
 
 const PLC_REPORT_COLUMNS = [
-  "machine_name", "shot_date", "shot_time", "shot_number", "cycle_time",
+  "machine_name", "part_name", "shot_date", "shot_time", "shot_number", "cycle_time",
   "die_close_core_in_time", "pouring_time", "shot_fwd_time", "curing_time", "die_open_core_out_time",
   "ejector_time", "extract_time", "spray_time", "v1_speed", "v2_speed", "v3_speed", "v4_speed", "metal_pressure",
   "furnace_metal_temp", "cooling_water_mov", "cooling_water_sta", "accel_point", "deaccel_point", "intensification_time",
@@ -133,9 +134,12 @@ function normalizeShotToken(value) {
 function extractShotFromPartId(partId) {
   const raw = String(partId || "").trim();
   if (!raw) return "";
-  // Compact QR format: DDMMHHMM + SHOT(1..6)
+  // Compact QR format: MMDDHHMM + MACHINE_CODE(1) + SHOT(1..6)
+  const machineCompact = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+  if (machineCompact?.groups?.shot) return String(machineCompact.groups.shot).trim();
+  // Legacy compact QR format: MMDDHHMM + SHOT(1..6)
   const compact = raw.match(/^(\d{8})(\d{1,6})$/);
-  if (compact?.[3]) return compact[3];
+  if (compact?.[2]) return compact[2];
   const digits = raw.replace(/\D/g, "");
   if (!digits) return "";
   // Common production format: YYMMDDHHMMSS + SHOT_SUFFIX
@@ -146,22 +150,24 @@ function extractShotFromPartId(partId) {
 }
 function parseCompactQrPartId(partId) {
   const raw = String(partId || "").trim();
-  const match = raw.match(/^(?<day>\d{2})(?<month>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<shot>\d{1,6})$/);
-  if (!match?.groups) return null;
-  const day = Number(match.groups.day);
-  const month = Number(match.groups.month);
-  const hour = Number(match.groups.hour);
-  const minute = Number(match.groups.minute);
-  const shot = Number(match.groups.shot);
+  const machineCompact = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+  const legacyCompact = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<shot>\d{1,6})$/);
+  const groups = machineCompact?.groups || legacyCompact?.groups;
+  if (!groups) return null;
+  const month = Number(groups.month);
+  const day = Number(groups.day);
+  const hour = Number(groups.hour);
+  const minute = Number(groups.minute);
+  const shot = Number(groups.shot);
   if (![day, month, hour, minute, shot].every(Number.isFinite)) return null;
   return {
-    key: `${day}|${month}|${hour}|${minute}|${shot}`,
+    key: `${month}|${day}|${hour}|${minute}|${shot}`,
     day,
     month,
     hour,
     minute,
     shot,
-    shotRaw: String(match.groups.shot || "").trim(),
+    shotRaw: String(groups.shot || "").trim(),
   };
 }
 function deriveShotCandidates(log) {
@@ -328,6 +334,46 @@ async function fetchLatestPlcReadingsByCompactQr(values = []) {
   return map;
 }
 
+async function fetchLatestPlcReadingByMachineShotContext({ shotCandidates = [], machineName = "", logCreatedAt = null }) {
+  const normalizedShots = [...new Set(shotCandidates.map((v) => normalizeShotToken(v)).filter(Boolean))];
+  if (!normalizedShots.length) return null;
+
+  const normalizedMachine = String(machineName || "").trim();
+  const logDate = logCreatedAt ? new Date(logCreatedAt) : null;
+  const hasLogDate = Boolean(logDate) && !Number.isNaN(logDate.getTime());
+
+  for (const shot of normalizedShots) {
+    try {
+      const [rows] = await sequelize.query(
+        `
+          SELECT TOP 1 ${PLC_REPORT_SELECT}
+          FROM ${PLC_READING_TABLE}
+          WHERE (
+            TRY_CONVERT(INT, shot_number) = TRY_CONVERT(INT, :shot)
+            OR LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) = :shot
+          )
+          ${normalizedMachine ? "AND LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255)))) = :machineName" : ""}
+          ORDER BY
+            ${hasLogDate ? "ABS(DATEDIFF(SECOND, recorded_at, :logCreatedAt)) ASC," : ""}
+            recorded_at DESC
+        `,
+        {
+          replacements: {
+            shot,
+            machineName: normalizedMachine,
+            logCreatedAt: hasLogDate ? logDate : new Date(),
+          },
+        }
+      );
+      if (rows && rows[0]) return enrichPlcReadingDisplay(rows[0]);
+    } catch (_) {
+      // Keep report resilient if context fallback is not supported in some installations.
+    }
+  }
+
+  return null;
+}
+
 async function fetchLatestPlcReadingForPartId(partId, plcColumns = null) {
   const normalizedPartId = String(partId || "").trim();
   if (!normalizedPartId) return null;
@@ -428,6 +474,7 @@ async function runIndustrialExport(res, { filters, reportConfig, type = "full" }
  */
 async function fetchProductionData(filters = {}, options = {}) {
   const includePlcReadings = options.includePlcReadings !== false;
+  let plcColumns = new Set();
   const {
     dateFrom, dateTo,
     machineId, lineName,
@@ -517,9 +564,22 @@ async function fetchProductionData(filters = {}, options = {}) {
     attributes: ["part_id", "qr_format_name"],
     raw: true
   });
+  const partCodeMappings = await PartCodeMapping.findAll({
+    where: {
+      old_part_id: { [Op.in]: partIds },
+      is_active: true,
+    },
+    attributes: ["old_part_id", "customer_qr"],
+    raw: true,
+  });
 
   const partMap = parts.reduce((acc, p) => {
-    acc[p.part_id] = p;
+    acc[normalizeKey(p.part_id)] = p;
+    return acc;
+  }, {});
+  const partCodeMap = partCodeMappings.reduce((acc, row) => {
+    if (!row?.old_part_id) return acc;
+    acc[normalizeKey(row.old_part_id)] = String(row.customer_qr || "").trim();
     return acc;
   }, {});
 
@@ -562,7 +622,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     // Attach PLC cycle readings from DB table (PlcCycleReadings):
     // 1) Prefer part-id style columns (if available in current schema)
     // 2) Fallback to shot_number style columns
-    const plcColumns = await getPlcReadingColumns();
+    plcColumns = await getPlcReadingColumns();
     const partLookupColumn = pickFirstAvailableColumn(plcColumns, PLC_PART_ID_CANDIDATE_COLUMNS);
     const shotLookupColumn = pickFirstAvailableColumn(plcColumns, PLC_SHOT_CANDIDATE_COLUMNS);
     const partIdsForPlcLookup = [...new Set(
@@ -590,8 +650,9 @@ async function fetchProductionData(filters = {}, options = {}) {
   }
 
   // Enrich & Standardize
-  const enriched = deduplicatedLogs.map((log, index) => {
-    const part = partMap[log.part_id] || {};
+  const enriched = await Promise.all(deduplicatedLogs.map(async (log, index) => {
+    const normalizedPartIdKey = normalizeKey(log.part_id);
+    const part = partMap[normalizedPartIdKey] || {};
     const { status: industrialResult, category } = resolveIndustrialResult({
       result: log.result,
       plc_status: log.plc_status,
@@ -610,10 +671,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     }
 
     const partIdValue = String(log.part_id || "").trim();
-    const normalizedPartId = partIdValue.toUpperCase();
-    const derivedCustomerCode = normalizedPartId.includes("-")
-      ? normalizedPartId.split("-")[0]
-      : normalizedPartId.slice(0, 8) || "-";
+    const mappedCustomerQr = String(partCodeMap[normalizeKey(partIdValue)] || "").trim();
 
     const partLookupKey = normalizeKey(partIdValue);
     const compactQrKey = parseCompactQrPartId(partIdValue)?.key || "";
@@ -627,13 +685,24 @@ async function fetchProductionData(filters = {}, options = {}) {
         null
       )
       : null;
-    const plcReadingFromDb = enrichPlcReadingDisplay(plcReadingFromDbRaw);
+    const plcReadingFromDb = plcReadingFromDbRaw
+      ? enrichPlcReadingDisplay(plcReadingFromDbRaw)
+      : (
+        includePlcReadings
+          ? await fetchLatestPlcReadingByMachineShotContext({
+              shotCandidates: deriveShotCandidates(log),
+              machineName: log.Machine?.machine_name || "",
+              logCreatedAt: log.createdAt,
+            })
+          : null
+      );
 
     return {
       ...log,
       srNo: index + 1,
       partId:      partIdValue || "-",
-      customerCode: derivedCustomerCode,
+      customerCode: mappedCustomerQr || "-",
+      customerQrCode: mappedCustomerQr || "-",
       machineName: log.Machine?.machine_name || "-",
       lineName:    log.Machine?.line_name    || "-",
       operationNo: log.operation_no || log.Machine?.operation_no || "-",
@@ -651,7 +720,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       reason: log.interlock_reason || "-",
       plcReading: plcReadingFromDb
     };
-  });
+  }));
 
   let filtered = enriched;
 
