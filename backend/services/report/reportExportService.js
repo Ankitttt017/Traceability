@@ -38,7 +38,7 @@ const PLC_SHOT_CANDIDATE_COLUMNS = [
 ];
 
 const PLC_REPORT_COLUMNS = [
-  "machine_name", "shot_date", "shot_time", "shot_number", "cycle_time",
+  "machine_name", "part_name", "shot_date", "shot_time", "shot_number", "cycle_time",
   "die_close_core_in_time", "pouring_time", "shot_fwd_time", "curing_time", "die_open_core_out_time",
   "ejector_time", "extract_time", "spray_time", "v1_speed", "v2_speed", "v3_speed", "v4_speed", "metal_pressure",
   "furnace_metal_temp", "cooling_water_mov", "cooling_water_sta", "accel_point", "deaccel_point", "intensification_time",
@@ -334,6 +334,46 @@ async function fetchLatestPlcReadingsByCompactQr(values = []) {
   return map;
 }
 
+async function fetchLatestPlcReadingByMachineShotContext({ shotCandidates = [], machineName = "", logCreatedAt = null }) {
+  const normalizedShots = [...new Set(shotCandidates.map((v) => normalizeShotToken(v)).filter(Boolean))];
+  if (!normalizedShots.length) return null;
+
+  const normalizedMachine = String(machineName || "").trim();
+  const logDate = logCreatedAt ? new Date(logCreatedAt) : null;
+  const hasLogDate = Boolean(logDate) && !Number.isNaN(logDate.getTime());
+
+  for (const shot of normalizedShots) {
+    try {
+      const [rows] = await sequelize.query(
+        `
+          SELECT TOP 1 ${PLC_REPORT_SELECT}
+          FROM ${PLC_READING_TABLE}
+          WHERE (
+            TRY_CONVERT(INT, shot_number) = TRY_CONVERT(INT, :shot)
+            OR LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) = :shot
+          )
+          ${normalizedMachine ? "AND LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255)))) = :machineName" : ""}
+          ORDER BY
+            ${hasLogDate ? "ABS(DATEDIFF(SECOND, recorded_at, :logCreatedAt)) ASC," : ""}
+            recorded_at DESC
+        `,
+        {
+          replacements: {
+            shot,
+            machineName: normalizedMachine,
+            logCreatedAt: hasLogDate ? logDate : new Date(),
+          },
+        }
+      );
+      if (rows && rows[0]) return enrichPlcReadingDisplay(rows[0]);
+    } catch (_) {
+      // Keep report resilient if context fallback is not supported in some installations.
+    }
+  }
+
+  return null;
+}
+
 async function fetchLatestPlcReadingForPartId(partId, plcColumns = null) {
   const normalizedPartId = String(partId || "").trim();
   if (!normalizedPartId) return null;
@@ -434,6 +474,7 @@ async function runIndustrialExport(res, { filters, reportConfig, type = "full" }
  */
 async function fetchProductionData(filters = {}, options = {}) {
   const includePlcReadings = options.includePlcReadings !== false;
+  let plcColumns = new Set();
   const {
     dateFrom, dateTo,
     machineId, lineName,
@@ -581,7 +622,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     // Attach PLC cycle readings from DB table (PlcCycleReadings):
     // 1) Prefer part-id style columns (if available in current schema)
     // 2) Fallback to shot_number style columns
-    const plcColumns = await getPlcReadingColumns();
+    plcColumns = await getPlcReadingColumns();
     const partLookupColumn = pickFirstAvailableColumn(plcColumns, PLC_PART_ID_CANDIDATE_COLUMNS);
     const shotLookupColumn = pickFirstAvailableColumn(plcColumns, PLC_SHOT_CANDIDATE_COLUMNS);
     const partIdsForPlcLookup = [...new Set(
@@ -609,7 +650,7 @@ async function fetchProductionData(filters = {}, options = {}) {
   }
 
   // Enrich & Standardize
-  const enriched = deduplicatedLogs.map((log, index) => {
+  const enriched = await Promise.all(deduplicatedLogs.map(async (log, index) => {
     const normalizedPartIdKey = normalizeKey(log.part_id);
     const part = partMap[normalizedPartIdKey] || {};
     const { status: industrialResult, category } = resolveIndustrialResult({
@@ -644,7 +685,17 @@ async function fetchProductionData(filters = {}, options = {}) {
         null
       )
       : null;
-    const plcReadingFromDb = enrichPlcReadingDisplay(plcReadingFromDbRaw);
+    const plcReadingFromDb = plcReadingFromDbRaw
+      ? enrichPlcReadingDisplay(plcReadingFromDbRaw)
+      : (
+        includePlcReadings
+          ? await fetchLatestPlcReadingByMachineShotContext({
+              shotCandidates: deriveShotCandidates(log),
+              machineName: log.Machine?.machine_name || "",
+              logCreatedAt: log.createdAt,
+            })
+          : null
+      );
 
     return {
       ...log,
@@ -669,7 +720,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       reason: log.interlock_reason || "-",
       plcReading: plcReadingFromDb
     };
-  });
+  }));
 
   let filtered = enriched;
 
