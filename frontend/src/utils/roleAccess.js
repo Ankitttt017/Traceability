@@ -14,7 +14,7 @@ export const MODULE_ACCESS_META = [
   { key: "production", label: "Production" },
   { key: "io_monitor", label: "I/O Monitor" },
   { key: "part_journey", label: "Part Journey" },
-  { key: "process_flow", label: "Process Flow" },
+  { key: "process_flow", label: "Traceability Process Flow" },
   { key: "operator_view", label: "Operator View" },
   { key: "packing", label: "Packing" },
   { key: "packing_management", label: "Packing Management" },

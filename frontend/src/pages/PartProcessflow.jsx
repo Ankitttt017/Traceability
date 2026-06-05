@@ -1,211 +1,30 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { ChevronLeft, ChevronRight, RotateCcw, Play, Pause, CheckCircle2, Circle, Activity } from "lucide-react";
+import { ChevronLeft, ChevronRight, Play, Pause, RotateCcw } from "lucide-react";
 
 const processes = [
-  {
-    id: "OP10A", phase: "Raw Material", phaseColor: "emerald",
-    title: "Reception of Raw Material", subtitle: "ADC-12 Ingot Form",
-    desc: "ADC-12 aluminium alloy received in ingot form. Visual inspection and incoming quality check performed.",
-    icon: "📦", tools: ["Inspection Table", "Weight Scale"],
-  },
-  {
-    id: "OP10B", phase: "Raw Material", phaseColor: "emerald",
-    title: "Contingency Plan", subtitle: "ADC-12 Molten Form",
-    desc: "Alternate reception route — ADC-12 received in molten form as backup supply.",
-    icon: "🔄", tools: ["Molten Transfer Ladle"],
-  },
-  {
-    id: "OP20A", phase: "Melting & Prep", phaseColor: "orange",
-    title: "Melting of Alloy", subtitle: "ADC-12 Furnace",
-    desc: "ADC-12 ingots are charged into the furnace and melted to liquid state.",
-    icon: "🔥", tools: ["Melting Furnace"],
-  },
-  {
-    id: "OP20B", phase: "Melting & Prep", phaseColor: "orange",
-    title: "Degassing & Metal Treatment", subtitle: "Molten Metal",
-    desc: "Molten metal is degassed and chemically treated to remove hydrogen and impurities for quality casting.",
-    icon: "⚗️", tools: ["Degassing Unit", "Flux Treatment"],
-  },
-  {
-    id: "OP20C", phase: "Melting & Prep", phaseColor: "orange",
-    title: "Holding Material", subtitle: "For Casting",
-    desc: "Treated molten metal is held in a holding furnace at controlled temperature until required.",
-    icon: "🫙", tools: ["Holding Furnace", "Thermocouple"],
-  },
-  {
-    id: "OP30", phase: "Casting", phaseColor: "red",
-    title: "Die Casting", subtitle: "High Pressure",
-    desc: "ADC-12 molten metal injected into precision dies under high pressure to form raw casting.",
-    icon: "🏭", tools: ["HPDC Machine", "Die Mold"],
-  },
-  {
-    id: "OP40A", phase: "Post-Cast Fettling", phaseColor: "purple",
-    title: "Overflow Breaking", subtitle: "Gate & Runner Cutting",
-    desc: "Excess material — overflows, gates, and runners — broken and cut from the raw casting.",
-    icon: "✂️", tools: ["Trimming Press", "Cutting Tool"],
-  },
-  {
-    id: "OP40B", phase: "Post-Cast Fettling", phaseColor: "purple",
-    title: "Masking & Shot Blasting", subtitle: "Fettling Process",
-    desc: "Casting is masked, shot blasted to clean surfaces, and final fettling (trimming/deburring) performed.",
-    icon: "💨", tools: ["Shot Blasting Machine", "Masking Tape"],
-  },
-  {
-    id: "OP50", phase: "Inspection & Marking", phaseColor: "blue",
-    title: "Casting PDI", subtitle: "Final Table Inspection",
-    desc: "Pre-dispatch inspection on table — visual quality check of all cast parts before machining begins.",
-    icon: "🔍", tools: ["Inspection Table", "Visual Gauges"],
-  },
-  {
-    id: "OP50A1", phase: "Inspection & Marking", phaseColor: "blue",
-    title: "QR Code Laser Marking", subtitle: "Customer Traceability",
-    desc: "Unique customer QR code is laser-marked on each part for full traceability throughout supply chain.",
-    icon: "📲", tools: ["Laser Marking Machine"],
-  },
-  {
-    id: "OP50A", phase: "Machining", phaseColor: "indigo",
-    title: "Milling, Drilling & Reaming", subtitle: "VMC + Hydraulic Fixture",
-    desc: "Vertical Machining Centre with hydraulic clamping. Milling Ø63, Drill Ø7, Reamer Ø8 (+0.099/+0.077).",
-    icon: "⚙️", tools: ["VMC", "Milling Ø63", "Drill Ø7", "Reamer Ø8"],
-  },
-  {
-    id: "OP50B", phase: "Machining", phaseColor: "indigo",
-    title: "Spot Facing, Drilling & Tapping", subtitle: "VMC + Hydraulic Fixture",
-    desc: "Spot Face Cutter Ø36, Tap M14×1.5 machined on VMC with hydraulic clamping fixture.",
-    icon: "🔩", tools: ["VMC", "Spot Face Ø36", "Tap M14×1.5"],
-  },
-  {
-    id: "OP50C", phase: "Machining", phaseColor: "indigo",
-    title: "Milling, Drilling & Tapping", subtitle: "VMC + Hydraulic Fixture",
-    desc: "Milling Cutter Ø50 and Tap M8×1.25 operations performed on VMC.",
-    icon: "🔧", tools: ["VMC", "Milling Ø50", "Tap M8×1.25"],
-  },
-  {
-    id: "OP60A", phase: "Machining", phaseColor: "indigo",
-    title: "Spot Facing, Drilling & Tapping", subtitle: "VMC + Hydraulic Fixture",
-    desc: "Spot Face Ø77.2, Tap 3/4-16 UNF, Drill Ø7, End Mill Ø12 on VMC.",
-    icon: "⚙️", tools: ["Spot Face Ø77.2", "Tap 3/4-16 UNF", "Drill Ø7", "End Mill Ø12"],
-  },
-  {
-    id: "OP60B", phase: "Machining", phaseColor: "indigo",
-    title: "Milling & Drilling", subtitle: "VMC + Hydraulic Fixture",
-    desc: "Milling Cutter Ø50 and Drill Ø12 operations on Vertical Machining Centre.",
-    icon: "🔩", tools: ["VMC", "Milling Ø50", "Drill Ø12"],
-  },
-  {
-    id: "OP60C", phase: "Machining", phaseColor: "indigo",
-    title: "Milling, Drilling & Tapping", subtitle: "VMC + Hydraulic Fixture",
-    desc: "Milling Cutter Ø50 and Tap M8×1.25 final machining operations.",
-    icon: "🔧", tools: ["VMC", "Milling Ø50", "Tap M8×1.25"],
-  },
-  {
-    id: "OP60D", phase: "Machining", phaseColor: "indigo",
-    title: "Deburring & Cleaning", subtitle: "Manual",
-    desc: "Manual removal of all burrs from machined surfaces and thorough cleaning before inspection.",
-    icon: "🧹", tools: ["Deburring Tools", "Cleaning Brush"],
-  },
-  {
-    id: "OP70", phase: "Inspection & Testing", phaseColor: "teal",
-    title: "Pre-Inspection", subtitle: "Inspection Table",
-    desc: "Manual visual and dimensional pre-inspection on table before electronic gauging.",
-    icon: "📋", tools: ["Inspection Table", "Calipers", "Visual Check"],
-  },
-  {
-    id: "OP80", phase: "Inspection & Testing", phaseColor: "teal",
-    title: "Auto Gauging", subtitle: "Electronic Gauge",
-    desc: "All critical dimensions verified automatically using precision electronic gauging equipment.",
-    icon: "📏", tools: ["Electronic Gauge", "Auto Gauging Station"],
-  },
-  {
-    id: "OP90", phase: "Inspection & Testing", phaseColor: "teal",
-    title: "Leak Testing", subtitle: "Leak Testing Machine",
-    desc: "Part pressure-tested to confirm sealing integrity — zero leakage tolerance.",
-    icon: "💧", tools: ["Leak Testing Machine", "Pressure Gauge"],
-  },
-  {
-    id: "OP100", phase: "Inspection & Testing", phaseColor: "teal",
-    title: "Ultrasonic Washing", subtitle: "Washing Machine",
-    desc: "Ultrasonic washing machine removes all machining chips, oils, and contaminants.",
-    icon: "🌊", tools: ["Ultrasonic Washing Machine"],
-  },
-  {
-    id: "OP110", phase: "Final Release", phaseColor: "green",
-    title: "Final Inspection", subtitle: "Inspection Table",
-    desc: "Complete manual final inspection — dimensional, visual, and functional check before dispatch.",
-    icon: "✅", tools: ["Inspection Table", "Final Gauges"],
-  },
-  {
-    id: "OP120", phase: "Final Release", phaseColor: "green",
-    title: "Packaging & Dispatch", subtitle: "Manual",
-    desc: "Parts manually packed per customer specification and dispatched to customer location.",
-    icon: "🚚", tools: ["Packing Materials", "Dispatch Station"],
-  },
+  { id: "OP10A", title: "Raw Material Reception", desc: "ADC-12 aluminium alloy received in ingot form", icon: "📦" },
+  { id: "OP20A", title: "Melting of Alloy", desc: "ADC-12 ingots charged into furnace", icon: "🔥" },
+  { id: "OP20B", title: "Degassing & Treatment", desc: "Molten metal degassed and chemically treated", icon: "⚗️" },
+  { id: "OP20C", title: "Holding Material", desc: "Treated metal held at controlled temperature", icon: "🫙" },
+  { id: "OP30", title: "Die Casting", desc: "High pressure die casting of molten metal", icon: "🏭" },
+  { id: "OP40A", title: "Overflow Breaking", desc: "Excess material removed from raw casting", icon: "✂️" },
+  { id: "OP40B", title: "Shot Blasting", desc: "Surface cleaning and fettling", icon: "💨" },
+  { id: "OP50", title: "Casting Inspection", desc: "Pre-dispatch visual quality check", icon: "🔍" },
+  { id: "OP50A1", title: "QR Code Marking", desc: "Laser marking for traceability", icon: "📲" },
+  { id: "OP50A", title: "Milling & Drilling", desc: "VMC operations with hydraulic fixture", icon: "⚙️" },
+  { id: "OP50B", title: "Spot Facing & Tapping", desc: "Spot face and tap operations on VMC", icon: "🔩" },
+  { id: "OP50C", title: "Milling & Tapping", desc: "Milling and tapping on VMC", icon: "🔧" },
+  { id: "OP60A", title: "Spot Face & Drill", desc: "Multiple operations on VMC", icon: "⚙️" },
+  { id: "OP60B", title: "Milling & Drilling", desc: "VMC operations", icon: "🔩" },
+  { id: "OP60C", title: "Final Machining", desc: "Final VMC operations", icon: "🔧" },
+  { id: "OP60D", title: "Deburring", desc: "Manual deburring and cleaning", icon: "🧹" },
+  { id: "OP70", title: "Pre-Inspection", desc: "Manual visual inspection", icon: "📋" },
+  { id: "OP80", title: "Auto Gauging", desc: "Electronic precision gauging", icon: "📏" },
+  { id: "OP90", title: "Leak Testing", desc: "Pressure testing for sealing", icon: "💧" },
+  { id: "OP100", title: "Ultrasonic Washing", desc: "Remove chips and contaminants", icon: "🌊" },
+  { id: "OP110", title: "Final Inspection", desc: "Complete final quality check", icon: "✅" },
+  { id: "OP120", title: "Packaging & Dispatch", desc: "Pack and dispatch to customer", icon: "🚚" },
 ];
-
-const colorConfig = {
-  emerald: { bg: "bg-emerald-500/10", border: "border-emerald-500/30", text: "text-emerald-500", badge: "bg-emerald-500/20", glow: "shadow-emerald-500/20" },
-  orange: { bg: "bg-orange-500/10", border: "border-orange-500/30", text: "text-orange-500", badge: "bg-orange-500/20", glow: "shadow-orange-500/20" },
-  red: { bg: "bg-red-500/10", border: "border-red-500/30", text: "text-red-500", badge: "bg-red-500/20", glow: "shadow-red-500/20" },
-  purple: { bg: "bg-purple-500/10", border: "border-purple-500/30", text: "text-purple-500", badge: "bg-purple-500/20", glow: "shadow-purple-500/20" },
-  blue: { bg: "bg-blue-500/10", border: "border-blue-500/30", text: "text-blue-500", badge: "bg-blue-500/20", glow: "shadow-blue-500/20" },
-  indigo: { bg: "bg-indigo-500/10", border: "border-indigo-500/30", text: "text-indigo-500", badge: "bg-indigo-500/20", glow: "shadow-indigo-500/20" },
-  teal: { bg: "bg-teal-500/10", border: "border-teal-500/30", text: "text-teal-500", badge: "bg-teal-500/20", glow: "shadow-teal-500/20" },
-  green: { bg: "bg-green-500/10", border: "border-green-500/30", text: "text-green-500", badge: "bg-green-500/20", glow: "shadow-green-500/20" },
-};
-
-const OperationCard = ({ operation, index, isActive, isCompleted, onClick }) => {
-  const colors = colorConfig[operation.phaseColor];
-  
-  return (
-    <button
-      onClick={onClick}
-      className={`relative text-left rounded-xl border-2 p-4 transition-all duration-300 ${
-        isActive 
-          ? `${colors.bg} ${colors.border} ${colors.glow} shadow-lg scale-[1.02]`
-          : isCompleted
-          ? `${colors.bg} border-border/50 opacity-75 hover:opacity-100`
-          : "bg-bg-hover border-border hover:border-primary/50 hover:scale-[1.01]"
-      }`}
-    >
-      {isActive && (
-        <div className={`absolute -top-2 -right-2 ${colors.badge} ${colors.text} rounded-full p-1`}>
-          <Activity size={14} />
-        </div>
-      )}
-      
-      <div className="flex items-start gap-3 mb-2">
-        <span className="text-3xl">{operation.icon}</span>
-        <div className="flex-1 min-w-0">
-          <div className={`text-xs font-bold uppercase mb-1 ${isActive ? colors.text : isCompleted ? "text-success" : "text-text-muted"}`}>
-            {operation.id}
-          </div>
-          <div className={`text-sm font-bold truncate ${isActive ? colors.text : "text-text-main"}`}>
-            {operation.title}
-          </div>
-        </div>
-        {isCompleted && !isActive && (
-          <CheckCircle2 size={18} className="text-success shrink-0" />
-        )}
-        {!isCompleted && !isActive && (
-          <Circle size={18} className="text-text-muted/30 shrink-0" />
-        )}
-      </div>
-      
-      <div className={`text-xs ${isActive ? colors.text : "text-text-muted"} truncate`}>
-        {operation.subtitle}
-      </div>
-    </button>
-  );
-};
-
-const PhaseBadge = ({ phase, color }) => {
-  const colors = colorConfig[color];
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${colors.bg} ${colors.text} border ${colors.border}`}>
-      {phase}
-    </span>
-  );
-};
 
 export default function PartProcessflow() {
   const [activeStep, setActiveStep] = useState(0);
@@ -213,12 +32,11 @@ export default function PartProcessflow() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState(2000);
   const intervalRef = useRef(null);
-  const stepRefs = useRef([]);
+  const containerRef = useRef(null);
+  const activeCardRef = useRef(null);
 
   const total = processes.length;
   const currentOp = processes[activeStep];
-  const currentColors = colorConfig[currentOp.phaseColor];
-  const progress = Math.round((completedSteps.size / total) * 100);
 
   const goToStep = useCallback((idx) => {
     setIsPlaying(false);
@@ -228,7 +46,6 @@ export default function PartProcessflow() {
       for (let i = 0; i <= idx; i++) next.add(i);
       return next;
     });
-    stepRefs.current[idx]?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, []);
 
   const playNext = useCallback(() => {
@@ -238,7 +55,6 @@ export default function PartProcessflow() {
         return prev;
       }
       setCompletedSteps(c => new Set([...c, prev]));
-      stepRefs.current[prev + 1]?.scrollIntoView({ behavior: "smooth", block: "center" });
       return prev + 1;
     });
   }, [total]);
@@ -249,6 +65,17 @@ export default function PartProcessflow() {
     }
     return () => clearInterval(intervalRef.current);
   }, [isPlaying, speed, playNext]);
+
+  useEffect(() => {
+    // Better scroll handling - centers the active card properly
+    if (activeCardRef.current) {
+      activeCardRef.current.scrollIntoView({ 
+        behavior: "smooth", 
+        block: "center", 
+        inline: "center" 
+      });
+    }
+  }, [activeStep]);
 
   const handlePlayPause = () => {
     if (activeStep >= total - 1) {
@@ -262,238 +89,220 @@ export default function PartProcessflow() {
     setIsPlaying(false);
     setActiveStep(0);
     setCompletedSteps(new Set());
-    stepRefs.current[0]?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-bg-dark via-bg-main to-bg-dark p-6">
-      <div className="max-w-7xl mx-auto space-y-6">
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 via-white to-gray-100 p-4">
+      <div className="max-w-full mx-auto px-2">
         {/* Header */}
-        <div className="bg-gradient-to-r from-bg-card to-bg-hover border border-border rounded-2xl p-6 shadow-xl">
-          <div className="flex items-center gap-4">
-            <div className="p-3 bg-primary/20 rounded-xl border border-primary/30">
-              <svg className="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-              </svg>
-            </div>
-            <div>
-              <h1 className="text-2xl md:text-3xl font-bold text-text-main">Manufacturing Process Flow</h1>
-              <p className="text-text-muted mt-1">ADC-12 Die Cast Component · Complete Production Journey</p>
+        <div className="db-header-card mb-4">
+          <div className="db-header-gradient-bar" />
+          <div className="db-header-inner py-3">
+            <div className="db-header-title-group">
+              <div className="db-header-icon-box">
+                <svg className="w-5 h-5 text-current" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                </svg>
+              </div>
+              <div>
+                <h1 className="db-header-title text-text-main text-xl">Part Process Flow</h1>
+                <p className="db-header-subtitle text-sm">ADC-12 Die Cast Component — Production Journey</p>
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Controls Panel */}
-        <div className="bg-bg-card border border-border rounded-2xl p-5 shadow-lg">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            {/* Progress Section */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="font-bold text-text-muted">Overall Progress</span>
-                <span className="font-bold text-primary">{progress}%</span>
-              </div>
-              <div className="h-2 bg-bg-hover rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-gradient-to-r from-primary to-primary/60 rounded-full transition-all duration-500" 
-                  style={{ width: `${progress}%` }} 
-                />
-              </div>
-              <div className="text-xs text-text-muted">
-                {completedSteps.size} of {total} operations completed
-              </div>
-            </div>
-
-            {/* Speed Control */}
-            <div>
-              <label className="block text-xs font-bold text-text-muted uppercase mb-2">Playback Speed</label>
-              <select
-                className="w-full px-3 py-2 rounded-lg border border-border bg-bg-dark text-text-main text-sm focus:outline-none focus:border-primary/50"
-                value={speed}
-                onChange={e => setSpeed(Number(e.target.value))}
-              >
-                <option value={3000}>0.5x (Slow)</option>
-                <option value={2000}>1x (Normal)</option>
-                <option value={1000}>2x (Fast)</option>
-                <option value={500}>4x (Very Fast)</option>
-              </select>
-            </div>
-
-            {/* Playback Controls */}
-            <div className="flex gap-2">
-              <button
-                onClick={handleReset}
-                className="flex-1 px-4 py-2 rounded-lg border border-border bg-bg-dark text-text-main hover:bg-bg-hover transition-all text-sm font-bold flex items-center justify-center gap-2"
-              >
-                <RotateCcw size={16} /> Reset
-              </button>
-              <button
-                onClick={handlePlayPause}
-                className={`flex-1 px-4 py-2 rounded-lg border transition-all text-sm font-bold flex items-center justify-center gap-2 ${
-                  isPlaying 
-                    ? "bg-warning/20 border-warning text-warning hover:bg-warning/30" 
-                    : "bg-primary/20 border-primary text-primary hover:bg-primary/30"
-                }`}
-              >
-                {isPlaying ? <Pause size={16} /> : <Play size={16} />}
-                {isPlaying ? "Pause" : "Play"}
-              </button>
-            </div>
-
-            {/* Current Operation */}
-            <div className={`rounded-lg p-3 border ${currentColors.border} ${currentColors.bg}`}>
-              <div className="text-xs font-bold text-text-muted uppercase mb-1">Current Operation</div>
-              <div className={`text-base font-bold ${currentColors.text}`}>{currentOp.id}</div>
-              <div className="text-xs text-text-muted truncate">{currentOp.title}</div>
-            </div>
+        {/* Controls - Compact */}
+        <div className="flex items-center justify-center gap-3 mb-5 bg-white rounded-xl p-3 shadow-md border border-gray-100">
+          <button
+            onClick={handleReset}
+            className="px-4 py-2 bg-white text-gray-700 rounded-lg hover:bg-gray-50 transition-all flex items-center gap-2 border border-gray-200 font-medium text-sm shadow-sm"
+          >
+            <RotateCcw size={14} /> Reset
+          </button>
+          <button
+            onClick={handlePlayPause}
+            className={`px-5 py-2 rounded-lg transition-all flex items-center gap-2 font-semibold text-sm shadow-sm ${
+              isPlaying 
+                ? "bg-amber-500 text-white hover:bg-amber-600 shadow-amber-500/20" 
+                : "bg-blue-600 text-white hover:bg-blue-700 shadow-blue-500/20"
+            }`}
+          >
+            {isPlaying ? <Pause size={14} /> : <Play size={14} />}
+            {isPlaying ? "Pause" : "Auto Play"}
+          </button>
+          <select
+            className="px-3 py-2 bg-white text-gray-700 rounded-lg border border-gray-200 font-medium text-sm shadow-sm cursor-pointer hover:border-gray-300 transition-all"
+            value={speed}
+            onChange={e => setSpeed(Number(e.target.value))}
+          >
+            <option value={3000}>🐢 Slow</option>
+            <option value={2000}>🐇 Normal</option>
+            <option value={1000}>🚀 Fast</option>
+            <option value={500}>⚡ Very Fast</option>
+          </select>
+          <div className="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg font-mono font-bold text-sm border border-blue-100">
+            {activeStep + 1} / {total}
           </div>
         </div>
 
-        {/* Main Content */}
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Sidebar Navigation */}
-          <div className="lg:col-span-1">
-            <div className="bg-bg-card border border-border rounded-2xl p-4 shadow-lg sticky top-6 max-h-[calc(100vh-2rem)] overflow-y-auto">
-              <div className="text-xs font-bold text-text-muted uppercase mb-3 sticky top-0 bg-bg-card py-2">
-                Operation List
+        {/* Process Flow Visualization */}
+        <div className="bg-white rounded-xl p-5 shadow-lg border border-gray-100">
+          <div 
+            ref={containerRef}
+            className="flex items-center gap-0 overflow-x-auto pb-4 px-6 scrollbar-thin scrollbar-thumb-gray-300"
+            style={{ scrollbarWidth: 'thin' }}
+          >
+            {/* Start Point */}
+            <div className="flex flex-col items-center shrink-0">
+              <div className="w-14 h-14 rounded-full bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center text-sm font-bold text-white shadow-md shadow-green-500/20">
+                START
               </div>
-              <div className="space-y-1.5">
-                {processes.map((p, i) => {
-                  const isCompleted = completedSteps.has(i);
-                  const isActive = activeStep === i;
-                  const colors = colorConfig[p.phaseColor];
-                  
-                  return (
-                    <button
-                      key={p.id}
-                      ref={el => stepRefs.current[i] = el}
-                      onClick={() => goToStep(i)}
-                      className={`w-full text-left px-3 py-2 rounded-lg transition-all text-xs flex items-center gap-2 group ${
-                        isActive 
-                          ? `${colors.bg} ${colors.border} border shadow-sm`
-                          : isCompleted 
-                          ? "opacity-60 hover:opacity-100" 
-                          : "hover:bg-bg-hover"
-                      }`}
-                    >
-                      <div className={`w-2 h-2 rounded-full shrink-0 ${
-                        isActive ? colors.text : isCompleted ? "bg-success" : "bg-text-muted/40"
-                      }`} />
-                      <span className={`font-mono font-bold ${isActive ? colors.text : "text-text-muted"}`}>
-                        {p.id}
-                      </span>
-                      <span className="flex-1 truncate text-text-muted group-hover:text-text-main">
-                        {p.title}
-                      </span>
-                      {isCompleted && <CheckCircle2 size={12} className="text-success shrink-0" />}
-                    </button>
-                  );
-                })}
-              </div>
+              <div className="text-[10px] text-gray-500 mt-1 font-medium">Begin</div>
             </div>
-          </div>
 
-          {/* Main Content Area */}
-          <div className="lg:col-span-3 space-y-6">
-            {/* Active Operation Detail */}
-            <div className={`rounded-2xl border-2 p-6 shadow-xl transition-all ${currentColors.border} ${currentColors.bg}`}>
-              <div className="flex items-start justify-between mb-4 gap-4">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-3">
-                    <PhaseBadge phase={currentOp.phase} color={currentOp.phaseColor} />
-                    <span className={`text-xs font-mono font-bold ${currentColors.text}`}>{currentOp.id}</span>
-                  </div>
-                  <h2 className="text-2xl font-bold text-text-main mb-2">{currentOp.title}</h2>
-                  <p className="text-text-muted">{currentOp.subtitle}</p>
-                </div>
-                <div className="text-6xl">{currentOp.icon}</div>
-              </div>
-              
-              <p className="text-text-muted leading-relaxed mb-4">{currentOp.desc}</p>
-              
-              <div className="flex flex-wrap gap-2 mb-4">
-                {currentOp.tools.map(tool => (
-                  <span key={tool} className={`text-xs px-3 py-1 rounded-full border ${currentColors.border} ${currentColors.bg} ${currentColors.text} font-medium`}>
-                    🛠️ {tool}
-                  </span>
-                ))}
-              </div>
-              
-              <div className="flex items-center justify-between text-sm pt-3 border-t border-border/50">
-                <span className="text-text-muted">
-                  Step <span className={`font-bold ${currentColors.text}`}>{activeStep + 1}</span> of {total}
-                </span>
-                <div className="flex gap-2">
+            {/* Arrow after Start */}
+            <Arrow isActive={activeStep >= 0} />
+
+            {/* Process Cards - Adjusted size to prevent cutoff */}
+            {processes.map((process, idx) => (
+              <div key={process.id} className="flex items-center shrink-0">
+                <div ref={activeStep === idx ? activeCardRef : null}>
                   <button
-                    onClick={() => goToStep(Math.max(0, activeStep - 1))}
-                    disabled={activeStep === 0}
-                    className="px-3 py-1 rounded-lg border border-border bg-bg-dark text-text-muted hover:text-text-main disabled:opacity-30 disabled:cursor-not-allowed transition-all"
-                  >
-                    <ChevronLeft size={16} />
-                  </button>
-                  <button
-                    onClick={() => goToStep(Math.min(total - 1, activeStep + 1))}
-                    disabled={activeStep === total - 1}
-                    className="px-3 py-1 rounded-lg border border-border bg-bg-dark text-text-muted hover:text-text-main disabled:opacity-30 disabled:cursor-not-allowed transition-all"
-                  >
-                    <ChevronRight size={16} />
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Process Timeline Visualization */}
-            <div className="bg-bg-card border border-border rounded-2xl p-5 shadow-lg">
-              <div className="text-xs font-bold text-text-muted uppercase mb-3">Process Timeline</div>
-              <div className="flex items-center gap-1 overflow-x-auto pb-3">
-                {processes.map((p, i) => {
-                  const isCompleted = completedSteps.has(i);
-                  const isActive = activeStep === i;
-                  const colors = colorConfig[p.phaseColor];
-                  
-                  return (
-                    <div key={p.id} className="flex items-center shrink-0">
-                      <button
-                        onClick={() => goToStep(i)}
-                        className={`relative w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold transition-all cursor-pointer ${
-                          isActive 
-                            ? `${colors.bg} ${colors.border} border-2 scale-110 shadow-lg`
-                            : isCompleted 
-                            ? "bg-success text-white"
-                            : "bg-bg-hover border border-border text-text-muted"
-                        }`}
-                      >
-                        {isCompleted ? <CheckCircle2 size={16} /> : i + 1}
-                      </button>
-                      {i < total - 1 && (
-                        <div className={`w-6 h-0.5 mx-0.5 transition-all ${isCompleted ? "bg-success" : "bg-border"}`} />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* All Operations Grid */}
-            <div>
-              <h3 className="text-sm font-bold text-text-muted uppercase mb-3 flex items-center gap-2">
-                <span>📋</span> Complete Operation List
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {processes.map((operation, idx) => (
-                  <OperationCard
-                    key={operation.id}
-                    operation={operation}
-                    index={idx}
-                    isActive={activeStep === idx}
-                    isCompleted={completedSteps.has(idx)}
                     onClick={() => goToStep(idx)}
-                  />
-                ))}
+                    className={`relative w-40 h-auto min-h-[140px] rounded-xl p-3 transition-all duration-300 cursor-pointer border-2 group ${
+                      activeStep === idx
+                        ? "border-blue-500 bg-gradient-to-br from-blue-50 to-white shadow-xl shadow-blue-500/30 scale-105 z-20"
+                        : completedSteps.has(idx)
+                        ? "border-emerald-400/60 bg-gradient-to-br from-emerald-50/80 to-white shadow-md"
+                        : "border-gray-200 bg-white hover:border-blue-300 hover:shadow-md hover:-translate-y-0.5"
+                    }`}
+                  >
+                    {/* Active indicator */}
+                    {activeStep === idx && (
+                      <div className="absolute -top-2 -right-2 w-6 h-6 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full animate-pulse shadow-lg flex items-center justify-center">
+                        <div className="w-2 h-2 bg-white rounded-full"></div>
+                      </div>
+                    )}
+                    
+                    {/* Step number badge */}
+                    <div className={`absolute top-2 left-2 text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                      activeStep === idx 
+                        ? "bg-blue-500 text-white" 
+                        : completedSteps.has(idx)
+                        ? "bg-emerald-100 text-emerald-700"
+                        : "bg-gray-100 text-gray-500"
+                    }`}>
+                      {idx + 1}
+                    </div>
+                    
+                    <div className="text-2xl mb-1.5 mt-4 text-center">{process.icon}</div>
+                    <div className="text-[10px] font-mono text-blue-600 font-bold mb-0.5 text-center">{process.id}</div>
+                    <div className="text-xs font-bold text-gray-800 leading-tight text-center line-clamp-1">{process.title}</div>
+                    <div className="text-[10px] text-gray-500 mt-1 line-clamp-2 text-center leading-tight px-1">{process.desc}</div>
+                    
+                    {/* Completion checkmark */}
+                    {completedSteps.has(idx) && activeStep !== idx && (
+                      <div className="absolute bottom-2 right-2 w-5 h-5 bg-emerald-500 rounded-full flex items-center justify-center shadow-sm">
+                        <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                        </svg>
+                      </div>
+                    )}
+                    
+                    {/* Hover effect glow */}
+                    <div className={`absolute inset-0 rounded-xl transition-opacity duration-300 pointer-events-none ${
+                      activeStep === idx ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                    }`} style={{ boxShadow: 'inset 0 0 0 2px rgba(59,130,246,0.2)' }} />
+                  </button>
+                </div>
+
+                {/* Arrow after each card */}
+                {idx < total - 1 && (
+                  <Arrow isActive={completedSteps.has(idx)} isNext={activeStep === idx + 1} />
+                )}
+              </div>
+            ))}
+
+            {/* Arrow before End */}
+            <Arrow isActive={completedSteps.size === total} />
+
+            {/* End Point */}
+            <div className="flex flex-col items-center shrink-0 ml-1">
+              <div className={`w-14 h-14 rounded-full flex items-center justify-center text-sm font-bold text-white shadow-md transition-all ${
+                completedSteps.size === total 
+                  ? "bg-gradient-to-br from-green-500 to-emerald-600 shadow-green-500/20 scale-105" 
+                  : "bg-gray-300 shadow-gray-300/20"
+              }`}>
+                {completedSteps.size === total ? "✓" : "END"}
+              </div>
+              <div className="text-[10px] text-gray-500 mt-1 font-medium">Complete</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Current Step Details Card */}
+        <div className="mt-5 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl p-4 border border-blue-100 shadow-sm">
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="text-3xl">{currentOp.icon}</div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-mono font-bold text-blue-600 bg-blue-100 px-2 py-0.5 rounded">{currentOp.id}</span>
+                <span className="text-sm font-bold text-gray-800">{currentOp.title}</span>
+              </div>
+              <p className="text-xs text-gray-600 mt-0.5">{currentOp.desc}</p>
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-gray-500">Step {activeStep + 1} of {total}</div>
+              <div className="w-32 h-1.5 bg-gray-200 rounded-full mt-1 overflow-hidden">
+                <div className="h-full bg-gradient-to-r from-blue-500 to-blue-600 rounded-full transition-all duration-300" style={{ width: `${((activeStep + 1) / total) * 100}%` }} />
               </div>
             </div>
           </div>
+        </div>
+
+        {/* Navigation Arrows */}
+        <div className="flex justify-center gap-3 mt-5">
+          <button
+            onClick={() => goToStep(Math.max(0, activeStep - 1))}
+            disabled={activeStep === 0}
+            className="px-4 py-2 bg-white text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition-all border border-gray-200 shadow-sm font-medium text-sm flex items-center gap-1.5"
+          >
+            <ChevronLeft size={16} /> Previous
+          </button>
+          <button
+            onClick={() => goToStep(Math.min(total - 1, activeStep + 1))}
+            disabled={activeStep === total - 1}
+            className="px-4 py-2 bg-white text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition-all border border-gray-200 shadow-sm font-medium text-sm flex items-center gap-1.5"
+          >
+            Next <ChevronRight size={16} />
+          </button>
         </div>
       </div>
     </div>
   );
 }
+
+// Enhanced Arrow Component with Animation
+const Arrow = ({ isActive, isNext }) => {
+  return (
+    <div className="flex items-center shrink-0 mx-1">
+      <div className="relative">
+        <div className={`w-10 h-0.5 transition-all duration-500 rounded-full ${
+          isActive ? "bg-gradient-to-r from-emerald-400 to-emerald-500" : "bg-gray-300"
+        }`} />
+        <div className={`absolute right-0 top-1/2 -translate-y-1/2 w-0 h-0 
+          border-t-[4px] border-t-transparent 
+          border-b-[4px] border-b-transparent 
+          border-l-[6px] transition-all duration-500 ${
+          isActive ? "border-l-emerald-500" : "border-l-gray-300"
+        }`} />
+        {isNext && (
+          <div className="absolute -inset-1">
+            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-6 h-6 bg-blue-400/20 rounded-full animate-ping" />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
