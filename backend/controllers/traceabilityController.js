@@ -879,6 +879,36 @@ function emitOperatorPopup(type, payload) {
   });
 }
 
+async function emitPackingReadyPopup({ partId, stationNo, machineId, machineName }) {
+  const station = normalizeStation(stationNo);
+  if (!station || !partId) return;
+  const features = await getStationFeatureConfig(station).catch(() => null);
+  if (!features?.finalPacking) return;
+  emitOperatorPopup("SUCCESS", {
+    partId,
+    stationNo: "PACKING",
+    sourceStationNo: station,
+    machineId,
+    machineName,
+    qrStatus: "PASSED",
+    operationStatus: "READY_FOR_PACKING",
+    status: "READY_FOR_PACKING",
+    plcStatus: "READY_FOR_PACKING",
+    finalPackingEligible: true,
+    message: `Part ready for packing from ${station}.`,
+  });
+  emitRealtime("packing_update", {
+    event: "PART_READY_FOR_PACKING",
+    partId,
+    stationNo: "PACKING",
+    sourceStationNo: station,
+    machineId,
+    machineName,
+    finalPackingEligible: true,
+    timestamp: new Date().toISOString(),
+  });
+}
+
 async function buildScannerHealth(scanner, machineId) {
   if (!scanner) {
     return {
@@ -1434,6 +1464,12 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId
           plcStatus: "ENDED_OK",
           message: "Operation Passed",
         });
+        await emitPackingReadyPopup({
+          partId,
+          stationNo,
+          machineId: machine.id,
+          machineName: machine.machine_name,
+        });
         emitRealtime("PLC_COMPLETED_OK", { partId, machineId: machine.id, stationNo });
         emitRealtime("dashboard_refresh", { reason: "PLC_END_OK" });
       },
@@ -1638,6 +1674,12 @@ async function handleStationPlcFlow({
           status: "ENDED_OK",
           plcStatus: "ENDED_OK",
           message: "Operation Passed (PLC communication bypassed/disabled)",
+        });
+        await emitPackingReadyPopup({
+          partId,
+          stationNo,
+          machineId: machine.id,
+          machineName: machine.machine_name,
         });
         emitRealtime("dashboard_refresh", { reason: "PLC_BYPASSED" });
       }
@@ -2341,6 +2383,25 @@ exports.getPartJourney = async (req, res) => {
         })
         .filter(Boolean),
     ]);
+    const customerMappings = await PartCodeMapping.findAll({
+      where: {
+        old_part_id: String(partId || "").trim(),
+        is_active: true,
+      },
+      attributes: ["customer_qr", "station_no", "machine_id", "createdAt", "updatedAt"],
+      order: [["updatedAt", "DESC"]],
+      raw: true,
+    });
+    const customerMappingByStation = customerMappings.reduce((acc, row) => {
+      const key = normalizeStation(row.station_no);
+      if (!key || acc[key]) return acc;
+      acc[key] = {
+        customerQrCode: String(row.customer_qr || "").trim() || null,
+        customerQrMappedAt: row.updatedAt || row.createdAt || null,
+        customerQrMachineId: row.machine_id || null,
+      };
+      return acc;
+    }, {});
 
     const currentStation = normalizeStation(part?.current_station);
     const currentIndex = sequenceData.sequence.findIndex((station) => station === currentStation);
@@ -2420,6 +2481,9 @@ exports.getPartJourney = async (req, res) => {
         cycleEndTime,
         cycleDurationSec,
         attempts,
+        customerQrCode: customerMappingByStation[stationNo]?.customerQrCode || null,
+        customerQrMappedAt: customerMappingByStation[stationNo]?.customerQrMappedAt || null,
+        customerQrMachineId: customerMappingByStation[stationNo]?.customerQrMachineId || null,
       };
     });
 
@@ -2854,6 +2918,7 @@ exports.processScan = async (req, res) => {
     }
 
     if (scannerRole === "CUSTOMER_QR") {
+      const stationFeatures = await getStationFeatureConfig(normalizedStation).catch(() => null);
       const customerRoleGuard = await enforceScannerRoleIfConfigured({
         machine,
         sourceIp: bound.sourceIp,
@@ -2901,25 +2966,35 @@ exports.processScan = async (req, res) => {
         is_active: true,
       });
 
-      emitOperatorPopup("INFO", {
+      const finalized = await finalizeCustomerQrMappingIfEligible({
+        partId: activePartId,
+        stationNo: normalizedStation,
+        machine,
+        userId: req.user?.id,
+        stationFeatures,
+      });
+
+      emitOperatorPopup(finalized.finalized ? "SUCCESS" : "INFO", {
         partId: activePartId,
         stationNo: normalizedStation,
         machineId: machine.id,
         machineName: machine.machine_name,
-        status: "SCANNED",
-        plcStatus: "WAITING_PLC",
+        status: finalized.finalized ? "ENDED_OK" : "SCANNED",
+        plcStatus: finalized.operationStatus === "ENDED_OK" ? "ENDED_OK" : "WAITING_PLC",
         qrResult: "PASS",
         reason: "CUSTOMER_QR_MAPPED",
-        message: "Customer QR mapped successfully to active part.",
+        message: finalized.finalized
+          ? "Customer QR mapped successfully. Operation passed."
+          : "Customer QR mapped successfully to active part.",
       });
 
       return res.json({
         status: "OK",
         decision: "ALLOW",
         qrStatus: "PASS",
-        operationStatus: "WAITING",
+        operationStatus: finalized.operationStatus || "WAITING",
         reason: "CUSTOMER_QR_MAPPED",
-        message: "Customer QR mapped successfully",
+        message: finalized.finalized ? "Customer QR mapped successfully. Operation passed." : "Customer QR mapped successfully",
         mapped: true,
         partId: activePartId,
         customerQrCode: scannedQrRaw,
@@ -3234,6 +3309,7 @@ exports.verifyScanForOperator = async (req, res) => {
       looksLikeCustomerQr &&
       activePartIdForMachine
     ) {
+      const customerStationFeatures = await getStationFeatureConfig(stationNo).catch(() => null);
       if (
         existingCustomerMapping &&
         String(existingCustomerMapping.old_part_id || "").trim() !== activePartIdForMachine
@@ -3251,16 +3327,26 @@ exports.verifyScanForOperator = async (req, res) => {
         is_active: true,
       });
 
-      emitOperatorPopup("INFO", {
+      const finalized = await finalizeCustomerQrMappingIfEligible({
+        partId: activePartIdForMachine,
+        stationNo,
+        machine,
+        userId: req.user?.id,
+        stationFeatures: customerStationFeatures,
+      });
+
+      emitOperatorPopup(finalized.finalized ? "SUCCESS" : "INFO", {
         partId: activePartIdForMachine,
         stationNo,
         machineId: machine.id,
         machineName: machine.machine_name,
-        status: "SCANNED",
-        plcStatus: "WAITING_PLC",
+        status: finalized.finalized ? "ENDED_OK" : "SCANNED",
+        plcStatus: finalized.operationStatus === "ENDED_OK" ? "ENDED_OK" : "WAITING_PLC",
         qrResult: "PASS",
         reason: "CUSTOMER_QR_MAPPED",
-        message: "Customer QR mapped successfully to active part.",
+        message: finalized.finalized
+          ? "Customer QR mapped successfully. Operation passed."
+          : "Customer QR mapped successfully to active part.",
         customerQrCode: scannedQrRaw,
       });
 
@@ -3268,9 +3354,9 @@ exports.verifyScanForOperator = async (req, res) => {
         status: "OK",
         decision: "ALLOW",
         qrStatus: "PASS",
-        operationStatus: "WAITING",
+        operationStatus: finalized.operationStatus || "WAITING",
         reason: "CUSTOMER_QR_MAPPED",
-        message: "Customer QR mapped successfully",
+        message: finalized.finalized ? "Customer QR mapped successfully. Operation passed." : "Customer QR mapped successfully",
         mapped: true,
         partId: activePartIdForMachine,
         customerQrCode: scannedQrRaw,
@@ -3574,6 +3660,12 @@ exports.confirmOperationEnd = async (req, res) => {
         plcStatus: "ENDED_OK",
         qrResult: "PASS",
         message: "Operation Passed",
+      });
+      await emitPackingReadyPopup({
+        partId,
+        stationNo: station,
+        machineId: machine.id,
+        machineName: machine.machine_name,
       });
     } else {
       await markOperationEndedNg({
@@ -4247,6 +4339,14 @@ exports.submitManualResult = async (req, res) => {
         ? "Manual quality check passed"
         : `Manual quality check completed with NG: ${reason || "Rejection"}`,
     });
+    if (normalizedStatus === "OK") {
+      await emitPackingReadyPopup({
+        partId: normalizedPartId,
+        stationNo: targetStation,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+      });
+    }
     emitRealtime("dashboard_refresh", { reason: "MANUAL_RESULT_SUBMITTED" });
 
     res.json({
@@ -4490,6 +4590,62 @@ function getDateRangeFromQuery(query) {
   const from = Number.isNaN(fromCandidate.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : fromCandidate;
   const to = Number.isNaN(toCandidate.getTime()) ? now : toCandidate;
   return { from, to };
+}
+
+async function finalizeCustomerQrMappingIfEligible({
+  partId,
+  stationNo,
+  machine,
+  userId,
+  stationFeatures = null,
+}) {
+  const station = normalizeStation(stationNo);
+  const features = stationFeatures || await getStationFeatureConfig(station).catch(() => null);
+  if (!partId || !station || !machine?.id || !features) {
+    return { finalized: false, operationStatus: "WAITING" };
+  }
+  const shouldAutoComplete =
+    features.manualResult !== true &&
+    features.plcCommunication === false;
+  if (!shouldAutoComplete) {
+    return { finalized: false, operationStatus: "WAITING" };
+  }
+  const latest = await getLatestOperationLog(partId, station);
+  if (!latest) {
+    return { finalized: false, operationStatus: "WAITING" };
+  }
+  const plcStatus = String(latest.plc_status || "").trim().toUpperCase();
+  if (plcStatus === "ENDED_OK") {
+    return { finalized: true, operationStatus: "ENDED_OK", operationLogId: latest.id };
+  }
+  if (plcStatus === "ENDED_NG") {
+    return { finalized: false, operationStatus: "ENDED_NG", operationLogId: latest.id };
+  }
+  await markOperationEndedOk({
+    operationLogId: latest.id,
+    partId,
+    stationNo: station,
+    machineId: machine.id,
+    userId,
+  });
+  await safeRecordTimeline({
+    operationId: latest.id,
+    partId,
+    machineId: machine.id,
+    stationNo: station,
+    eventType: TIMELINE_EVENTS.COMPLETED_OK,
+    eventData: {
+      customerQrMapped: true,
+      autoCompleted: true,
+    },
+  });
+  await emitPackingReadyPopup({
+    partId,
+    stationNo: station,
+    machineId: machine.id,
+    machineName: machine.machine_name,
+  });
+  return { finalized: true, operationStatus: "ENDED_OK", operationLogId: latest.id };
 }
 
 function toScannerResponse(scanner) {

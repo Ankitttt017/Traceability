@@ -108,10 +108,12 @@ exports.scanPartToBox = async (req, res) => {
       },
       item: {
         id: packed.item.id,
-        partId: packed.item.part_id,
+        partId: packed.resolvedPartId || packed.item.part_id,
         slotNo: packed.item.slot_no,
         packedAt: packed.item.createdAt,
       },
+      resolvedPartId: packed.resolvedPartId || packed.item.part_id,
+      customerQrCode: packed.customerQrCode || null,
     });
   } catch (error) {
     res.status(400).json({ error: error.message });

@@ -1398,6 +1398,17 @@ const ComponentJourney = () => {
                               )}
                             </div>
                           )}
+                          {station.customerQrCode && (
+                            <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap"}}>
+                              <span style={{fontSize:10,fontWeight:800,color:C.info(),
+                                background:C.info(0.12),padding:"2px 6px",borderRadius:5}}>
+                                Customer QR: {station.customerQrCode}
+                              </span>
+                              <span style={{fontSize:10,color:C.txt("muted"),display:"flex",alignItems:"center",gap:3}}>
+                                <Clock3 size={10}/> Read: {formatTime(station.customerQrMappedAt)}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </div>
 

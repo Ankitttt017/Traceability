@@ -332,7 +332,7 @@ const Header = ({ onMenuClick }) => {
           <button
             type="button"
             onClick={onMenuClick}
-            className="lg:hidden p-2 rounded-xl hover:bg-bg-hover transition-colors text-text-main"
+            className="xl:hidden p-2 rounded-xl hover:bg-bg-hover transition-colors text-text-main"
             aria-label="Open navigation"
           >
             <Menu size={18} />

@@ -67,7 +67,7 @@ const Sidebar = ({ onClose }) => {
 
   useEffect(() => {
     if (onClose) onClose();
-  }, [location.pathname, onClose]);
+  }, [location.pathname]);
 
   const traceabilityNavigation = useMemo(
     () => [
