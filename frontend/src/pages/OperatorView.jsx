@@ -108,6 +108,11 @@ const SHM = `0 14px 34px rgba(var(--ov-navy),.2),0 4px 12px rgba(0,0,0,.16)`;
 
 // ── Utility functions ────────────────────────────────────────────────────
 function normalizePartId(v) { return String(v || "").trim(); }
+function sanitizeScannerCode(value) {
+  const raw = String(value || "");
+  const cleaned = raw.replace(/[\u0000-\u001F\u007F]/g, "").trim();
+  return cleaned;
+}
 function extractQrDecision(payload = {}) {
   const p = String(payload.qrResult || payload.decision || payload.outcome || payload.scanOutcome || payload.qrDecision || payload.qrStatus || "").trim().toUpperCase();
   if (p) return p;
@@ -1362,8 +1367,12 @@ const OperatorView = () => {
   }, [selectedMachineId, loadMachineTelemetry, openScannerReadyPopup]);
 
   const submitUsbScan = useCallback(async (rawValue) => {
-    const code = String(rawValue || "").trim();
+    const code = sanitizeScannerCode(rawValue);
     if (!code || !selectedMachineIdRef.current) return;
+    if (code.length < 4) {
+      setUsbDebug(`Ignored noise: ${JSON.stringify(rawValue)}`);
+      return;
+    }
     setUsbDebug(`Captured: ${code}`);
     try {
       const machineRows = machinesRef.current || [];
@@ -1441,7 +1450,7 @@ const OperatorView = () => {
     window.addEventListener("touchstart", keepFocus, true);
 
     const flush = () => {
-      const value = usbBufferRef.current.trim();
+      const value = sanitizeScannerCode(usbBufferRef.current);
       usbBufferRef.current = "";
       if (value) submitUsbScan(value);
     };
@@ -1468,6 +1477,7 @@ const OperatorView = () => {
         return;
       }
       if (event.key.length === 1) {
+        if (/[\u0000-\u001F\u007F]/.test(event.key)) return;
         event.preventDefault();
         usbBufferRef.current += event.key;
         if (usbFlushTimerRef.current) clearTimeout(usbFlushTimerRef.current);
@@ -1553,6 +1563,7 @@ const OperatorView = () => {
         onResetOperation={handleResetOperation}
         autoCloseMs={12000} criticalAutoCloseMs={18000} showAcknowledge={false}
         machineId={selectedMachineId}
+        activeStation={selectedStation}
         scannerInfo={scannerInfo}
         showJourney
         journeyScope="station" />

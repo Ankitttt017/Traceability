@@ -49,7 +49,7 @@ const en = {
     shiftManager: "Shift Manager",
     qrManager: "QR Manager",
     userManagement: "User Management",
-    processFlow: "Process Flow",
+    processFlow: "Traceability Process Flow",
     partProcessFlow: "Part Process Flow",
     reports: "Reports",
     settings: "Settings",

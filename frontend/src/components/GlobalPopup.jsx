@@ -21,6 +21,10 @@ const StationIcon = React.memo(() => (
   <MapPin size={32} className="opacity-40 text-amber-500 animate-bounce" />
 ));
 
+function sanitizeScannerCode(value) {
+  return String(value || "").replace(/[\u0000-\u001F\u007F]/g, "").trim();
+}
+
 // ---------------------------------------------
 // OIL PAN K12 DEFECT MASTER
 // ---------------------------------------------
@@ -456,6 +460,7 @@ const GlobalPopup = ({
   allowBottomClose = false,
   manualScanMode = false,
   disableAutoClose = false,
+  activeStation = "",
 }) => {
   const { t } = useLanguage();
   const [journeyData, setJourneyData] = useState(null);
@@ -500,11 +505,16 @@ const GlobalPopup = ({
   const reasonDropdownRef = useRef(null);
   const validateRequestSeqRef = useRef(0);
 
-    const validateQrCode = async (rawCode) => {
-    const scannedCode = String(rawCode || "").trim();
+  const validateQrCode = async (rawCode) => {
+    const scannedCode = sanitizeScannerCode(rawCode);
     if (!scannedCode) {
       setValidationInfo("");
       setValidationError("Please scan or enter QR code.");
+      return;
+    }
+    if (scannedCode.length < 4) {
+      setValidationInfo("");
+      setValidationError("");
       return;
     }
     const requestSeq = ++validateRequestSeqRef.current;
@@ -590,7 +600,7 @@ const GlobalPopup = ({
 
   const socketPartId = String(popup?.partId || popup?.part_id || "").trim();
   const partId = socketPartId;
-  const stationNo = String(popup?.stationNo || popup?.station_no || "").trim();
+  const stationNo = String(activeStation || popup?.stationNo || popup?.station_no || "").trim();
 
   // Reset manual state only when station changes (not on partId change — that would wipe localQrValidated)
   useEffect(() => {
@@ -762,7 +772,7 @@ const GlobalPopup = ({
       return undefined;
     }
 
-    const targetStationNo = stationNo || popup?.stationNo || popup?.station_no;
+    const targetStationNo = stationNo || activeStation || popup?.stationNo || popup?.station_no;
     const targetFeatures = getStationFeatures(targetStationNo, stationSettings);
     const isOnlyQrCheck = targetFeatures.qr === true && targetFeatures.operation === false;
     const isManual = targetFeatures?.manualResult === true;
@@ -910,7 +920,7 @@ const GlobalPopup = ({
   // Auto-clear only non-error helper messages for manual result stations.
   // Keep validation errors visible so operators can read and act (no blink/disappear).
   useEffect(() => {
-    const targetStationNo = stationNo || popup?.stationNo || popup?.station_no;
+    const targetStationNo = stationNo || activeStation || popup?.stationNo || popup?.station_no;
     const targetFeatures = getStationFeatures(targetStationNo, stationSettings);
     const isManual = targetFeatures?.manualResult === true;
     if (!isManual) return undefined;
@@ -1027,7 +1037,7 @@ const GlobalPopup = ({
     const isUsbMode = ["USB_SERIAL", "USB", "USB_HID", "HID"].includes(mode);
     if (!isUsbMode) return undefined;
 
-    const targetStationNo = stationNo || popup?.stationNo || popup?.station_no;
+    const targetStationNo = stationNo || activeStation || popup?.stationNo || popup?.station_no;
     const targetFeatures = getStationFeatures(targetStationNo, stationSettings);
     const isManualResultStation = targetFeatures?.manualResult === true;
 
@@ -1093,6 +1103,7 @@ const GlobalPopup = ({
       }
 
       if (event.key.length === 1) {
+        if (/[\u0000-\u001F\u007F]/.test(event.key)) return;
         usbScanBufferRef.current += event.key;
         setManualQrCode(usbScanBufferRef.current);
         event.preventDefault();
@@ -1174,6 +1185,8 @@ const GlobalPopup = ({
 
   // Full journey mode
   const stations = showJourney ? (journeyData?.stations || []) : [];
+  const targetStationNo = stationNo || popup.stationNo || popup.station_no;
+  const targetStationKey = String(targetStationNo || "").trim().toUpperCase();
 
   // Merge live data into the current station (if it exists in the timeline)
   const liveQrState = resolveQrState(popup);
@@ -1184,14 +1197,19 @@ const GlobalPopup = ({
     String(popup?.message || "").toUpperCase().includes("DUPLICATE");
   const liveRejectionState = resolveRejectionState(popup, liveOperationState);
 
-  // Find current station index and merge live data
-  const currentStationIndex = stations.findIndex(s => s.status === "IN_PROGRESS");
+  // Always prefer the station currently opened on OperatorView.
+  // Fallback to journey IN_PROGRESS only when popup has no station identity.
+  const currentStationIndex = stations.findIndex(
+    (s) => String(s.stationNo || "").trim().toUpperCase() === targetStationKey
+  );
+  const fallbackLiveStationIndex = stations.findIndex((s) => s.status === "IN_PROGRESS");
+  const mergeStationIndex = currentStationIndex >= 0 ? currentStationIndex : fallbackLiveStationIndex;
   const enrichedStations = stations.map((s, idx) => {
     const features = getStationFeatures(s.stationNo, stationSettings);
     let base = { ...s, features };
 
-    // MERGE LOGIC: If this is the current active station, merge live data from popup
-    if (idx === currentStationIndex) {
+    // MERGE LOGIC: merge live data only into the opened target station
+    if (idx === mergeStationIndex) {
       // If system is reset (IDLE/WAIT) AND no active QR is scanned, force journey to WAIT
       if ((liveOperationState === "WAIT" || liveOperationState === "IDLE") && liveQrState === "WAIT") {
         return {
@@ -1218,8 +1236,6 @@ const GlobalPopup = ({
     }
     return base;
   });
-
-  const targetStationNo = stationNo || popup.stationNo || popup.station_no;
   const features = getStationFeatures(targetStationNo, stationSettings);
   const isManualResultStation = features?.manualResult === true;
 
@@ -1274,7 +1290,6 @@ const GlobalPopup = ({
   })();
   const isValidNgReason = !manualReason || ngReasonOptions.includes(manualReason);
   const currentStationName = displayStations.find((s) => s.status === "IN_PROGRESS")?.stationName || stationNo || "System Node";
-  const targetStationKey = String(targetStationNo || "").trim().toUpperCase();
   const activeStationIndexInJourney = enrichedStations.findIndex(
     (s) => String(s.stationNo || "").trim().toUpperCase() === targetStationKey
   );
@@ -1628,7 +1643,7 @@ const GlobalPopup = ({
                   key={station.stationNo || `station-${idx}`}
                   station={station}
                   isLast={idx === displayStations.length - 1}
-                  isCurrentStation={idx === currentStationIndex}
+                  isCurrentStation={String(station.stationNo || "").trim().toUpperCase() === targetStationKey}
                 />
               ))}
             </div>

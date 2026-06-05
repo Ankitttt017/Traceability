@@ -49,7 +49,7 @@ const hi = {
     shiftManager: "शिफ्ट मैनेजर",
     qrManager: "क्यूआर मैनेजर",
     userManagement: "यूज़र मैनेजमेंट",
-    processFlow: "प्रोसेस फ्लो",
+    processFlow: "ट्रेसबिलिटी प्रोसेस फ्लो",
     partProcessFlow: "पार्ट प्रोसेस फ्लो",
     reports: "रिपोर्ट्स",
     settings: "सेटिंग्स",
