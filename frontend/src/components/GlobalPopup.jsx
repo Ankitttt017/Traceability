@@ -1309,11 +1309,11 @@ const GlobalPopup = ({
     return ngReasonOptions.filter((reason) => String(reason).toLowerCase().includes(q));
   })();
   const isValidNgReason = !manualReason || ngReasonOptions.includes(manualReason);
-  const currentStationName = currentStationCard?.stationName || displayStations.find((s) => s.status === "IN_PROGRESS")?.stationName || stationNo || "System Node";
   const previousOpState = String(previousStation?.operation || previousStation?.qualityCheck || previousStation?.status || "").trim().toUpperCase();
   const currentOpState = String(liveOperationState || currentStationCard?.operation || currentStationCard?.status || "").trim().toUpperCase();
   const previousStationPassed = ["PASS", "PASSED", "COMPLETED", "ENDED_OK"].includes(previousOpState);
   const currentStationPassed = ["PASS", "PASSED", "COMPLETED", "ENDED_OK"].includes(currentOpState);
+  const currentStationName = currentStationCard?.stationName || displayStations.find((s) => s.status === "IN_PROGRESS")?.stationName || stationNo || "System Node";
 
   const passCount = displayStations.filter(s => {
     const quality = String(s.qualityCheck || "").toUpperCase();
@@ -1649,18 +1649,7 @@ const GlobalPopup = ({
               </div>
             </div>
           )}
-          {showJourney && displayStations.length > 0 ? (
-            <div>
-              {displayStations.map((station, idx) => (
-                <StationCard
-                  key={station.stationNo || `station-${idx}`}
-                  station={station}
-                  isLast={idx === displayStations.length - 1}
-                  isCurrentStation={String(station.stationNo || "").trim().toUpperCase() === targetStationKey}
-                />
-              ))}
-            </div>
-          ) : showJourney ? (
+          {showJourney && displayStations.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-8 text-text-muted space-y-4">
               <StationIcon />
               <div className="text-center">
