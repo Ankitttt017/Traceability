@@ -571,6 +571,8 @@ const ComponentJourney = () => {
 
   const patchPartFromRealtime = useCallback((payload={})=>{
     const rPartId=normalizePartId(payload.partId||payload.part_id);
+    const reason = String(payload.reason || payload.qrReason || "").trim().toUpperCase();
+    if (reason === "CUSTOMER_QR_MAPPED" && !rPartId) return;
     if (!rPartId) return;
     const opStatus=String(payload.operationStatus||payload.plcStatus||"").trim().toUpperCase();
     const rStatus=String(payload.currentStatus||payload.partStatus||opStatus||payload.status||"").trim().toUpperCase();
