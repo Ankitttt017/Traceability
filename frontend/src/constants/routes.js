@@ -17,9 +17,11 @@ export const APP_ROUTES = {
   qrRules: "/qr-format-rules",
   partJourney: "/component-journey",
   processFlow: "/process-flow",
+  partProcessFlow: "/part-process-flow",
   operatorView: "/operator-view",
   packing: "/packing",
   packingManagement: "/packing-management",
+  faq: "/faq",
 
   reports: "/reports",
 };

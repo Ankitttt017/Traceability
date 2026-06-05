@@ -16,6 +16,7 @@ import {
   LayoutGrid, List, Zap, Radio, Eye,
 } from "lucide-react";
 import { packingApi } from "../api/services";
+import { useLanguage } from "../context/LanguageContext";
 
 
 
@@ -174,7 +175,7 @@ const QRCodeSVG=({value,size=140,fgColor="#000",bgColor="#fff"})=>{
 };
 
 // ── Print handler ──────────────────────────────────────────────────────────
-function printBoxLabel(session,items){
+function printBoxLabel(session,items,t){
   if(!session)return;
   const labelCode=session.labelCode||session.boxNumber;
 
@@ -192,6 +193,9 @@ function printBoxLabel(session,items){
       <td style="color:#22C55E;font-weight:700">✓ Pass</td>
       <td style="font-family:monospace;font-size:9px;color:#6b7280">${item.packedAt?new Date(item.packedAt).toLocaleString():"—"}</td>
     </tr>`).join("");
+
+  const packedLabel = t?.("packing.packed", "Packed") ?? "Packed";
+  const statusLabel = t?.("packing.status", "Status") ?? "Status";
 
   const html=`<!DOCTYPE html><html><head>
 <meta charset="UTF-8"/><title>Packing Label — ${session.boxNumber}</title>
@@ -221,10 +225,10 @@ tbody td{padding:6px 10px;border-bottom:1px solid #f1f5f9}
 <div class="label-area"><div class="qr-col">${qSvg}<div style="font-family:monospace;font-size:10px;font-weight:900">${labelCode}</div></div>
 <div class="meta-col"><div class="meta-grid">
 <div class="meta-item"><div class="lbl">Box ID</div><div class="val">${session.boxNumber}</div></div>
-<div class="meta-item"><div class="lbl">Packed</div><div class="val" style="color:#22C55E">${items.length} / ${session.capacity}</div></div>
-<div class="meta-item"><div class="lbl">Status</div><div class="val" style="color:#22C55E">${session.status||"OPEN"}</div></div>
+<div class="meta-item"><div class="lbl">${packedLabel}</div><div class="val" style="color:#22C55E">${items.length} / ${session.capacity}</div></div>
+<div class="meta-item"><div class="lbl">${statusLabel}</div><div class="val" style="color:#22C55E">${session.status||"OPEN"}</div></div>
 </div></div></div>
-<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Slot</th><th>Part Serial</th><th>Operation</th><th>QC</th><th>Packed At</th></tr></thead><tbody>${partsRows}</tbody></table></div>
+<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Slot</th><th>Part Serial</th><th>Operation</th><th>QC</th><th>${packedLabel} At</th></tr></thead><tbody>${partsRows}</tbody></table></div>
 <div class="footer"><span>IndusTrace MES — Box: ${session.boxNumber}</span><span>Printed: ${new Date().toLocaleString()}</span></div>
 </div>
 <script>window.onload=function(){setTimeout(function(){window.print();},700);}</script>
@@ -301,6 +305,7 @@ function useScanInput(onScan){
 // ══════════════════════════════════════════════════════════════════════════
 const Packing=()=>{
   injectDS();
+  const { t } = useLanguage();
 
   const[overview,    setOverview]    =useState({activeSession:null,activeItems:[],recentSessions:[],finalPackingStations:[],managementSettings:null});
   const[selectedBox, setSelectedBox]  =useState("");
@@ -394,7 +399,7 @@ const Packing=()=>{
     setSelectedBox(v);selectedBoxRef.current=v;loadSession(v);
   };
 
-  const handlePrint=()=>{printBoxLabel(displaySess,displayItems);};
+  const handlePrint=()=>{printBoxLabel(displaySess,displayItems,t);};
 
   // Packing rate: parts packed per minute since session start
   const eff = displaySess?.createdAt
@@ -461,8 +466,8 @@ const Packing=()=>{
               <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
                 {[
                   {label:"Box ID", value:displaySess?.boxNumber||scanResult.boxNumber,mono:true},
-                  {label:"Packed / Total",value:`${filledCount} / ${capacity}`,mono:true},
-                  {label:"Status", value:displaySess?.status||"OPEN",mono:false},
+                  {label:`${t("packing.packed", "Packed")} / Total`,value:`${filledCount} / ${capacity}`,mono:true},
+                  {label:t("packing.status", "Status"), value:displaySess?.status||"OPEN",mono:false},
                 ].map((f,i)=>(
                   <div key={i} style={{background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
                     borderRadius:9,padding:"9px 11px"}}>
@@ -671,7 +676,7 @@ const Packing=()=>{
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
               marginBottom:8,flexWrap:"wrap",gap:8}}>
               <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                <span style={{fontSize:13,fontWeight:700,color:C.txt("pri")}}>Box Fill Status</span>
+                <span style={{fontSize:13,fontWeight:700,color:C.txt("pri")}}>Box Fill {t("packing.status", "Status")}</span>
                 <Badge v={progressPct>=90?"ok":progressPct>=50?"amber":"idle"}
                   l={`${filledCount} / ${capacity} packed`}/>
               </div>
@@ -759,7 +764,7 @@ const Packing=()=>{
                           <div style={{width:6,height:6,borderRadius:"50%",background:C.ok(),
                             boxShadow:`0 0 6px ${C.ok(0.7)}`,animation:"pkPulse 2s ease-in-out infinite"}}/>
                         ):(
-                          <span style={{fontSize:7,color:C.txt("muted"),textTransform:"uppercase",fontWeight:600}}>Empty</span>
+                          <span style={{fontSize:7,color:C.txt("muted"),textTransform:"uppercase",fontWeight:600}}>{t("packing.empty", "Empty")}</span>
                         )}
                         {isHov&&item&&(
                           <div style={{position:"absolute",bottom:"calc(100% + 8px)",left:"50%",
@@ -782,21 +787,21 @@ const Packing=()=>{
                   <div style={{display:"flex",alignItems:"center",gap:6}}>
                     <div style={{width:12,height:12,borderRadius:3,background:`linear-gradient(135deg,${C.ok(0.2)},${C.ok(0.08)})`,
                       border:`1.5px solid ${C.ok(0.45)}`}}/>
-                    <span>Packed</span>
+                    <span>{t("packing.packed", "Packed")}</span>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:6}}>
                     <div style={{width:12,height:12,borderRadius:3,background:C.bg("slot"),
                       border:`1.5px solid ${C.bdr(0.22)}`}}/>
-                    <span>Empty</span>
+                    <span>{t("packing.empty", "Empty")}</span>
                   </div>
-                  <span style={{marginLeft:"auto",fontStyle:"italic"}}>Hover for details</span>
+                  <span style={{marginLeft:"auto",fontStyle:"italic"}}>{t("packing.hoverForDetails", "Hover for details")}</span>
                 </div>
               </div>
             ):(
               <div style={{overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                   <thead><tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
-                    {["Slot","Part Serial No.","Operation","Result","Packed At"].map(h=>(
+                    {["Slot","Part Serial No.","Operation","Result",`${t("packing.packed", "Packed")} At`].map(h=>(
                       <th key={h} style={{padding:"9px 14px",textAlign:"left",fontSize:9,
                         fontWeight:800,textTransform:"uppercase",letterSpacing:"0.09em",
                         color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
@@ -804,7 +809,7 @@ const Packing=()=>{
                   </tr></thead>
                   <tbody>
                     {displayItems.length===0?(
-                      <tr><td colSpan={5} style={{padding:"32px",textAlign:"center",color:C.txt("muted")}}>No parts yet</td></tr>
+                      <tr><td colSpan={5} style={{padding:"32px",textAlign:"center",color:C.txt("muted")}}>{t("packing.noPartsYet", "No parts yet")}</td></tr>
                     ):displayItems.map((item,i)=>(
                       <tr key={i} style={{borderBottom:`1px solid ${C.bdr()}`,
                         background:i%2===1?C.bg("surf"):"transparent"}}>
@@ -825,45 +830,45 @@ const Packing=()=>{
         {/* ── Right Sidebar ──────────────────────────────────────── */}
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
           {/* Status Card */}
-          <Card title="Session Overview" subtitle="Packing Metrics" icon={Clock} accent={C.amber()}>
+          <Card title={t("packing.sessionOverview", "Session Overview")} subtitle={t("packing.packingMetrics", "Packing Metrics")} icon={Clock} accent={C.amber()}>
             <div style={{display:"flex",flexDirection:"column",gap:12}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <span style={{fontSize:11,color:C.txt("muted")}}>Box Number</span>
+                <span style={{fontSize:11,color:C.txt("muted")}}>{t("packing.boxNumber", "Box Number")}</span>
                 <span style={{fontSize:12,fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.amber()}}>
                   {displaySess?.boxNumber||"—"}
                 </span>
               </div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <span style={{fontSize:11,color:C.txt("muted")}}>Status</span>
+                <span style={{fontSize:11,color:C.txt("muted")}}>{t("packing.status", "Status")}</span>
                 <Badge v={displaySess?.status==="CLOSED"?"ok":"wip"} l={displaySess?.status||"OPEN"} pulse={!!activeSession}/>
               </div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <span style={{fontSize:11,color:C.txt("muted")}}>Packing Rate</span>
+                <span style={{fontSize:11,color:C.txt("muted")}}>{t("packing.packingRate", "Packing Rate")}</span>
                 <span style={{fontSize:12,fontWeight:700,color:C.ok()}}>{eff} pcs/min</span>
               </div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <span style={{fontSize:11,color:C.txt("muted")}}>Created</span>
+                <span style={{fontSize:11,color:C.txt("muted")}}>{t("packing.created", "Created")}</span>
                 <span style={{fontSize:10,fontFamily:"'DM Mono',monospace",color:C.txt("sec")}}>{fmtDT(displaySess?.createdAt)}</span>
               </div>
             </div>
           </Card>
 
           {/* Quick Actions Card */}
-          <Card title="Quick Actions" subtitle="Utilities" icon={Zap} accent={C.steel()}>
+          <Card title={t("packing.quickActions", "Quick Actions")} subtitle={t("packing.utilities", "Utilities")} icon={Zap} accent={C.steel()}>
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               <button onClick={handlePrint} disabled={!displaySess}
                 style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
                   padding:"8px 12px",borderRadius:9,fontSize:11,fontWeight:700,
                   background:displaySess?C.bg("surf"):C.idle(0.05),border:`1px solid ${C.bdr()}`,
                   cursor:displaySess?"pointer":"not-allowed",color:C.txt(displaySess?"pri":"muted")}}>
-                <Printer size={14}/> Print Box Label
+                <Printer size={14}/> {t("packing.printBoxLabel", "Print Box Label")}
               </button>
               <button onClick={()=>displaySess&&setShowQRModal(true)} disabled={!displaySess}
                 style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
                   padding:"8px 12px",borderRadius:9,fontSize:11,fontWeight:700,
                   background:displaySess?C.bg("surf"):C.idle(0.05),border:`1px solid ${C.bdr()}`,
                   cursor:displaySess?"pointer":"not-allowed",color:C.txt(displaySess?"pri":"muted")}}>
-                <Eye size={14}/> View QR Code
+                <Eye size={14}/> {t("packing.viewQrCode", "View QR Code")}
               </button>
             </div>
           </Card>
@@ -871,27 +876,27 @@ const Packing=()=>{
       </div>
 
       {/* ══ PACKED PARTS TABLE ─────────────────────────────────────── */}
-      <Card noPad title={`Packed Parts — ${displayItems.length} of ${capacity} slots filled`}
-        subtitle="Live Record" icon={List} accent={C.ok()}
+      <Card noPad title={`{t("packing.packed", "Packed")} Parts — ${displayItems.length} of ${capacity} slots filled`}
+        subtitle={t("packing.liveRecord", "Live Record")} icon={List} accent={C.ok()}
         right={
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 9px",borderRadius:99,
               background:C.ok(0.1),border:`1px solid ${C.ok(0.25)}`}}>
               <div style={{width:5,height:5,borderRadius:"50%",background:C.ok(),animation:"pkPulse 1.2s ease-in-out infinite"}}/>
-              <span style={{fontSize:10,fontWeight:700,color:C.ok()}}>{activeSession?"Live":"History"}</span>
+              <span style={{fontSize:10,fontWeight:700,color:C.ok()}}>{activeSession ? t("packing.live", "Live") : t("packing.history", "History")}</span>
             </div>
           </div>
         }>
         {displayItems.length===0?(
           <div style={{padding:"56px 24px",textAlign:"center"}}>
             <Package size={28} color={C.txt("muted")} style={{margin:"0 auto 14px"}}/>
-            <p style={{fontSize:13,fontWeight:600,color:C.txt("sec"),marginBottom:6}}>No parts packed yet</p>
+            <p style={{fontSize:13,fontWeight:600,color:C.txt("sec"),marginBottom:6}}>{t("packing.noPartsPacked", "No parts packed yet")}</p>
           </div>
         ):(
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
               <thead><tr style={{background:`linear-gradient(90deg,${C.navy()},${C.steel(0.9)})`}}>
-                {["#","Slot","Part ID","Operation","Station","Machine","QC","Packed At"].map(h=>(
+                {["#","Slot","Part ID","Operation","Station","Machine","QC",`${t("packing.packed", "Packed")} At`].map(h=>(
                   <th key={h} style={{padding:"9px 12px",textAlign:"left",fontSize:8,
                     fontWeight:800,textTransform:"uppercase",letterSpacing:"0.09em",
                     color:C.linen(0.85),whiteSpace:"nowrap"}}>{h}</th>

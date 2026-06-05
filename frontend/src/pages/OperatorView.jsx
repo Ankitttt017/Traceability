@@ -17,6 +17,7 @@ import GlobalPopup from "../components/GlobalPopup";
 import ConfirmModal from "../components/ConfirmModal";
 import { getMachineStage } from "../utils/machineFields";
 import { getStationFeatureSettings, getStationFeatures, saveStationFeatureSettings } from "../utils/stationSettings";
+import { useLanguage } from "../context/LanguageContext";
 
 
 const LIVE_REFRESH_COOLDOWN = 350;
@@ -140,13 +141,13 @@ function extractQrDecision(payload = {}) {
 function hasQrDecision(payload = {}) {
   return ["ALLOW", "PASS", "OK", "ACCEPT", "VALID", "BLOCK", "FAIL", "NG", "REJECT", "INVALID"].includes(extractQrDecision(payload));
 }
-function toQrSignal(payload = {}) {
+function toQrSignal(payload = {}, t = (_key, fallback) => fallback) {
   const d = extractQrDecision(payload);
   const isPass = ["ALLOW", "PASS", "OK", "ACCEPT", "VALID"].includes(d);
   const isFail = ["BLOCK", "FAIL", "NG", "REJECT", "INVALID"].includes(d);
   return {
     id: `${Date.now()}-${Math.random()}`,
-    label: isPass ? "QR PASS" : isFail ? "QR FAIL" : "QR WAIT",
+    label: isPass ? t("operatorView.qrPass", "QR Pass") : isFail ? t("operatorView.qrFail", "QR Fail") : t("operatorView.qrWait", "QR Wait"),
     variant: isPass ? "ok" : isFail ? "ng" : "idle",
     partId: normalizePartId(payload.partId || payload.part_id),
     stationNo: String(payload.stationNo || payload.station_no || "").trim().toUpperCase(),
@@ -156,7 +157,7 @@ function toQrSignal(payload = {}) {
     timestamp: payload.timestamp || new Date().toISOString(),
   };
 }
-function formatScanErrorMessage(payload = {}) {
+function formatScanErrorMessage(payload = {}, t = (_key, fallback) => fallback) {
   const reason = String(payload.reason || "").trim().toUpperCase();
   const station = String(payload.stationNo || payload.station_no || "").trim().toUpperCase();
   const expected = String(payload.expectedStation || payload.expected_station || "").trim().toUpperCase();
@@ -435,6 +436,7 @@ const DecisionDisplay = ({ label, variant, sub1, sub2, accent, compact = false }
 
 // Responsive Gauge Component
 const ResponsiveGauge = ({ progressPct, qualityPct, producedCount, expectedCount, compact }) => {
+  const { t } = useLanguage();
   const size = compact ? 120 : 160;
   const strokeWidth = compact ? 10 : 12;
   const radius = (size - strokeWidth) / 2;
@@ -466,7 +468,7 @@ const ResponsiveGauge = ({ progressPct, qualityPct, producedCount, expectedCount
           <p style={{
             fontSize: compact ? 8 : 10, color: C.txt("muted"), marginTop: 2,
             textTransform: "uppercase", letterSpacing: "0.08em"
-          }}>Progress</p>
+          }}>{t("operatorView.progress", "Progress")}</p>
           <p style={{ fontSize: compact ? 10 : 12, fontWeight: 700, color: C.steel(), marginTop: 2 }}>
             Quality {qualityPct}%
           </p>
@@ -500,6 +502,7 @@ const ResponsiveGauge = ({ progressPct, qualityPct, producedCount, expectedCount
 // ══════════════════════════════════════════════════════════════════════════
 const OperatorView = () => {
   injectDS();
+  const { t } = useLanguage();
 
   const user = useMemo(() => { try { return JSON.parse(localStorage.getItem("user") || "{}"); } catch { return {}; } }, []);
 
@@ -509,6 +512,7 @@ const OperatorView = () => {
   const [stationStats, setStationStats] = useState(null);
   const [stationSettings, setStationSettings] = useState(() => getStationFeatureSettings());
   const [loadingMachines, setLoadingMachines] = useState(true);
+  const hasLoadedMachinesRef = useRef(false);
   const [loadingStats, setLoadingStats] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [popup, setPopup] = useState(null);
@@ -565,6 +569,7 @@ const OperatorView = () => {
   const lastLiveRefreshRef = useRef(0);
   const lastQrEventRef = useRef({ key: "", at: 0 });
   const lastPopupEventRef = useRef({ key: "", at: 0 });
+  const hasLoadedTelemetryRef = useRef(false);
   const lastSocketIdentityRef = useRef({ key: "", at: 0 });
 
   const isMobile = breakpoint === "sm" || breakpoint === "md";
@@ -717,7 +722,7 @@ const OperatorView = () => {
         configured,
         connected,
         scannerMode: scannerModeLocal,
-        statusLabel: !configured ? "Not Set" : usbLike ? (connected ? "USB Active" : "USB Idle") : (connected ? "Online" : "Offline"),
+        statusLabel: !configured ? t("operatorView.notSet", "Not Set") : usbLike ? (connected ? t("operatorView.usbActive", "USB Active") : t("operatorView.usbIdle", "USB Idle")) : (connected ? t("operatorView.online", "Online") : t("operatorView.offline", "Offline")),
       };
     });
     if (!merged.length && (scannerInfo || scannerHealth)) {
@@ -735,11 +740,11 @@ const OperatorView = () => {
         configured: String(scannerHealth?.status || "").toUpperCase() !== "NOT_CONFIGURED",
         connected,
         scannerMode: scannerModeLocal,
-        statusLabel: usbLike ? (connected ? "USB Active" : "USB Idle") : (connected ? "Online" : "Offline"),
+        statusLabel: usbLike ? (connected ? t("operatorView.usbActive", "USB Active") : t("operatorView.usbIdle", "USB Idle")) : (connected ? t("operatorView.online", "Online") : t("operatorView.offline", "Offline")),
       });
     }
     return merged;
-  }, [hasLiveState, scannerListRaw, scannerHealthListRaw, scannerInfo, scannerHealth]);
+  }, [hasLiveState, scannerListRaw, scannerHealthListRaw, scannerInfo, scannerHealth, t]);
   const primaryScannerEntry = scannerEntries.find((entry) => String(entry?.scanner?.scannerRole || "").trim().toUpperCase() === "START_QR") || scannerEntries[0] || null;
   const secondaryScannerEntries = useMemo(() => {
     if (!primaryScannerEntry) return scannerEntries;
@@ -761,7 +766,8 @@ const OperatorView = () => {
   const usbActivityGraceMs = 90 * 1000;
   const usbConnected = Boolean(scannerConfigured && scannerLastSeenAtMs && (Date.now() - scannerLastSeenAtMs) <= usbActivityGraceMs);
   const effectiveScannerConnected = scannerEntries.length > 0 ? scannerConnected : (isUsbScannerMode ? usbConnected : scannerConnected);
-  const scannerStatusLabel = !scannerConfigured ? "Not Set" : isUsbScannerMode ? (usbConnected ? "USB Active" : "USB Idle") : (scannerConnected ? "Online" : "Offline");
+  const scannerStatusLabel = !scannerConfigured ? t("operatorView.notSet", "Not Set") : isUsbScannerMode ? (usbConnected ? t("operatorView.usbActive", "USB Active") : t("operatorView.usbIdle", "USB Idle")) : (scannerConnected ? t("operatorView.online", "Online") : t("operatorView.offline", "Offline"));
+  const showBlockingLoader = (loadingMachines && !hasLoadedMachinesRef.current) || (loadingStats && !hasLoadedTelemetryRef.current && !liveState);
   const fullscreenGap = isTablet ? 8 : (isCompact ? 10 : 14);
   const fullscreenBottomPadding = isTablet ? 10 : (isCompact ? 14 : 18);
   const contentGap = isFullscreen ? fullscreenGap : (isTablet ? 10 : (isCompact ? 12 : 20));
@@ -828,10 +834,10 @@ const OperatorView = () => {
         machineId: selectedMachineId,
         machineName: selectedMachine?.machineName || "",
         type: "INFO",
-        title: isUsbScannerMode ? "USB Scanner Active" : "Simulation Active",
+        title: isUsbScannerMode ? t("operatorView.usbScannerActive", "USB Scanner Active") : t("operatorView.simulationActive", "Simulation Active"),
         message: isUsbScannerMode
-          ? `USB scanner ready at ${selectedStation}. Scan QR to validate.`
-          : "Scan Simulation Active. Enter QR code below to validate.",
+          ? t("operatorView.usbReadyMessage", "USB scanner ready at {station}. Scan QR to validate.").replace("{station}", selectedStation)
+          : t("operatorView.simulationReadyMessage", "Scan Simulation Active. Enter QR code below to validate."),
         isSimulationPlaceholder: true,
         manualScanMode: true,
       };
@@ -879,7 +885,7 @@ const OperatorView = () => {
     // Do not auto-open popup on initial load/station selection.
     // Popup is opened only on explicit refresh action or live scan trigger events.
     setPopup((prev) => (prev?.isSimulationPlaceholder ? null : prev));
-  }, [selectedMachineId, selectedStation, popup, suppressReadyPopup]);
+  }, [selectedMachineId, selectedStation, suppressReadyPopup]);
 
   const quickResetPartId = useMemo(
     () => normalizePartId(currentContext?.partId || popup?.partId || popup?.part_id),
@@ -941,13 +947,14 @@ const OperatorView = () => {
       const rows = await machineApi.list();
       const list = rows || [];
       setMachines(list);
+      hasLoadedMachinesRef.current = true;
       setSelectedMachineId((current) => {
         if (list.length === 0) return "";
         if (current && list.some((item) => String(item.id) === String(current))) return String(current);
         return String(list[0].id);
       });
     } catch (e) {
-      if (!silent) setPopup({ type: "ERROR", title: "Machine Load Failed", message: e.response?.data?.error || "Unable to load machines" });
+      if (!silent) setPopup({ type: "ERROR", title: t("operatorView.machineLoadFailed", "Machine Load Failed"), message: e.response?.data?.error || t("operatorView.unableLoadMachines", "Unable to load machines") });
     }
     finally { if (!silent) setLoadingMachines(false); }
   }, []);
@@ -955,17 +962,18 @@ const OperatorView = () => {
   const loadMachineTelemetry = useCallback(async (machineId, showLoader = true) => {
     const id = Number(machineId || 0);
     if (!id) { setLiveState(null); setStationStats(null); return; }
-    if (showLoader) setLoadingStats(true); else setRefreshing(true);
+    if (showLoader && !hasLoadedTelemetryRef.current) setLoadingStats(true); else setRefreshing(true);
     try {
       const [live, stats] = await Promise.all([traceabilityApi.liveState(id), traceabilityApi.machineStats(id)]);
       setLiveState(live || null); setStationStats(stats || null);
+      hasLoadedTelemetryRef.current = true;
       if (live?.stationSettings) {
         setStationSettings(prev => ({
           ...prev,
           [String(live.machine?.stationNo || "").trim().toUpperCase()]: live.stationSettings
         }));
       }
-    } catch (e) { if (showLoader) setPopup({ type: "ERROR", title: "Station Data Error", message: e.response?.data?.error || "Unable to load machine telemetry" }); }
+    } catch (e) { if (showLoader) setPopup({ type: "ERROR", title: t("operatorView.stationDataError", "Station Data Error"), message: e.response?.data?.error || t("operatorView.unableLoadTelemetry", "Unable to load machine telemetry") }); }
     finally { setLoadingStats(false); setRefreshing(false); }
   }, []);
 
@@ -1002,20 +1010,12 @@ const OperatorView = () => {
     const activeStation = String(selectedStationRef.current || "").trim().toUpperCase();
 
     if (payloadMachineId) {
-      if (payloadMachineId === activeMachineId) return true;
-      // Keep operator feedback visible when backend emits partial/mismatched tags
-      // but the payload clearly contains a scan result for current workflow.
-      if (hasQrDecision(payload) && normalizePartId(payload.partId || payload.part_id)) return true;
-      return false;
+      return payloadMachineId === activeMachineId;
     }
     if (payloadStation) {
-      if (payloadStation === activeStation) return true;
-      if (hasQrDecision(payload) && normalizePartId(payload.partId || payload.part_id)) return true;
-      return false;
+      return payloadStation === activeStation;
     }
-    // If backend payload does not include machine/station identity,
-    // allow it for active Operator screen instead of dropping messages.
-    return true;
+    return false;
   }, []);
 
   const shouldIgnoreStartupPopup = useCallback((payload = {}) => {
@@ -1038,7 +1038,7 @@ const OperatorView = () => {
   const processQrSignal = useCallback((payload = {}) => {
     if (!hasQrDecision(payload)) return false;
     if (!isPayloadForActiveMachine(payload)) return false;
-    const sig = toQrSignal(payload);
+    const sig = toQrSignal(payload, t);
     const dedupeR = ["BLOCK", "FAIL", "NG", "REJECT", "INVALID"].includes(sig.decision) ? sig.reason : "";
     const key = [sig.partId, sig.stationNo, sig.decision, dedupeR].join("|");
     const now = Date.now();
@@ -1075,11 +1075,11 @@ const OperatorView = () => {
     const isFinalPackingStation = Boolean(signalFeatures?.finalPacking);
     const fallbackMessage = isBlockedDecision
       ? (isFinalPackingStation
-        ? `${formatScanErrorMessage(payload)} Not eligible for packing.`
-        : formatScanErrorMessage(payload))
-      : (isFinalPackingStation
+        ? `${formatScanErrorMessage(payload, t)} Not eligible for packing.`
+        : formatScanErrorMessage(payload, t))
+      : (String(payload.message || "").trim() || (isFinalPackingStation
         ? `Final station PASS: Eligible for packing (${sig.stationNo || "Station"}).`
-        : `Scan accepted at ${sig.stationNo || "Station"}`);
+        : `Scan accepted at ${sig.stationNo || "Station"}`));
     const passOperationStatus = getPassOperationStatusForStation(sig.stationNo, stationSettings);
     setPopup((prev) => {
       const nextPartId = sig.partId || prev?.partId || prev?.part_id || "";
@@ -1092,7 +1092,7 @@ const OperatorView = () => {
       return ({
       ...prev,
       type: nextType,
-      title: isBlockedDecision ? "Scan Blocked" : "Scan Passed",
+      title: isBlockedDecision ? t("operatorView.scanBlockedMessage", "Scan blocked") : t("operatorView.scanPassedMessage", "Scan passed"),
       message: fallbackMessage,
       reason: String(payload.reason || payload.qrReason || "").trim(),
       partId: nextPartId,
@@ -1225,8 +1225,8 @@ const OperatorView = () => {
     } catch (e) {
       mergePopupPayload({
         type: "ERROR",
-        title: "Reset Failed",
-        message: e.response?.data?.error || "Unable to reset",
+        title: t("operatorView.resetFailed", "Reset Failed"),
+        message: e.response?.data?.error || t("operatorView.unableReset", "Unable to reset"),
         partId: pid,
         stationNo: sno,
       });
@@ -1242,12 +1242,9 @@ const OperatorView = () => {
   }, [loadMachines]);
   useEffect(() => {
     if (!selectedMachineId) return;
-    setLiveState(null);
-    setStationStats(null);
-    loadMachineTelemetry(selectedMachineId, true);
+    loadMachineTelemetry(selectedMachineId, !hasLoadedTelemetryRef.current);
   }, [selectedMachineId, loadMachineTelemetry]);
   useEffect(() => {
-    setPopup(null);
     setSuppressReadyPopup(false);
   }, [selectedMachineId, selectedStation]);
   useEffect(() => { const t = setInterval(() => { if (selectedMachineIdRef.current) loadMachineTelemetry(selectedMachineIdRef.current, false); }, 15000); return () => clearInterval(t); }, [loadMachineTelemetry]);
@@ -1267,7 +1264,7 @@ const OperatorView = () => {
   useEffect(() => {
     const socket = io(SOCKET_URL, {
       path: "/socket.io/",
-      transports: ["polling"], upgrade: false,
+      transports: ["websocket", "polling"],
       autoConnect: false,
     });
     const connectTimer = setTimeout(() => {
@@ -1282,8 +1279,8 @@ const OperatorView = () => {
           if (shouldSuppressPopupPayload(p)) { scheduleLiveRefresh(); return; }
           mergePopupPayload({
             type: "ERROR",
-            title: "Scan Blocked",
-            message: formatScanErrorMessage(p),
+            title: t("operatorView.scanBlocked", "Scan Blocked"),
+            message: formatScanErrorMessage(p, t),
             reason: p.reason || "",
             partId: p.partId || p.part_id,
             stationNo: p.stationNo || p.station_no,
@@ -1295,8 +1292,8 @@ const OperatorView = () => {
         } else {
           mergePopupPayload({
             type: "INFO",
-            title: "Scan Passed",
-            message: `QR Validated at ${p.stationNo || "Station"}`,
+            title: t("operatorView.scanPassed", "Scan Passed"),
+            message: t("operatorView.qrValidatedAt", "QR Validated at {station}").replace("{station}", p.stationNo || "Station"),
             partId: p.partId || p.part_id,
             stationNo: p.stationNo || p.station_no,
             qrStatus: "PASSED",
@@ -1325,7 +1322,7 @@ const OperatorView = () => {
         setSuppressReadyPopup(false);
       }
       const nm = String(p.type || "").toUpperCase() === "ERROR"
-        ? formatScanErrorMessage({ ...p, reason: p.reason || p.qrReason })
+        ? formatScanErrorMessage({ ...p, reason: p.reason || p.qrReason }, t)
         : p.message;
       mergePopupPayload({ ...p, ...(nm ? { message: nm } : {}) });
       scheduleLiveRefresh();
@@ -1381,7 +1378,14 @@ const OperatorView = () => {
         stationNo,
       });
       await scannerApi.markUsbActivity({ machineId: selectedMachineIdRef.current }).catch(() => null);
-      processQrSignal({ ...payload, partId: code, stationNo, machineId: selectedMachineIdRef.current, sourceEvent: "usb_hidden_input" });
+      processQrSignal({
+        ...payload,
+        partId: payload?.partId || payload?.part_id || code,
+        customerQrCode: payload?.customerQrCode || payload?.customer_qr || null,
+        stationNo: payload?.stationNo || payload?.station_no || stationNo,
+        machineId: payload?.machine?.id || payload?.machineId || payload?.machine_id || selectedMachineIdRef.current,
+        sourceEvent: "usb_hidden_input",
+      });
       setUsbDebug(`Submitted OK: ${code}`);
       scheduleLiveRefresh();
     } catch (error) {
@@ -1400,7 +1404,7 @@ const OperatorView = () => {
       setPopup((prev) => ({
         ...prev,
         type: "ERROR",
-        title: "Scan Blocked",
+        title: t("operatorView.scanBlocked", "Scan Blocked"),
         message: errorMessage,
         partId: code,
         stationNo: selectedStationRef.current || "",
@@ -1513,12 +1517,14 @@ const OperatorView = () => {
   return (
     <div ref={operatorViewRootRef} style={{
       display: "flex", flexDirection: "column", gap: contentGap,
-      paddingBottom: contentBottomPadding,
+      paddingTop: isFullscreen ? fullscreenTopPadding : 0,
+      paddingLeft: isFullscreen ? fullscreenPadding : 0,
+      paddingRight: isFullscreen ? fullscreenPadding : 0,
+      paddingBottom: isFullscreen ? fullscreenPadding : contentBottomPadding,
       animation: "ovFadeIn .3s ease",
       maxWidth: "100%", overflowX: "hidden",
       background: C.bg("surf"),
       minHeight: isFullscreen ? "100vh" : undefined,
-      padding: isFullscreen ? `${fullscreenTopPadding}px ${fullscreenPadding}px ${fullscreenPadding}px` : undefined,
     }}>
       <input
         ref={usbScannerInputRef}
@@ -1674,7 +1680,9 @@ const OperatorView = () => {
       }}>
         <div style={{
           height: 3, background: `linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`,
-          margin: headerStripeMargin,
+          marginTop: headerStripeMargin,
+          marginRight: headerStripeMargin,
+          marginLeft: headerStripeMargin,
           marginBottom: isCompact ? 12 : 14,
         }} />
 
@@ -1826,7 +1834,7 @@ const OperatorView = () => {
       </div>
 
       {/* Loading */}
-      {(loadingStats || loadingMachines) && (
+      {showBlockingLoader && (
         <div style={{
           padding: "32px 24px", textAlign: "center",
           background: C.bg("card"), border: `1px solid ${C.bdr()}`, borderRadius: 14,
@@ -1838,7 +1846,7 @@ const OperatorView = () => {
         </div>
       )}
 
-      {!loadingStats && !loadingMachines && (
+      {!showBlockingLoader && (
         <>
           {/* ── Row 1: Status + Gauge + Station Rules (Responsive Grid) ── */}
           <div style={{
@@ -1849,7 +1857,7 @@ const OperatorView = () => {
           }}>
             {/* ── Left: Station Status (Connections + QR + Operation) ── */}
             <div style={{ display: "flex", flexDirection: "column", gap: isCompact ? 10 : 12 }}>
-              <Card title="Connections" icon={Wifi} accent={C.steel()} collapsible={isMobile}>
+              <Card title={t("operatorView.connections", "Connections")} icon={Wifi} accent={C.steel()} collapsible={isMobile}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {/* PLC */}
                   <div style={{
@@ -1861,7 +1869,7 @@ const OperatorView = () => {
                     <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                       <ConnDot connected={Boolean(plcConnected)} />
                       <div style={{ minWidth: 0 }}>
-                        <p style={{ fontSize: isCompact ? 11 : 12, fontWeight: 700, color: C.txt("pri") }}>PLC Controller</p>
+                        <p style={{ fontSize: isCompact ? 11 : 12, fontWeight: 700, color: C.txt("pri") }}>{t("operatorView.plcController", "PLC Controller")}</p>
                           <p style={{ fontSize: 9, color: C.txt("muted"), fontFamily: "'DM Mono',monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {plcHealth?.plcIp || selectedMachine?.plcIp || liveState?.machine?.plcIp || "—"}
                         </p>
@@ -1869,7 +1877,7 @@ const OperatorView = () => {
                     </div>
                     <Badge
                       variant={plcConnected === null ? "idle" : plcConnected ? "ok" : "ng"}
-                      label={plcConnected === null ? "Checking" : plcConnected ? "Online" : "Offline"}
+                      label={plcConnected === null ? t("operatorView.checking", "Checking") : plcConnected ? t("operatorView.online", "Online") : t("operatorView.offline", "Offline")}
                       pulse={Boolean(plcConnected)}
                       size={isCompact ? "sm" : "sm"}
                     />
@@ -1886,7 +1894,7 @@ const OperatorView = () => {
                       <ConnDot connected={effectiveScannerConnected} />
                       <div style={{ minWidth: 0 }}>
                         <p style={{ fontSize: isCompact ? 11 : 12, fontWeight: 700, color: C.txt("pri") }}>
-                          {primaryScannerEntry?.scanner?.scannerName || scannerInfo?.scannerName || "Scanner"}
+                          {primaryScannerEntry?.scanner?.scannerName || scannerInfo?.scannerName || t("operatorView.scanner", "Scanner")}
                         </p>
                           <p style={{ fontSize: 9, color: C.txt("muted"), fontFamily: "'DM Mono',monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {primaryScannerEntry?.scanner?.scannerIp || primaryScannerEntry?.health?.scannerIp || scannerInfo?.scannerIp || scannerHealth?.scannerIp || "—"}
@@ -1920,7 +1928,7 @@ const OperatorView = () => {
                             <ConnDot connected={entry.connected} />
                             <div style={{ minWidth: 0 }}>
                               <p style={{ fontSize: 10, fontWeight: 700, color: C.txt("pri"), display: "flex", gap: 6, alignItems: "center" }}>
-                                <span>{entry?.scanner?.scannerName || "Scanner"}</span>
+                                <span>{entry?.scanner?.scannerName || t("operatorView.scanner", "Scanner")}</span>
                                 <span style={{ fontSize: 9, color: C.txt("muted"), fontFamily: "'DM Mono',monospace" }}>
                                   {entry?.scanner?.scannerRole || "GENERAL"}
                                 </span>
@@ -1977,14 +1985,14 @@ const OperatorView = () => {
                     }}
                     onMouseEnter={e => e.currentTarget.style.filter = "brightness(1.08)"}
                     onMouseLeave={e => e.currentTarget.style.filter = "none"}>
-                    <RefreshCw size={isCompact ? 12 : 13} /> Reset Operation
+                    <RefreshCw size={isCompact ? 12 : 13} /> {t("operatorView.resetOperation", "Reset Operation")}
                   </button>
                 )}
               </Card>
             </div>
 
             {/* ── Center: Production Gauge ──────────────────────────── */}
-            <Card title="Production Overview" icon={Gauge} accent={C.amber()}>
+            <Card title={t("operatorView.productionOverview", "Production Overview")} icon={Gauge} accent={C.amber()}>
               <ResponsiveGauge
                 progressPct={progressPct}
                 qualityPct={qualityPct}
@@ -2001,10 +2009,10 @@ const OperatorView = () => {
                 marginBottom: isCompact ? 12 : 16,
               }}>
                 {[
-                  { label: "Pass", value: qualitySummary.okCount || 0, color: C.ok(), bg: C.ok(0.08), bd: C.ok(0.2) },
-                  { label: "Fail", value: qualitySummary.ngCount || 0, color: C.ng(), bg: C.ng(0.08), bd: C.ng(0.2) },
-                  { label: "Locked", value: qualitySummary.interlockedCount || 0, color: C.amber(), bg: C.amber(0.08), bd: C.amber(0.2) },
-                  { label: "Active", value: qualitySummary.inProgressCount || 0, color: C.steel(), bg: C.steel(0.08), bd: C.steel(0.2) },
+                  { label: t("operatorView.pass", "Pass"), value: qualitySummary.okCount || 0, color: C.ok(), bg: C.ok(0.08), bd: C.ok(0.2) },
+                  { label: t("operatorView.fail", "Fail"), value: qualitySummary.ngCount || 0, color: C.ng(), bg: C.ng(0.08), bd: C.ng(0.2) },
+                  { label: t("operatorView.locked", "Locked"), value: qualitySummary.interlockedCount || 0, color: C.amber(), bg: C.amber(0.08), bd: C.amber(0.2) },
+                  { label: t("operatorView.active", "Active"), value: qualitySummary.inProgressCount || 0, color: C.steel(), bg: C.steel(0.08), bd: C.steel(0.2) },
                 ].map((s, i) => (
                   <div key={i} style={{
                     borderRadius: 10, padding: "8px 4px", textAlign: "center",
@@ -2034,28 +2042,28 @@ const OperatorView = () => {
                   gridTemplateColumns: operatorInfoColumns,
                   gap: isMobile ? 4 : 0,
                 }}>
-                  <InfoRow label="Operator" value={user.username || "Operator"} />
-                  <InfoRow label="Status" value={currentContext?.plcStatus || "WAITING"} />
-                  <InfoRow label="Last Part" value={currentContext?.partId} mono />
-                  <InfoRow label="Updated" value={fmtTime(currentContext?.createdAt)} />
+                  <InfoRow label={t("operatorView.operator", "Operator")} value={user.username || t("operatorView.operator", "Operator")} />
+                  <InfoRow label={t("operatorView.status", "Status")} value={currentContext?.plcStatus || "WAITING"} />
+                  <InfoRow label={t("operatorView.lastPart", "Last Part")} value={currentContext?.partId} mono />
+                  <InfoRow label={t("operatorView.updated", "Updated")} value={fmtTime(currentContext?.createdAt)} />
                 </div>
               </div>
             </Card>
 
             {/* ── Right: Station Rules + Rejection Summary ──────────── */}
             <div style={{ display: "flex", flexDirection: "column", gap: isCompact ? 10 : 12 }}>
-              <Card title="Station Configuration" icon={ShieldCheck} accent={C.steel()} collapsible={isMobile}>
+              <Card title={t("operatorView.stationConfiguration", "Station Configuration")} icon={ShieldCheck} accent={C.steel()} collapsible={isMobile}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
-                  <FeatureRow label="QR Validation" enabled={stationFeatureConfig.qr} />
-                  <FeatureRow label="Operation Rule" enabled={stationFeatureConfig.operation} />
-                  <FeatureRow label="Rejection Bin" enabled={stationFeatureConfig.rejectionBin} />
+                  <FeatureRow label={t("operatorView.qrValidation", "QR Validation")} enabled={stationFeatureConfig.qr} />
+                  <FeatureRow label={t("operatorView.operationRule", "Operation Rule")} enabled={stationFeatureConfig.operation} />
+                  <FeatureRow label={t("operatorView.rejectionBin", "Rejection Bin")} enabled={stationFeatureConfig.rejectionBin} />
 
-                  <FeatureRow label="Final Pack Station" enabled={stationFeatureConfig.finalPacking} />
-                  <FeatureRow label="Machine Bypass" enabled={Boolean(selectedMachine?.machineBypassEnabled)} />
+                  <FeatureRow label={t("operatorView.finalPackStation", "Final Pack Station")} enabled={stationFeatureConfig.finalPacking} />
+                  <FeatureRow label={t("operatorView.machineBypass", "Machine Bypass")} enabled={Boolean(selectedMachine?.machineBypassEnabled)} />
                 </div>
                 {selectedMachine?.machineBypassEnabled && selectedMachine?.machineBypassReason && (
                   <p style={{ fontSize: 10, color: C.amber(), marginTop: 6 }}>
-                    Reason: {selectedMachine.machineBypassReason}
+                    {t("operatorView.reason", "Reason")}: {selectedMachine.machineBypassReason}
                   </p>
                 )}
               </Card>
@@ -2112,13 +2120,14 @@ const OperatorView = () => {
             gap: isCompact ? 12 : 16,
           }}>
             {/* Hourly trend */}
-            <Card title="Hourly Production Trend" icon={BarChart2} accent={C.steel()}>
+            <Card title={t("operatorView.hourlyProductionTrend", "Hourly Production Trend")} icon={BarChart2} accent={C.steel()}>
               {trendChartData.length === 0 ? (
-                <p style={{ fontSize: 11, color: C.txt("muted") }}>No trend data for this station.</p>
+                <p style={{ fontSize: 11, color: C.txt("muted") }}>{t("operatorView.noTrendData", "No trend data for this station.")}</p>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   <SafeChart height={trendChartHeight}>
-                    <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
+                    {({ width, height }) => (
+                    <ResponsiveContainer width={Math.max(1, width)} height={Math.max(1, height)}>
                       <ComposedChart data={trendChartData} margin={{ top: 6, right: 8, left: -14, bottom: 0 }}>
                         <CartesianGrid stroke={C.bdr(0.18)} strokeDasharray="3 4" vertical={false} />
                         <XAxis dataKey="hour" tick={{ fontSize: 10, fill: C.txt("muted"), fontFamily: "'DM Mono',monospace" }} axisLine={false} tickLine={false} />
@@ -2129,30 +2138,31 @@ const OperatorView = () => {
                           labelStyle={{ color: C.txt("sec") }}
                           formatter={(value, key) => {
                             if (key === "utilization") return [`${value}%`, "Utilization"];
-                            if (key === "ok") return [value, "Pass"];
-                            if (key === "ng") return [value, "Fail"];
+                            if (key === "ok") return [value, t("operatorView.pass", "Pass")];
+                            if (key === "ng") return [value, t("operatorView.fail", "Fail")];
                             return [value, "Output"];
                           }}
                         />
-                        <Bar yAxisId="count" dataKey="ok" name="Pass" fill={C.ok()} radius={[4, 4, 0, 0]} maxBarSize={20} />
-                        <Bar yAxisId="count" dataKey="ng" name="Fail" fill={C.ng()} radius={[4, 4, 0, 0]} maxBarSize={20} />
+                        <Bar yAxisId="count" dataKey="ok" name={t("operatorView.pass", "Pass")} fill={C.ok()} radius={[4, 4, 0, 0]} maxBarSize={20} />
+                        <Bar yAxisId="count" dataKey="ng" name={t("operatorView.fail", "Fail")} fill={C.ng()} radius={[4, 4, 0, 0]} maxBarSize={20} />
                         <Line yAxisId="util" type="monotone" dataKey="utilization" name="Utilization" stroke={C.amber()} strokeWidth={2} dot={false} />
                       </ComposedChart>
                     </ResponsiveContainer>
+                    )}
                   </SafeChart>
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <Badge variant="ok" label="Pass Output" />
-                    <Badge variant="ng" label="Fail Output" />
-                    <Badge variant="wip" label="Utilization %" />
+                    <Badge variant="ok" label={t("dashboard.passOutput", "Pass Output")} />
+                    <Badge variant="ng" label={t("dashboard.failOutput", "Fail Output")} />
+                    <Badge variant="wip" label={t("dashboard.utilization", "Utilization %")} />
                   </div>
                 </div>
               )}
             </Card>
 
             {/* Recent events */}
-            <Card title="Recent Scan Events" icon={Wrench} accent={C.navy()}>
+            <Card title={t("operatorView.recentScanEvents", "Recent Scan Events")} icon={Wrench} accent={C.navy()}>
               {(stationStats?.recentParts || []).length === 0 ? (
-                <p style={{ fontSize: 11, color: C.txt("muted") }}>No recent station events.</p>
+                <p style={{ fontSize: 11, color: C.txt("muted") }}>{t("operatorView.noRecentStationEvents", "No recent station events.")}</p>
               ) : (
                 <div style={{
                   display: "flex", flexDirection: "column", gap: 6,
@@ -2207,7 +2217,7 @@ const OperatorView = () => {
 
           {/* ── Row 3: Live QR Feed (Responsive) ────────────────────── */}
           {qrFeed.length > 0 && (
-            <Card title="Live QR Feed" icon={Radio} accent={C.steel()}>
+            <Card title={t("operatorView.liveQrFeed", "Live QR Feed")} icon={Radio} accent={C.steel()}>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {qrFeed.slice(0, isMobile ? 3 : 6).map(entry => (
                   <div key={entry.id} style={{
@@ -2238,7 +2248,7 @@ const OperatorView = () => {
                     </span>
                     <button
                       onClick={() => openResetConfirm(entry.partId, entry.stationNo)}
-                      title="Reset this part"
+                      title={t("operatorView.resetThisPart", "Reset this part")}
                       style={{
                         display: "flex", alignItems: "center", justifyContent: "center",
                         width: 24, height: 24, borderRadius: 6,
@@ -2271,21 +2281,21 @@ const OperatorView = () => {
                 fontSize: isCompact ? 10 : 12, fontWeight: 600, color: C.txt("sec"),
                 background: "none", border: "none", cursor: "pointer"
               }}>
-                <CheckCircle2 size={isCompact ? 12 : 14} color={C.ok()} /> Change Job
+                <CheckCircle2 size={isCompact ? 12 : 14} color={C.ok()} /> {t("operatorView.changeJob", "Change Job")}
               </button>
               <button style={{
                 display: "inline-flex", alignItems: "center", gap: 5,
                 fontSize: isCompact ? 10 : 12, fontWeight: 600, color: C.txt("sec"),
                 background: "none", border: "none", cursor: "pointer"
               }}>
-                <AlertTriangle size={isCompact ? 12 : 14} color={C.ng()} /> Reject Part
+                <AlertTriangle size={isCompact ? 12 : 14} color={C.ng()} /> {t("operatorView.rejectPart", "Reject Part")}
               </button>
             </div>
             <div style={{ display: "flex", gap: isCompact ? 6 : 10, flexWrap: "wrap" }}>
               {[
-                { label: "Availability", value: `${Math.max(0, 100 - (qualitySummary.interlockedCount || 0))}%` },
-                { label: "Quality", value: `${qualityPct}%` },
-                { label: "In Progress", value: qualitySummary.inProgressCount || 0 },
+                { label: t("operatorView.availability", "Availability"), value: `${Math.max(0, 100 - (qualitySummary.interlockedCount || 0))}%` },
+                { label: t("operatorView.quality", "Quality"), value: `${qualityPct}%` },
+                { label: t("operatorView.inProgress", "In Progress"), value: qualitySummary.inProgressCount || 0 },
               ].map((s, i) => (
                 <div key={i} style={{
                   padding: "4px 10px", borderRadius: 8,
@@ -2304,10 +2314,10 @@ const OperatorView = () => {
 
       <ConfirmModal
         isOpen={Boolean(resetConfirm)}
-        title="Confirm Reset Operation"
-        message={`Reset operation for part "${resetConfirm?.partId || ""}" at station "${resetConfirm?.stationNo || ""}"?`}
-        confirmText="Confirm Reset"
-        cancelText="Cancel"
+        title={t("operatorView.confirmResetTitle", "Confirm Reset Operation")}
+        message={`${t("globalPopup.confirmResetQuestion", "Reset operation for part")} "${resetConfirm?.partId || ""}" at station "${resetConfirm?.stationNo || ""}"?`}
+        confirmText={t("operatorView.confirmReset", "Confirm Reset")}
+        cancelText={t("common.cancel", "Cancel")}
         variant="danger"
         onConfirm={confirmResetOperation}
         onCancel={() => setResetConfirm(null)}

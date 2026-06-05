@@ -24,6 +24,7 @@ import { dashboardApi, machineApi } from "../api/services";
 import ChartTooltip from "../components/charts/ChartTooltip";
 import SafeChart from "../components/charts/SafeChart";
 import { CHART_COLORS } from "../constants/chartTheme";
+import { useLanguage } from "../context/LanguageContext";
 
 
 // —— Design tokens —————————————————————————————————————————————————————————————
@@ -416,6 +417,7 @@ const getPresetRange = (preset) => {
 // ==============================================================================
 const Dashboard = () => {
   injectDS();
+  const { t } = useLanguage();
 
   const [machines,     setMachines]     = useState([]);
   const [summary,      setSummary]      = useState(EMPTY_SUMMARY);
@@ -1242,7 +1244,7 @@ const Dashboard = () => {
 
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title="Top Rejection Reasons"/>
+              <SectionHead title={t("dashboard.topRejectionReasons", "Top Rejection Reasons")}/>
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 {(report.recentScans||[]).filter(r=>r.result==="NG").slice(0,5).map((row,i)=>(
                   <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
@@ -1375,7 +1377,7 @@ const Dashboard = () => {
                 </SafeChart>
                 <div style={{marginTop:8,display:"flex",gap:8,flexWrap:"wrap"}}>
                   <Badge variant={oa>=85 ? "ok" : oa>=60 ? "wip" : "ng"} label={oa>=85 ? "Healthy" : oa>=60 ? "Watch" : "Critical"} />
-                  <Badge variant="idle" label={`Downtime ${Math.round(Number(row?.downtimeMinutes || 0))}m`} />
+                  <Badge variant="idle" label={`${t("dashboard.downtime", "Downtime")} ${Math.round(Number(row?.downtimeMinutes || 0))}m`} />
                 </div>
               </div>
             );
@@ -1387,7 +1389,7 @@ const Dashboard = () => {
         <div style={{display:"grid",gridTemplateColumns:"320px 1fr",gap:16}} className="db-grid-responsive">
           <style>{`@media(max-width:900px){.db-grid-responsive{grid-template-columns:1fr!important}}`}</style>
           <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
-            <SectionHead title="Rejection Distribution"/>
+            <SectionHead title={t("dashboard.rejectionDistribution", "Rejection Distribution")}/>
             <div style={{display:"flex",justifyContent:"center",marginBottom:16}}>
               <SafeChart height={200}>
                 <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
@@ -1419,7 +1421,7 @@ const Dashboard = () => {
 
           <div style={{display:"grid",gridTemplateRows:"220px auto",gap:16}}>
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title={isMultiDayRange ? "Rejection Trend by Day" : "Rejection Trend by Hour"} right={<ChartModeToggle mode={chartModeRejectTrend} onChange={setChartModeRejectTrend} />} />
+              <SectionHead title={isMultiDayRange ? t("dashboard.rejectionTrendByDay", "Rejection Trend by Day") : t("dashboard.rejectionTrendByHour", "Rejection Trend by Hour")} right={<ChartModeToggle mode={chartModeRejectTrend} onChange={setChartModeRejectTrend} />} />
               <SafeChart height={180}>
               <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
                 {chartModeRejectTrend === "area" && (
@@ -1460,7 +1462,7 @@ const Dashboard = () => {
             </div>
 
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title="Top Rejection Reasons"/>
+              <SectionHead title={t("dashboard.topRejectionReasons", "Top Rejection Reasons")}/>
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 {rejectionTopReasons.map((row,i)=>(
                   <div key={i} style={{display:"grid",gridTemplateColumns:"1fr auto",alignItems:"center",padding:"10px 12px",background:C.bg("surf"),borderRadius:10,border:`1px solid ${C.bdr()}`}}>

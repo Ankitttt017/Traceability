@@ -16,6 +16,7 @@ import {
   CheckCircle
 } from "lucide-react";
 import { packingApi } from "../api/services";
+import { useLanguage } from "../context/LanguageContext";
 
 function toPositiveInt(value, fallback) {
   const parsed = Number(value);
@@ -77,6 +78,7 @@ function BarcodePreview({ value }) {
 }
 
 const PackingManagement = () => {
+  const { t } = useLanguage();
   const [settings, setSettings] = useState({
     boxPrefix: "BOX", boxSeparator: "-", serialPadding: 4, nextSerial: 1,
     defaultCapacity: 65, autoCreateNextBox: true, labelPrefix: "PKG", preview: "BOX-0001"
@@ -163,16 +165,16 @@ const PackingManagement = () => {
               <Boxes size={22} />
             </div>
             <div>
-              <h1 className="db-header-title">Packing Management</h1>
-              <p className="db-header-subtitle">Configure automated distribution & container mapping protocols</p>
+              <h1 className="db-header-title">{t("packingManagement.title", "Packing Management")}</h1>
+              <p className="db-header-subtitle">{t("packingManagement.subtitle", "Configure automated distribution & container mapping protocols")}</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
             <button onClick={loadData} disabled={loading} className="db-action-btn">
-              <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
+              <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> {t("packingManagement.refresh", "Refresh")}
             </button>
             <button onClick={saveSettings} disabled={saving} className="db-action-btn">
-              <Save size={14} /> Save Settings
+              <Save size={14} /> {t("packingManagement.saveSettings", "Save Settings")}
             </button>
           </div>
         </div>
@@ -183,7 +185,7 @@ const PackingManagement = () => {
         <div className="industrial-card p-3">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">Total Boxes</p>
+              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">{t("packingManagement.totalBoxes", "Total Boxes")}</p>
               <p className="text-2xl font-black text-primary font-mono">{stats.total}</p>
             </div>
             <Database size={28} className="text-primary/30" />
@@ -193,7 +195,7 @@ const PackingManagement = () => {
         <div className="industrial-card p-3">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">Open Boxes</p>
+              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">{t("packingManagement.openBoxes", "Open Boxes")}</p>
               <p className="text-2xl font-black text-primary font-mono">{stats.open}</p>
             </div>
             <Activity size={28} className="text-primary/30" />
@@ -203,7 +205,7 @@ const PackingManagement = () => {
         <div className="industrial-card p-3">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">Closed Boxes</p>
+              <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">{t("packingManagement.closedBoxes", "Closed Boxes")}</p>
               <p className="text-2xl font-black text-emerald-400 font-mono">{stats.closed}</p>
             </div>
             <CheckCircle size={28} className="text-emerald-400/30" />
@@ -215,11 +217,11 @@ const PackingManagement = () => {
       <div className="industrial-card p-0 overflow-hidden">
         <div className="px-5 py-3 border-b border-border bg-bg-dark/40 flex items-center gap-2">
           <Hash size={14} className="text-primary" />
-          <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">Configuration Parameters</h2>
+          <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">{t("packingManagement.configurationParameters", "Configuration Parameters")}</h2>
         </div>
         <div className="p-5 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
           <div className="space-y-1">
-            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Container Prefix</label>
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">{t("packingManagement.containerPrefix", "Container Prefix")}</label>
             <input
               type="text"
               value={settings.boxPrefix}
@@ -229,7 +231,7 @@ const PackingManagement = () => {
           </div>
           
           <div className="space-y-1">
-            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Separator</label>
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">{t("packingManagement.separator", "Separator")}</label>
             <input
               type="text"
               value={settings.boxSeparator}
@@ -239,7 +241,7 @@ const PackingManagement = () => {
           </div>
           
           <div className="space-y-1">
-            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Serial Padding</label>
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">{t("packingManagement.serialPadding", "Serial Padding")}</label>
             <input
               type="number"
               min={1}
@@ -251,7 +253,7 @@ const PackingManagement = () => {
           </div>
           
           <div className="space-y-1">
-            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Next Serial</label>
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">{t("packingManagement.nextSerial", "Next Serial")}</label>
             <input
               type="number"
               min={1}
@@ -262,7 +264,7 @@ const PackingManagement = () => {
           </div>
           
           <div className="space-y-1">
-            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Default Capacity</label>
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">{t("packingManagement.defaultCapacity", "Default Capacity")}</label>
             <input
               type="number"
               min={1}
@@ -274,7 +276,7 @@ const PackingManagement = () => {
           </div>
           
           <div className="space-y-1">
-            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">Label Prefix</label>
+            <label className="text-[9px] font-black text-text-muted uppercase tracking-wider">{t("packingManagement.labelPrefix", "Label Prefix")}</label>
             <input
               type="text"
               value={settings.labelPrefix}
@@ -290,7 +292,7 @@ const PackingManagement = () => {
               <div className={`w-8 h-4 rounded-full p-0.5 transition-colors ${settings.autoCreateNextBox ? 'bg-primary' : 'bg-border'}`}>
                 <div className={`w-3 h-3 rounded-full bg-white transition-transform ${settings.autoCreateNextBox ? 'translate-x-4' : ''}`} />
               </div>
-              <span className="text-[10px] font-bold text-text-main group-hover:text-primary transition-colors">Auto-create next box</span>
+              <span className="text-[10px] font-bold text-text-main group-hover:text-primary transition-colors">{t("packingManagement.autoCreateNextBox", "Auto-create next box")}</span>
             </div>
           </div>
           
@@ -299,7 +301,7 @@ const PackingManagement = () => {
             disabled={generating}
             className="h-9 px-4 rounded-lg bg-accent text-on-strong font-black uppercase tracking-wider flex items-center gap-2 hover:brightness-110 shadow-lg shadow-accent/20 transition-all disabled:opacity-50 text-[10px]"
           >
-            <PlusCircle size={14} /> {generating ? "Generating..." : "Generate Box"}
+            <PlusCircle size={14} /> {generating ? t("packingManagement.generating", "Generating...") : t("packingManagement.generateBox", "Generate Box")}
           </button>
         </div>
       </div>
@@ -309,16 +311,16 @@ const PackingManagement = () => {
         <div className="px-5 py-3 border-b border-border bg-bg-dark/40 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Package size={14} className="text-primary" />
-            <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">Box Registry</h2>
+            <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">{t("packingManagement.boxRegistry", "Box Registry")}</h2>
           </div>
           <select
             value={statusFilter}
             onChange={e => setStatusFilter(e.target.value)}
             className="bg-bg-dark border border-border rounded-lg px-3 py-1.5 text-[9px] font-black text-text-main uppercase tracking-wider focus:outline-none focus:border-primary"
           >
-            <option value="ALL">All Boxes</option>
-            <option value="OPEN">Open Only</option>
-            <option value="CLOSED">Closed Only</option>
+            <option value="ALL">{t("packingManagement.allBoxes", "All Boxes")}</option>
+            <option value="OPEN">{t("packingManagement.openOnly", "Open Only")}</option>
+            <option value="CLOSED">{t("packingManagement.closedOnly", "Closed Only")}</option>
           </select>
         </div>
         
@@ -326,13 +328,13 @@ const PackingManagement = () => {
           <table className="w-full text-left">
             <thead className="bg-bg-dark/60 text-[9px] font-black text-text-muted uppercase tracking-wider border-b border-border">
               <tr>
-                <th className="px-4 py-3">Serial</th>
-                <th className="px-4 py-3">Box ID</th>
-                <th className="px-4 py-3">Capacity</th>
-                <th className="px-4 py-3">Filled</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Label</th>
-                <th className="px-4 py-3">Created</th>
+                <th className="px-4 py-3">{t("packingManagement.serial", "Serial")}</th>
+                <th className="px-4 py-3">{t("packingManagement.boxId", "Box ID")}</th>
+                <th className="px-4 py-3">{t("packingManagement.capacity", "Capacity")}</th>
+                <th className="px-4 py-3">{t("packingManagement.filled", "Filled")}</th>
+                <th className="px-4 py-3">{t("packingManagement.status", "Status")}</th>
+                <th className="px-4 py-3">{t("packingManagement.label", "Label")}</th>
+                <th className="px-4 py-3">{t("packingManagement.created", "Created")}</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
@@ -341,8 +343,8 @@ const PackingManagement = () => {
                 <tr>
                   <td colSpan={8} className="px-4 py-16 text-center text-text-muted">
                     <Package size={32} className="mx-auto opacity-20 mb-3" />
-                    <p className="text-xs font-medium">No boxes found</p>
-                    <p className="text-[10px] mt-1 opacity-60">Generate your first box using the button above</p>
+                    <p className="text-xs font-medium">{t("packingManagement.noBoxesFound", "No boxes found")}</p>
+                    <p className="text-[10px] mt-1 opacity-60">{t("packingManagement.generateFirstBox", "Generate your first box using the button above")}</p>
                   </td>
                 </tr>
               ) : boxes.map((box) => (

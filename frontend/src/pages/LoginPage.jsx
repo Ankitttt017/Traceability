@@ -16,6 +16,7 @@ import toast from "react-hot-toast";
 import { authApi } from "../api/services";
 import { setAuthSession } from "../utils/authStorage";
 import { APP_ROUTES } from "../constants/routes";
+import { useLanguage } from "../context/LanguageContext";
 
 // ── Styles injected once ──────────────────────────────────────────────────
 const STYLES = `
@@ -288,6 +289,7 @@ const IndustrialBg = () => (
 // ═══════════════════════════════════════════════════════════════════════════
 const LoginPage = () => {
   injectLP();
+  const { t } = useLanguage();
 
   const navigate  = useNavigate();
   const [form,    setForm]    = useState({ username:"", password:"" });
@@ -403,7 +405,7 @@ const LoginPage = () => {
             <div style={{height:1,width:28,background:C.bdr()}}/>
             <p style={{fontSize:10,fontWeight:700,textTransform:"uppercase",
               letterSpacing:"0.15em",color:C.txt("m")}}>
-              Manufacturing Traceability System
+              {t("login.systemName", "Manufacturing Traceability System")}
             </p>
             <div style={{height:1,width:28,background:C.bdr()}}/>
           </div>
@@ -434,10 +436,10 @@ const LoginPage = () => {
             <div>
               <p style={{fontSize:9,fontWeight:800,textTransform:"uppercase",
                 letterSpacing:"0.12em",color:C.txt("m"),marginBottom:3}}>
-                Secure Access
+                {t("login.secureAccess", "Secure Access")}
               </p>
               <p style={{fontSize:14,fontWeight:700,color:C.txt("pri")}}>
-                Sign in to your account
+                {t("login.signInToAccount", "Sign in to your account")}
               </p>
             </div>
             {/* Live indicator */}
@@ -449,7 +451,7 @@ const LoginPage = () => {
                   background:C.ok(),animation:"lpPing 1.6s ease-out infinite",opacity:0.6}}/>
                 <div style={{width:6,height:6,borderRadius:"50%",background:C.ok()}}/>
               </div>
-              <span style={{fontSize:10,fontWeight:700,color:C.ok()}}>System Online</span>
+              <span style={{fontSize:10,fontWeight:700,color:C.ok()}}>{t("login.systemOnline", "System Online")}</span>
             </div>
           </div>
 
@@ -479,7 +481,7 @@ const LoginPage = () => {
                 <p style={{fontSize:10,fontWeight:700,textTransform:"uppercase",
                   letterSpacing:"0.07em",color:C.txt("sec"),marginBottom:6,
                   display:"flex",alignItems:"center",gap:4}}>
-                  <User size={10}/> Username
+                  <User size={10}/> {t("login.username", "Username")}
                   <span style={{color:C.ng()}}>*</span>
                 </p>
                 <div style={{position:"relative"}}>
@@ -489,7 +491,7 @@ const LoginPage = () => {
                   <input type="text" required
                     value={form.username}
                     onChange={e=>setForm(p=>({...p,username:e.target.value}))}
-                    placeholder="Enter your username"
+                    placeholder={t("login.enterUsername", "Enter your username")}
                     onFocus={()=>setFocusF("username")}
                     onBlur={()=>setFocusF("")}
                     style={inputStyle("username")}
@@ -503,7 +505,7 @@ const LoginPage = () => {
                 <p style={{fontSize:10,fontWeight:700,textTransform:"uppercase",
                   letterSpacing:"0.07em",color:C.txt("sec"),marginBottom:6,
                   display:"flex",alignItems:"center",gap:4}}>
-                  <Lock size={10}/> Password
+                  <Lock size={10}/> {t("login.password", "Password")}
                   <span style={{color:C.ng()}}>*</span>
                 </p>
                 <div style={{position:"relative"}}>
@@ -513,7 +515,7 @@ const LoginPage = () => {
                   <input type={showPw?"text":"password"} required
                     value={form.password}
                     onChange={e=>setForm(p=>({...p,password:e.target.value}))}
-                    placeholder="Enter your password"
+                    placeholder={t("login.enterPassword", "Enter your password")}
                     onFocus={()=>setFocusF("password")}
                     onBlur={()=>setFocusF("")}
                     style={inputStyle("password")}
@@ -555,7 +557,7 @@ const LoginPage = () => {
                   </>
                 ) : (
                   <>
-                    <ShieldCheck size={16}/> Sign In
+                    <ShieldCheck size={16}/> {t("login.signIn", "Sign In")}
                   </>
                 )}
               </button>
@@ -569,10 +571,10 @@ const LoginPage = () => {
           gap:20,marginTop:22,flexWrap:"wrap",
         }}>
           {[
-            { icon:Activity,    label:"Real-time Monitoring" },
-            { icon:GitBranch,   label:"Part Genealogy"       },
-            { icon:CheckCircle2,label:"QR Traceability"      },
-            { icon:Cpu,         label:"PLC Integration"      },
+            { icon:Activity,    label:t("login.realTimeMonitoring", "Real-time Monitoring") },
+            { icon:GitBranch,   label:t("login.partGenealogy", "Part Genealogy") },
+            { icon:CheckCircle2,label:t("login.qrTraceability", "QR Traceability") },
+            { icon:Cpu,         label:t("login.plcIntegration", "PLC Integration") },
           ].map(({icon:Icon,label},i)=>(
             <div key={i} style={{
               display:"flex",alignItems:"center",gap:5,
@@ -591,5 +593,4 @@ const LoginPage = () => {
 };
 
 export default LoginPage;
-
 

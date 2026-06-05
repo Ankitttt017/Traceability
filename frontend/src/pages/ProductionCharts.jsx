@@ -1,5 +1,5 @@
-// ============================================================
-//  ProductionCharts.jsx — IndusTrace Premium v4
+ï»¿// ============================================================
+//  ProductionCharts.jsx â€” IndusTrace Premium v4
 //  ? Download bar at TOP
 //  ? Tabs: Overview | Hourly | Machine | Shift | Parts List
 //  ? Excel exports: Full / Parts / Audit
@@ -21,7 +21,7 @@ import {
   ResponsiveContainer, PieChart as RePieChart,
   Pie, Cell, AreaChart, Area, Legend,
 } from "recharts";
-import { dashboardApi, machineApi } from "../api/services";
+import { dashboardApi, machineApi, reportApi } from "../api/services";
 import { CHART_COLORS, STATUS_COLORS } from "../constants/chartTheme";
 import SafeChart from "../components/charts/SafeChart";
 import { SOCKET_URL } from "../constants/network";
@@ -157,7 +157,7 @@ function formatPlcColumnLabel(key){
 }
 
 function renderCellValue(value){
-  if (value === null || value === undefined || value === "") return "—";
+  if (value === null || value === undefined || value === "") return "â€”";
   if (typeof value === "object") {
     try {
       return JSON.stringify(value);
@@ -380,10 +380,11 @@ const ProductionCharts=()=>{
     refreshInFlightRef.current = true;
     setLoading(true);setError("");
     try{
-      const[s,r,m]=await Promise.all([
+      const[s,r,m,reportData]=await Promise.all([
         dashboardApi.summary(query),
         dashboardApi.report(query),
         machineApi.list(),
+        reportApi.getData(query),
       ]);
       setSummary(s||summary);
       setReport(r||report);
@@ -391,7 +392,28 @@ const ProductionCharts=()=>{
       // Load parts list if available
       try{
         const parts=await dashboardApi.partsList?.(query)||r?.partsList||[];
-        setPartsList(consolidatePartsList(parts));
+        const reportRows = Array.isArray(reportData?.rows) ? reportData.rows : [];
+        const reportByPartId = reportRows.reduce((acc, row) => {
+          const key = String(row?.partId || row?.part_id || "").trim();
+          if (!key) return acc;
+          const prev = acc[key];
+          const currentTs = new Date(row?.createdAt || 0).getTime() || 0;
+          const prevTs = prev ? (new Date(prev?.createdAt || 0).getTime() || 0) : -1;
+          if (!prev || currentTs >= prevTs) acc[key] = row;
+          return acc;
+        }, {});
+        const mergedParts = (Array.isArray(parts) ? parts : []).map((part) => {
+          const key = String(part?.partId || part?.part_id || "").trim();
+          const reportRow = reportByPartId[key] || {};
+          return {
+            ...part,
+            customerQrCode: part?.customerQrCode || reportRow?.customerQrCode || reportRow?.customerCode || reportRow?.customer_qr || null,
+            partName: part?.partName || reportRow?.partName || reportRow?.componentName || null,
+            machineName: part?.machineName || reportRow?.machineName || null,
+            plcReading: part?.plcReading || reportRow?.plcReading || null,
+          };
+        });
+        setPartsList(consolidatePartsList(mergedParts));
       }catch{}
     }catch(e){setError(e.response?.data?.error||"Failed to load analytics data.");}
     finally{
@@ -598,9 +620,12 @@ const ProductionCharts=()=>{
 
   const totalPartsPages = Math.max(1, Math.ceil(filteredParts.length / partsPageSize));
 
-  const normalizeStationResult = (value, reason = "") => {
+  const normalizeStationResult = (value, reason = "", row = null) => {
     const s = String(value || "").trim().toUpperCase();
     const r = String(reason || "").trim().toUpperCase();
+    const bypassStatus = Boolean(row?.bypassStatus || row?.is_bypassed || row?.isBypassed);
+    const bypassReason = String(row?.bypassReason || row?.bypass_reason || "").trim().toUpperCase();
+    if (bypassStatus || ["MACHINE_BYPASS_AUTO_OK", "STATION_BYPASS_AUTO_OK", "STATION_OPERATION_DISABLED_AUTO_OK"].includes(bypassReason)) return "OK";
     if (r === "NG_SHOT_STATUS" && ["BLOCK", "INTERLOCKED"].includes(s)) return "NG";
     if (!s) return "";
     if (["OK", "PASS", "COMPLETED", "ENDED_OK"].includes(s)) return "OK";
@@ -637,7 +662,7 @@ const ProductionCharts=()=>{
     const machineName = (part.machineName || machineMap.get(Number(part.machineId))?.machineName || "").toString().trim();
     const op = (part.stationNo || part.operationNo || "").toString().trim();
     const directKey = `${machineName}__${op}`;
-    const directStatus = normalizeStationResult(part.result || part.status, part.interlockReason || part.reason);
+    const directStatus = normalizeStationResult(part.result || part.status, part.interlockReason || part.reason, part);
     if (machineName || op) map.set(directKey, directStatus);
 
     const timeline = Array.isArray(part.stationTimeline) ? part.stationTimeline : [];
@@ -645,7 +670,7 @@ const ProductionCharts=()=>{
       const tMachine = (t.machineName || t.machine_name || machineName || "").toString().trim();
       const tOp = (t.stationNo || t.station_no || t.operationNo || t.operation_no || "").toString().trim();
       const tKey = `${tMachine}__${tOp}`;
-      const tStatus = normalizeStationResult(t.result || t.status || t.opStatus, t.interlockReason || t.reason);
+      const tStatus = normalizeStationResult(t.result || t.status || t.opStatus, t.interlockReason || t.reason, t);
       if (tMachine || tOp) map.set(tKey, tStatus);
     });
     return map;
@@ -662,10 +687,13 @@ const ProductionCharts=()=>{
   const isSingleMachineView = Boolean(filters.machineId);
 
   const plcColumns = useMemo(() => {
-    const sorted = DEFAULT_PLC_CYCLE_COLUMNS;
+    const sorted = [
+      "shot_datetime",
+      ...DEFAULT_PLC_CYCLE_COLUMNS.filter((key) => !["machine_name", "shot_number", "shot_date", "shot_time"].includes(key)),
+    ];
     const usedLabels = new Map();
     return sorted.map((key) => {
-      const baseLabel = formatPlcColumnLabel(key);
+      const baseLabel = key === "shot_datetime" ? "Shot Date & Time" : formatPlcColumnLabel(key);
       const count = usedLabels.get(baseLabel) || 0;
       usedLabels.set(baseLabel, count + 1);
       const label = count === 0 ? baseLabel : `${baseLabel} (${count + 1})`;
@@ -698,6 +726,13 @@ const ProductionCharts=()=>{
       if ([y, m, d].every((v) => v !== null && v !== undefined && v !== "")) {
         return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
       }
+    }
+    if (key === "shot_datetime") {
+      const shotDate = getPlcValue(part, "shot_date");
+      const shotTime = getPlcValue(part, "shot_time");
+      const dateText = shotDate && shotDate !== "-" ? String(shotDate) : "";
+      const timeText = shotTime && shotTime !== "-" ? String(shotTime) : "";
+      return [dateText, timeText].filter(Boolean).join(" ") || "-";
     }
     return part?.[key];
   };
@@ -766,7 +801,7 @@ const ProductionCharts=()=>{
                     border:`1px solid ${C.amber(0.3)}`}}>LIVE</span>
                 </div>
                 <p style={{fontSize:11,color:C.txt("muted"),marginTop:3}}>
-                  {timeLabel} · {fmtNow()} · {lineContextLabel}
+                  {timeLabel} Â· {fmtNow()} Â· {lineContextLabel}
                 </p>
               </div>
             </div>
@@ -789,7 +824,7 @@ const ProductionCharts=()=>{
                 <input type="datetime-local" value={customDate.from||""}
                   onChange={e=>{setCustomDate(p=>({...p,from:e.target.value}));setTimeRange("custom");}}
                   style={{height:22,background:"transparent",border:"none",fontSize:11,color:C.txt("pri"),outline:"none",cursor:"pointer"}}/>
-                <span style={{fontSize:11,color:C.txt("muted")}}>–</span>
+                <span style={{fontSize:11,color:C.txt("muted")}}>â€“</span>
                 <input type="datetime-local" value={customDate.to||""}
                   onChange={e=>{setCustomDate(p=>({...p,to:e.target.value}));setTimeRange("custom");}}
                   style={{height:22,background:"transparent",border:"none",fontSize:11,color:C.txt("pri"),outline:"none",cursor:"pointer"}}/>
@@ -800,14 +835,14 @@ const ProductionCharts=()=>{
                   color:C.txt("sec"),opacity:loading?0.5:1,
                   display:"inline-flex",alignItems:"center",gap:5,transition:"all .15s"}}>
                 <RefreshCw size={12} style={{animation:loading?"pcSpin .9s linear infinite":"none"}}/>
-                {loading?"Loading…":"Refresh"}
+                {loading?"Loadingâ€¦":"Refresh"}
               </button>
             </div>
           </div>
         </div>
       </div>
 
-      {/* -- DOWNLOAD BAR — TOP --------------------------------------- */}
+      {/* -- DOWNLOAD BAR â€” TOP --------------------------------------- */}
       <div style={{
         background:C.bg("card"),
         border:`1px solid ${C.bdr()}`,
@@ -889,7 +924,7 @@ const ProductionCharts=()=>{
           <div>
             <p style={{fontSize:13,fontWeight:800,color:C.txt("pri")}}>Export & Filters</p>
             <p style={{fontSize:10,color:C.txt("muted")}}>
-              {timeLabel} · {totalUnits} units · {efficiency}% quality rate
+              {timeLabel} Â· {totalUnits} units Â· {efficiency}% quality rate
             </p>
           </div>
         </div>
@@ -1044,9 +1079,9 @@ const ProductionCharts=()=>{
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <p style={{fontSize:9,fontWeight:800,textTransform:"uppercase",
               letterSpacing:"0.1em",color:C.txt("muted")}}>Shift Performance</p>
-            {[{key:"SHIFT_A",label:"Shift A — Morning",  colorFn:C.steel,icon:Zap    },
-              {key:"SHIFT_B",label:"Shift B — Afternoon",colorFn:C.amber,icon:Activity},
-              {key:"SHIFT_C",label:"Shift C — Night",    colorFn:C.idle, icon:Clock  }
+            {[{key:"SHIFT_A",label:"Shift A â€” Morning",  colorFn:C.steel,icon:Zap    },
+              {key:"SHIFT_B",label:"Shift B â€” Afternoon",colorFn:C.amber,icon:Activity},
+              {key:"SHIFT_C",label:"Shift C â€” Night",    colorFn:C.idle, icon:Clock  }
             ].map(s=>(
               <ShiftCard key={s.key} label={s.label}
                 row={shiftRowsNormalized?.[s.key]}
@@ -1218,9 +1253,9 @@ const ProductionCharts=()=>{
       {activeTab==="shift"&&(
         <div style={{animation:"pcFadeIn .2s ease"}}>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14}}>
-            {[{key:"SHIFT_A",label:"Shift A — Morning",  colorFn:C.steel,icon:Zap    },
-              {key:"SHIFT_B",label:"Shift B — Afternoon",colorFn:C.amber,icon:Activity},
-              {key:"SHIFT_C",label:"Shift C — Night",    colorFn:C.idle, icon:Clock  }
+            {[{key:"SHIFT_A",label:"Shift A â€” Morning",  colorFn:C.steel,icon:Zap    },
+              {key:"SHIFT_B",label:"Shift B â€” Afternoon",colorFn:C.amber,icon:Activity},
+              {key:"SHIFT_C",label:"Shift C â€” Night",    colorFn:C.idle, icon:Clock  }
             ].map(s=>(
               <ShiftCard key={s.key} label={s.label}
                 row={shiftRowsNormalized?.[s.key]}
@@ -1281,7 +1316,7 @@ const ProductionCharts=()=>{
             {/* Search */}
             <div style={{position:"relative",flex:"1 1 200px",minWidth:160}}>
               <input value={partsSearch} onChange={e=>setPartsSearch(e.target.value)}
-                placeholder="Search part serial or batch…"
+                placeholder="Search part serial or batchâ€¦"
                 style={{width:"100%",height:36,paddingLeft:14,paddingRight:12,
                   background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
                   borderRadius:8,fontSize:12,color:C.txt("pri"),outline:"none",
@@ -1324,18 +1359,19 @@ const ProductionCharts=()=>{
             </div>
           ):(
             <>
-            <Card noPad title={`Production Parts List — ${filteredParts.length} records`}
+            <Card noPad title={`Production Parts List â€” ${filteredParts.length} records`}
               subtitle="All scanned parts this period" icon={List} accent={C.navy()}>
               <div className="pc-thin-scroll" style={{overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,fontFamily:"inherit"}}>
                   <thead>
                     <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
                       {[
-                        "#",
+                        "Shot Number",
                         "Part Serial No.",
-                        "Date & Time",
-                        "Part Name",
                         "Customer QR Code",
+                        "Part Name",
+                        "Machine Name",
+                        "Scanned Date & Time",
                         ...stationColumns.map((c)=>c.label),
                         "Final Status",
                         ...(isSingleMachineView ? ["Cycle Time (s)"] : []),
@@ -1365,21 +1401,26 @@ const ProductionCharts=()=>{
                           background:i%2===1?C.bg("surf"):"transparent",transition:"background .1s"}}
                           onMouseEnter={e=>e.currentTarget.style.background=C.steel(0.04)}
                           onMouseLeave={e=>e.currentTarget.style.background=i%2===1?C.bg("surf"):"transparent"}>
-                          <td style={{padding:"9px 13px",color:C.txt("muted"),fontSize:11,fontWeight:500}}>{((partsPage - 1) * partsPageSize) + i + 1}</td>
+                          <td style={{padding:"9px 13px",fontSize:11,color:"#111827",fontWeight:600,whiteSpace:"nowrap"}}>
+                            {getPlcValue(p, "shot_number") || "â€”"}
+                          </td>
                           <td style={{padding:"9px 13px"}}>
                             <span style={{fontFamily:"inherit",fontSize:11,
-                              fontWeight:700,color:"#111827"}}>{p.partId||"—"}</span>
+                              fontWeight:700,color:"#111827"}}>{p.partId||"â€”"}</span>
+                          </td>
+                          <td style={{padding:"9px 13px",fontSize:11,color:C.txt("sec")}}>
+                            {p.customerQrCode || p.customerQR || p.markingCode || "â€”"}
+                          </td>
+                          <td style={{padding:"9px 13px",fontSize:11,color:"#111827",fontWeight:600,whiteSpace:"nowrap"}}>
+                            {getPlcValue(p, "part_name") || p.partName || p.modelName || p.componentName || "â€”"}
+                          </td>
+                          <td style={{padding:"9px 13px",fontSize:11,color:"#111827",fontWeight:600,whiteSpace:"nowrap"}}>
+                            {getPlcValue(p, "machine_name") || p.machineName || machineMap.get(Number(p.machineId))?.machineName || "â€”"}
                           </td>
                           <td style={{padding:"9px 13px",fontSize:11,color:"#111827",
                             fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>
                             {p.createdAt?new Date(p.createdAt).toLocaleString("en-IN",{
-                              day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):"—"}
-                          </td>
-                          <td style={{padding:"9px 13px",fontSize:11,color:"#111827",fontWeight:600,whiteSpace:"nowrap"}}>
-                            {getPlcValue(p, "part_name") || p.partName || p.modelName || p.componentName || "—"}
-                          </td>
-                          <td style={{padding:"9px 13px",fontSize:11,color:C.txt("sec")}}>
-                            {p.customerQrCode || p.customerQR || p.markingCode || "—"}
+                              day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):"â€”"}
                           </td>
                           {stationColumns.map((col) => {
                             const st = statusMap.get(col.key) || "";
@@ -1393,7 +1434,7 @@ const ProductionCharts=()=>{
                                     : null;
                             return (
                               <td key={`${i}-${col.key}`} style={{padding:"9px 13px"}}>
-                                {badge ? <Bdg v={badge.v} l={badge.l}/> : <span style={{color:"#111827"}}>—</span>}
+                                {badge ? <Bdg v={badge.v} l={badge.l}/> : <span style={{color:"#111827"}}>â€”</span>}
                               </td>
                             );
                           })}
@@ -1406,7 +1447,7 @@ const ProductionCharts=()=>{
                               <div style={{display:"flex",alignItems:"center",gap:6}}>
                                 <span style={{fontFamily:"inherit",fontSize:11,fontWeight:600,
                                   color:p.cycleTime ? "#111827" : C.txt("muted")}}>
-                                  {p.cycleTime || "—"}
+                                  {p.cycleTime || "â€”"}
                                 </span>
                                 {p.cycleTime && (() => {
                                   const m = machineMap.get(Number(p.machineId));
@@ -1448,7 +1489,7 @@ const ProductionCharts=()=>{
                           ))}
                           <td style={{padding:"9px 13px",fontSize:10,color:isNg?C.ng():C.txt("muted"),
                             maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                            {p.interlockReason||p.reason||"—"}
+                            {p.interlockReason||p.reason||"â€”"}
                           </td>
                         </tr>
                       );

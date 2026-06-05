@@ -12,7 +12,6 @@ import {
   SlidersHorizontal,
   Settings2,
   Activity,
-  Package,
   Cpu,
   ScanLine,
   Wifi,
@@ -33,8 +32,8 @@ import {
   getRoleAccessSettings,
   saveRoleAccessSettings,
 } from "../utils/roleAccess";
+import { useLanguage } from "../context/LanguageContext";
 import logo from "../assets/images/logo.jpg";
-
 
 const RicoIcon = () => (
   <div className="flex flex-col items-center leading-none select-none">
@@ -51,18 +50,14 @@ const RicoIcon = () => (
     >
       R
     </span>
-    
   </div>
 );
 
-// ─────────────────────────────────────────────
-// Sidebar
-// ─────────────────────────────────────────────
 const Sidebar = ({ onClose }) => {
+  const { t } = useLanguage();
   const [collapsed, setCollapsed] = useState(false);
   const [traceOpen, setTraceOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
-
   const [roleAccessSettings, setRoleAccessSettings] = useState(() =>
     getRoleAccessSettings()
   );
@@ -72,149 +67,145 @@ const Sidebar = ({ onClose }) => {
 
   useEffect(() => {
     if (onClose) onClose();
-  }, [location.pathname]);
+  }, [location.pathname, onClose]);
 
-  // ── TRACEABILITY OPERATIONAL PAGES ──────────
   const traceabilityNavigation = useMemo(
     () => [
-
-       {
-        name: "Process Flow",
+      {
+        name: t("pages.processFlow", "Process Flow"),
         path: APP_ROUTES.processFlow,
         icon: Route,
         moduleKey: "process_flow",
       },
       {
-        name: "Dashboard",
+        name: t("pages.partProcessFlow", "Part Process Flow"),
+        path: APP_ROUTES.partProcessFlow,
+        icon: Route,
+      },
+      {
+        name: t("pages.dashboard", "Dashboard"),
         path: APP_ROUTES.dashboard,
         icon: LayoutDashboard,
         moduleKey: "dashboard",
       },
       {
-        name: "Operator View",
+        name: t("pages.operatorView", "Operator View"),
         path: APP_ROUTES.operatorView,
         icon: UserCog,
         moduleKey: "operator_view",
       },
       {
-        name: "Production",
+        name: t("pages.production", "Production"),
         path: APP_ROUTES.production,
         icon: Factory,
         moduleKey: "production",
       },
       {
-        name: "Reports",
+        name: t("pages.reports", "Reports"),
         path: APP_ROUTES.reports,
         icon: BarChart3,
         moduleKey: "production",
       },
       {
-        name: "Packing",
+        name: t("pages.packing", "Packing"),
         path: APP_ROUTES.packing,
         icon: Boxes,
         moduleKey: "packing",
       },
-      
       {
-        name: "Part Journey",
+        name: t("pages.partJourney", "Part Journey"),
         path: APP_ROUTES.partJourney,
         icon: Wrench,
         moduleKey: "part_journey",
       },
-     
       {
-        name: "I/O Monitor",
+        name: t("pages.ioMonitor", "I/O Monitor"),
         path: APP_ROUTES.ioMonitor,
         icon: Activity,
         moduleKey: "io_monitor",
       },
       {
-        name: "Scanner Monitor",
+        name: t("pages.scannerMonitor", "Scanner Monitor"),
         path: APP_ROUTES.scannerMonitor,
         icon: Wifi,
         moduleKey: "scanners",
       },
     ],
-    []
+    [t]
   );
 
-  // ── SETTINGS & MASTER PAGES (SEQUENTIAL) ─────
   const settingsNavigation = useMemo(
     () => [
-
       {
-        name: "Machine Manager",
+        name: t("pages.machineManager", "Machine Manager"),
         path: APP_ROUTES.machines,
         icon: Cpu,
         moduleKey: "machines",
       },
       {
-        name: "PLC Manager",
+        name: t("pages.plcManager", "PLC Manager"),
         path: APP_ROUTES.plcConfig,
         icon: Zap,
         moduleKey: "plc_config",
       },
       {
-        name: "Scanner Manager",
+        name: t("pages.scannerManager", "Scanner Manager"),
         path: APP_ROUTES.scanners,
         icon: ScanLine,
         moduleKey: "scanners",
       },
       {
-        name: "QR Manager",
+        name: t("pages.qrManager", "QR Manager"),
         path: APP_ROUTES.qrRules,
         icon: Regex,
         moduleKey: "qr_rules",
       },
       {
-        name: "Packing Management",
+        name: t("pages.packingManagement", "Packing Management"),
         path: APP_ROUTES.packingManagement,
         icon: Boxes,
         moduleKey: "packing_management",
       },
-     
       {
-        name: "Station Controls",
+        name: t("pages.stationControls", "Station Controls"),
         path: APP_ROUTES.stationControls,
         icon: Settings2,
         moduleKey: "master_settings",
       },
       {
-        name: "Report Config",
+        name: t("pages.reportConfig", "Report Config"),
         path: APP_ROUTES.masterReports,
         icon: FileText,
         moduleKey: "master_settings",
       },
-       {
-        name: "Shift Manager",
+      {
+        name: t("pages.shiftManager", "Shift Manager"),
         path: APP_ROUTES.shifts,
         icon: Clock3,
         moduleKey: "shifts",
       },
       {
-        name: "Role Access",
+        name: t("pages.roleAccess", "Role Access"),
         path: APP_ROUTES.masterSettings,
         icon: SlidersHorizontal,
         moduleKey: "master_settings",
       },
-
       {
-        name: "User Management",
+        name: t("pages.userManagement", "User Management"),
         path: APP_ROUTES.users,
         icon: Users,
         moduleKey: "users",
       },
     ],
-    []
+    [t]
   );
 
-  // ── ROLE FILTER ───────────────────────────
   const visibleTraceNavigation = useMemo(
     () =>
       traceabilityNavigation.filter((item) =>
         canAccessModule(userRole, item.moduleKey, roleAccessSettings)
       ),
-    [traceabilityNavigation, roleAccessSettings, userRole]
+    [roleAccessSettings, traceabilityNavigation, userRole]
   );
 
   const visibleSettingsNavigation = useMemo(
@@ -222,12 +213,12 @@ const Sidebar = ({ onClose }) => {
       settingsNavigation.filter((item) =>
         canAccessModule(userRole, item.moduleKey, roleAccessSettings)
       ),
-    [settingsNavigation, roleAccessSettings, userRole]
+    [roleAccessSettings, settingsNavigation, userRole]
   );
 
-  // ── FETCH ROLE ACCESS ─────────────────────
   useEffect(() => {
     let cancelled = false;
+
     roleAccessApi
       .list()
       .then((data) => {
@@ -236,14 +227,15 @@ const Sidebar = ({ onClose }) => {
         setRoleAccessSettings(getRoleAccessSettings());
       })
       .catch(() => {});
+
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // ── NAV ITEM ──────────────────────────────
   const renderNavItem = (item, nested = false) => {
     const Icon = item.icon;
+
     return (
       <NavLink
         key={item.path}
@@ -251,11 +243,9 @@ const Sidebar = ({ onClose }) => {
         end
         title={collapsed ? item.name : undefined}
         className={({ isActive }) =>
-          `group flex items-center
-          ${collapsed ? "justify-center px-2" : "gap-3 px-3"}
-          py-2 rounded-xl transition-all duration-200
-          ${nested && !collapsed ? "ml-3" : ""}
-          ${
+          `group flex items-center ${collapsed ? "justify-center px-2" : "gap-3 px-3"} py-2 rounded-xl transition-all duration-200 ${
+            nested && !collapsed ? "ml-3" : ""
+          } ${
             isActive
               ? "bg-[#1a3263] text-[#e8e2db] font-semibold shadow-md"
               : "text-text-muted hover:bg-bg-hover/60 hover:text-text-main"
@@ -263,69 +253,42 @@ const Sidebar = ({ onClose }) => {
         }
       >
         <Icon size={18} className="flex-shrink-0" />
-        {!collapsed && (
-          <span className="text-sm truncate">{item.name}</span>
-        )}
+        {!collapsed && <span className="text-sm truncate">{item.name}</span>}
       </NavLink>
     );
   };
 
-  // ── SECTION TOGGLE BUTTON ─────────────────
-  const renderSectionToggle = (label, icon, isOpen, onToggle) => {
-    const Icon = icon;
-    return (
-      <button
-        onClick={onToggle}
-        className={`w-full flex items-center justify-between px-2 py-2 rounded-xl transition-all
-        ${
-          isOpen
-            ? "bg-bg-hover text-blue-400"
-            : "text-text-muted hover:bg-bg-hover/60"
-        }`}
-      >
-        <span
-          className={`flex items-center ${
-            collapsed ? "justify-center w-full" : "gap-3"
-          }`}
-        >
-          <Icon size={18} />
-          {!collapsed && <span className="text-sm">{label}</span>}
-        </span>
-        {!collapsed && (
-          <ChevronDown
-            size={14}
-            className={`transition-transform ${isOpen ? "rotate-180" : ""}`}
-          />
-        )}
-      </button>
-    );
-  };
+  const renderSectionToggle = (label, Icon, isOpen, onToggle) => (
+    <button
+      type="button"
+      onClick={onToggle}
+      className={`w-full flex items-center justify-between px-2 py-2 rounded-xl transition-all ${
+        isOpen ? "bg-bg-hover text-blue-400" : "text-text-muted hover:bg-bg-hover/60"
+      }`}
+    >
+      <span className={`flex items-center ${collapsed ? "justify-center w-full" : "gap-3"}`}>
+        <Icon size={18} />
+        {!collapsed && <span className="text-sm">{label}</span>}
+      </span>
+      {!collapsed && (
+        <ChevronDown size={14} className={`transition-transform ${isOpen ? "rotate-180" : ""}`} />
+      )}
+    </button>
+  );
 
-  // ─────────────────────────────────────────
   return (
     <aside
-      className={`
-        ${collapsed ? "w-[60px]" : "w-[240px]"}
-        h-full flex flex-col
-        relative z-50
-        bg-bg-card/90 backdrop-blur-xl
-        border-r border-border/60
-        transition-all duration-300
-        overflow-hidden
-      `}
+      className={`${collapsed ? "w-[60px]" : "w-[240px]"} h-full flex flex-col relative z-50 bg-bg-card/90 backdrop-blur-xl border-r border-border/60 transition-all duration-300 overflow-hidden`}
     >
-      {/* ── HEADER ── */}
       <div className="h-14 flex items-center justify-between px-3 border-b border-border/60">
-
         {!collapsed ? (
-          /* EXPANDED — real logo image, height-constrained, left-aligned */
           <div className="flex items-center flex-1 min-w-0">
             <img
               src={logo}
               alt="RICO"
               draggable={false}
               style={{
-                height: "30px",       /* fits comfortably in the 56px header */
+                height: "30px",
                 width: "auto",
                 objectFit: "contain",
                 objectPosition: "left center",
@@ -335,15 +298,14 @@ const Sidebar = ({ onClose }) => {
             />
           </div>
         ) : (
-          /* COLLAPSED — R lettermark with red bar */
           <div className="w-full flex justify-center">
             <RicoIcon />
           </div>
         )}
 
-        {/* Collapse / expand button */}
         {!collapsed ? (
           <button
+            type="button"
             onClick={() => setCollapsed(true)}
             className="p-1 rounded-lg hover:bg-bg-hover/60 flex-shrink-0 ml-1"
             title="Collapse sidebar"
@@ -352,6 +314,7 @@ const Sidebar = ({ onClose }) => {
           </button>
         ) : (
           <button
+            type="button"
             onClick={() => setCollapsed(false)}
             className="absolute top-4 right-[-12px] bg-bg-card border border-border rounded-full p-1 shadow-md"
             title="Expand sidebar"
@@ -361,35 +324,30 @@ const Sidebar = ({ onClose }) => {
         )}
       </div>
 
-      {/* ── NAVIGATION ── */}
       <nav className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
-        {/* Traceability */}
         {renderSectionToggle(
-          "Traceability",
+          t("pages.traceability", "Traceability"),
           Factory,
           traceOpen,
-          () => setTraceOpen((p) => !p)
+          () => setTraceOpen((prev) => !prev)
         )}
+
         {(traceOpen || collapsed) && (
           <div className="space-y-0.5">
-            {visibleTraceNavigation.map((item) =>
-              renderNavItem(item, !collapsed)
-            )}
-            
-            {/* Nested Settings Dropdown inside Traceability */}
+            {visibleTraceNavigation.map((item) => renderNavItem(item, !collapsed))}
+
             {visibleSettingsNavigation.length > 0 && (
               <div className="mt-1">
                 {renderSectionToggle(
-                  "Settings",
+                  t("pages.settings", "Settings"),
                   Settings2,
                   settingsOpen,
-                  () => setSettingsOpen((p) => !p)
+                  () => setSettingsOpen((prev) => !prev)
                 )}
+
                 {(settingsOpen || collapsed) && (
                   <div className="space-y-0.5 mt-0.5">
-                    {visibleSettingsNavigation.map((item) =>
-                      renderNavItem(item, true)
-                    )}
+                    {visibleSettingsNavigation.map((item) => renderNavItem(item, true))}
                   </div>
                 )}
               </div>
@@ -398,10 +356,8 @@ const Sidebar = ({ onClose }) => {
         )}
       </nav>
 
-      {/* ── FOOTER ── */}
       {!collapsed && (
         <div className="px-3 py-2 border-t border-border/60 flex items-center gap-2">
-          {/* Faded logo repeat */}
           <img
             src={logo}
             alt="RICO"
@@ -414,9 +370,7 @@ const Sidebar = ({ onClose }) => {
               userSelect: "none",
             }}
           />
-          <span className="text-[10px] text-text-muted/60">
-            Traceability v2.0
-          </span>
+          <span className="text-[10px] text-text-muted/60">Traceability v2.0</span>
         </div>
       )}
     </aside>

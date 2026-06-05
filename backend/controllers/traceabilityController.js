@@ -3166,10 +3166,6 @@ exports.verifyScanForOperator = async (req, res) => {
       return res.status(400).json({ error: "qrCode and machineId are required" });
     }
     const scannedQrRaw = String(inputCode || "").trim();
-    const resolvedCode = await resolveMappedPartId(inputCode);
-    const normalizedPartId = resolvedCode.resolvedPartId;
-    const customerQrCode = resolvedCode.customerQrCode;
-    const isMappedCustomerQrScan = Boolean(customerQrCode) && customerQrCode === scannedQrRaw;
 
     const machine = await Machine.findByPk(machineId);
     if (!machine) {
@@ -3179,6 +3175,79 @@ exports.verifyScanForOperator = async (req, res) => {
     if (!bound.ok) {
       return res.status(bound.status).json({ error: bound.error });
     }
+    const stationNo = getMachineOperationStage(machine);
+    const stationFeatures = await getStationFeatureConfig(stationNo);
+    const roleScanners = await Scanner.findAll({
+      where: { mapped_machine_id: machine.id, is_active: true },
+    });
+    const hasCustomerQrScanner = roleScanners.some(
+      (scanner) => String(scanner.scanner_role || "").trim().toUpperCase() === "CUSTOMER_QR"
+    );
+    const activePartIdForMachine = await resolveActivePartIdForMachine(machine, stationNo);
+    const existingCustomerMapping = await PartCodeMapping.findOne({
+      where: {
+        customer_qr: scannedQrRaw,
+        is_active: true,
+      },
+      order: [["updatedAt", "DESC"]],
+    });
+    const isExistingMappedCustomerQr = Boolean(existingCustomerMapping);
+    const isKnownPartId = Boolean(await Part.findOne({ where: { part_id: scannedQrRaw }, attributes: ["part_id"] }));
+
+    if (
+      hasCustomerQrScanner &&
+      activePartIdForMachine &&
+      scannedQrRaw !== activePartIdForMachine &&
+      (!isKnownPartId || isExistingMappedCustomerQr)
+    ) {
+      if (
+        existingCustomerMapping &&
+        String(existingCustomerMapping.old_part_id || "").trim() !== activePartIdForMachine
+      ) {
+        return res.status(409).json({
+          error: "Customer QR already mapped to another part",
+        });
+      }
+
+      await PartCodeMapping.upsert({
+        old_part_id: activePartIdForMachine,
+        customer_qr: scannedQrRaw,
+        machine_id: machine.id,
+        station_no: stationNo || null,
+        is_active: true,
+      });
+
+      emitOperatorPopup("INFO", {
+        partId: activePartIdForMachine,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "SCANNED",
+        plcStatus: "WAITING_PLC",
+        qrResult: "PASS",
+        reason: "CUSTOMER_QR_MAPPED",
+        message: "Customer QR mapped successfully to active part.",
+        customerQrCode: scannedQrRaw,
+      });
+
+      return res.json({
+        status: "OK",
+        decision: "ALLOW",
+        qrStatus: "PASS",
+        operationStatus: "WAITING",
+        reason: "CUSTOMER_QR_MAPPED",
+        message: "Customer QR mapped successfully",
+        mapped: true,
+        partId: activePartIdForMachine,
+        customerQrCode: scannedQrRaw,
+        machine: {
+          id: machine.id,
+          machineName: machine.machine_name,
+          stationNo,
+        },
+      });
+    }
+
     const roleGuard = await enforceScannerRoleIfConfigured({
       machine,
       sourceIp: bound.sourceIp,
@@ -3188,8 +3257,11 @@ exports.verifyScanForOperator = async (req, res) => {
       return res.status(roleGuard.status).json({ error: roleGuard.error });
     }
 
-    const stationNo = getMachineOperationStage(machine);
-    const stationFeatures = await getStationFeatureConfig(stationNo);
+    const resolvedCode = await resolveMappedPartId(inputCode);
+    const normalizedPartId = resolvedCode.resolvedPartId;
+    const customerQrCode = resolvedCode.customerQrCode;
+    const isMappedCustomerQrScan = Boolean(customerQrCode) && customerQrCode === scannedQrRaw;
+
     const spcConfig = getMachineSpcConfig(machine);
     const rejectionBinConfirmed = stationFeatures.rejectionBin && hasRejectionBinConfirmation(req.body);
     const manualResultEnabled = stationFeatures.manualResult === true;
@@ -5133,15 +5205,15 @@ exports.getDashboardReport = async (req, res) => {
       };
       const parseCompactQrPartId = (value) => {
         const raw = String(value || "").trim();
-        const match = raw.match(/^(?<day>\d{2})(?<month>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machine_code>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+        const match = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machine_code>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
         if (!match?.groups) return null;
-        const day = Number(match.groups.day);
         const month = Number(match.groups.month);
+        const day = Number(match.groups.day);
         const hour = Number(match.groups.hour);
         const minute = Number(match.groups.minute);
         const shot = Number(match.groups.shot);
         if (![day, month, hour, minute, shot].every(Number.isFinite)) return null;
-        return { key: `${day}|${month}|${hour}|${minute}|${shot}`, day, month, hour, minute, shot, shotRaw: String(match.groups.shot || "").trim() };
+        return { key: `${month}|${day}|${hour}|${minute}|${shot}`, day, month, hour, minute, shot, shotRaw: String(match.groups.shot || "").trim() };
       };
       const shotValuesSet = new Set();
       const compactValuesMap = new Map();
@@ -5247,16 +5319,16 @@ exports.getDashboardReport = async (req, res) => {
     };
     const parseCompactQrPartId = (value) => {
       const raw = String(value || "").trim();
-      const match = raw.match(/^(?<day>\d{2})(?<month>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machine_code>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+      const match = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machine_code>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
       if (!match?.groups) return null;
-      const day = Number(match.groups.day);
       const month = Number(match.groups.month);
+      const day = Number(match.groups.day);
       const hour = Number(match.groups.hour);
       const minute = Number(match.groups.minute);
       const shot = Number(match.groups.shot);
       if (![day, month, hour, minute, shot].every(Number.isFinite)) return null;
       return {
-        key: `${day}|${month}|${hour}|${minute}|${shot}`,
+        key: `${month}|${day}|${hour}|${minute}|${shot}`,
         day,
         month,
         hour,
@@ -5271,7 +5343,7 @@ exports.getDashboardReport = async (req, res) => {
     };
     const extractShotSuffix = (value) => {
       const s = String(value || "").toUpperCase().replace(/\s+/g, "");
-      // New compact QR format: DDMMHHMM + MACHINE_ID(1) + SHOT(1..6)
+      // New compact QR format: MMDDHHMM + MACHINE_ID(1) + SHOT(1..6)
       // Ignore machine id while resolving shot for PlcCycleReadings lookup.
       const compact = s.match(/^(\d{8})([A-Z0-9])(\d{1,6})$/);
       if (compact?.[3]) return compact[3];
@@ -5320,6 +5392,24 @@ exports.getDashboardReport = async (req, res) => {
       return acc;
     }, {});
 
+    const partIdsForCustomerQr = [...new Set(partHistory.slice(0, 3000).map((row) => String(row.part_id || "").trim()).filter(Boolean))];
+    const partCodeMappings = partIdsForCustomerQr.length > 0
+      ? await PartCodeMapping.findAll({
+          where: {
+            old_part_id: { [Op.in]: partIdsForCustomerQr },
+            is_active: true,
+          },
+          attributes: ["old_part_id", "customer_qr"],
+          raw: true,
+        })
+      : [];
+    const customerQrByPartId = partCodeMappings.reduce((acc, row) => {
+      const key = String(row.old_part_id || "").trim().toUpperCase();
+      if (!key) return acc;
+      acc[key] = String(row.customer_qr || "").trim();
+      return acc;
+    }, {});
+
     const partsList = partHistory.slice(0, 3000).map((row) => {
       const machine = machineMetaById[Number(row.machine_id)] || machineRowMapById[Number(row.machine_id)] || {};
       const plcStatus = String(row.plc_status || "").trim().toUpperCase();
@@ -5360,6 +5450,7 @@ exports.getDashboardReport = async (req, res) => {
       return {
         id: row.id,
         partId: row.part_id,
+        customerQrCode: customerQrByPartId[String(row.part_id || "").trim().toUpperCase()] || null,
         partName: row.Part?.part_name || row.Part?.name || null,
         machineId: row.machine_id,
         machineName: machine.machineName || machine.machine_name || null,

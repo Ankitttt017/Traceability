@@ -32,7 +32,7 @@ const SafeChart = ({ height = 220, children, style = {} }) => {
     <div ref={hostRef} style={{ height, width: "100%", minWidth: 1, minHeight: 1, overflow: "hidden", ...style }}>
       {ready ? (
         <div style={{ width: size.width, height: size.height, minWidth: 1, minHeight: 1 }}>
-          {children}
+          {typeof children === "function" ? children(size) : children}
         </div>
       ) : null}
     </div>
