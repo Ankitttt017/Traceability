@@ -13,6 +13,7 @@ import {
 import toast from "react-hot-toast";
 import { scannerApi } from "../api/services";
 import { formatMachineLabel } from "../utils/machineFields";
+import { useLanguage } from "../context/LanguageContext";
 
 
 const CONNECTION_GRACE_MS = SCANNER_CONNECTION_GRACE_MS;
@@ -97,6 +98,7 @@ const Badge = ({ variant = "idle", label, pulse }) => {
   const map = {
     ok:   { fg: C.ok(),    bg: C.ok(0.1),    bd: C.ok(0.25)   },
     ng:   { fg: C.ng(),    bg: C.ng(0.1),    bd: C.ng(0.25)   },
+    warn: { fg: C.amber(), bg: C.amber(0.1), bd: C.amber(0.25) },
     idle: { fg: C.txt("muted"), bg: C.bg("surf"), bd: C.bdr() },
   };
   const s = map[variant] || map.idle;
@@ -236,7 +238,7 @@ const PingModal = ({ scanner, onClose }) => {
               { label: "IP Address", value: scanner.scannerIp || "—",     mono: true  },
               { label: "Port",       value: scanner.scannerPort || "—",   mono: true  },
               { label: "Machine",    value: scanner.mappedMachine
-                  ? formatMachineLabel(scanner.mappedMachine) : "Not linked", mono: false },
+                  ? formatMachineLabel(scanner.mappedMachine) : t("scannerMonitor.notLinked", "Not linked"), mono: false },
             ].map((f, i) => (
               <div key={i} style={{
                 background: C.bg("surf"), border: `1px solid ${C.bdr()}`,
@@ -314,6 +316,7 @@ const PingModal = ({ scanner, onClose }) => {
 //  SCANNER MONITOR
 // ══════════════════════════════════════════════════════════════════════════
 const ScannerMonitor = () => {
+  const { t } = useLanguage();
   injectDS();
 
   const [rows,        setRows]        = useState([]);
@@ -370,16 +373,42 @@ const ScannerMonitor = () => {
     return () => clearInterval(intervalId);
   }, [loadConnections]);
 
+  const getScannerPresence = useCallback((row) => {
+    const mode = String(row?.scannerMode || "").toUpperCase();
+    const socketConnected = Boolean(row?.connection?.connected);
+    const recentData = isRecentWithinGrace(row?.connection?.lastDataAt);
+
+    if (mode === "USB_SERIAL") {
+      return {
+        connected: socketConnected || recentData,
+        label: socketConnected || recentData ? "USB Active" : "USB Idle",
+        variant: socketConnected || recentData ? "ok" : "idle",
+        pulse: socketConnected || recentData,
+      };
+    }
+
+    if (socketConnected && recentData) {
+      return { connected: true, label: "Online", variant: "ok", pulse: true };
+    }
+    if (socketConnected) {
+      return { connected: false, label: "Connected / Idle", variant: "warn", pulse: false };
+    }
+    if (recentData) {
+      return { connected: false, label: "Recent Data", variant: "warn", pulse: false };
+    }
+    return { connected: false, label: "Offline", variant: "ng", pulse: false };
+  }, []);
+
   const summary = useMemo(() => {
     const total     = rows.length;
-    const connected = rows.filter(r => Boolean(r?.connection?.connected)).length;
+    const connected = rows.filter((r) => getScannerPresence(r).connected).length;
     return {
       total,
       connected,
       disconnected: Math.max(total - connected, 0),
       rate: total ? Math.round((connected / total) * 100) : 0,
     };
-  }, [rows]);
+  }, [rows, getScannerPresence]);
 
   // ═════════════════════════════════════════════════════════════════════
   return (
@@ -432,7 +461,7 @@ const ScannerMonitor = () => {
                   <div style={{ width: 7, height: 7, borderRadius: "50%", background: C.ok() }}/>
                 </div>
                 <p style={{ fontSize: 11, color: C.txt("muted") }}>
-                  Live — updates on every connection event
+                  {t("scannerMonitor.live", "Live")} — updates on every connection event
                 </p>
               </div>
             </div>
@@ -502,10 +531,10 @@ const ScannerMonitor = () => {
               fontSize: 9, fontWeight: 800, textTransform: "uppercase",
               letterSpacing: "0.1em", color: C.txt("muted"), marginBottom: 1,
             }}>
-              Live Status
+              {t("scannerMonitor.live", "Live")} Status
             </p>
             <p style={{ fontSize: 13, fontWeight: 700, color: C.txt("pri") }}>
-              All Scanners
+              {t("scannerMonitor.subtitle", "All Scanners")}
             </p>
           </div>
           <div style={{
@@ -517,7 +546,7 @@ const ScannerMonitor = () => {
               width: 5, height: 5, borderRadius: "50%", background: C.ok(),
               animation: "scPulse 1.2s ease-in-out infinite",
             }}/>
-            <span style={{ fontSize: 10, fontWeight: 700, color: C.ok() }}>Live</span>
+            <span style={{ fontSize: 10, fontWeight: 700, color: C.ok() }}>{t("scannerMonitor.live", "Live")}</span>
           </div>
         </div>
 
@@ -531,10 +560,10 @@ const ScannerMonitor = () => {
           <div style={{ padding: "56px 24px", textAlign: "center" }}>
             <ScanLine size={32} color={C.txt("muted")} style={{ margin: "0 auto 14px" }}/>
             <p style={{ fontSize: 14, fontWeight: 600, color: C.txt("sec"), marginBottom: 6 }}>
-              No scanners configured
+              {t("scannerMonitor.noScanners", "No scanners configured")}
             </p>
             <p style={{ fontSize: 12, color: C.txt("muted") }}>
-              Add scanners in Scanner Registry to monitor them here.
+              {t("scannerMonitor.addScanners", "Add scanners in Scanner Registry to monitor them here.")}
             </p>
           </div>
         ) : (
@@ -543,8 +572,8 @@ const ScannerMonitor = () => {
               <thead>
                 <tr style={{ background: C.bg("surf"), borderBottom: `1px solid ${C.bdr()}` }}>
                   {[
-                    "Connection","Scanner Name","Role","IP Address : Port",
-                    "Linked Machine","Online Since","Last Data Received","Action",
+                    t("scannerMonitor.connection", "Connection"),t("scannerMonitor.scannerName", "Scanner Name"),t("scannerMonitor.role", "Role"),t("scannerMonitor.ipPort", "IP Address : Port"),
+                    t("scannerMonitor.linkedMachine", "Linked Machine"),t("scannerMonitor.onlineSince", "Online Since"),t("scannerMonitor.lastDataReceived", "Last Data Received"),t("scannerMonitor.action", "Action"),
                   ].map(h => (
                     <th key={h} style={{
                       padding: "10px 16px", textAlign: "left",
@@ -559,8 +588,9 @@ const ScannerMonitor = () => {
               <tbody>
                 {rows.map((row, i) => {
                   const isUsbMode = String(row?.scannerMode || "").toUpperCase() === "USB_SERIAL";
-                  const conn = Boolean(row?.connection?.connected) || isRecentWithinGrace(row?.connection?.lastDataAt);
-                  const connLabel = isUsbMode ? (conn ? "USB Active" : "USB Idle") : (conn ? "Online" : "Offline");
+                  const presence = getScannerPresence(row);
+                  const conn = presence.connected;
+                  const connLabel = presence.label;
                   return (
                     <tr key={row.id} style={{
                       borderBottom: `1px solid ${C.bdr()}`,
@@ -589,9 +619,9 @@ const ScannerMonitor = () => {
                             }}/>
                           </div>
                           <Badge
-                            variant={conn ? "ok" : "ng"}
+                            variant={presence.variant}
                             label={connLabel}
-                            pulse={conn}
+                            pulse={presence.pulse}
                           />
                         </div>
                       </td>
@@ -602,14 +632,14 @@ const ScannerMonitor = () => {
                           {row.scannerName || "Scanner"}
                         </p>
                         <p style={{ fontSize: 10, color: C.txt("muted") }}>
-                          {isUsbMode ? "USB Scanner" : "TCP Barcode / QR"}
+                          {isUsbMode ? t("scannerMonitor.usbScanner", "USB Scanner") : t("scannerMonitor.tcpScanner", "TCP Barcode / QR")}
                         </p>
                       </td>
 
                       <td style={{ padding: "12px 16px" }}>
                         <Badge
                           variant={String(row.scannerRole || "").toUpperCase() === "CUSTOMER_QR" ? "ok" : "idle"}
-                          label={row.scannerRole || "GENERAL"}
+                          label={row.scannerRole || t("scannerMonitor.general", "GENERAL")}
                         />
                       </td>
 
@@ -640,7 +670,7 @@ const ScannerMonitor = () => {
                           </span>
                         ) : (
                           <span style={{ fontSize: 11, color: C.txt("muted"), fontStyle: "italic" }}>
-                            Not linked
+                            {t("scannerMonitor.notLinked", "Not linked")}
                           </span>
                         )}
                       </td>
@@ -703,11 +733,10 @@ const ScannerMonitor = () => {
           <WifiOff size={16} color={C.ng()} style={{ flexShrink: 0, marginTop: 1 }}/>
           <div>
             <p style={{ fontSize: 12, fontWeight: 700, color: C.ng(), marginBottom: 4 }}>
-              {summary.disconnected} scanner{summary.disconnected > 1 ? "s" : ""} offline
+              {summary.disconnected} {summary.disconnected > 1 ? t("scannerMonitor.offlineSummaryPlural", "scanners offline") : t("scannerMonitor.offlineSummary", "scanner offline")}
             </p>
             <p style={{ fontSize: 11, color: C.ng(0.75), lineHeight: 1.5 }}>
-              Check power supply, network cable, and IP address configuration for offline scanners.
-              Use the Ping button to test individual connections.
+              {t("scannerMonitor.offlineHelp", "Check power supply, network cable, and IP address configuration for offline scanners. Use the Ping button to test individual connections.")}
             </p>
           </div>
         </div>

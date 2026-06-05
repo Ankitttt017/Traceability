@@ -2,6 +2,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-d
 import { Toaster } from "react-hot-toast";
 import { useAlarmToasts } from "./hooks/useAlarmToasts.jsx";
 import { NotificationProvider } from "./context/NotificationContext";
+import { LanguageProvider } from "./context/LanguageContext";
 import MainLayout from "./layouts/MainLayout";
 import LoginPage from "./pages/LoginPage";
 import Dashboard from "./pages/Dashboard";
@@ -17,6 +18,7 @@ import Scanners from "./pages/Scanners";
 import ScannerMonitor from "./pages/ScannerMonitor";
 import Packing from "./pages/Packing";
 import PackingManagement from "./pages/PackingManagement";
+import FaqPage from "./pages/FaqPage";
 import Shifts from "./pages/Shifts";
 import MasterSettingsDashboard from "./pages/MasterSettingsDashboard";
 import StationControls from "./pages/StationControls";
@@ -27,7 +29,7 @@ import ReportsPage from "./pages/Reports/ReportsPage";
 import { getUserRole, isAuthenticated } from "./utils/authStorage";
 import { APP_ROUTES } from "./constants/routes";
 import { canAccessModule, getRoleAccessSettings } from "./utils/roleAccess";
-
+import PartProcessflow from "./pages/PartProcessflow.jsx";
 const ProtectedRoute = ({ children }) => {
   return isAuthenticated() ? children : <Navigate to={APP_ROUTES.login} replace />;
 };
@@ -80,7 +82,9 @@ function App() {
   // Global Socket.IO alarm & scan toasts — active on every page
   useAlarmToasts();
 
-  return (    <NotificationProvider>
+  return (
+    <LanguageProvider>
+    <NotificationProvider>
       <Router>
         <Toaster
           position="top-right"
@@ -296,6 +300,14 @@ function App() {
               }
             />
             <Route
+              path={APP_ROUTES.faq.slice(1)}
+              element={<FaqPage />}
+            />
+            <Route
+              path={APP_ROUTES.partProcessFlow.slice(1)}
+              element={<PartProcessflow />}
+            />
+            <Route
               path={APP_ROUTES.packingManagement.slice(1)}
               element={
                 <ModuleRoute moduleKey="packing_management">
@@ -308,6 +320,7 @@ function App() {
         </Routes>
       </Router>
     </NotificationProvider>
+    </LanguageProvider>
 
   );
 }

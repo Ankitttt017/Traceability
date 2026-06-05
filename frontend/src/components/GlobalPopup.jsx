@@ -14,6 +14,7 @@ import {
 import { getStationFeatures, getStationFeatureSettings } from "../utils/stationSettings";
 import { stationSettingsApi, traceabilityApi } from "../api/services";
 import { normalizeScanResponse } from "../utils/scanResponse";
+import { useLanguage } from "../context/LanguageContext";
 
 
 const StationIcon = React.memo(() => (
@@ -190,20 +191,21 @@ function resolveRejectionState(popup = {}) {
 
 // --- Compact StatusBadge ------------------------------------------------------
 export const StatusBadge = ({ status }) => {
+  const { t } = useLanguage();
   const statusMap = {
     PASS: { bg: "bg-success/15", text: "text-success", dot: "bg-success", label: "PASSED ✓" },
     FAIL: { bg: "bg-danger/15", text: "text-danger", dot: "bg-danger", label: "FAILED ✗" },
-    DUPLICATE: { bg: "bg-amber-500/15", text: "text-amber-600", dot: "bg-amber-500", label: "DUPLICATE" },
-    BLOCKED: { bg: "bg-slate-500/15", text: "text-slate-600", dot: "bg-slate-500", label: "BLOCKED" },
-    RUN: { bg: "bg-warning/15", text: "text-warning", dot: "bg-warning animate-pulse", label: "RUNNING..." },
-    WAIT_MACHINE: { bg: "bg-warning/10", text: "text-warning/80", dot: "bg-warning/60 animate-pulse", label: "WAITING MACHINE..." },
-    WAIT_OP: { bg: "bg-primary/10", text: "text-primary/80", dot: "bg-primary/60", label: "WAITING..." },
-    SCANNED: { bg: "bg-primary/15", text: "text-primary", dot: "bg-primary", label: "SCANNED" },
-    COMM: { bg: "bg-comm/15", text: "text-comm", dot: "bg-comm", label: "PLC FAULT" },
-    INTERLOCKED: { bg: "bg-slate-500/15", text: "text-slate-600", dot: "bg-slate-500", label: "INTERLOCKED" },
-    RESETTING: { bg: "bg-amber-500/15", text: "text-amber-600", dot: "bg-amber-500 animate-spin", label: "RESETTING..." },
-    WAIT: { bg: "bg-bg-elevated", text: "text-text-muted", dot: "bg-border-strong", label: "WAITING" },
-    IDLE: { bg: "bg-bg-elevated", text: "text-text-muted", dot: "bg-border-strong", label: "IDLE" },
+    DUPLICATE: { bg: "bg-amber-500/15", text: "text-amber-600", dot: "bg-amber-500", label: t("globalPopup.duplicate", "DUPLICATE") },
+    BLOCKED: { bg: "bg-slate-500/15", text: "text-slate-600", dot: "bg-slate-500", label: t("globalPopup.blocked", "BLOCKED") },
+    RUN: { bg: "bg-warning/15", text: "text-warning", dot: "bg-warning animate-pulse", label: t("globalPopup.running", "RUNNING...") },
+    WAIT_MACHINE: { bg: "bg-warning/10", text: "text-warning/80", dot: "bg-warning/60 animate-pulse", label: t("globalPopup.waitingMachine", "WAITING MACHINE...") },
+    WAIT_OP: { bg: "bg-primary/10", text: "text-primary/80", dot: "bg-primary/60", label: t("globalPopup.waiting", "WAITING...") },
+    SCANNED: { bg: "bg-primary/15", text: "text-primary", dot: "bg-primary", label: t("globalPopup.scanned", "SCANNED") },
+    COMM: { bg: "bg-comm/15", text: "text-comm", dot: "bg-comm", label: t("globalPopup.plcFault", "PLC FAULT") },
+    INTERLOCKED: { bg: "bg-slate-500/15", text: "text-slate-600", dot: "bg-slate-500", label: t("globalPopup.interlocked", "INTERLOCKED") },
+    RESETTING: { bg: "bg-amber-500/15", text: "text-amber-600", dot: "bg-amber-500 animate-spin", label: t("globalPopup.resetting", "RESETTING...") },
+    WAIT: { bg: "bg-bg-elevated", text: "text-text-muted", dot: "bg-border-strong", label: t("globalPopup.waiting", "WAITING") },
+    IDLE: { bg: "bg-bg-elevated", text: "text-text-muted", dot: "bg-border-strong", label: t("globalPopup.idle", "IDLE") },
   };
 
   const theme = statusMap[status] || statusMap.IDLE;
@@ -218,6 +220,7 @@ export const StatusBadge = ({ status }) => {
 
 // --- Station Timeline Card (Single source of truth) --------------------------
 const StationCard = ({ station, isLast, isCurrentStation }) => {
+  const { t } = useLanguage();
   const isCompleted = station.status === "COMPLETED";
   const isFailed = station.status === "FAILED";
   const isInProgress = station.status === "IN_PROGRESS";
@@ -246,7 +249,7 @@ const StationCard = ({ station, isLast, isCurrentStation }) => {
               {station.stationName || station.stationNo}
             </h3>
             {(isInProgress || isLiveCurrent) && (
-              <span className="px-1.5 py-0.5 rounded-full bg-primary text-white text-[8px] font-bold uppercase">Current</span>
+              <span className="px-1.5 py-0.5 rounded-full bg-primary text-white text-[8px] font-bold uppercase">{t("globalPopup.current", "Current")}</span>
             )}
           </div>
           {dateObj && <span className="text-[9px] text-text-muted">{timeStr}</span>}
@@ -256,31 +259,31 @@ const StationCard = ({ station, isLast, isCurrentStation }) => {
           <div className="flex flex-wrap gap-1.5">
             {station.features?.qr && (
               <div className="flex items-center justify-between gap-1 bg-white/5 rounded px-2 py-1.5 min-w-[80px]">
-                <span className="text-[9px] font-medium text-text-muted uppercase">QR</span>
+                <span className="text-[9px] font-medium text-text-muted uppercase">{t("globalPopup.qr", "QR")}</span>
                 <StatusBadge status={station.qrVerification || "WAIT"} />
               </div>
             )}
             {station.features?.operation && (
               <div className="flex items-center justify-between gap-1 bg-white/5 rounded px-2 py-1.5 min-w-[80px]">
-                <span className="text-[9px] font-medium text-text-muted uppercase">Op</span>
+                <span className="text-[9px] font-medium text-text-muted uppercase">{t("globalPopup.operation", "Op")}</span>
                 <StatusBadge status={station.operation || "WAIT"} />
               </div>
             )}
             {station.features?.qualityCheck && (
               <div className="flex items-center justify-between gap-1 bg-white/5 rounded px-2 py-1.5 min-w-[80px]">
-                <span className="text-[9px] font-medium text-text-muted uppercase">QC</span>
+                <span className="text-[9px] font-medium text-text-muted uppercase">{t("globalPopup.qc", "QC")}</span>
                 <StatusBadge status={station.qualityCheck || "WAIT"} />
               </div>
             )}
             {(station.features?.manualResult || station.features?.camera || station.features?.torque) && !station.features?.qualityCheck && (
               <div className="flex items-center justify-between gap-1 bg-white/5 rounded px-2 py-1.5 min-w-[80px]">
-                <span className="text-[9px] font-medium text-text-muted uppercase">QC Val</span>
+                <span className="text-[9px] font-medium text-text-muted uppercase">{t("globalPopup.qcValue", "QC Val")}</span>
                 <StatusBadge status={station.qualityCheck || "WAIT"} />
               </div>
             )}
             {station.features?.rejectionBin && (
               <div className="flex items-center justify-between gap-1 bg-white/5 rounded px-2 py-1.5 min-w-[80px]">
-                <span className="text-[9px] font-medium text-text-muted uppercase">Rej</span>
+                <span className="text-[9px] font-medium text-text-muted uppercase">{t("globalPopup.rejectionShort", "Rej")}</span>
                 <StatusBadge status={station.rejectionConfirmation || "PENDING"} />
               </div>
             )}
@@ -290,7 +293,7 @@ const StationCard = ({ station, isLast, isCurrentStation }) => {
         {/* Show NG Reason if available */}
         {(station.reason || station.remarks) && (isFailed || station.qualityCheck === "FAIL" || station.operation === "FAIL") && (
           <div className="mt-2 px-2 py-1.5 bg-danger/10 border border-danger/20 rounded">
-            <span className="text-[9px] font-bold text-danger uppercase tracking-wider">Defect Reason:</span>
+            <span className="text-[9px] font-bold text-danger uppercase tracking-wider">{t("globalPopup.defectReason", "Defect Reason:")}</span>
             <p className="text-[11px] font-semibold text-danger/90 mt-0.5">{station.reason || station.remarks}</p>
           </div>
         )}
@@ -454,6 +457,7 @@ const GlobalPopup = ({
   manualScanMode = false,
   disableAutoClose = false,
 }) => {
+  const { t } = useLanguage();
   const [journeyData, setJourneyData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
@@ -544,7 +548,9 @@ const GlobalPopup = ({
 
       setValidationInfo(normalized.message || `QR accepted for ${String(normalized.stationNo || stationNo || "").trim().toUpperCase() || "current station"}.`);
       setLocalScanDecision("PASS");
-      localValidatedPartIdRef.current = scannedCode;
+      localValidatedPartIdRef.current = String(
+        normalized?.raw?.partId || normalized?.raw?.part_id || scannedCode
+      ).trim();
       setLocalQrValidated(true);
       setManualSelection(null);
       setManualReason("");
@@ -1496,9 +1502,9 @@ const GlobalPopup = ({
           {plcReadingPreview && (
             <div className="mb-3 rounded-lg border border-sky-500/30 bg-sky-950/20 p-3">
               <div className="flex items-center justify-between gap-2 mb-2">
-                <p className="text-[10px] font-bold text-sky-200 uppercase tracking-widest">PLC Reading</p>
+                <p className="text-[10px] font-bold text-sky-200 uppercase tracking-widest">{t("globalPopup.plcReading", "PLC Reading")}</p>
                 <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${plcOnline ? "bg-emerald-500/20 text-emerald-200" : "bg-rose-500/20 text-rose-200"}`}>
-                  {plcOnline ? "ONLINE" : "OFFLINE"}
+                  {plcOnline ? t("operatorView.online", "Online") : t("operatorView.offline", "Offline")}
                 </span>
               </div>
               <pre className="text-[11px] text-slate-100 bg-slate-900/70 rounded-md p-2 overflow-auto max-h-36">
@@ -1512,13 +1518,13 @@ const GlobalPopup = ({
               <div className={`rounded-lg border p-3 ${
                 previousStation ? (previousStationPassed ? "border-emerald-500/40 bg-emerald-950/25" : "border-rose-500/40 bg-rose-950/20") : "border-slate-700 bg-slate-900/60"
               }`}>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Previous Station</p>
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">{t("globalPopup.previousStation", "Previous Station")}</p>
                 {previousStation ? (
                   <div className="space-y-1">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-sm font-bold text-slate-100">{previousStation.stationName || previousStation.stationNo || "-"}</p>
                       <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${previousStationPassed ? "bg-emerald-500/20 text-emerald-200" : "bg-rose-500/20 text-rose-200"}`}>
-                        {previousStationPassed ? "PASSED" : "NOT PASSED"}
+                        {previousStationPassed ? t("globalPopup.passed", "PASSED") : t("globalPopup.notPassed", "NOT PASSED")}
                       </span>
                     </div>
                     <div className="flex items-center gap-2 text-[11px]">
@@ -1531,20 +1537,20 @@ const GlobalPopup = ({
                     </div>
                   </div>
                 ) : (
-                  <p className="text-xs font-semibold text-slate-400">No previous station (first operation).</p>
+                  <p className="text-xs font-semibold text-slate-400">{t("operatorView.noPreviousStation", "No previous station (first operation).")}</p>
                 )}
               </div>
 
               <div className={`rounded-lg border p-3 ${
                 currentStationPassed ? "border-emerald-500/40 bg-emerald-950/20" : "border-sky-500/40 bg-sky-950/20"
               }`}>
-                <p className="text-[10px] font-bold text-slate-300 uppercase tracking-widest mb-2">Current Station</p>
+                <p className="text-[10px] font-bold text-slate-300 uppercase tracking-widest mb-2">{t("globalPopup.currentStation", "Current Station")}</p>
                 {currentStationCard ? (
                   <div className="space-y-1">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-sm font-bold text-slate-100">{currentStationCard.stationName || currentStationCard.stationNo || currentStationName}</p>
                       <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${currentStationPassed ? "bg-emerald-500/20 text-emerald-200" : "bg-sky-500/20 text-sky-200"}`}>
-                        {currentStationPassed ? "PASSED" : "IN PROCESS"}
+                        {currentStationPassed ? t("globalPopup.passed", "PASSED") : t("globalPopup.inProcess", "IN PROCESS")}
                       </span>
                     </div>
                     <div className="flex items-center gap-2 text-[11px]">
@@ -1557,7 +1563,7 @@ const GlobalPopup = ({
                     </div>
                   </div>
                 ) : (
-                  <p className="text-xs font-semibold text-slate-400">Waiting for station data.</p>
+                  <p className="text-xs font-semibold text-slate-400">{t("operatorView.waitingStationData", "Waiting for station data.")}</p>
                 )}
               </div>
             </div>
@@ -1567,22 +1573,22 @@ const GlobalPopup = ({
           {showScanInputPanel && (
             <div className="w-full bg-slate-900/80 border border-slate-700/80 rounded-xl p-5 space-y-4 mb-5">
               <label className="block text-xs font-bold uppercase tracking-wider text-slate-300">
-                Scan / Manual QR Input
+                {t("operatorView.scanManualInput", "Scan / Manual QR Input")}
               </label>
-              <div className="flex gap-3">
+              <div className="flex flex-col sm:flex-row gap-3">
                 <input
                   ref={scanInputRef}
                   type="text"
                   value={manualQrCode}
                   onChange={(e) => setManualQrCode(e.target.value)}
-                  placeholder="e.g., PART-K12-998877"
+                  placeholder={t("globalPopup.manualQrPlaceholder", "e.g., PART-K12-998877")}
                   inputMode={isUsbScannerMode ? "none" : "text"}
                   readOnly={isUsbScannerMode}
                   autoComplete="off"
                   autoCorrect="off"
                   autoCapitalize="off"
                   spellCheck={false}
-                  className="flex-1 bg-slate-950 border border-slate-600 rounded-lg px-4 py-2 font-bold text-sm text-slate-400 placeholder:text-slate-400 outline-none focus:border-amber-500 transition-colors font-mono"
+                  className="flex-1 min-w-0 bg-slate-950 border border-slate-600 rounded-lg px-4 py-2 font-bold text-sm text-slate-400 placeholder:text-slate-400 outline-none focus:border-amber-500 transition-colors font-mono"
                   style={{ caretColor: isUsbScannerMode ? "transparent" : undefined }}
                   tabIndex={isUsbScannerMode ? -1 : 0}
                   onFocus={() => {}}
@@ -1604,12 +1610,12 @@ const GlobalPopup = ({
                   type="button"
                   onClick={handleValidateQr}
                   disabled={validatingQr || !manualQrCode.trim() || scanLocked}
-                  className="bg-amber-500 hover:bg-amber-400 disabled:bg-slate-700 disabled:text-slate-400 text-slate-950 font-bold px-5 py-2 rounded-lg text-sm transition-colors flex items-center gap-2"
+                  className="w-full sm:w-auto justify-center bg-amber-500 hover:bg-amber-400 disabled:bg-slate-700 disabled:text-slate-400 text-slate-950 font-bold px-5 py-2 rounded-lg text-sm transition-colors flex items-center gap-2"
                 >
                   {validatingQr ? (
                     <RefreshCw size={14} className="animate-spin" />
                   ) : (
-                    "Validate"
+                    t("operatorView.validate", "Validate")
                   )}
                 </button>
               </div>
@@ -1630,8 +1636,8 @@ const GlobalPopup = ({
             <div className="flex flex-col items-center justify-center py-8 text-text-muted space-y-4">
               <StationIcon />
               <div className="text-center">
-                <p className="text-sm font-bold text-white">Waiting for Barcode Scan</p>
-                <p className="text-xs text-text-muted mt-1">Timeline appears after first scan</p>
+                <p className="text-sm font-bold text-white">{t("globalPopup.waiting", "Waiting")}</p>
+                <p className="text-xs text-text-muted mt-1">{t("globalPopup.timelineAfterFirstScan", "Timeline appears after first scan")}</p>
               </div>
             </div>
           ) : null}
@@ -1643,10 +1649,10 @@ const GlobalPopup = ({
             <div className="rounded-xl border-2 border-slate-600 bg-slate-800/90 p-5 space-y-5 shadow-xl mb-3" style={{ backdropFilter: "blur(4px)" }}>
               <div className="flex items-center gap-2 border-b border-slate-700/60 pb-2">
                 <div className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
-                <h3 className="text-white text-sm font-extrabold uppercase tracking-wider">Manual Quality Inspection</h3>
+                <h3 className="text-white text-sm font-extrabold uppercase tracking-wider">{t("globalPopup.submitQualityVerification", "Manual Quality Inspection")}</h3>
               </div>
 
-              <div className="flex gap-5">
+              <div className="flex flex-col sm:flex-row gap-5">
                 <button
                   type="button"
                   onClick={() => {
@@ -1660,7 +1666,7 @@ const GlobalPopup = ({
                     }`}
                 >
                   <CheckCircle size={28} className={manualSelection === "OK" ? "text-white animate-bounce" : "text-emerald-500"} />
-                  <span className="mt-2 text-base font-black uppercase tracking-wider">Part OK (Pass)</span>
+                  <span className="mt-2 text-base font-black uppercase tracking-wider">{t("common.ok", "OK")} ({t("operatorView.pass", "Pass")})</span>
                 </button>
 
                 <button
@@ -1678,13 +1684,13 @@ const GlobalPopup = ({
                     }`}
                 >
                   <AlertTriangle size={28} className={manualSelection === "NG" ? "text-white animate-bounce" : "text-rose-500"} />
-                  <span className="mt-2 text-base font-black uppercase tracking-wider">Part NG (Fail)</span>
+                  <span className="mt-2 text-base font-black uppercase tracking-wider">{t("common.ng", "NG")} ({t("operatorView.fail", "Fail")})</span>
                 </button>
               </div>
 
               {manualSelection === "NG" && (
                 <div className="space-y-2 animate-in slide-in-from-top-2 duration-150">
-                  <label className="text-xs font-bold text-white uppercase tracking-wide">Failure / Rejection Reason</label>
+                  <label className="text-xs font-bold text-white uppercase tracking-wide">{t("faq.rejectionTab", "Rejection Categories")}</label>
                   <div className="flex flex-wrap gap-2">
                     {NG_REASON_CATEGORIES.map((category) => {
                       const selected = manualReasonCategory === category.key;
@@ -1718,7 +1724,7 @@ const GlobalPopup = ({
                         setManualReason("");
                         setShowReasonDropdown(true);
                       }}
-                      placeholder={manualReasonCategory ? "Search or select rejection reason" : "Search reason or select category"}
+                      placeholder={manualReasonCategory ? t("globalPopup.searchOrSelectReason", "Search or select rejection reason") : t("globalPopup.searchReasonOrSelectCategory", "Search reason or select category")}
                       className="w-full bg-white border-2 border-slate-500 rounded-xl py-3 px-4 text-sm text-black outline-none focus:border-rose-500 transition-colors font-semibold"
                       onFocus={() => {
                         setShowReasonDropdown(true);
@@ -1736,7 +1742,7 @@ const GlobalPopup = ({
                       <div className="absolute z-30 mt-1 w-full max-h-52 overflow-y-auto rounded-xl border border-slate-300 bg-white shadow-xl">
                         {filteredNgReasonOptions.length === 0 ? (
                           <div className="px-3 py-2 text-xs font-semibold text-slate-500">
-                            No reason found
+                            {t("globalPopup.noReasonFound", "No reason found")}
                           </div>
                         ) : (
                           filteredNgReasonOptions.map((reason) => (
@@ -1762,7 +1768,7 @@ const GlobalPopup = ({
                   </div>
                   {!isValidNgReason && (
                     <p className="text-[11px] font-semibold text-rose-300">
-                      Select a reason from the dropdown list.
+                      {t("globalPopup.selectReasonFromList", "Select a reason from the dropdown list.")}
                     </p>
                   )}
                 </div>
@@ -1786,10 +1792,10 @@ const GlobalPopup = ({
                 {submittingManual ? (
                   <span className="flex items-center justify-center gap-2">
                     <RefreshCw size={18} className="animate-spin" />
-                    Submitting Result...
+                    {t("globalPopup.submittingResult", "Submitting Result...")}
                   </span>
                 ) : (
-                  "Submit Quality Verification"
+                  t("globalPopup.submitQualityVerification", "Submit Quality Verification")
                 )}
               </button>
             </div>
@@ -1831,14 +1837,14 @@ const GlobalPopup = ({
           {canReset && showResetConfirm && (
             <div className="rounded-xl border-2 border-red-300 bg-red-50/90 p-4 space-y-2">
               <p className="text-sm font-semibold text-red-700">
-                Reset <span className="font-mono">{partId}</span> at {stationNo}?
+                {t("globalPopup.confirmResetQuestion", "Reset operation for part")} <span className="font-mono">{partId}</span> at {stationNo}?
               </p>
-              <div className="flex gap-3">
+              <div className="flex flex-col sm:flex-row gap-3">
                 <button onClick={() => setShowResetConfirm(false)} className="flex-1 rounded-xl border border-red-300 bg-white py-2 text-sm font-bold text-red-700 hover:bg-red-50">
-                  Cancel
+                  {t("globalPopup.cancel", "Cancel")}
                 </button>
                 <button onClick={handleReset} disabled={isResetting} className="flex-1 rounded-xl bg-red-600 py-2 text-sm font-bold text-white hover:bg-red-700">
-                  {isResetting ? "..." : "Confirm"}
+                  {isResetting ? "..." : t("globalPopup.confirm", "Confirm")}
                 </button>
               </div>
             </div>
@@ -1850,7 +1856,7 @@ const GlobalPopup = ({
                 onClick={onClose}
                 className="flex-1 bg-slate-400 hover:bg-slate-600 active:scale-[0.98] text-white font-black py-4 px-6 rounded-xl text-sm uppercase tracking-widest border-2 border-slate-600 shadow-lg transition-all duration-150"
               >
-                Close
+                {t("globalPopup.close", "Close")}
               </button>
             )}
             {canReset && !showResetConfirm && (
@@ -1860,7 +1866,7 @@ const GlobalPopup = ({
                 className="flex-1 bg-rose-600 hover:bg-rose-500 active:scale-[0.98] text-white font-black py-4 px-6 rounded-xl text-sm uppercase tracking-widest border-2 border-rose-500 shadow-lg shadow-rose-600/40 flex items-center justify-center gap-2 transition-all duration-150"
               >
                 <RefreshCw size={16} className={isResetting ? "animate-spin" : ""} />
-                {isResetting ? "..." : "RESET OPERATION"}
+                {isResetting ? "..." : t("globalPopup.resetOperation", "RESET OPERATION")}
               </button>
             )}
           </div>

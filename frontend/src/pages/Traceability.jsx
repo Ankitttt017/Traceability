@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { traceabilityApi } from "../api/services";
+import { useLanguage } from "../context/LanguageContext";
 
 
 
@@ -40,6 +41,7 @@ function normalizeEventType(type, decision) {
 }
 
 const Traceability = () => {
+  const { t } = useLanguage();
   const [partId, setPartId] = useState("");
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState({ type: "", message: "" });
@@ -78,11 +80,11 @@ const Traceability = () => {
     try {
       const response = await traceabilityApi.historyByPart(value);
       setTraceData(response);
-      toast.success("Part DNA Provenance Decrypted.");
+      toast.success(t("traceability.pageTitle", "Production Authenticator"));
     } catch (error) {
       setTraceData(null);
       setStatus({ type: "error", message: error.response?.data?.error || "Trace failed: Identity not found in master ledger" });
-      toast.error("Trace Failure");
+      toast.error(t("common.ng", "NG"));
     } finally { setLoading(false); }
   };
 
@@ -97,8 +99,8 @@ const Traceability = () => {
               <Fingerprint size={40} />
             </div>
             <div>
-              <h1 className="text-3xl font-black text-text-main tracking-tighter uppercase mb-1">Production Authenticator</h1>
-              <p className="text-text-muted text-sm font-medium tracking-tight">Decrypting part genealogy & station conformance matrices</p>
+              <h1 className="text-3xl font-black text-text-main tracking-tighter uppercase mb-1">{t("traceability.pageTitle", "Production Authenticator")}</h1>
+              <p className="text-text-muted text-sm font-medium tracking-tight">{t("traceability.pageSubtitle", "Decrypting part genealogy & station conformance matrices")}</p>
             </div>
           </div>
 
@@ -111,11 +113,11 @@ const Traceability = () => {
               value={partId}
               onChange={(e) => setPartId(e.target.value)}
               className="w-full h-16 bg-bg-dark border-2 border-border rounded-2xl pl-14 pr-44 text-xl font-black font-mono text-primary placeholder:text-text-muted/20 outline-none focus:border-primary focus:ring-4 focus:ring-primary/10 transition-all shadow-inner"
-              placeholder="SCAN PART ID / SERIAL..."
+              placeholder={t("traceability.scanPlaceholder", "SCAN PART ID / SERIAL...")}
             />
             <button disabled={loading} type="submit" className="absolute right-2 top-2 bottom-2 px-8 bg-primary text-on-strong font-black uppercase tracking-widest text-xs rounded-xl hover:brightness-110 active:scale-95 transition-all flex items-center gap-2 shadow-xl shadow-primary/20">
               {loading ? <RefreshCw size={16} className="animate-spin" /> : <ScanLine size={16} />}
-              {loading ? "SEARCHING" : "AUTHENTICATE"}
+              {loading ? t("traceability.searching", "SEARCHING") : t("traceability.authenticate", "AUTHENTICATE")}
             </button>
           </form>
         </div>
@@ -135,10 +137,10 @@ const Traceability = () => {
           {partSummary ? (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               {[
-                { label: "Identity Hash", val: partSummary.part_id, icon: Fingerprint, color: "text-primary" },
-                { label: "Ledger State", val: partSummary.status || "IDLE", icon: ShieldCheck, color: partSummary.status === 'OK' ? 'text-emerald-400' : 'text-red-400' },
-                { label: "Node Position", val: partSummary.current_station || "NOT STARTED", icon: Workflow, color: "text-text-main" },
-                { label: "Signal Bypass", val: partSummary.interlock_reason || "NOMINAL", icon: Zap, color: partSummary.interlock_reason ? 'text-primary' : 'text-emerald-400 opacity-40' }
+                { label: t("traceability.identityHash", "Identity Hash"), val: partSummary.part_id, icon: Fingerprint, color: "text-primary" },
+                { label: t("traceability.ledgerState", "Ledger State"), val: partSummary.status || t("traceability.idle", "IDLE"), icon: ShieldCheck, color: partSummary.status === 'OK' ? 'text-emerald-400' : 'text-red-400' },
+                { label: t("traceability.nodePosition", "Node Position"), val: partSummary.current_station || t("traceability.notStarted", "NOT STARTED"), icon: Workflow, color: "text-text-main" },
+                { label: t("traceability.signalBypass", "Signal Bypass"), val: partSummary.interlock_reason || t("traceability.nominal", "NOMINAL"), icon: Zap, color: partSummary.interlock_reason ? 'text-primary' : 'text-emerald-400 opacity-40' }
               ].map((k, i) => (
                 <div key={i} className="industrial-card p-5 group hover:border-primary/40 transition-all relative overflow-hidden">
                   <div className="absolute right-0 top-0 p-3 opacity-5 group-hover:opacity-10 transition-opacity"><k.icon size={24} /></div>
@@ -153,11 +155,11 @@ const Traceability = () => {
           <div className="industrial-card p-0 overflow-hidden min-h-[500px]">
             <div className="px-6 py-5 border-b border-border bg-bg-dark/40 flex items-center justify-between">
               <h2 className="text-xs font-black text-text-main uppercase tracking-[0.2em] flex items-center gap-3">
-                <History size={16} className="text-primary" /> Multi-Station Lifecycle
+                <History size={16} className="text-primary" /> {t("traceability.lifecycle", "Multi-Station Lifecycle")}
               </h2>
               {historyRows.length > 0 && (
                 <span className="text-[10px] font-black text-primary bg-primary/10 border border-primary/20 px-3 py-1 rounded-full uppercase tracking-widest">
-                  {historyRows.length} Nodes Recorded
+                  {historyRows.length} {t("traceability.nodesRecorded", "Nodes Recorded")}
                 </span>
               )}
             </div>
@@ -166,7 +168,7 @@ const Traceability = () => {
               {historyRows.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-20 text-text-muted/20">
                   <ArrowDownCircle size={80} className="mb-6 opacity-5" />
-                  <p className="text-sm font-black uppercase tracking-[0.4em]">Awaiting Identity Decryption</p>
+                  <p className="text-sm font-black uppercase tracking-[0.4em]">{t("traceability.awaitingIdentity", "Awaiting Identity Decryption")}</p>
                 </div>
               ) : (
                 <div className="relative border-l-4 border-border/40 ml-4 pl-12 space-y-12">

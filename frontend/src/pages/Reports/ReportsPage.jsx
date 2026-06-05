@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+﻿import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { reportApi, machineApi, shiftApi } from '../../api/services';
 import { toDatetimeLocal } from '../../utils/time';
 import { loadReportConfig } from '../../utils/reportConfig';
@@ -6,6 +6,7 @@ import ReportSummaryCards from './ReportSummaryCards';
 import ReportTable from './ReportTable';
 import { FileText, Download, RefreshCw } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { useLanguage } from '../../context/LanguageContext';
 
 const DEFAULT_PLC_CYCLE_COLUMNS = [
   "machine_name","shot_date","shot_time","shot_number","cycle_time",
@@ -79,6 +80,7 @@ const extractShotFromPartId = (partId) => {
 };
 
 const ReportsPage = () => {
+  const { t } = useLanguage();
   const getMesDayRange = useCallback(() => {
     const now = new Date();
     const start = new Date(now);
@@ -169,7 +171,7 @@ const ReportsPage = () => {
       });
     } catch (e) {
       console.error(e);
-      toast.error("Failed to load production analytics");
+      toast.error(t("reports.failedLoad", "Failed to load production analytics"));
     } finally {
       setLoading(false);
       fetchInFlightRef.current = false;
@@ -189,11 +191,11 @@ const ReportsPage = () => {
 
   const handleExport = async (type = "full") => {
     setExportLoading(true);
-    const toastId = toast.loading(`Preparing ${type.toUpperCase()} report...`);
+    const toastId = toast.loading(t("reports.preparingReport", "Preparing report..."));
     try {
       let blob;
 
-      // Pass filters and reportConfig as separate args — services.js builds the body correctly
+      // Pass filters and reportConfig as separate args â€” services.js builds the body correctly
       if (type === 'full')  blob = await reportApi.exportFull(filters);
       else if (type === 'ng')    blob = await reportApi.exportNG(filters);
       else if (type === 'parts') blob = await reportApi.exportParts(filters);
@@ -210,10 +212,10 @@ const ReportsPage = () => {
       link.click();
       link.remove();
       window.URL.revokeObjectURL(url);
-      toast.success("Report downloaded successfully", { id: toastId });
+      toast.success(t("reports.reportDownloaded", "Report downloaded successfully"), { id: toastId });
     } catch (e) {
       console.error("Export failed:", e);
-      toast.error(e?.response?.data?.error || "Export failed — check console", { id: toastId });
+      toast.error(e?.response?.data?.error || t("reports.exportFailed", "Export failed — check console"), { id: toastId });
     } finally {
       setExportLoading(false);
     }
@@ -259,11 +261,12 @@ const ReportsPage = () => {
     const stationPairs = Array.from(machineStationMap.values()).sort((a, b) =>
       a.op.localeCompare(b.op, undefined, { numeric: true, sensitivity: "base" }) || a.machineName.localeCompare(b.machineName)
     );
-    const plcKeys = DEFAULT_PLC_CYCLE_COLUMNS;
+    const plcKeys = DEFAULT_PLC_CYCLE_COLUMNS.filter((key) => !["machine_name", "shot_number", "shot_date", "shot_time"].includes(key));
     const plcColumns = (() => {
       const used = new Map();
-      return plcKeys.map((key) => {
-        const base = formatPlcColumnLabel(key);
+      const baseColumns = [{ key: "shot_datetime", label: "Shot Date & Time" }, ...plcKeys.map((key) => ({ key, label: formatPlcColumnLabel(key) }))];
+      return baseColumns.map(({ key, label: initialLabel }) => {
+        const base = initialLabel;
         const count = used.get(base) || 0;
         used.set(base, count + 1);
         return { key, label: count === 0 ? base : `${base} (${count + 1})` };
@@ -277,11 +280,12 @@ const ReportsPage = () => {
     });
 
     const dynamicColumns = [
-      { key: "srNo", label: "#" },
+      { key: "plc_shot_number", label: "Shot Number" },
       { key: "barcode", label: "Part Serial No." },
-      { key: "createdAt", label: "Date & Time" },
-      { key: "partName", label: "Part Name" },
       { key: "customerCode", label: "Customer QR Code" },
+      { key: "partName", label: "Part Name" },
+      { key: "plc_machine_name", label: "Machine Name" },
+      { key: "createdAt", label: "Scanned Date & Time" },
       ...stationPairs.map((s) => ({ key: `station_${s.key}`, label: s.label })),
       { key: "overallStatus", label: "Final Status" },
       ...plcColumns.map((c) => ({ key: `plc_${c.key}`, label: c.label })),
@@ -326,7 +330,9 @@ const ReportsPage = () => {
       }
       const shaped = {
         srNo: idx + 1,
-        barcode: partKey || "—",
+        plc_shot_number: plcData.shot_number ?? first.shot_number ?? first.shotNumber ?? extractShotFromPartId(partKey) ?? "-",
+        barcode: partKey || "â€”",
+        plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: first.createdAt ? new Date(first.createdAt).toLocaleString("en-IN") : "-",
         partName: plcData.part_name || first.partName || first.modelName || first.componentName || "-",
         customerCode: first.customerQrCode || first.customer_qr || "-",
@@ -346,23 +352,19 @@ const ReportsPage = () => {
         shaped[`cycle_${s.key}`] = stationCycleTimes[s.key] || "-";
       });
       plcColumns.forEach(({ key }) => {
-        if (key === "shot_status") {
-          const code = Number(plcData[key] ?? first[key]);
-          shaped[`plc_${key}`] = ({ 1: "OK", 3: "WARM UP SHOT", 5: "OFF SHOT" }[code] || (plcData[key] ?? first[key] ?? "-"));
-        } else if (key === "shot_date") {
+        if (key === "shot_datetime") {
           const y = plcData.shot_year ?? first.shot_year;
           const m = plcData.shot_month ?? first.shot_month;
           const d = plcData.shot_day ?? first.shot_day;
-          shaped[`plc_${key}`] = (y !== undefined && m !== undefined && d !== undefined)
-            ? `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`
-            : (plcData[key] ?? first[key] ?? "-");
-        } else if (key === "shot_time") {
           const hh = plcData.shot_hour ?? first.shot_hour;
           const mm = plcData.shot_minute ?? first.shot_minute;
           const ss = plcData.shot_second ?? first.shot_second;
-          shaped[`plc_${key}`] = (hh !== undefined && mm !== undefined && ss !== undefined)
-            ? `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`
-            : (plcData[key] ?? first[key] ?? "-");
+          shaped[`plc_${key}`] = (y !== undefined && m !== undefined && d !== undefined && hh !== undefined && mm !== undefined && ss !== undefined)
+            ? `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")} ${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`
+            : `${plcData.shot_date ?? first.shot_date ?? "-"} ${plcData.shot_time ?? first.shot_time ?? ""}`.trim();
+        } else if (key === "shot_status") {
+          const code = Number(plcData[key] ?? first[key]);
+          shaped[`plc_${key}`] = ({ 1: "OK", 3: "WARM UP SHOT", 5: "OFF SHOT" }[code] || (plcData[key] ?? first[key] ?? "-"));
         } else {
           shaped[`plc_${key}`] = plcData[key] ?? first[key] ?? "-";
         }
@@ -388,29 +390,29 @@ const ReportsPage = () => {
               <FileText size={22} />
             </div>
             <div>
-              <h1 className="db-header-title text-text-main">Traceability Report</h1>
-              <p className="db-header-subtitle">Production analytics and PLC cycle trace data</p>
+              <h1 className="db-header-title text-text-main">{t("reports.title", "Traceability Report")}</h1>
+              <p className="db-header-subtitle">{t("reports.subtitle", "Production analytics and PLC cycle trace data")}</p>
             </div>
           </div>
         </div>
       </div>
 
       <div className="bg-bg-card border border-border rounded-xl p-3 mb-2 flex items-center justify-between">
-        <p className="text-[14px] font-bold text-text-muted uppercase tracking-wider">Report</p>
+        <p className="text-[14px] font-bold text-text-muted uppercase tracking-wider">{t("reports.report", "Report")}</p>
         <div className="flex items-center gap-2">
           <button
             disabled={loading}
             onClick={fetchData}
             className="inline-flex items-center gap-2 bg-bg-dark text-text-main px-3 py-2 rounded-lg text-xs font-bold border border-border hover:border-primary/40 transition-all disabled:opacity-60"
           >
-            <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> {loading ? "Refreshing..." : "Refresh"}
+            <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> {loading ? t("reports.refreshing", "Refreshing...") : t("reports.refresh", "Refresh")}
           </button>
           <button
             disabled={exportLoading}
             onClick={() => handleExport("full")}
             className="inline-flex items-center gap-2 bg-primary text-on-primary px-4 py-2.5 rounded-lg text-xs font-bold shadow-lg shadow-primary/20 hover:brightness-110 active:scale-95 transition-all disabled:opacity-60"
           >
-            <Download size={14} /> {exportLoading ? "Downloading..." : "Download Report"}
+            <Download size={14} /> {exportLoading ? t("reports.downloading", "Downloading...") : t("reports.downloadReport", "Download Report")}
           </button>
         </div>
       </div>
@@ -424,11 +426,11 @@ const ReportsPage = () => {
           }}
           className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
         >
-          <option value="today">Today</option>
-          <option value="yesterday">Yesterday</option>
-          <option value="last7">Last 7 Days</option>
-          <option value="last15">Last 15 Days</option>
-          <option value="last30">Last 1 Month</option>
+          <option value="today">{t("reports.today", "Today")}</option>
+          <option value="yesterday">{t("reports.yesterday", "Yesterday")}</option>
+          <option value="last7">{t("reports.last7Days", "Last 7 Days")}</option>
+          <option value="last15">{t("reports.last15Days", "Last 15 Days")}</option>
+          <option value="last30">{t("reports.last1Month", "Last 1 Month")}</option>
         </select>
         <input
           type="datetime-local"
@@ -447,7 +449,7 @@ const ReportsPage = () => {
           onChange={(e) => setFilters((prev) => ({ ...prev, lineName: e.target.value, machineId: "" }))}
           className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
         >
-          <option value="">All Lines</option>
+          <option value="">{t("reports.allLines", "All Lines")}</option>
           {availableLines.map((line) => <option key={line} value={line}>{line}</option>)}
         </select>
         <select
@@ -455,7 +457,7 @@ const ReportsPage = () => {
           onChange={(e) => setFilters((prev) => ({ ...prev, machineId: e.target.value }))}
           className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
         >
-          <option value="">All Machines</option>
+          <option value="">{t("reports.allMachines", "All Machines")}</option>
           {machines
             .filter((m) => !filters.lineName || String(m.line_name || m.lineName || "").trim() === filters.lineName)
             .map((m) => <option key={m.id} value={m.id}>{m.machine_name || m.machineName}</option>)}
@@ -463,7 +465,7 @@ const ReportsPage = () => {
         <input
           value={filters.barcode || ""}
           onChange={(e) => setFilters((prev) => ({ ...prev, barcode: e.target.value }))}
-          placeholder="Part ID"
+          placeholder={t("reports.partId", "Part ID")}
           className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
         />
         <select
@@ -471,16 +473,16 @@ const ReportsPage = () => {
           onChange={(e) => setFilters((prev) => ({ ...prev, status: e.target.value }))}
           className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
         >
-          <option value="">All Status</option>
-          <option value="OK">PASSED</option>
-          <option value="NG">FAILED</option>
+          <option value="">{t("reports.allStatus", "All Status")}</option>
+          <option value="OK">{t("reports.passed", "PASSED")}</option>
+          <option value="NG">{t("reports.failed", "FAILED")}</option>
         </select>
         <select
           value={filters.shiftCode || ""}
           onChange={(e) => setFilters((prev) => ({ ...prev, shiftCode: e.target.value }))}
           className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
         >
-          <option value="">All Shifts</option>
+          <option value="">{t("reports.allShifts", "All Shifts")}</option>
           {((data.availableShifts && data.availableShifts.length) ? data.availableShifts : availableShifts).map((shift) => (
             <option key={shift.shiftCode || shift.shift_code} value={shift.shiftCode || shift.shift_code}>
               {shift.shiftName || shift.shift_name || shift.shiftCode || shift.shift_code}
@@ -496,7 +498,7 @@ const ReportsPage = () => {
           })}
           className="h-10 px-3 rounded-lg border border-red-400/30 bg-red-500/10 text-red-400 text-xs font-bold"
         >
-          Clear
+          {t("reports.clear", "Clear")}
         </button>
         <button
           disabled={loading}
@@ -504,7 +506,7 @@ const ReportsPage = () => {
           className="h-10 px-3 rounded-lg border text-xs font-bold inline-flex items-center justify-center gap-2 disabled:opacity-60"
           style={{ background: "rgba(84,119,146,0.10)", borderColor: "rgba(84,119,146,0.30)", color: "rgb(84,119,146)" }}
         >
-          <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> {loading ? "Loading..." : "Apply Filters"}
+          <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> {loading ? t("reports.loading", "Loading...") : t("reports.applyFilters", "Apply Filters")}
         </button>
       </div>
 
