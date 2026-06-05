@@ -1014,6 +1014,9 @@ const OperatorView = () => {
     const activeMachineId = String(selectedMachineIdRef.current || "").trim();
     const activeStation = String(selectedStationRef.current || "").trim().toUpperCase();
 
+    if (payloadMachineId && payloadStation) {
+      return payloadMachineId === activeMachineId && payloadStation === activeStation;
+    }
     if (payloadMachineId) {
       return payloadMachineId === activeMachineId;
     }
