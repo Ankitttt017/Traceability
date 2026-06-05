@@ -791,7 +791,7 @@ const GlobalPopup = ({
     ].join("|");
 
     let duration = 0;
-    const STANDARD_SUCCESS_CLOSE_MS = 6000;
+    const STANDARD_SUCCESS_CLOSE_MS = 4200;
     const STANDARD_ERROR_CLOSE_MS = 9000;
 
     // Faster auto-close / auto-reset for QR-focused industrial flow
@@ -814,11 +814,10 @@ const GlobalPopup = ({
         return undefined;
       }
       const hasManualDecisionPending = Boolean(manualSelection);
-      if ((validationError || popupType === "ERROR") && !hasManualDecisionPending) {
+      if (popupType === "SUCCESS" || manualSuccessMsg) {
+        duration = 2200;
+      } else if ((validationError || popupType === "ERROR") && !hasManualDecisionPending) {
         duration = STANDARD_ERROR_CLOSE_MS; // auto-close plain validation errors so next scan can start
-      } else
-      if (manualSuccessMsg) {
-        duration = 2200; // close quickly after final manual submit success
       } else {
         setAutoCloseTimeLeft(null);
         setAutoCloseDuration(0);
@@ -829,7 +828,7 @@ const GlobalPopup = ({
         const qrState = String(popup.qrVerification || popup.qrState || "WAIT").toUpperCase();
         const operationState = resolveOperationState(popup);
 
-        if (operationState === "PASS") {
+        if (popupType === "SUCCESS" || operationState === "PASS") {
           duration = STANDARD_SUCCESS_CLOSE_MS; // Auto-close for PASS
         } else if (["FAIL", "COMM", "TIMEOUT"].includes(operationState) || popupType === "ERROR" || qrState === "FAIL") {
           duration = Math.max(criticalAutoCloseMs || 0, STANDARD_ERROR_CLOSE_MS); // shorter for errors

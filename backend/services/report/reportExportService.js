@@ -120,6 +120,18 @@ function isProductionReportLog(log) {
   return true;
 }
 
+function shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr) {
+  const status = String(log?.plc_status || "").trim().toUpperCase();
+  const result = String(log?.result || "").trim().toUpperCase();
+  const reason = String(log?.interlock_reason || "").trim().toUpperCase();
+  return (
+    Boolean(mappedCustomerQr) &&
+    result === "OK" &&
+    ["PENDING", "PLC_COMM_ERROR", "STARTED"].includes(status) &&
+    reason === "RECOVERY_PENDING_AFTER_BACKEND_RESTART"
+  );
+}
+
 function normalizeKey(value) {
   return String(value || "").trim().toUpperCase();
 }
@@ -557,8 +569,42 @@ async function fetchProductionData(filters = {}, options = {}) {
     productionLogs = [...merged.values()];
   }
 
+  const anchorPartIds = [...new Set(
+    productionLogs
+      .map((log) => String(log.part_id || "").trim())
+      .filter(Boolean)
+  )];
+
+  if (!anchorPartIds.length) {
+    return [];
+  }
+
+  const fullHistoryLogs = await runLogQuery({
+    part_id: { [Op.in]: anchorPartIds }
+  });
+  const fullProductionHistoryLogs = fullHistoryLogs.filter(isProductionReportLog);
+
+  const earliestScanByPart = new Map();
+  const latestAnchorScanByPart = new Map();
+  fullProductionHistoryLogs.forEach((log) => {
+    const partId = String(log.part_id || "").trim();
+    if (!partId) return;
+    const prev = earliestScanByPart.get(partId);
+    if (!prev || new Date(log.createdAt).getTime() < new Date(prev).getTime()) {
+      earliestScanByPart.set(partId, log.createdAt);
+    }
+  });
+  productionLogs.forEach((log) => {
+    const partId = String(log.part_id || "").trim();
+    if (!partId) return;
+    const prev = latestAnchorScanByPart.get(partId);
+    if (!prev || new Date(log.createdAt).getTime() > new Date(prev).getTime()) {
+      latestAnchorScanByPart.set(partId, log.createdAt);
+    }
+  });
+
   // Fetch Part & QR Info (Flattening for performance)
-  const partIds = [...new Set(productionLogs.map(l => l.part_id))];
+  const partIds = anchorPartIds;
   const parts = await Part.findAll({
     where: { part_id: { [Op.in]: partIds } },
     attributes: ["part_id", "qr_format_name"],
@@ -592,7 +638,7 @@ async function fetchProductionData(filters = {}, options = {}) {
   // Deduplicate: per (part_id + operation_no) keep only the best outcome log.
   // Priority: ENDED_OK > ENDED_NG > everything else.
   const bestByPartStation = new Map();
-  for (const log of productionLogs) {
+  for (const log of fullProductionHistoryLogs) {
     const key = `${log.part_id}||${log.operation_no || log.station_no}`;
     const existing = bestByPartStation.get(key);
     if (!existing) {
@@ -612,7 +658,15 @@ async function fetchProductionData(filters = {}, options = {}) {
       }
     }
   }
-  const deduplicatedLogs = [...bestByPartStation.values()];
+  const deduplicatedLogs = [...bestByPartStation.values()].sort((a, b) => {
+    const partA = String(a.part_id || "").trim();
+    const partB = String(b.part_id || "").trim();
+    const anchorA = latestAnchorScanByPart.get(partA);
+    const anchorB = latestAnchorScanByPart.get(partB);
+    const anchorDiff = new Date(anchorB || 0).getTime() - new Date(anchorA || 0).getTime();
+    if (anchorDiff !== 0) return anchorDiff;
+    return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+  });
 
   let plcByPartId = new Map();
   let plcByUid = new Map();
@@ -653,11 +707,6 @@ async function fetchProductionData(filters = {}, options = {}) {
   const enriched = await Promise.all(deduplicatedLogs.map(async (log, index) => {
     const normalizedPartIdKey = normalizeKey(log.part_id);
     const part = partMap[normalizedPartIdKey] || {};
-    const { status: industrialResult, category } = resolveIndustrialResult({
-      result: log.result,
-      plc_status: log.plc_status,
-      interlock_reason: log.interlock_reason
-    });
 
     // Cycle times: scan time (createdAt of PENDING = QR scan) ? PLC end time
     const cycleStartTime = log.plc_start_at || log.createdAt || null;
@@ -672,6 +721,14 @@ async function fetchProductionData(filters = {}, options = {}) {
 
     const partIdValue = String(log.part_id || "").trim();
     const mappedCustomerQr = String(partCodeMap[normalizeKey(partIdValue)] || "").trim();
+    const recoveryCompletedByCustomerQr = shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr);
+    const { status: industrialResultRaw, category: categoryRaw } = resolveIndustrialResult({
+      result: log.result,
+      plc_status: log.plc_status,
+      interlock_reason: log.interlock_reason
+    });
+    const industrialResult = recoveryCompletedByCustomerQr ? "OK" : industrialResultRaw;
+    const category = recoveryCompletedByCustomerQr ? "PRODUCTION" : categoryRaw;
 
     const partLookupKey = normalizeKey(partIdValue);
     const compactQrKey = parseCompactQrPartId(partIdValue)?.key || "";
@@ -701,6 +758,8 @@ async function fetchProductionData(filters = {}, options = {}) {
       ...log,
       srNo: index + 1,
       partId:      partIdValue || "-",
+      firstScanCreatedAt: earliestScanByPart.get(partIdValue) || log.createdAt || null,
+      latestAnchorCreatedAt: latestAnchorScanByPart.get(partIdValue) || log.createdAt || null,
       customerCode: mappedCustomerQr || "-",
       customerQrCode: mappedCustomerQr || "-",
       machineName: log.Machine?.machine_name || "-",

@@ -1,6 +1,7 @@
 const PackingSession = require("../models/PackingSession");
 const PackingItem = require("../models/PackingItem");
 const Part = require("../models/Part");
+const PartCodeMapping = require("../models/PartCodeMapping");
 const { Op } = require("sequelize");
 const { emitRealtime } = require("./realtimeService");
 const { getFinalPackingStations } = require("./stationFeatureService");
@@ -55,6 +56,27 @@ function normalizeCapacity(value, fallback = DEFAULT_PACKING_CAPACITY) {
     return fallback;
   }
   return Math.min(MAX_PACKING_CAPACITY, Math.max(MIN_PACKING_CAPACITY, Math.round(parsed)));
+}
+
+async function resolvePackingPartId(scannedCode) {
+  const raw = String(scannedCode || "").trim();
+  if (!raw) {
+    return { partId: "", customerQrCode: null };
+  }
+  const mapping = await PartCodeMapping.findOne({
+    where: {
+      customer_qr: raw,
+      is_active: true,
+    },
+    order: [["updatedAt", "DESC"]],
+  });
+  if (!mapping?.old_part_id) {
+    return { partId: raw, customerQrCode: null };
+  }
+  return {
+    partId: String(mapping.old_part_id || "").trim(),
+    customerQrCode: raw,
+  };
 }
 
 async function getOpenSessionByBox(boxNumber) {
@@ -135,7 +157,8 @@ async function createAutoSessionIfMissing(capacity) {
 }
 
 async function packPart({ boxNumber, partId, capacity }) {
-  const normalizedPartId = String(partId || "").trim();
+  const resolvedScan = await resolvePackingPartId(partId);
+  const normalizedPartId = String(resolvedScan.partId || "").trim();
   if (!normalizedPartId) {
     throw new Error("partId is required for packing");
   }
@@ -250,6 +273,8 @@ async function packPart({ boxNumber, partId, capacity }) {
   return {
     session,
     item,
+    resolvedPartId: normalizedPartId,
+    customerQrCode: resolvedScan.customerQrCode,
   };
 }
 
@@ -399,4 +424,5 @@ module.exports = {
   normalizeCapacity,
   normalizeBoxNumber,
   assertValidBoxNumber,
+  resolvePackingPartId,
 };

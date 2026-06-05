@@ -297,6 +297,12 @@ const ReportsPage = () => {
       const stationResults = {};
       const stationCycleTimes = {};
       const plcData = {};
+      const firstScanAt = entries.reduce((earliest, row) => {
+        const raw = row.firstScanCreatedAt || row.createdAtRaw || row.createdAt || null;
+        if (!raw) return earliest;
+        if (!earliest) return raw;
+        return new Date(raw).getTime() < new Date(earliest).getTime() ? raw : earliest;
+      }, null);
       entries.forEach((row) => {
         const stationOp = String(row.operationNo || row.stationNo || "").trim();
         const stationMachine = String(row.machineName || "").trim();
@@ -333,7 +339,7 @@ const ReportsPage = () => {
         plc_shot_number: plcData.shot_number ?? first.shot_number ?? first.shotNumber ?? extractShotFromPartId(partKey) ?? "-",
         barcode: partKey || "â€”",
         plc_machine_name: plcData.machine_name || first.machineName || "-",
-        createdAt: first.createdAt ? new Date(first.createdAt).toLocaleString("en-IN") : "-",
+        createdAt: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
         partName: plcData.part_name || first.partName || first.modelName || first.componentName || "-",
         customerCode: first.customerQrCode || first.customer_qr || "-",
         overallStatus: (() => {
@@ -344,7 +350,7 @@ const ReportsPage = () => {
           return "IN_PROGRESS";
         })(),
         ngReason: first.reason || first.interlock_reason || "-",
-        cycleStartTime: first.createdAt ? new Date(first.createdAt).toLocaleString("en-IN") : "-",
+        cycleStartTime: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
         cycleTimeValue: stationPairs.length ? (stationCycleTimes[stationPairs[stationPairs.length - 1].key] || "-") : "-",
       };
       stationPairs.forEach((s) => {

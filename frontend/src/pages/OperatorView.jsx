@@ -679,6 +679,13 @@ const OperatorView = () => {
   }, [enforceStationLockMode, machines, selectedMachineId, stationLock]);
 
   const stationFeatureConfig = useMemo(() => getStationFeatures(selectedStation, stationSettings), [selectedStation, stationSettings]);
+  const popupStationReady = useMemo(() => {
+    if (!selectedMachineId || !selectedStation) return false;
+    if (!enforceStationLockMode) return true;
+    return hasLockedSelection &&
+      String(stationLock?.machineId || "") === String(selectedMachineId || "") &&
+      String(stationLock?.stationNo || "").trim().toUpperCase() === String(selectedStation || "").trim().toUpperCase();
+  }, [selectedMachineId, selectedStation, enforceStationLockMode, hasLockedSelection, stationLock]);
 
   const qualitySummary = stationStats?.summary || { okCount: 0, ngCount: 0, interlockedCount: 0, inProgressCount: 0, processedCount: 0, accuracy: 0 };
   const expectedCount = Math.max(Number(qualitySummary.processedCount || 0) + Number(qualitySummary.inProgressCount || 0) + Number(qualitySummary.interlockedCount || 0), 1);
@@ -1009,6 +1016,7 @@ const OperatorView = () => {
   }, []);
 
   const isPayloadForActiveMachine = useCallback((payload = {}) => {
+    if (!popupStationReady) return false;
     const payloadMachineId = String(payload.machineId || payload.machine_id || "").trim();
     const payloadStation = String(payload.stationNo || payload.station_no || "").trim().toUpperCase();
     const activeMachineId = String(selectedMachineIdRef.current || "").trim();
@@ -1024,7 +1032,7 @@ const OperatorView = () => {
       return payloadStation === activeStation;
     }
     return false;
-  }, []);
+  }, [popupStationReady]);
 
   const shouldIgnoreStartupPopup = useCallback((payload = {}) => {
     const now = Date.now();
@@ -1081,13 +1089,20 @@ const OperatorView = () => {
     const signalStation = String(sig.stationNo || selectedStationRef.current || "").trim().toUpperCase();
     const signalFeatures = getStationFeatures(signalStation, stationSettings);
     const isFinalPackingStation = Boolean(signalFeatures?.finalPacking);
+    const isCustomerMappingStation =
+      signalFeatures?.manualResult !== true &&
+      signalFeatures?.validateQrFormat === false &&
+      signalFeatures?.validateShotNumber === false &&
+      signalFeatures?.validatePreviousStation !== false;
     const fallbackMessage = isBlockedDecision
       ? (isFinalPackingStation
         ? `${formatScanErrorMessage(payload, t)} Not eligible for packing.`
         : formatScanErrorMessage(payload, t))
-      : (String(payload.message || "").trim() || (isFinalPackingStation
+      : (String(payload.message || "").trim() || (isCustomerMappingStation
+        ? "Start QR accepted. Waiting for customer QR code."
+        : (isFinalPackingStation
         ? `Final station PASS: Eligible for packing (${sig.stationNo || "Station"}).`
-        : `Scan accepted at ${sig.stationNo || "Station"}`));
+        : `Scan accepted at ${sig.stationNo || "Station"}`)));
     const passOperationStatus = getPassOperationStatusForStation(sig.stationNo, stationSettings);
     setPopup((prev) => {
       const nextPartId = sig.partId || prev?.partId || prev?.part_id || "";

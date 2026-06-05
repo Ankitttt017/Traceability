@@ -300,6 +300,12 @@ function useScanInput(onScan){
   },[onScan]);
 }
 
+function normalizeScanValue(value) {
+  return String(value || "")
+    .replace(/[^\x20-\x7E]/g, "")
+    .trim();
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 //  MAIN COMPONENT
 // ══════════════════════════════════════════════════════════════════════════
@@ -319,6 +325,7 @@ const Packing=()=>{
   const[scanResult,  setScanResult]  =useState(null);
   const[showQRModal, setShowQRModal] =useState(false);
   const selectedBoxRef=useRef("");
+  const popupTimerRef=useRef(null);
 
   const activeSession=overview.activeSession;
   const activeItems  =useMemo(()=>overview.activeItems||[],[overview.activeItems]);
@@ -364,16 +371,50 @@ const Packing=()=>{
 
   useEffect(()=>{loadOverview();},[loadOverview]);
 
-  useScanInput(useCallback((scanned)=>{
+  useEffect(()=>{
+    if(!popup) return undefined;
+    if(popupTimerRef.current) clearTimeout(popupTimerRef.current);
+    popupTimerRef.current=setTimeout(()=>setPopup(null), popup.type==="ERROR" ? 5200 : 3200);
+    return()=>{ if(popupTimerRef.current) clearTimeout(popupTimerRef.current); };
+  },[popup]);
+
+  const handlePackingScan=useCallback(async(rawScanned)=>{
+    const scanned=normalizeScanValue(rawScanned).toUpperCase();
+    if(!scanned || scanned.length<3) return;
     setScanFlash(true);setTimeout(()=>setScanFlash(false),800);
-    const boxes=[activeSession?.boxNumber,...(overview.recentSessions||[]).map(s=>s.boxNumber)].filter(Boolean);
+    const boxes=[activeSession?.boxNumber,...(overview.recentSessions||[]).map(s=>s.boxNumber)].filter(Boolean).map(v=>String(v).trim().toUpperCase());
     const matched=boxes.find(b=>scanned.includes(b)||b.includes(scanned)||scanned===b);
-    const boxNum=matched||scanned;
-    setSelectedBox(boxNum);selectedBoxRef.current=boxNum;
-    loadSession(boxNum).then(()=>{
-      setScanResult({boxNumber:boxNum,scannedAt:new Date().toISOString()});
-    });
-  },[activeSession,overview.recentSessions,loadSession]));
+    if(matched){
+      setSelectedBox(matched);selectedBoxRef.current=matched;
+      loadSession(matched).then(()=>{
+        setScanResult({boxNumber:matched,scannedAt:new Date().toISOString()});
+      });
+      return;
+    }
+    try{
+      const packed=await packingApi.scan({
+        boxNumber:selectedBoxRef.current||undefined,
+        partId:scanned,
+      });
+      await loadOverview(selectedBoxRef.current||packed?.box?.boxNumber||"");
+      setPopup({
+        type:"SUCCESS",
+        title:"Packing Ready",
+        message:`Packed ${packed?.resolvedPartId||packed?.item?.partId||scanned} into ${packed?.box?.boxNumber||selectedBoxRef.current||"active box"}.`,
+        subtitle:packed?.customerQrCode?`Customer QR: ${packed.customerQrCode}`:"",
+      });
+    }catch(error){
+      const message=String(error?.response?.data?.error||error?.message||"Packing scan failed");
+      setPopup({
+        type:"ERROR",
+        title:"Packing Blocked",
+        message,
+        subtitle:scanned,
+      });
+    }
+  },[activeSession?.boxNumber, overview.recentSessions, loadOverview, loadSession]);
+
+  useScanInput(handlePackingScan);
 
   useEffect(()=>{
     const socket=io(SOCKET_URL,{
@@ -388,11 +429,29 @@ const Packing=()=>{
     socket.on("packing_update",(payload={})=>{
       loadOverview(payload.boxNumber).catch(()=>{});
     });
+    socket.on("operator_popup",(payload={})=>{
+      const targetStation=String(payload.stationNo||payload.station_no||"").trim().toUpperCase();
+      const sourceStation=String(payload.sourceStationNo||payload.source_station_no||"").trim().toUpperCase();
+      const finalStations=(overview.finalPackingStations||[]).map(v=>String(v).trim().toUpperCase());
+      const isPackingPopup=targetStation==="PACKING";
+      const isFinalStationPopup=sourceStation && finalStations.includes(sourceStation);
+      if(!isPackingPopup && !isFinalStationPopup) return;
+      setPopup({
+        type:String(payload.type||"INFO").toUpperCase()==="ERROR"?"ERROR":"SUCCESS",
+        title:isFinalStationPopup?"Ready For Packing":"Packing Update",
+        message:String(payload.message||"Packing status updated"),
+        subtitle:[payload.partId||payload.part_id, sourceStation||targetStation].filter(Boolean).join(" • "),
+      });
+      if(payload.partId || payload.part_id){
+        loadOverview(selectedBoxRef.current||"").catch(()=>{});
+      }
+    });
     return()=>{
       socket.off("packing_update");
+      socket.off("operator_popup");
       if (socket.connected) socket.disconnect();
     };
-  },[loadOverview]);
+  },[loadOverview, overview.finalPackingStations]);
 
   const handleSelectBox=(e)=>{
     const v=e.target.value.toUpperCase();
@@ -429,7 +488,27 @@ const Packing=()=>{
     <div style={{display:"flex",flexDirection:"column",gap:18,paddingBottom:32,
       animation:"pkFadeIn .3s ease",outline:scanFlash?`3px solid ${C.ok()}`:"none",
       transition:"outline .1s",borderRadius:4}}>
-
+      {popup&&(
+        <div style={{position:"fixed",top:18,right:18,zIndex:1350,maxWidth:420,width:"calc(100% - 32px)"}}>
+          <div style={{background:C.bg("card"),border:`1px solid ${popup.type==="ERROR"?C.ng(0.35):C.ok(0.3)}`,
+            borderLeft:`4px solid ${popup.type==="ERROR"?C.ng():C.ok()}`,borderRadius:14,boxShadow:SHM,
+            padding:"14px 16px",display:"flex",gap:12,alignItems:"flex-start"}}>
+            <div style={{width:32,height:32,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",
+              background:popup.type==="ERROR"?C.ng(0.12):C.ok(0.12),flexShrink:0}}>
+              {popup.type==="ERROR"?<AlertCircle size={16} color={C.ng()}/>:<CheckCircle2 size={16} color={C.ok()}/>}
+            </div>
+            <div style={{minWidth:0,flex:1}}>
+              <div style={{fontSize:13,fontWeight:800,color:C.txt("pri"),marginBottom:4}}>{popup.title||"Packing Update"}</div>
+              <div style={{fontSize:12,color:C.txt("sec"),lineHeight:1.45}}>{popup.message}</div>
+              {popup.subtitle&&<div style={{fontSize:10,color:C.txt("muted"),marginTop:6,fontFamily:"'DM Mono',monospace"}}>{popup.subtitle}</div>}
+            </div>
+            <button onClick={()=>setPopup(null)} style={{width:28,height:28,borderRadius:8,background:"none",
+              border:`1px solid ${C.bdr()}`,color:C.txt("muted"),display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
+              <X size={13}/>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── QR Scan Result Modal ─────────────────────────────────── */}
       {scanResult&&(
