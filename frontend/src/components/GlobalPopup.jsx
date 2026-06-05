@@ -1209,14 +1209,21 @@ const GlobalPopup = ({
     String(popup?.message || "").toUpperCase().includes("ALREADY COMPLETED") ||
     String(popup?.message || "").toUpperCase().includes("DUPLICATE");
   const liveRejectionState = resolveRejectionState(popup, liveOperationState);
+  const targetStationIndexInJourney = journeyStations.findIndex(
+    (s) => String(s.stationNo || "").trim().toUpperCase() === targetStationKey
+  );
+  const fallbackCurrentIndex = journeyStations.findIndex((s) => String(s.status || "").toUpperCase() === "IN_PROGRESS");
+  const resolvedCurrentIndex = targetStationIndexInJourney >= 0 ? targetStationIndexInJourney : fallbackCurrentIndex;
+  const previousStation = targetStationIndexInJourney > 0
+    ? journeyStations[targetStationIndexInJourney - 1]
+    : (resolvedCurrentIndex > 0 ? journeyStations[resolvedCurrentIndex - 1] : null);
+  const currentStationCard = targetStationIndexInJourney >= 0
+    ? journeyStations[targetStationIndexInJourney]
+    : (resolvedCurrentIndex >= 0 ? journeyStations[resolvedCurrentIndex] : null);
 
   // Always prefer the station currently opened on OperatorView.
   // Fallback to journey IN_PROGRESS only when popup has no station identity.
-  const currentStationIndex = journeyStations.findIndex(
-    (s) => String(s.stationNo || "").trim().toUpperCase() === targetStationKey
-  );
-  const fallbackLiveStationIndex = journeyStations.findIndex((s) => s.status === "IN_PROGRESS");
-  const mergeStationIndex = currentStationIndex >= 0 ? currentStationIndex : fallbackLiveStationIndex;
+  const mergeStationIndex = resolvedCurrentIndex;
   const enrichedStations = journeyStations.map((s, idx) => {
     const features = getStationFeatures(s.stationNo, stationSettings);
     let base = { ...s, features };
@@ -1303,15 +1310,6 @@ const GlobalPopup = ({
   })();
   const isValidNgReason = !manualReason || ngReasonOptions.includes(manualReason);
   const currentStationName = currentStationCard?.stationName || displayStations.find((s) => s.status === "IN_PROGRESS")?.stationName || stationNo || "System Node";
-  const targetStationIndexInJourney = enrichedStations.findIndex(
-    (s) => String(s.stationNo || "").trim().toUpperCase() === targetStationKey
-  );
-  const fallbackCurrentIndex = enrichedStations.findIndex((s) => String(s.status || "").toUpperCase() === "IN_PROGRESS");
-  const resolvedCurrentIndex = targetStationIndexInJourney >= 0 ? targetStationIndexInJourney : fallbackCurrentIndex;
-  const previousStation = targetStationIndexInJourney > 0 ? enrichedStations[targetStationIndexInJourney - 1] : (resolvedCurrentIndex > 0 ? enrichedStations[resolvedCurrentIndex - 1] : null);
-  const currentStationCard = targetStationIndexInJourney >= 0
-    ? enrichedStations[targetStationIndexInJourney]
-    : (resolvedCurrentIndex >= 0 ? enrichedStations[resolvedCurrentIndex] : null);
   const previousOpState = String(previousStation?.operation || previousStation?.qualityCheck || previousStation?.status || "").trim().toUpperCase();
   const currentOpState = String(liveOperationState || currentStationCard?.operation || currentStationCard?.status || "").trim().toUpperCase();
   const previousStationPassed = ["PASS", "PASSED", "COMPLETED", "ENDED_OK"].includes(previousOpState);
