@@ -687,6 +687,20 @@ const OperatorView = () => {
       String(stationLock?.stationNo || "").trim().toUpperCase() === String(selectedStation || "").trim().toUpperCase();
   }, [selectedMachineId, selectedStation, enforceStationLockMode, hasLockedSelection, stationLock]);
 
+  const resolvePopupStationNo = useCallback((payload = {}) => {
+    return String(
+      payload.stationNo ||
+      payload.station_no ||
+      payload.sourceStationNo ||
+      payload.source_station_no ||
+      payload.expectedStation ||
+      payload.expected_station ||
+      payload.lastCompletedStation ||
+      payload.last_completed_station ||
+      ""
+    ).trim().toUpperCase();
+  }, []);
+
   const qualitySummary = stationStats?.summary || { okCount: 0, ngCount: 0, interlockedCount: 0, inProgressCount: 0, processedCount: 0, accuracy: 0 };
   const expectedCount = Math.max(Number(qualitySummary.processedCount || 0) + Number(qualitySummary.inProgressCount || 0) + Number(qualitySummary.interlockedCount || 0), 1);
   const producedCount = Number(qualitySummary.processedCount || 0);
@@ -1018,9 +1032,11 @@ const OperatorView = () => {
   const isPayloadForActiveMachine = useCallback((payload = {}) => {
     if (!popupStationReady) return false;
     const payloadMachineId = String(payload.machineId || payload.machine_id || "").trim();
-    const payloadStation = String(payload.stationNo || payload.station_no || "").trim().toUpperCase();
+    const payloadStation = resolvePopupStationNo(payload);
     const activeMachineId = String(selectedMachineIdRef.current || "").trim();
     const activeStation = String(selectedStationRef.current || "").trim().toUpperCase();
+
+    if (!payloadStation) return false;
 
     if (payloadMachineId && payloadStation) {
       return payloadMachineId === activeMachineId && payloadStation === activeStation;
@@ -1032,7 +1048,7 @@ const OperatorView = () => {
       return payloadStation === activeStation;
     }
     return false;
-  }, [popupStationReady]);
+  }, [popupStationReady, resolvePopupStationNo]);
 
   const shouldIgnoreStartupPopup = useCallback((payload = {}) => {
     const now = Date.now();
@@ -1162,9 +1178,10 @@ const OperatorView = () => {
   }, [selectedMachineId, selectedStation, isPayloadForActiveMachine]);
 
   const mergePopupPayload = useCallback((payload = {}) => {
+    if (!isPayloadForActiveMachine(payload)) return;
     setPopup(prev => {
       const nextPartId = payload.partId || payload.part_id || prev?.partId || "";
-      const nextStationNo = payload.stationNo || payload.station_no || prev?.stationNo || "";
+      const nextStationNo = resolvePopupStationNo(payload) || prev?.stationNo || "";
       const nextType = payload.type || prev?.type || "";
       const prevPartId = prev?.partId || prev?.part_id || "";
       const prevStationNo = prev?.stationNo || prev?.station_no || "";
@@ -1192,14 +1209,14 @@ const OperatorView = () => {
         ...(payload.expectedStation && { expectedStation: payload.expectedStation }),
         ...(payload.lastCompletedStation && { lastCompletedStation: payload.lastCompletedStation }),
         ...((payload.partId || payload.part_id) && { partId: payload.partId || payload.part_id }),
-        ...((payload.stationNo || payload.station_no) && { stationNo: payload.stationNo || payload.station_no }),
+        ...(resolvePopupStationNo(payload) && { stationNo: resolvePopupStationNo(payload) }),
         ...((payload.machineId || payload.machine_id) && { machineId: payload.machineId || payload.machine_id }),
         ...(payload.machineName && { machineName: payload.machineName }),
         ...(payload.timestamp && { timestamp: payload.timestamp }),
         _shownAtMs: isIdentityChanged ? Date.now() : (prev?._shownAtMs || Date.now()),
       };
     });
-  }, []);
+  }, [isPayloadForActiveMachine, resolvePopupStationNo]);
 
   const handleResetOperation = useCallback(async (partId, stationNo) => {
     const pid = normalizePartId(partId), sno = String(stationNo || "").trim().toUpperCase();
@@ -1339,8 +1356,8 @@ const OperatorView = () => {
     });
     socket.on("operator_popup", (p = {}) => {
       if (shouldSuppressPopupPayload(p) || isDuplicatePopupEvent(p)) return;
-      processIncomingSocketScanEvent(p, "operator_popup");
       if (!isPayloadForActiveMachine(p)) return;
+      processIncomingSocketScanEvent(p, "operator_popup");
       if (String(p.partId || p.part_id || "").trim()) {
         setSuppressReadyPopup(false);
       }

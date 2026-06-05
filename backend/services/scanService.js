@@ -1075,48 +1075,54 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       await part.save();
     }
 
-    // 1. DUPLICATE VALIDATION (cycle-aware + latest-station-log aware)
-    const firstStationInSequence = sequence[0] || null;
-    let cycleAnchorAt = null;
-
-    if (stationSequenceIndex > 0 && firstStationInSequence) {
-      const latestFirstStationPassLog = await OperationLog.findOne({
-        where: {
-          part_id: normalizedPartId,
-          station_no: firstStationInSequence,
-          [Op.or]: [
-            { plc_status: { [Op.in]: ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"] } },
-            { result: { [Op.in]: ["OK", "NG", "PASS", "FAIL"] } },
-          ],
-        },
-        attributes: ["createdAt"],
-        order: [["createdAt", "DESC"]],
-      });
-      cycleAnchorAt = latestFirstStationPassLog?.createdAt || null;
-    }
-
-    const latestStationWhere = {
-      part_id: normalizedPartId,
-      station_no: station,
-    };
-    if (cycleAnchorAt && stationSequenceIndex > 0) {
-      latestStationWhere.createdAt = { [Op.gte]: cycleAnchorAt };
-    }
-
+    // 1. DUPLICATE VALIDATION
+    // Once a station has a real success for this part, any later attempt is a duplicate
+    // unless the part is explicitly in rework.
     const latestStationLog = await OperationLog.findOne({
-      where: latestStationWhere,
+      where: {
+        part_id: normalizedPartId,
+        station_no: station,
+      },
+      order: [["createdAt", "DESC"]],
+    });
+    const anySuccessfulStationLog = await OperationLog.findOne({
+      where: {
+        part_id: normalizedPartId,
+        station_no: station,
+        [Op.or]: [
+          { plc_status: { [Op.in]: ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"] } },
+          { result: { [Op.in]: ["OK", "NG", "PASS", "FAIL"] } },
+        ],
+      },
       order: [["createdAt", "DESC"]],
     });
     const latestStationStatus = String(latestStationLog?.plc_status || "").trim().toUpperCase();
     const latestStationResult = String(latestStationLog?.result || "").trim().toUpperCase();
     const hasExistingSuccess =
+      Boolean(anySuccessfulStationLog) ||
       ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"].includes(latestStationStatus) ||
       ["OK", "NG", "PASS", "FAIL"].includes(latestStationResult);
 
     const scanAttemptType = hasExistingSuccess ? "RE-SCAN" : "INITIAL";
 
+    if (part.is_interlocked && !part.is_rework) {
+      const lockedReason = String(part.interlock_reason || "").trim().toUpperCase();
+      if (["DUPLICATE_SCAN", "ALREADY_COMPLETED", "DUPLICATE_SCAN_LOCK"].includes(lockedReason)) {
+        return {
+          decision: "BLOCK",
+          reason: lockedReason || "DUPLICATE_SCAN_LOCK",
+          qrStatus: "DUPLICATE",
+          operationStatus: "PASSED",
+          message: "This part is locked after a duplicate scan. Reset the journey before scanning again.",
+          currentStatus: part.status,
+        };
+      }
+    }
+
     if (part.status === "COMPLETED" && !part.is_rework) {
        part.last_validation_result = "DUPLICATE";
+       part.is_interlocked = true;
+       part.interlock_reason = "ALREADY_COMPLETED";
        await part.save();
        return {
         decision: "BLOCK",
@@ -1144,6 +1150,8 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       });
       
       part.last_validation_result = "DUPLICATE";
+      part.is_interlocked = true;
+      part.interlock_reason = "DUPLICATE_SCAN_LOCK";
       await part.save();
 
       return {

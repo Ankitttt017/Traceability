@@ -775,6 +775,11 @@ const GlobalPopup = ({
     const targetStationNo = stationNo || activeStation || popup?.stationNo || popup?.station_no;
     const targetFeatures = getStationFeatures(targetStationNo, stationSettings);
     const isOnlyQrCheck = targetFeatures.qr === true && targetFeatures.operation === false;
+    const signalCustomerMappingStation =
+      targetFeatures?.manualResult !== true &&
+      targetFeatures?.validateQrFormat === false &&
+      targetFeatures?.validateShotNumber === false &&
+      targetFeatures?.validatePreviousStation !== false;
     const isManual = targetFeatures?.manualResult === true;
 
     const popupType = String(popup?.type || "").trim().toUpperCase();
@@ -804,6 +809,14 @@ const GlobalPopup = ({
       } else {
         // Even when upstream state is partial/WAIT, close quickly to be ready for next industrial scan.
         duration = STANDARD_SUCCESS_CLOSE_MS;
+      }
+    } else if (signalCustomerMappingStation) {
+      if (popupType === "SUCCESS" || popupQrState === "PASS") {
+        duration = Math.max(autoCloseMs || 12000, 12000);
+      } else if (popup?.type === "ERROR" || popupQrState === "FAIL" || popupQrState === "BLOCKED") {
+        duration = Math.max(criticalAutoCloseMs || 0, STANDARD_ERROR_CLOSE_MS);
+      } else {
+        duration = Math.max(autoCloseMs || 12000, 12000);
       }
     } else if (isManual) {
       // Manual-result station behavior:
@@ -1184,6 +1197,7 @@ const GlobalPopup = ({
 
   // Full journey mode
   const stations = showJourney ? (journeyData?.stations || []) : [];
+  const journeyStations = showJourney ? (journeyData?.stationTimeline || journeyData?.stations || []) : [];
   const targetStationNo = stationNo || popup.stationNo || popup.station_no;
   const targetStationKey = String(targetStationNo || "").trim().toUpperCase();
 
@@ -1198,12 +1212,12 @@ const GlobalPopup = ({
 
   // Always prefer the station currently opened on OperatorView.
   // Fallback to journey IN_PROGRESS only when popup has no station identity.
-  const currentStationIndex = stations.findIndex(
+  const currentStationIndex = journeyStations.findIndex(
     (s) => String(s.stationNo || "").trim().toUpperCase() === targetStationKey
   );
-  const fallbackLiveStationIndex = stations.findIndex((s) => s.status === "IN_PROGRESS");
+  const fallbackLiveStationIndex = journeyStations.findIndex((s) => s.status === "IN_PROGRESS");
   const mergeStationIndex = currentStationIndex >= 0 ? currentStationIndex : fallbackLiveStationIndex;
-  const enrichedStations = stations.map((s, idx) => {
+  const enrichedStations = journeyStations.map((s, idx) => {
     const features = getStationFeatures(s.stationNo, stationSettings);
     let base = { ...s, features };
 
@@ -1238,10 +1252,6 @@ const GlobalPopup = ({
   const features = getStationFeatures(targetStationNo, stationSettings);
   const isManualResultStation = features?.manualResult === true;
 
-  const stationScopedJourney = journeyScope === "station" && targetStationNo
-    ? enrichedStations.filter((s) => String(s.stationNo || "").trim().toUpperCase() === String(targetStationNo).trim().toUpperCase())
-    : enrichedStations;
-
   const nextPartHint = String(validationInfo || popup?.message || "").trim().toUpperCase();
   const isNextPartState =
     awaitingNextScan ||
@@ -1275,7 +1285,7 @@ const GlobalPopup = ({
       manualScanMode === true ||
       popup?.manualScanMode === true);
 
-  const displayStations = showJourney ? stationScopedJourney : [];
+  const displayStations = showJourney ? enrichedStations : [];
   const allNgReasonOptions = Array.from(
     new Set(NG_REASON_CATEGORIES.flatMap((category) => getNgReasonsByCategory(category.key)))
   );
