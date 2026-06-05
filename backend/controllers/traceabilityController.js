@@ -3193,12 +3193,40 @@ exports.verifyScanForOperator = async (req, res) => {
     });
     const isExistingMappedCustomerQr = Boolean(existingCustomerMapping);
     const isKnownPartId = Boolean(await Part.findOne({ where: { part_id: scannedQrRaw }, attributes: ["part_id"] }));
+    const looksLikeCustomerQr =
+      hasCustomerQrScanner &&
+      scannedQrRaw &&
+      scannedQrRaw !== activePartIdForMachine &&
+      (!isKnownPartId || isExistingMappedCustomerQr);
+
+    if (looksLikeCustomerQr && !activePartIdForMachine) {
+      emitOperatorPopup("ERROR", {
+        partId: "",
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "BLOCKED",
+        plcStatus: "WAIT",
+        qrResult: "FAIL",
+        reason: "START_QR_REQUIRED",
+        message: "Scan the start QR first, then scan customer QR for mapping.",
+        customerQrCode: scannedQrRaw,
+      });
+      return res.status(409).json({
+        error: "Scan the start QR first, then scan customer QR for mapping.",
+        reason: "START_QR_REQUIRED",
+        stationNo,
+        machine: {
+          id: machine.id,
+          machineName: machine.machine_name,
+          stationNo,
+        },
+      });
+    }
 
     if (
-      hasCustomerQrScanner &&
-      activePartIdForMachine &&
-      scannedQrRaw !== activePartIdForMachine &&
-      (!isKnownPartId || isExistingMappedCustomerQr)
+      looksLikeCustomerQr &&
+      activePartIdForMachine
     ) {
       if (
         existingCustomerMapping &&
