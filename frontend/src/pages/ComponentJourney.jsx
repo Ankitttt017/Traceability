@@ -88,6 +88,7 @@ const C = {
   ng:     (o=1) => `rgba(var(--ng-rgb),${o})`,
   wip:    (o=1) => `rgba(var(--wip-rgb),${o})`,
   idle:   (o=1) => `rgba(var(--idle-rgb),${o})`,
+  info:   (o=1) => `rgba(var(--steel),${o})`,
   bg:     (v="base")      => `rgb(var(--bg-${v}))`,
   txt:    (v="primary")   => `rgb(var(--txt-${v}))`,
   border: (o)             => `rgba(var(--border),${o||"var(--border-op)"})`,
