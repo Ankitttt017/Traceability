@@ -3,12 +3,39 @@ const scannerConnectionService = require("../services/scannerConnectionService")
 const { markScannerHeartbeat } = require("../services/scannerHealthService");
 const Scanner = require("../models/Scanner");
 const Machine = require("../models/Machine");
+const OperationLog = require("../models/OperationLog");
+const PartCodeMapping = require("../models/PartCodeMapping");
 const { saveScan } = require("../services/scanService");
 const { emitRealtime } = require("../services/realtimeService");
+const { Op } = require("sequelize");
+
+function sanitizeScannerPayload(value) {
+  return String(value || "").replace(/[\u0000-\u001F\u007F]/g, "").trim();
+}
+
+async function resolveActivePartIdForMachine(machine, stationNo) {
+  if (!machine) return "";
+  const machineRunningPartId = String(machine.running_part_id || "").trim();
+  const machineRunningStation = String(machine.running_station_no || "").trim().toUpperCase();
+  const targetStation = String(stationNo || "").trim().toUpperCase();
+  if (machineRunningPartId && (!targetStation || !machineRunningStation || machineRunningStation === targetStation)) {
+    return machineRunningPartId;
+  }
+  const activeLog = await OperationLog.findOne({
+    where: {
+      machine_id: machine.id,
+      ...(targetStation ? { station_no: targetStation } : {}),
+      plc_status: { [Op.in]: ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING"] },
+    },
+    order: [["createdAt", "DESC"]],
+  });
+  return String(activeLog?.part_id || "").trim();
+}
 
 async function processIncomingScannerPayload({ scannerIp, payload }) {
-  const partId = String(payload || "").trim();
+  const partId = sanitizeScannerPayload(payload);
   if (!partId) return;
+  if (partId.length < 4) return;
 
   const scanner = await Scanner.findOne({
     where: { scanner_ip: scannerIp, is_active: true },
@@ -90,6 +117,109 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
   console.log(
     `[TCP] Routing payload scanner=${scanner.id} name=${scanner.scanner_name} role=${scannerRole} machine=${machine.id} station=${stationNo} payload=${partId}`
   );
+
+  if (scannerRole === "CUSTOMER_QR") {
+    const activePartId = await resolveActivePartIdForMachine(machine, stationNo);
+    if (!activePartId) {
+      emitRealtime("operator_popup", {
+        type: "ERROR",
+        partId: "",
+        customerQrCode: partId,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        scannerId: scanner.id,
+        scannerName: scanner.scanner_name,
+        scannerRole,
+        scannerIp,
+        qrStatus: "FAILED",
+        operationStatus: "BLOCKED",
+        status: "BLOCKED",
+        plcStatus: "BLOCKED",
+        reason: "START_QR_REQUIRED",
+        message: "Scan the start QR first, then scan customer QR for mapping.",
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const existingMapping = await PartCodeMapping.findOne({
+      where: { customer_qr: partId, is_active: true },
+      order: [["updatedAt", "DESC"]],
+    });
+    if (existingMapping && String(existingMapping.old_part_id || "").trim() !== activePartId) {
+      emitRealtime("operator_popup", {
+        type: "ERROR",
+        partId: activePartId,
+        customerQrCode: partId,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        scannerId: scanner.id,
+        scannerName: scanner.scanner_name,
+        scannerRole,
+        scannerIp,
+        qrStatus: "FAILED",
+        operationStatus: "BLOCKED",
+        status: "BLOCKED",
+        plcStatus: "BLOCKED",
+        reason: "CUSTOMER_QR_ALREADY_MAPPED",
+        message: "Customer QR already mapped to another part.",
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    await PartCodeMapping.upsert({
+      old_part_id: activePartId,
+      customer_qr: partId,
+      machine_id: machine.id,
+      station_no: stationNo || null,
+      is_active: true,
+    });
+
+    emitRealtime("scan_event", {
+      sourceEvent: "scan_event",
+      partId: activePartId,
+      customerQrCode: partId,
+      stationNo,
+      machineId: machine.id,
+      machineName: machine.machine_name,
+      scannerId: scanner.id,
+      scannerName: scanner.scanner_name,
+      scannerRole,
+      scannerIp,
+      decision: "ALLOW",
+      reason: "CUSTOMER_QR_MAPPED",
+      status: "SCANNED",
+      qrStatus: "PASSED",
+      operationStatus: "WAITING",
+      message: "Customer QR mapped successfully",
+      timestamp: new Date().toISOString(),
+    });
+
+    emitRealtime("operator_popup", {
+      type: "INFO",
+      partId: activePartId,
+      customerQrCode: partId,
+      stationNo,
+      machineId: machine.id,
+      machineName: machine.machine_name,
+      scannerId: scanner.id,
+      scannerName: scanner.scanner_name,
+      scannerRole,
+      scannerIp,
+      qrStatus: "PASSED",
+      operationStatus: "WAITING",
+      status: "SCANNED",
+      plcStatus: "WAITING_PLC",
+      reason: "CUSTOMER_QR_MAPPED",
+      message: "Customer QR mapped successfully to active part.",
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
+
   const response = await saveScan(partId, stationNo, "OK", machine.id, null, {
     resultSource: "TCP_PUSH_SCANNER",
     resultInput: "OK",
@@ -173,7 +303,7 @@ function startTcpServer() {
     };
 
     const consumeMessage = (raw) => {
-      const data = String(raw || "").trim();
+      const data = sanitizeScannerPayload(raw);
       if (!data) return;
       console.log(`[TCP] Received from ${remoteIp}: ${data}`);
       scannerConnectionService.markScannerData({ scannerIp: remoteIp });

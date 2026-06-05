@@ -1269,7 +1269,7 @@ async function markOperationStarted(operationLogId, machineId) {
   return opLog;
 }
 
-async function markOperationEndedOk({ operationLogId, partId, stationNo, machineId, userId }) {
+async function markOperationEndedOk({ operationLogId, partId, stationNo, machineId, userId, isBypassed = false, bypassReason = null }) {
   const opLog = await OperationLog.findByPk(operationLogId);
   if (!opLog) {
     return null;
@@ -1281,8 +1281,8 @@ async function markOperationEndedOk({ operationLogId, partId, stationNo, machine
     plc_end_time: new Date(),
     plc_end_at: new Date(),
     interlock_reason: null,
-    is_bypassed: false,
-    bypass_reason: null,
+    is_bypassed: Boolean(isBypassed),
+    bypass_reason: isBypassed ? (bypassReason || "STATION_BYPASS_AUTO_OK") : null,
   });
 
   const part = await Part.findOne({ where: { part_id: partId } });
@@ -1601,6 +1601,12 @@ async function handleStationPlcFlow({
           stationNo,
           machineId: machine.id,
           userId,
+          isBypassed: true,
+          bypassReason: machineBypassEnabled
+            ? "MACHINE_BYPASS_AUTO_OK"
+            : (!stationFeatures.operation
+              ? "STATION_OPERATION_DISABLED_AUTO_OK"
+              : "STATION_BYPASS_AUTO_OK"),
         }).catch(err => console.error("Failed to mark bypassed operation ended OK:", err.message));
 
         await safeRecordTimeline({
