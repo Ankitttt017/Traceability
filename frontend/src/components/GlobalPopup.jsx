@@ -1285,7 +1285,11 @@ const GlobalPopup = ({
       manualScanMode === true ||
       popup?.manualScanMode === true);
 
-  const displayStations = showJourney ? enrichedStations : [];
+  const displayStations = showJourney
+    ? (resolvedCurrentIndex >= 0
+      ? enrichedStations.slice(Math.max(0, resolvedCurrentIndex - 1), Math.min(enrichedStations.length, resolvedCurrentIndex + 2))
+      : enrichedStations.slice(0, 3))
+    : [];
   const allNgReasonOptions = Array.from(
     new Set(NG_REASON_CATEGORIES.flatMap((category) => getNgReasonsByCategory(category.key)))
   );
@@ -1298,14 +1302,16 @@ const GlobalPopup = ({
     return ngReasonOptions.filter((reason) => String(reason).toLowerCase().includes(q));
   })();
   const isValidNgReason = !manualReason || ngReasonOptions.includes(manualReason);
-  const currentStationName = displayStations.find((s) => s.status === "IN_PROGRESS")?.stationName || stationNo || "System Node";
-  const activeStationIndexInJourney = enrichedStations.findIndex(
+  const currentStationName = currentStationCard?.stationName || displayStations.find((s) => s.status === "IN_PROGRESS")?.stationName || stationNo || "System Node";
+  const targetStationIndexInJourney = enrichedStations.findIndex(
     (s) => String(s.stationNo || "").trim().toUpperCase() === targetStationKey
   );
   const fallbackCurrentIndex = enrichedStations.findIndex((s) => String(s.status || "").toUpperCase() === "IN_PROGRESS");
-  const resolvedCurrentIndex = activeStationIndexInJourney >= 0 ? activeStationIndexInJourney : fallbackCurrentIndex;
-  const previousStation = resolvedCurrentIndex > 0 ? enrichedStations[resolvedCurrentIndex - 1] : null;
-  const currentStationCard = resolvedCurrentIndex >= 0 ? enrichedStations[resolvedCurrentIndex] : null;
+  const resolvedCurrentIndex = targetStationIndexInJourney >= 0 ? targetStationIndexInJourney : fallbackCurrentIndex;
+  const previousStation = targetStationIndexInJourney > 0 ? enrichedStations[targetStationIndexInJourney - 1] : (resolvedCurrentIndex > 0 ? enrichedStations[resolvedCurrentIndex - 1] : null);
+  const currentStationCard = targetStationIndexInJourney >= 0
+    ? enrichedStations[targetStationIndexInJourney]
+    : (resolvedCurrentIndex >= 0 ? enrichedStations[resolvedCurrentIndex] : null);
   const previousOpState = String(previousStation?.operation || previousStation?.qualityCheck || previousStation?.status || "").trim().toUpperCase();
   const currentOpState = String(liveOperationState || currentStationCard?.operation || currentStationCard?.status || "").trim().toUpperCase();
   const previousStationPassed = ["PASS", "PASSED", "COMPLETED", "ENDED_OK"].includes(previousOpState);
