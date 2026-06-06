@@ -106,7 +106,7 @@ export default function PartProcessflow() {
               </div>
               <div>
                 <h1 className="db-header-title text-text-main text-xl">Part Process Flow</h1>
-                <p className="db-header-subtitle text-sm">ADC-12 Die Cast Component — Production Journey</p>
+                <p className="db-header-subtitle text-sm"> OIL PAN K-12 — Production Journey</p>
               </div>
             </div>
           </div>
