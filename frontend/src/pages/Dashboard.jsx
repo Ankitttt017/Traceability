@@ -1042,7 +1042,7 @@ const Dashboard = () => {
       {/* —— KPI Row —————————————————————————————————————————————————————————————— */}
       <div style={{display:"grid",
         gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
-        <KpiCard label="Total Qulaity Gates"  value={summary.machines.active}         icon={Cpu}          accent={C.steel()}  sub={`Out of ${summary.machines.total} total machines`}/>
+        <KpiCard label="Total Quality Gates"  value={summary.machines.active}         icon={Cpu}          accent={C.steel()}  sub={`Out of ${summary.machines.total} total machines`}/>
         <KpiCard label="In Progress"      value={summary.parts.inProgress}         icon={Zap}          accent={C.wip()}    sub="Parts being processed"/>
         <KpiCard label="Completed (Pass)" value={summary.parts.completed}          icon={CheckCircle2} accent={C.ok()}     sub="Total OK this period"/>
         <KpiCard label="Failed (NG)"      value={summary.parts.ng||0}              icon={XCircle}      accent={C.ng()}     sub="Requires attention"/>
