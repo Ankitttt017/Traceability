@@ -22,6 +22,7 @@ import {
   Route,
   Zap,
   BarChart3,
+  Sheet,
 } from "lucide-react";
 
 import { APP_ROUTES } from "../constants/routes";
@@ -72,16 +73,17 @@ const Sidebar = ({ onClose }) => {
   const traceabilityNavigation = useMemo(
     () => [
       {
+        name: t("pages.partProcessFlow", "Part Process Flow"),
+        path: APP_ROUTES.partProcessFlow,
+        icon: Route,
+      },
+      {
         name: t("pages.processFlow", "Process Flow"),
         path: APP_ROUTES.processFlow,
         icon: Route,
         moduleKey: "process_flow",
       },
-      {
-        name: t("pages.partProcessFlow", "Part Process Flow"),
-        path: APP_ROUTES.partProcessFlow,
-        icon: Route,
-      },
+      
       {
         name: t("pages.dashboard", "Dashboard"),
         path: APP_ROUTES.dashboard,
@@ -129,6 +131,13 @@ const Sidebar = ({ onClose }) => {
         path: APP_ROUTES.scannerMonitor,
         icon: Wifi,
         moduleKey: "scanners",
+      },
+      {
+        name: t("pages.controlPlan", "Control Plan"),
+        path: APP_ROUTES.controlPlan,
+        icon: Sheet,
+        moduleKey: "operator_view",
+        newTab: true,
       },
     ],
     [t]
@@ -241,6 +250,8 @@ const Sidebar = ({ onClose }) => {
         key={item.path}
         to={item.path}
         end
+        target={item.newTab ? "_blank" : undefined}
+        rel={item.newTab ? "noopener noreferrer" : undefined}
         title={collapsed ? item.name : undefined}
         className={({ isActive }) =>
           `group flex items-center ${collapsed ? "justify-center px-2" : "gap-3 px-3"} py-2 rounded-xl transition-all duration-200 ${

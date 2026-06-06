@@ -13,6 +13,7 @@ export const APP_ROUTES = {
   users: "/users",
   scanners: "/scanners",
   scannerMonitor: "/scanner-monitor",
+  controlPlan: "/control-plan",
   shifts: "/shifts",
   qrRules: "/qr-format-rules",
   partJourney: "/component-journey",

@@ -306,6 +306,13 @@ const StationCard = ({ station, isLast, isCurrentStation }) => {
   );
 };
 
+const InfoRow = ({ label, children }) => (
+  <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2">
+    <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</span>
+    <div className="min-w-0">{children}</div>
+  </div>
+);
+
 // --- Skeleton Loader ----------------------------------------------------------
 const JourneySkeleton = () => (
   <div className="space-y-3 animate-pulse">
@@ -1542,56 +1549,52 @@ const GlobalPopup = ({
           )}
 
           {effectivePartId && (
-            <div className="mb-3 grid grid-cols-1 md:grid-cols-2 gap-2">
-              <div className={`rounded-lg border p-3 ${
-                previousStation ? (previousStationPassed ? "border-emerald-500/40 bg-emerald-950/25" : "border-rose-500/40 bg-rose-950/20") : "border-slate-700 bg-slate-900/60"
+            <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div className={`rounded-2xl border p-4 shadow-sm ${
+                previousStation ? (previousStationPassed ? "border-emerald-200 bg-emerald-50/80" : "border-rose-200 bg-rose-50/80") : "border-slate-200 bg-white"
               }`}>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">{t("globalPopup.previousStation", "Previous Station")}</p>
+                <p className="mb-3 text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">{t("globalPopup.previousStation", "Previous Station")}</p>
                 {previousStation ? (
-                  <div className="space-y-1">
+                  <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
-                      <p className="text-sm font-bold text-slate-100">{previousStation.stationName || previousStation.stationNo || "-"}</p>
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${previousStationPassed ? "bg-emerald-500/20 text-emerald-200" : "bg-rose-500/20 text-rose-200"}`}>
+                      <p className="text-sm font-bold text-slate-900">{previousStation.stationName || previousStation.stationNo || "-"}</p>
+                      <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${previousStationPassed ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
                         {previousStationPassed ? t("globalPopup.passed", "PASSED") : t("globalPopup.notPassed", "NOT PASSED")}
                       </span>
                     </div>
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <span className="text-slate-400">QR:</span>
+                    <InfoRow label="QR">
                       <StatusBadge status={previousStation.qrVerification || "WAIT"} />
-                    </div>
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <span className="text-slate-400">Operation:</span>
+                    </InfoRow>
+                    <InfoRow label="Operation">
                       <StatusBadge status={previousStation.operation || "WAIT"} />
-                    </div>
+                    </InfoRow>
                   </div>
                 ) : (
-                  <p className="text-xs font-semibold text-slate-400">{t("operatorView.noPreviousStation", "No previous station (first operation).")}</p>
+                  <p className="text-xs font-semibold text-slate-500">{t("operatorView.noPreviousStation", "No previous station (first operation).")}</p>
                 )}
               </div>
 
-              <div className={`rounded-lg border p-3 ${
-                currentStationPassed ? "border-emerald-500/40 bg-emerald-950/20" : "border-sky-500/40 bg-sky-950/20"
+              <div className={`rounded-2xl border p-4 shadow-sm ${
+                currentStationPassed ? "border-emerald-200 bg-emerald-50/80" : "border-sky-200 bg-sky-50/80"
               }`}>
-                <p className="text-[10px] font-bold text-slate-300 uppercase tracking-widest mb-2">{t("globalPopup.currentStation", "Current Station")}</p>
+                <p className="mb-3 text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">{t("globalPopup.currentStation", "Current Station")}</p>
                 {currentStationCard ? (
-                  <div className="space-y-1">
+                  <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
-                      <p className="text-sm font-bold text-slate-100">{currentStationCard.stationName || currentStationCard.stationNo || currentStationName}</p>
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${currentStationPassed ? "bg-emerald-500/20 text-emerald-200" : "bg-sky-500/20 text-sky-200"}`}>
+                      <p className="text-sm font-bold text-slate-900">{currentStationCard.stationName || currentStationCard.stationNo || currentStationName}</p>
+                      <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${currentStationPassed ? "bg-emerald-100 text-emerald-700" : "bg-sky-100 text-sky-700"}`}>
                         {currentStationPassed ? t("globalPopup.passed", "PASSED") : t("globalPopup.inProcess", "IN PROCESS")}
                       </span>
                     </div>
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <span className="text-slate-400">QR:</span>
+                    <InfoRow label="QR">
                       <StatusBadge status={liveQrState || currentStationCard.qrVerification || "WAIT"} />
-                    </div>
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <span className="text-slate-400">Operation:</span>
+                    </InfoRow>
+                    <InfoRow label="Operation">
                       <StatusBadge status={liveOperationState || currentStationCard.operation || "WAIT"} />
-                    </div>
+                    </InfoRow>
                   </div>
                 ) : (
-                  <p className="text-xs font-semibold text-slate-400">{t("operatorView.waitingStationData", "Waiting for station data.")}</p>
+                  <p className="text-xs font-semibold text-slate-500">{t("operatorView.waitingStationData", "Waiting for station data.")}</p>
                 )}
               </div>
             </div>
@@ -1663,10 +1666,10 @@ const GlobalPopup = ({
         {/* Message & Footer */}
         <div className="px-5 py-3 bg-bg-card border-t border-border/50 flex-shrink-0 space-y-3">
           {showManualVerificationPanel && (
-            <div className="rounded-xl border-2 border-slate-600 bg-slate-800/90 p-5 space-y-5 shadow-xl mb-3" style={{ backdropFilter: "blur(4px)" }}>
-              <div className="flex items-center gap-2 border-b border-slate-700/60 pb-2">
-                <div className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
-                <h3 className="text-white text-sm font-extrabold uppercase tracking-wider">{t("globalPopup.submitQualityVerification", "Manual Quality Inspection")}</h3>
+            <div className="mb-3 space-y-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
+              <div className="flex items-center gap-3 border-b border-slate-200 pb-3">
+                <div className="h-2.5 w-2.5 rounded-full bg-amber-500" />
+                <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-slate-700">{t("globalPopup.submitQualityVerification", "Manual Quality Inspection")}</h3>
               </div>
 
               <div className="flex flex-col sm:flex-row gap-5">
@@ -1677,12 +1680,12 @@ const GlobalPopup = ({
                     setManualReason("");
                     setManualReasonQuery("");
                   }}
-                  className={`flex-1 flex flex-col items-center justify-center p-5 rounded-xl border-3 transition-all duration-200 active:scale-[0.98] ${manualSelection === "OK"
-                    ? "bg-emerald-600 border-emerald-300 text-white shadow-lg shadow-emerald-500/40 scale-[1.04]"
-                    : "bg-slate-900 border-slate-700 text-emerald-500 hover:border-emerald-500 hover:bg-slate-800"
+                  className={`flex-1 flex flex-col items-center justify-center p-5 rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${manualSelection === "OK"
+                    ? "bg-emerald-500 border-emerald-300 text-white shadow-lg shadow-emerald-500/25 scale-[1.02]"
+                    : "bg-slate-50 border-slate-200 text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50"
                     }`}
                 >
-                  <CheckCircle size={28} className={manualSelection === "OK" ? "text-white animate-bounce" : "text-emerald-500"} />
+                  <CheckCircle size={28} className={manualSelection === "OK" ? "text-white" : "text-emerald-600"} />
                   <span className="mt-2 text-base font-black uppercase tracking-wider">{t("common.ok", "OK")} ({t("operatorView.pass", "Pass")})</span>
                 </button>
 
@@ -1695,19 +1698,19 @@ const GlobalPopup = ({
                     setManualReasonCategory("");
                     setShowReasonDropdown(false);
                   }}
-                  className={`flex-1 flex flex-col items-center justify-center p-5 rounded-xl border-3 transition-all duration-200 active:scale-[0.98] ${manualSelection === "NG"
-                    ? "bg-rose-600 border-rose-300 text-white shadow-lg shadow-rose-500/40 scale-[1.04]"
-                    : "bg-slate-900 border-slate-700 text-rose-500 hover:border-rose-500 hover:bg-slate-800"
+                  className={`flex-1 flex flex-col items-center justify-center p-5 rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${manualSelection === "NG"
+                    ? "bg-rose-500 border-rose-300 text-white shadow-lg shadow-rose-500/25 scale-[1.02]"
+                    : "bg-slate-50 border-slate-200 text-rose-700 hover:border-rose-300 hover:bg-rose-50"
                     }`}
                 >
-                  <AlertTriangle size={28} className={manualSelection === "NG" ? "text-white animate-bounce" : "text-rose-500"} />
+                  <AlertTriangle size={28} className={manualSelection === "NG" ? "text-white" : "text-rose-600"} />
                   <span className="mt-2 text-base font-black uppercase tracking-wider">{t("common.ng", "NG")} ({t("operatorView.fail", "Fail")})</span>
                 </button>
               </div>
 
               {manualSelection === "NG" && (
                 <div className="space-y-2 animate-in slide-in-from-top-2 duration-150">
-                  <label className="text-xs font-bold text-white uppercase tracking-wide">{t("faq.rejectionTab", "Rejection Categories")}</label>
+                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wide">{t("faq.rejectionTab", "Rejection Categories")}</label>
                   <div className="flex flex-wrap gap-2">
                     {NG_REASON_CATEGORIES.map((category) => {
                       const selected = manualReasonCategory === category.key;
@@ -1724,7 +1727,7 @@ const GlobalPopup = ({
                           className={`px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wide border transition-colors ${
                             selected
                               ? "bg-rose-500 text-white border-rose-300"
-                              : "bg-slate-900 text-slate-200 border-slate-600 hover:border-rose-400"
+                              : "bg-white text-slate-700 border-slate-300 hover:border-rose-300"
                           }`}
                         >
                           {category.label}
@@ -1742,7 +1745,7 @@ const GlobalPopup = ({
                         setShowReasonDropdown(true);
                       }}
                       placeholder={manualReasonCategory ? t("globalPopup.searchOrSelectReason", "Search or select rejection reason") : t("globalPopup.searchReasonOrSelectCategory", "Search reason or select category")}
-                      className="w-full bg-white border-2 border-slate-500 rounded-xl py-3 px-4 text-sm text-black outline-none focus:border-rose-500 transition-colors font-semibold"
+                      className="w-full bg-white border border-slate-300 rounded-xl py-3 px-4 text-sm text-slate-900 outline-none focus:border-rose-400 transition-colors font-semibold"
                       onFocus={() => {
                         setShowReasonDropdown(true);
                       }}
@@ -1784,7 +1787,7 @@ const GlobalPopup = ({
                     )}
                   </div>
                   {!isValidNgReason && (
-                    <p className="text-[11px] font-semibold text-rose-300">
+                    <p className="text-[11px] font-semibold text-rose-500">
                       {t("globalPopup.selectReasonFromList", "Select a reason from the dropdown list.")}
                     </p>
                   )}
@@ -1792,7 +1795,7 @@ const GlobalPopup = ({
               )}
 
               {manualSuccessMsg && (
-                <p className="text-sm font-bold text-emerald-400 text-center">{manualSuccessMsg}</p>
+                <p className="text-sm font-bold text-emerald-600 text-center">{manualSuccessMsg}</p>
               )}
 
               <button
@@ -1800,10 +1803,10 @@ const GlobalPopup = ({
                 onClick={handleSubmitManualResult}
                 disabled={submittingManual || !manualSelection || (manualSelection === "NG" && (!manualReason || !isValidNgReason))}
                 className={`w-full py-4 rounded-xl text-base font-black uppercase tracking-widest text-white transition-all duration-200 ${submittingManual || !manualSelection || (manualSelection === "NG" && (!manualReason || !isValidNgReason))
-                  ? "bg-slate-800 border-slate-700 text-slate-500 cursor-not-allowed opacity-60"
+                  ? "bg-slate-200 border-slate-200 text-slate-500 cursor-not-allowed opacity-70"
                   : manualSelection === "OK"
-                    ? "bg-emerald-500 hover:bg-emerald-400 border-2 border-emerald-300 shadow-lg shadow-emerald-500/30 active:scale-[0.98] text-slate-950 font-black"
-                    : "bg-emerald-500 hover:bg-emerald-400 border-2 border-emerald-300 shadow-lg shadow-rose-500/30 active:scale-[0.98] text-white font-black"
+                    ? "bg-emerald-500 hover:bg-emerald-400 border border-emerald-300 shadow-lg shadow-emerald-500/20 active:scale-[0.99] text-slate-950 font-black"
+                    : "bg-rose-500 hover:bg-rose-400 border border-rose-300 shadow-lg shadow-rose-500/20 active:scale-[0.99] text-white font-black"
                   }`}
               >
                 {submittingManual ? (
@@ -1819,10 +1822,10 @@ const GlobalPopup = ({
           )}
 
           {(validationError || validationInfo || popup.message) && (
-            <div className={`p-3 rounded-xl border-2 flex gap-2 items-start text-sm transition-colors duration-300 ${validationError ? "bg-danger/15 border-danger/30 text-danger" : !duplicateLike && (liveOperationState === "FAIL" || liveQrState === "FAIL" || popup.type === "ERROR" || popup.gate === "FORMAT" || popup.gate === "PLC_MATCH") ? "bg-danger/15 border-danger/30 text-danger" :
+            <div className={`p-4 rounded-2xl border flex gap-3 items-start text-sm transition-colors duration-300 ${validationError ? "bg-danger/15 border-danger/30 text-danger" : !duplicateLike && (liveOperationState === "FAIL" || liveQrState === "FAIL" || popup.type === "ERROR" || popup.gate === "FORMAT" || popup.gate === "PLC_MATCH") ? "bg-danger/15 border-danger/30 text-danger" :
               liveOperationState === "COMM" || popup.type === "WARNING" || popup.reason === "PREVIOUS_STATION_NOT_COMPLETED" ? "bg-warning/15 border-warning/30 text-warning" :
                 popup.type === "SUCCESS" || popup.type === "INFO" ? "bg-success/20 border-success/40 text-success" :
-                  "bg-bg-elevated/40 border-border/40 text-text-muted"
+                  "bg-white border-slate-200 text-text-muted"
               }`}>
               {(validationInfo || popup.type === "SUCCESS" || popup.type === "INFO" || duplicateLike) && !validationError ? (
                 <CheckCircle size={16} className="mt-0.5 flex-shrink-0" />
@@ -1852,7 +1855,7 @@ const GlobalPopup = ({
           {resetError && <p className="text-sm font-semibold text-red-500">{resetError}</p>}
 
           {canReset && showResetConfirm && (
-            <div className="rounded-xl border-2 border-red-300 bg-red-50/90 p-4 space-y-2">
+            <div className="rounded-2xl border border-red-300 bg-red-50/90 p-4 space-y-3">
               <p className="text-sm font-semibold text-red-700">
                 {t("globalPopup.confirmResetQuestion", "Reset operation for part")} <span className="font-mono">{partId}</span> at {stationNo}?
               </p>
@@ -1871,7 +1874,7 @@ const GlobalPopup = ({
             {allowBottomClose && (showAcknowledge || typeof onClose === "function") && (
               <button
                 onClick={onClose}
-                className="flex-1 bg-slate-400 hover:bg-slate-600 active:scale-[0.98] text-white font-black py-4 px-6 rounded-xl text-sm uppercase tracking-widest border-2 border-slate-600 shadow-lg transition-all duration-150"
+                className="flex-1 bg-white hover:bg-slate-50 active:scale-[0.98] text-slate-700 font-black py-4 px-6 rounded-xl text-sm uppercase tracking-widest border border-slate-300 shadow-sm transition-all duration-150"
               >
                 {t("globalPopup.close", "Close")}
               </button>
@@ -1880,7 +1883,7 @@ const GlobalPopup = ({
               <button
                 onClick={() => setShowResetConfirm(true)}
                 disabled={isResetting}
-                className="flex-1 bg-rose-600 hover:bg-rose-500 active:scale-[0.98] text-white font-black py-4 px-6 rounded-xl text-sm uppercase tracking-widest border-2 border-rose-500 shadow-lg shadow-rose-600/40 flex items-center justify-center gap-2 transition-all duration-150"
+                className="flex-1 bg-rose-600 hover:bg-rose-500 active:scale-[0.98] text-white font-black py-4 px-6 rounded-xl text-sm uppercase tracking-widest border border-rose-500 shadow-lg shadow-rose-600/25 flex items-center justify-center gap-2 transition-all duration-150"
               >
                 <RefreshCw size={16} className={isResetting ? "animate-spin" : ""} />
                 {isResetting ? "..." : t("globalPopup.resetOperation", "RESET OPERATION")}
