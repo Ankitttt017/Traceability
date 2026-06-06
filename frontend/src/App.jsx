@@ -16,6 +16,7 @@ import OperatorView from "./pages/OperatorView";
 import QrFormatRules from "./pages/QrFormatRules";
 import Scanners from "./pages/Scanners";
 import ScannerMonitor from "./pages/ScannerMonitor";
+import ControlPlan from "./pages/ControlPlan";
 import Packing from "./pages/Packing";
 import PackingManagement from "./pages/PackingManagement";
 import FaqPage from "./pages/FaqPage";
@@ -138,6 +139,16 @@ function App() {
               <PublicOnlyRoute>
                 <LoginPage />
               </PublicOnlyRoute>
+            }
+          />
+          <Route
+            path={APP_ROUTES.controlPlan}
+            element={
+              <ProtectedRoute>
+                <ModuleRoute moduleKey="operator_view">
+                  <ControlPlan />
+                </ModuleRoute>
+              </ProtectedRoute>
             }
           />
 

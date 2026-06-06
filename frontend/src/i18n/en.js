@@ -37,6 +37,7 @@ const en = {
     traceability: "Traceability",
     ioMonitor: "I/O Monitor",
     scannerMonitor: "Scanner Monitor",
+    controlPlan: "Control Plan",
     partJourney: "Part Journey",
     packing: "Packing",
     packingManagement: "Packing Management",
