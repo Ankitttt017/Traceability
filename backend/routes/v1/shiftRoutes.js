@@ -1,12 +1,13 @@
 const express = require("express");
 const shiftController = require("../../controllers/shiftController");
-const { verifyToken, isAdmin } = require("../../middleware/authMiddleware");
+const { verifyToken } = require("../../middleware/authMiddleware");
+const { requireModuleAccess } = require("../../middleware/roleAccessMiddleware");
 
 const router = express.Router();
 
-router.get("/", verifyToken, shiftController.listShifts);
-router.post("/", verifyToken, isAdmin, shiftController.createShift);
-router.put("/:id", verifyToken, isAdmin, shiftController.updateShift);
-router.delete("/:id", verifyToken, isAdmin, shiftController.deleteShift);
+router.get("/", verifyToken, requireModuleAccess("shifts", "view"), shiftController.listShifts);
+router.post("/", verifyToken, requireModuleAccess("shifts", "edit"), shiftController.createShift);
+router.put("/:id", verifyToken, requireModuleAccess("shifts", "edit"), shiftController.updateShift);
+router.delete("/:id", verifyToken, requireModuleAccess("shifts", "edit"), shiftController.deleteShift);
 
 module.exports = router;

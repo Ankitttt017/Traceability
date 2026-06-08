@@ -1,0 +1,1828 @@
+{
+  "info": {
+    "name": "Traceability API - PLC",
+    "description": "Postman collection for PLC APIs split from the Traceability backend.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "BASE_URL",
+      "value": "http://localhost:4000/api/v1"
+    },
+    {
+      "key": "TOKEN",
+      "value": ""
+    },
+    {
+      "key": "MACHINE_ID",
+      "value": "1"
+    },
+    {
+      "key": "PART_ID",
+      "value": "PART-0001"
+    },
+    {
+      "key": "STATION_ID",
+      "value": "10"
+    },
+    {
+      "key": "SHIFT_ID",
+      "value": "1"
+    },
+    {
+      "key": "USER_ID",
+      "value": "1"
+    }
+  ],
+  "item": [
+    {
+      "name": "PLC",
+      "item": [
+        {
+          "name": "Test PLC Connection",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/machines/test-plc",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "machines",
+                "test-plc"
+              ]
+            },
+            "description": "Test PLC connectivity for a machine.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"ip\": \"192.168.100.50\",\n  \"port\": 502,\n  \"protocol\": \"MODBUS\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/machines/test-plc",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "machines",
+                    "test-plc"
+                  ]
+                },
+                "description": "Test PLC connectivity for a machine.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"ip\": \"192.168.100.50\",\n  \"port\": 502,\n  \"protocol\": \"MODBUS\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Test PLC executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/machines/test-plc\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Test PLC Low-Level Connection",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/machines/test-connection",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "machines",
+                "test-connection"
+              ]
+            },
+            "description": "Low-level PLC connection test.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"ip\": \"192.168.100.50\",\n  \"port\": 502,\n  \"protocol\": \"MODBUS\",\n  \"stationNo\": \"10\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/machines/test-connection",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "machines",
+                    "test-connection"
+                  ]
+                },
+                "description": "Low-level PLC connection test.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"ip\": \"192.168.100.50\",\n  \"port\": 502,\n  \"protocol\": \"MODBUS\",\n  \"stationNo\": \"10\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Test PLC Connection executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/machines/test-connection\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Reset PLC",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/machines/reset-plc",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "machines",
+                "reset-plc"
+              ]
+            },
+            "description": "Reset PLC for a machine.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"stationNo\": \"10\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/machines/reset-plc",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "machines",
+                    "reset-plc"
+                  ]
+                },
+                "description": "Reset PLC for a machine.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"stationNo\": \"10\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Reset PLC executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/machines/reset-plc\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create PLC Command",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/machines/plc-command",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "machines",
+                "plc-command"
+              ]
+            },
+            "description": "Send a PLC command.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"command\": \"START\",\n  \"partId\": \"{{PART_ID}}\",\n  \"stationNo\": \"10\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/machines/plc-command",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "machines",
+                    "plc-command"
+                  ]
+                },
+                "description": "Send a PLC command.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"command\": \"START\",\n  \"partId\": \"{{PART_ID}}\",\n  \"stationNo\": \"10\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Send PLC Command executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/machines/plc-command\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Read PLC Value",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/machines/read-plc-value",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "machines",
+                "read-plc-value"
+              ]
+            },
+            "description": "Read a single PLC register or signal.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"signalKey\": \"START_SIGNAL\",\n  \"registerNo\": 100,\n  \"plcSlmpDevice\": \"D\",\n  \"timeoutMs\": 8000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/machines/read-plc-value",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "machines",
+                    "read-plc-value"
+                  ]
+                },
+                "description": "Read a single PLC register or signal.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"signalKey\": \"START_SIGNAL\",\n  \"registerNo\": 100,\n  \"plcSlmpDevice\": \"D\",\n  \"timeoutMs\": 8000\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Read PLC Value executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/machines/read-plc-value\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Read PLC Registers",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/machines/read-plc-registers",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "machines",
+                "read-plc-registers"
+              ]
+            },
+            "description": "Read multiple PLC registers.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"registers\": [\n    {\n      \"register\": 100,\n      \"device\": \"D\"\n    },\n    {\n      \"register\": 101,\n      \"device\": \"D\"\n    }\n  ],\n  \"plcSlmpDevice\": \"D\",\n  \"plcSlmpFrameMode\": \"BINARY\",\n  \"timeoutMs\": 20000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/machines/read-plc-registers",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "machines",
+                    "read-plc-registers"
+                  ]
+                },
+                "description": "Read multiple PLC registers.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"registers\": [\n    {\n      \"register\": 100,\n      \"device\": \"D\"\n    },\n    {\n      \"register\": 101,\n      \"device\": \"D\"\n    }\n  ],\n  \"plcSlmpDevice\": \"D\",\n  \"plcSlmpFrameMode\": \"BINARY\",\n  \"timeoutMs\": 20000\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Read PLC Registers executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/machines/read-plc-registers\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get PLC Effective Config Debug",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/machines/debug-plc-effective-config",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "machines",
+                "debug-plc-effective-config"
+              ]
+            },
+            "description": "Inspect resolved PLC config.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/machines/debug-plc-effective-config",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "machines",
+                    "debug-plc-effective-config"
+                  ]
+                },
+                "description": "Inspect resolved PLC config.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Debug PLC Effective Config executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/machines/debug-plc-effective-config\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Write PLC Value",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/machines/write-plc-value",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "machines",
+                "write-plc-value"
+              ]
+            },
+            "description": "Write a value to PLC register or signal.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"signalKey\": \"RESET_SIGNAL\",\n  \"registerNo\": 120,\n  \"value\": 1,\n  \"plcSlmpDevice\": \"D\",\n  \"timeoutMs\": 8000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/machines/write-plc-value",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "machines",
+                    "write-plc-value"
+                  ]
+                },
+                "description": "Write a value to PLC register or signal.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"signalKey\": \"RESET_SIGNAL\",\n  \"registerNo\": 120,\n  \"value\": 1,\n  \"plcSlmpDevice\": \"D\",\n  \"timeoutMs\": 8000\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Write PLC Value executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/machines/write-plc-value\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get All PLC Ranges",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/ranges",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "ranges"
+              ]
+            },
+            "description": "List configured PLC register ranges."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/ranges",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "ranges"
+                  ]
+                },
+                "description": "List configured PLC register ranges."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get All PLC Ranges executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/ranges\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get PLC Range Registers By ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/ranges/1/registers",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "ranges",
+                "1",
+                "registers"
+              ]
+            },
+            "description": "Get registers for a range."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/ranges/1/registers",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "ranges",
+                    "1",
+                    "registers"
+                  ]
+                },
+                "description": "Get registers for a range."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get PLC Range Registers executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/ranges/1/registers\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Export PLC Register Plan",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/export",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "export"
+              ]
+            },
+            "description": "Export PLC register plan as CSV."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/export",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "export"
+                  ]
+                },
+                "description": "Export PLC register plan as CSV."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Export PLC Register Plan executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/export\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create PLC Range",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/ranges",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "ranges"
+              ]
+            },
+            "description": "Create a PLC register range.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"rangeName\": \"Input Signals\",\n  \"startRegister\": 100,\n  \"registerCount\": 20,\n  \"deviceType\": \"D\",\n  \"protocol\": \"SLMP\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/ranges",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "ranges"
+                  ]
+                },
+                "description": "Create a PLC register range.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"rangeName\": \"Input Signals\",\n  \"startRegister\": 100,\n  \"registerCount\": 20,\n  \"deviceType\": \"D\",\n  \"protocol\": \"SLMP\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Create PLC Range executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/ranges\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update PLC Range",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/ranges/1",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "ranges",
+                "1"
+              ]
+            },
+            "description": "Update a PLC register range.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rangeName\": \"Input Signals Updated\",\n  \"startRegister\": 100,\n  \"registerCount\": 24,\n  \"deviceType\": \"D\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/ranges/1",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "ranges",
+                    "1"
+                  ]
+                },
+                "description": "Update a PLC register range.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"rangeName\": \"Input Signals Updated\",\n  \"startRegister\": 100,\n  \"registerCount\": 24,\n  \"deviceType\": \"D\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Update PLC Range executed successfully\",\n  \"method\": \"PUT\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/ranges/1\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Delete PLC Range",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/ranges/1",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "ranges",
+                "1"
+              ]
+            },
+            "description": "Delete a PLC register range."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/ranges/1",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "ranges",
+                    "1"
+                  ]
+                },
+                "description": "Delete a PLC register range."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Delete PLC Range executed successfully\",\n  \"method\": \"DELETE\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/ranges/1\",\n  \"data\": {\n    \"deleted\": true\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get All PLC Endpoints",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/endpoints",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "endpoints"
+              ]
+            },
+            "description": "List all PLC endpoints."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/endpoints",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "endpoints"
+                  ]
+                },
+                "description": "List all PLC endpoints."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get All PLC Endpoints executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/endpoints\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get PLC Endpoint By ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/endpoints/1",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "endpoints",
+                "1"
+              ]
+            },
+            "description": "Get PLC endpoint details."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/endpoints/1",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "endpoints",
+                    "1"
+                  ]
+                },
+                "description": "Get PLC endpoint details."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get PLC Endpoint executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/endpoints/1\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create PLC Endpoint",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/endpoints",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "endpoints"
+              ]
+            },
+            "description": "Create a PLC endpoint.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"endpointName\": \"Main PLC\",\n  \"plcIp\": \"192.168.100.70\",\n  \"plcPort\": 4096,\n  \"plcProtocol\": \"SLMP\",\n  \"plcName\": \"PLC-1\",\n  \"description\": \"Primary shopfloor PLC\",\n  \"notes\": \"Generated from Postman sample\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/endpoints",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "endpoints"
+                  ]
+                },
+                "description": "Create a PLC endpoint.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"endpointName\": \"Main PLC\",\n  \"plcIp\": \"192.168.100.70\",\n  \"plcPort\": 4096,\n  \"plcProtocol\": \"SLMP\",\n  \"plcName\": \"PLC-1\",\n  \"description\": \"Primary shopfloor PLC\",\n  \"notes\": \"Generated from Postman sample\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Create PLC Endpoint executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/endpoints\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update PLC Endpoint",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/endpoints/1",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "endpoints",
+                "1"
+              ]
+            },
+            "description": "Update a PLC endpoint.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"endpointName\": \"Main PLC Updated\",\n  \"plcIp\": \"192.168.100.71\",\n  \"plcPort\": 4096,\n  \"plcProtocol\": \"SLMP\",\n  \"plcName\": \"PLC-1\",\n  \"status\": \"ACTIVE\",\n  \"description\": \"Primary shopfloor PLC\",\n  \"notes\": \"Updated from Postman sample\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/endpoints/1",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "endpoints",
+                    "1"
+                  ]
+                },
+                "description": "Update a PLC endpoint.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"endpointName\": \"Main PLC Updated\",\n  \"plcIp\": \"192.168.100.71\",\n  \"plcPort\": 4096,\n  \"plcProtocol\": \"SLMP\",\n  \"plcName\": \"PLC-1\",\n  \"status\": \"ACTIVE\",\n  \"description\": \"Primary shopfloor PLC\",\n  \"notes\": \"Updated from Postman sample\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Update PLC Endpoint executed successfully\",\n  \"method\": \"PUT\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/endpoints/1\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Delete PLC Endpoint",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/endpoints/1",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "endpoints",
+                "1"
+              ]
+            },
+            "description": "Delete a PLC endpoint."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/endpoints/1",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "endpoints",
+                    "1"
+                  ]
+                },
+                "description": "Delete a PLC endpoint."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Delete PLC Endpoint executed successfully\",\n  \"method\": \"DELETE\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/endpoints/1\",\n  \"data\": {\n    \"deleted\": true\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Test PLC Endpoint By ID",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc-config/endpoints/1/test",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc-config",
+                "endpoints",
+                "1",
+                "test"
+              ]
+            },
+            "description": "Test a PLC endpoint connection.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"timeoutMs\": 3000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc-config/endpoints/1/test",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc-config",
+                    "endpoints",
+                    "1",
+                    "test"
+                  ]
+                },
+                "description": "Test a PLC endpoint connection.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"timeoutMs\": 3000\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Test PLC Endpoint executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/plc-config/endpoints/1/test\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create PLC Operation Start",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc/operation/start",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc",
+                "operation",
+                "start"
+              ]
+            },
+            "description": "Confirm operation start from PLC path.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"partId\": \"{{PART_ID}}\",\n  \"stationNo\": \"{{STATION_ID}}\",\n  \"operation\": \"ASSEMBLY\",\n  \"machineId\": \"{{MACHINE_ID}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc/operation/start",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc",
+                    "operation",
+                    "start"
+                  ]
+                },
+                "description": "Confirm operation start from PLC path.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"partId\": \"{{PART_ID}}\",\n  \"stationNo\": \"{{STATION_ID}}\",\n  \"operation\": \"ASSEMBLY\",\n  \"machineId\": \"{{MACHINE_ID}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Confirm Operation Start executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/plc/operation/start\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create PLC Operation End",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/plc/operation/end",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "plc",
+                "operation",
+                "end"
+              ]
+            },
+            "description": "Confirm operation end from PLC path.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"partId\": \"{{PART_ID}}\",\n  \"stationNo\": \"{{STATION_ID}}\",\n  \"operation\": \"ASSEMBLY\",\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"finalResult\": \"OK\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/plc/operation/end",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "plc",
+                    "operation",
+                    "end"
+                  ]
+                },
+                "description": "Confirm operation end from PLC path.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"partId\": \"{{PART_ID}}\",\n  \"stationNo\": \"{{STATION_ID}}\",\n  \"operation\": \"ASSEMBLY\",\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"finalResult\": \"OK\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Confirm Operation End executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/plc/operation/end\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

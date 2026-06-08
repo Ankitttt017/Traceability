@@ -340,11 +340,138 @@ async function ensurePlcLinkColumnsExist() {
   }
 }
 
+async function ensureRoleAccessSchema() {
+  const isMssql = typeof sequelize.getDialect === "function" && sequelize.getDialect() === "mssql";
+  if (!isMssql) return;
+
+  const [tableRows] = await sequelize.query("SELECT OBJECT_ID(N'dbo.RoleAccessSettings', N'U') AS table_id;");
+  if (!tableRows?.[0]?.table_id) return;
+
+  await sequelize.query(`
+    IF NOT EXISTS (
+      SELECT 1
+      FROM sys.columns
+      WHERE object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
+        AND name = N'other_access'
+    )
+    BEGIN
+      ALTER TABLE [dbo].[RoleAccessSettings] ADD [other_access] NVARCHAR(20) NULL;
+    END
+  `);
+
+  await sequelize.query(`
+    UPDATE [dbo].[RoleAccessSettings]
+    SET [other_access] = 'HIDDEN'
+    WHERE [other_access] IS NULL
+       OR LTRIM(RTRIM([other_access])) = '';
+  `);
+
+  await sequelize.query(`
+    IF NOT EXISTS (
+      SELECT 1
+      FROM sys.default_constraints
+      WHERE parent_object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
+        AND name = N'DF_RoleAccessSettings_other_access'
+    )
+    BEGIN
+      ALTER TABLE [dbo].[RoleAccessSettings]
+      ADD CONSTRAINT [DF_RoleAccessSettings_other_access]
+      DEFAULT 'HIDDEN' FOR [other_access];
+    END
+  `);
+
+  await sequelize.query(`
+    ALTER TABLE [dbo].[RoleAccessSettings]
+    ALTER COLUMN [other_access] NVARCHAR(20) NOT NULL;
+  `);
+
+  await sequelize.query(`
+    IF EXISTS (
+      SELECT 1
+      FROM sys.check_constraints
+      WHERE parent_object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
+        AND name = N'CK_RoleAccessSettings_other_access_allowed'
+    )
+    BEGIN
+      ALTER TABLE [dbo].[RoleAccessSettings]
+      DROP CONSTRAINT [CK_RoleAccessSettings_other_access_allowed];
+    END
+  `);
+
+  await sequelize.query(`
+    ALTER TABLE [dbo].[RoleAccessSettings]
+    ADD CONSTRAINT [CK_RoleAccessSettings_other_access_allowed]
+    CHECK ([other_access] IN ('HIDDEN', 'VIEW', 'VIEW_EDIT', 'VIEW_CONTROL'));
+  `);
+}
+
+async function ensureUserRoleSchema() {
+  const isMssql = typeof sequelize.getDialect === "function" && sequelize.getDialect() === "mssql";
+  if (!isMssql) return;
+
+  const [tableRows] = await sequelize.query("SELECT OBJECT_ID(N'dbo.Users', N'U') AS table_id;");
+  if (!tableRows?.[0]?.table_id) return;
+
+  await sequelize.query(`
+    UPDATE [dbo].[Users]
+    SET [role] = 'Operator'
+    WHERE [role] IS NULL
+       OR LTRIM(RTRIM([role])) = ''
+       OR [role] NOT IN ('Admin', 'Engineer', 'Supervisor', 'Operator', 'Other');
+  `);
+
+  const [constraints] = await sequelize.query(`
+    SELECT [name], [definition]
+    FROM sys.check_constraints
+    WHERE parent_object_id = OBJECT_ID(N'dbo.Users');
+  `);
+
+  for (const constraint of constraints || []) {
+    const definition = String(constraint.definition || "");
+    if (!/\brole\b/i.test(definition) && !/\[role\]/i.test(definition)) {
+      continue;
+    }
+    await sequelize.query(`
+      ALTER TABLE [dbo].[Users]
+      DROP CONSTRAINT ${quoteIdentifier(constraint.name)};
+    `);
+  }
+
+  await sequelize.query(`
+    IF NOT EXISTS (
+      SELECT 1
+      FROM sys.default_constraints
+      WHERE parent_object_id = OBJECT_ID(N'dbo.Users')
+        AND name = N'DF_Users_role'
+    )
+    BEGIN
+      ALTER TABLE [dbo].[Users]
+      ADD CONSTRAINT [DF_Users_role] DEFAULT 'Operator' FOR [role];
+    END
+  `);
+
+  await sequelize.query(`
+    IF NOT EXISTS (
+      SELECT 1
+      FROM sys.check_constraints
+      WHERE parent_object_id = OBJECT_ID(N'dbo.Users')
+        AND name = N'CK_Users_role_allowed_values'
+    )
+    BEGIN
+      ALTER TABLE [dbo].[Users]
+      ADD CONSTRAINT [CK_Users_role_allowed_values]
+      CHECK ([role] IN ('Admin', 'Engineer', 'Supervisor', 'Operator', 'Other'));
+    END
+  `);
+}
+
 module.exports = {
   ensureMachineQrScannerUniqueness,
   ensurePerformanceColumnsExist,
   ensureTraceabilityColumnsExist,
   ensureScannerColumnsExist,
   ensurePlcLinkColumnsExist,
+  ensureRoleAccessSchema,
+  ensureUserRoleSchema,
   FILTERED_QR_SCANNER_INDEX,
 };

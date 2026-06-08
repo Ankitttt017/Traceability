@@ -527,8 +527,13 @@ async function fetchProductionData(filters = {}, options = {}) {
     }
     if (lineName) {
       const machines = await Machine.findAll({ where: { line_name: lineName }, attributes: ["id"] });
-      const ids = machines.map((m) => m.id);
-      nextWhere.machine_id = { [Op.in]: ids };
+      const ids = machines.map((m) => Number(m.id)).filter((id) => Number.isFinite(id) && id > 0);
+      if (machineId) {
+        const selectedMachineId = Number(machineId);
+        nextWhere.machine_id = ids.includes(selectedMachineId) ? selectedMachineId : { [Op.in]: [] };
+      } else {
+        nextWhere.machine_id = { [Op.in]: ids };
+      }
     }
     return nextWhere;
   };

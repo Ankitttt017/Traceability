@@ -1,0 +1,348 @@
+{
+  "info": {
+    "name": "Traceability API - Dashboard",
+    "description": "Postman collection for Dashboard APIs split from the Traceability backend.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "BASE_URL",
+      "value": "http://localhost:4000/api/v1"
+    },
+    {
+      "key": "TOKEN",
+      "value": ""
+    },
+    {
+      "key": "MACHINE_ID",
+      "value": "1"
+    },
+    {
+      "key": "PART_ID",
+      "value": "PART-0001"
+    },
+    {
+      "key": "STATION_ID",
+      "value": "10"
+    },
+    {
+      "key": "SHIFT_ID",
+      "value": "1"
+    },
+    {
+      "key": "USER_ID",
+      "value": "1"
+    }
+  ],
+  "item": [
+    {
+      "name": "Dashboard",
+      "item": [
+        {
+          "name": "Get Dashboard Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/dashboard/summary",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "dashboard",
+                "summary"
+              ]
+            },
+            "description": "Dashboard summary metrics."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/dashboard/summary",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "dashboard",
+                    "summary"
+                  ]
+                },
+                "description": "Dashboard summary metrics."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get Dashboard Summary executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/dashboard/summary\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Dashboard Trends",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/dashboard/trends",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "dashboard",
+                "trends"
+              ]
+            },
+            "description": "Dashboard trend chart data."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/dashboard/trends",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "dashboard",
+                    "trends"
+                  ]
+                },
+                "description": "Dashboard trend chart data."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get Dashboard Trends executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/dashboard/trends\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Dashboard Report Data",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/dashboard/report",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "dashboard",
+                "report"
+              ],
+              "query": [
+                {
+                  "key": "dateFrom",
+                  "value": "2026-06-01"
+                },
+                {
+                  "key": "dateTo",
+                  "value": "2026-06-08"
+                },
+                {
+                  "key": "machineId",
+                  "value": "{{MACHINE_ID}}"
+                },
+                {
+                  "key": "lineName",
+                  "value": "LINE-1"
+                },
+                {
+                  "key": "shiftCode",
+                  "value": "SHIFT_A"
+                },
+                {
+                  "key": "status",
+                  "value": "OK"
+                },
+                {
+                  "key": "barcode",
+                  "value": "{{PART_ID}}"
+                }
+              ]
+            },
+            "description": "Paginated dashboard report with report filters."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/dashboard/report",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "dashboard",
+                    "report"
+                  ],
+                  "query": [
+                    {
+                      "key": "dateFrom",
+                      "value": "2026-06-01"
+                    },
+                    {
+                      "key": "dateTo",
+                      "value": "2026-06-08"
+                    },
+                    {
+                      "key": "machineId",
+                      "value": "{{MACHINE_ID}}"
+                    },
+                    {
+                      "key": "lineName",
+                      "value": "LINE-1"
+                    },
+                    {
+                      "key": "shiftCode",
+                      "value": "SHIFT_A"
+                    },
+                    {
+                      "key": "status",
+                      "value": "OK"
+                    },
+                    {
+                      "key": "barcode",
+                      "value": "{{PART_ID}}"
+                    }
+                  ]
+                },
+                "description": "Paginated dashboard report with report filters."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get Dashboard Report Data executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/dashboard/report\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get OEE Metrics",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/dashboard/oee",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "dashboard",
+                "oee"
+              ]
+            },
+            "description": "OEE dashboard metrics."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/dashboard/oee",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "dashboard",
+                    "oee"
+                  ]
+                },
+                "description": "OEE dashboard metrics."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get OEE Metrics executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/dashboard/oee\",\n  \"data\": []\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

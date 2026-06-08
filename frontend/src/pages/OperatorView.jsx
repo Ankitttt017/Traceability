@@ -702,9 +702,18 @@ const OperatorView = () => {
   }, []);
 
   const qualitySummary = stationStats?.summary || { okCount: 0, ngCount: 0, interlockedCount: 0, inProgressCount: 0, processedCount: 0, accuracy: 0 };
-  const expectedCount = Math.max(Number(qualitySummary.processedCount || 0) + Number(qualitySummary.inProgressCount || 0) + Number(qualitySummary.interlockedCount || 0), 1);
-  const producedCount = Number(qualitySummary.processedCount || 0);
-  const progressPct = Math.min(100, Math.round((producedCount / expectedCount) * 100));
+  const producedCount = Number(qualitySummary.producedCount ?? qualitySummary.processedCount ?? 0);
+  const targetCount = Number(
+    qualitySummary.targetProduction ??
+    qualitySummary.targetQty ??
+    stationStats?.machine?.targetProduction ??
+    stationStats?.machine?.targetQty ??
+    0
+  );
+  const expectedCount = Math.max(targetCount, producedCount, 1);
+  const progressPct = targetCount > 0
+    ? Math.min(100, Number(((producedCount / targetCount) * 100).toFixed(1)))
+    : 0;
   const qualityPct = Number(qualitySummary.accuracy || 0);
   const backendMachineState = String(liveState?.machineState?.state || "").trim().toUpperCase();
   const machineMode =

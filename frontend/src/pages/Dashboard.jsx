@@ -526,11 +526,11 @@ const Dashboard = () => {
   },[scheduleRefresh]);
 
   const efficiency = useMemo(()=>{
-    const ok = Number(summary.parts?.completed || 0);
-    const ng = Number(summary.parts?.ng || 0);
+    const ok = Number(summary.quality?.ok || 0);
+    const ng = Number(summary.quality?.ng || 0);
     const t = ok + ng;
     return t > 0 ? Math.round((ok / t) * 100) : 0;
-  },[summary.parts]);
+  },[summary.quality]);
   const lineContextLabel = useMemo(() => {
     const selectedMachineId = Number(filters.machineId || 0);
     if (selectedMachineId) {
@@ -548,10 +548,10 @@ const Dashboard = () => {
 
   // Pie data
   const pieData = useMemo(()=>[
-    { name:"Pass",    value:Number(summary.parts?.completed || 0)          },
-    { name:"Fail",    value:Number(summary.parts?.ng || 0)                 },
-    { name:"Blocked", value:Number(summary.parts?.interlocked || 0)        },
-  ],[summary.parts]);
+    { name:"Pass",    value:Number(summary.quality?.ok || 0)               },
+    { name:"Fail",    value:Number(summary.quality?.ng || 0)               },
+    { name:"Blocked", value:Number(summary.parts?.interlocked || summary.quality?.interlocked || 0) },
+  ],[summary.parts, summary.quality]);
 
   // Shift bar data
   const shiftData = useMemo(() => {
@@ -713,6 +713,12 @@ const Dashboard = () => {
     }, {});
     return Object.values(bucket).sort((a, b) => String(a.date).localeCompare(String(b.date)));
   }, [isMultiDayRange, rejectionTrend, rejectionAnalysisRows]);
+
+  const analysisMachineRows = useMemo(() => {
+    const filteredCards = Array.isArray(report.machineCards) ? report.machineCards : [];
+    if (filteredCards.length > 0) return filteredCards;
+    return Array.isArray(oeeData) ? oeeData : [];
+  }, [oeeData, report.machineCards]);
 
   // —— Tabs config ——
   const TABS = [
@@ -1044,8 +1050,8 @@ const Dashboard = () => {
         gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
         <KpiCard label="Total Quality Gates"  value={summary.machines.active}         icon={Cpu}          accent={C.steel()}  sub={`Out of ${summary.machines.total} total machines`}/>
         <KpiCard label="In Progress"      value={summary.parts.inProgress}         icon={Zap}          accent={C.wip()}    sub="Parts being processed"/>
-        <KpiCard label="Completed (Pass)" value={summary.parts.completed}          icon={CheckCircle2} accent={C.ok()}     sub="Total OK this period"/>
-        <KpiCard label="Failed (NG)"      value={summary.parts.ng||0}              icon={XCircle}      accent={C.ng()}     sub="Requires attention"/>
+        <KpiCard label="Completed (Pass)" value={summary.quality?.ok || 0}         icon={CheckCircle2} accent={C.ok()}     sub="Total OK this period"/>
+        <KpiCard label="Failed (NG)"      value={summary.quality?.ng || 0}         icon={XCircle}      accent={C.ng()}     sub="Requires attention"/>
         <KpiCard label="Interlocked"      value={summary.parts.interlocked||0}     icon={AlertTriangle}accent={C.amber()}  sub="PLC blocked"/>
         <KpiCard label="Quality Rate"        value={`${efficiency}%`}                 icon={TrendingUp}   accent={efficiency>=85?C.ok():efficiency>=60?C.amber():C.ng()} sub="Overall quality rate"/>
       </div>
@@ -1116,8 +1122,8 @@ const Dashboard = () => {
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
                 {[
-                  { label:"Pass",    value:summary.parts?.completed||0,  color:C.ok()    },
-                  { label:"Fail",    value:summary.parts?.ng||0,         color:C.ng()    },
+                  { label:"Pass",    value:summary.quality?.ok||0,       color:C.ok()    },
+                  { label:"Fail",    value:summary.quality?.ng||0,       color:C.ng()    },
                   { label:"Blocked", value:summary.parts?.interlocked||0,color:C.amber() },
                 ].map(s=>(
                   <div key={s.label} style={{background:C.bg("surf"),
@@ -1284,7 +1290,7 @@ const Dashboard = () => {
 
       {activeTab==="oee" && (
         <div className="db-tablet-oeeoa" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(340px,1fr))",gap:16}}>
-          {(oeeData.length ? oeeData : report.machineCards || []).map((row, idx)=>{
+          {analysisMachineRows.map((row, idx)=>{
             const oee = Number(row?.oee ?? row?.OEE ?? 0);
             const availability = Number(row?.availability ?? row?.Availability ?? 0);
             const performance = Number(row?.performance ?? row?.Performance ?? 0);
@@ -1348,7 +1354,7 @@ const Dashboard = () => {
       )}
       {activeTab==="oa" && (
         <div className="db-tablet-oeeoa" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(340px,1fr))",gap:16}}>
-          {(oeeData.length ? oeeData : report.machineCards || []).map((row, idx)=>{
+          {analysisMachineRows.map((row, idx)=>{
             const oa = Number(row?.oa ?? row?.OA ?? 0);
             const stationName = row?.stationNo || row?.station || row?.machineName || `Station ${idx + 1}`;
             const oaClamped = Math.max(0, Math.min(100, oa));

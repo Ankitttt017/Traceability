@@ -2732,6 +2732,13 @@ exports.getMachineStationStats = async (req, res) => {
     });
 
     const summary = getQualitySummaryFromOperationLogs(logs);
+    const shifts = await getActiveShiftDefinitions();
+    const currentShift = resolveShift(new Date(), shifts);
+    const targetProduction = computeTargetProduction({ machine, shift: currentShift });
+    const produced = Number(summary.processedCount || 0);
+    const achievementPct = targetProduction > 0
+      ? Number(((produced / targetProduction) * 100).toFixed(2))
+      : 0;
     const hourlyMap = logs.reduce((acc, row) => {
       const key = formatHourBucket(row.createdAt);
       if (!acc[key]) {
@@ -2778,6 +2785,9 @@ exports.getMachineStationStats = async (req, res) => {
         lineName: machine.line_name,
         sequenceNo: machine.sequence_no,
         stationNo,
+        currentShiftCode: currentShift?.shift_code || null,
+        targetProduction,
+        achievementPct,
       },
       range: {
         from,
@@ -2789,7 +2799,13 @@ exports.getMachineStationStats = async (req, res) => {
       scannerHealth: scannerBundle.primaryHealth,
       scanners: scannerBundle.scanners,
       scannerHealthList: scannerBundle.scannerHealth,
-      summary,
+      summary: {
+        ...summary,
+        producedCount: produced,
+        targetProduction,
+        targetQty: targetProduction,
+        achievementPct,
+      },
       trend,
       current: current
         ? {
