@@ -274,12 +274,15 @@ const ReportsPage = () => {
     })();
     const grouped = new Map();
     sourceRows.forEach((row, idx) => {
-      const key = String(row.partId || row.part_id || row.barcode || row.shot_uid || `row_${idx}`).trim();
+      const partKey = String(row.partId || row.part_id || row.barcode || row.shot_uid || `row_${idx}`).trim();
+      const machineKey = String(row.machineId || row.machine_id || row.machineName || "").trim();
+      const key = `${machineKey || "machine"}__${partKey || `row_${idx}`}`;
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key).push(row);
     });
 
     const dynamicColumns = [
+      { key: "srNo", label: "Sr No" },
       { key: "plc_shot_number", label: "Shot Number" },
       { key: "barcode", label: "Part Serial No." },
       { key: "customerCode", label: "Customer QR Code" },
@@ -292,8 +295,9 @@ const ReportsPage = () => {
       { key: "ngReason", label: "Reason / Remark" },
     ];
 
-    const dynamicRows = Array.from(grouped.entries()).map(([partKey, entries], idx) => {
+    const dynamicRows = Array.from(grouped.values()).map((entries, idx) => {
       const first = entries[0] || {};
+      const partKey = String(first.partId || first.part_id || first.barcode || first.shot_uid || `row_${idx}`).trim();
       const stationResults = {};
       const stationCycleTimes = {};
       const plcData = {};

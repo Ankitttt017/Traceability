@@ -1,0 +1,641 @@
+{
+  "info": {
+    "name": "Traceability API - Health / Diagnostics",
+    "description": "Postman collection for Health / Diagnostics APIs split from the Traceability backend.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "BASE_URL",
+      "value": "http://localhost:4000/api/v1"
+    },
+    {
+      "key": "TOKEN",
+      "value": ""
+    },
+    {
+      "key": "MACHINE_ID",
+      "value": "1"
+    },
+    {
+      "key": "PART_ID",
+      "value": "PART-0001"
+    },
+    {
+      "key": "STATION_ID",
+      "value": "10"
+    },
+    {
+      "key": "SHIFT_ID",
+      "value": "1"
+    },
+    {
+      "key": "USER_ID",
+      "value": "1"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health / Diagnostics",
+      "item": [
+        {
+          "name": "Get Industrial Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/../../health/industrial",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "health",
+                "industrial"
+              ]
+            },
+            "description": "Server industrial health route mounted outside /api/v1."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{BASE_URL}}/../../health/industrial",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "health",
+                    "industrial"
+                  ]
+                },
+                "description": "Server industrial health route mounted outside /api/v1."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get Industrial Health executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/../../health/industrial\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get PLC Health Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/traceability/plc-health",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "traceability",
+                "plc-health"
+              ],
+              "query": [
+                {
+                  "key": "machineId",
+                  "value": "{{MACHINE_ID}}"
+                },
+                {
+                  "key": "force",
+                  "value": "true"
+                }
+              ]
+            },
+            "description": "Fetch PLC health."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{BASE_URL}}/traceability/plc-health",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "traceability",
+                    "plc-health"
+                  ],
+                  "query": [
+                    {
+                      "key": "machineId",
+                      "value": "{{MACHINE_ID}}"
+                    },
+                    {
+                      "key": "force",
+                      "value": "true"
+                    }
+                  ]
+                },
+                "description": "Fetch PLC health."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get PLC Health Status executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/traceability/plc-health\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Scanner Health Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/traceability/scanner-health",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "traceability",
+                "scanner-health"
+              ],
+              "query": [
+                {
+                  "key": "machineId",
+                  "value": "{{MACHINE_ID}}"
+                }
+              ]
+            },
+            "description": "Fetch scanner health."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{BASE_URL}}/traceability/scanner-health",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "traceability",
+                    "scanner-health"
+                  ],
+                  "query": [
+                    {
+                      "key": "machineId",
+                      "value": "{{MACHINE_ID}}"
+                    }
+                  ]
+                },
+                "description": "Fetch scanner health."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get Scanner Health Status executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/traceability/scanner-health\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get IO Snapshot",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/traceability/io-snapshot",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "traceability",
+                "io-snapshot"
+              ],
+              "query": [
+                {
+                  "key": "machineId",
+                  "value": "{{MACHINE_ID}}"
+                },
+                {
+                  "key": "plcIp",
+                  "value": "192.168.100.50"
+                }
+              ]
+            },
+            "description": "Fetch IO snapshot."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/traceability/io-snapshot",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "traceability",
+                    "io-snapshot"
+                  ],
+                  "query": [
+                    {
+                      "key": "machineId",
+                      "value": "{{MACHINE_ID}}"
+                    },
+                    {
+                      "key": "plcIp",
+                      "value": "192.168.100.50"
+                    }
+                  ]
+                },
+                "description": "Fetch IO snapshot."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get IO Snapshot executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/traceability/io-snapshot\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Machine Diagnostics By ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/diagnostics/{{MACHINE_ID}}",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "diagnostics",
+                "{{MACHINE_ID}}"
+              ]
+            },
+            "description": "Fetch industrial diagnostics by machine id."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{BASE_URL}}/diagnostics/{{MACHINE_ID}}",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "diagnostics",
+                    "{{MACHINE_ID}}"
+                  ]
+                },
+                "description": "Fetch industrial diagnostics by machine id."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get Machine Diagnostics executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/diagnostics/{{MACHINE_ID}}\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get RCA Report By Cycle Token",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/diagnostics/rca/cycle-token-001",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "diagnostics",
+                "rca",
+                "cycle-token-001"
+              ]
+            },
+            "description": "Fetch RCA report by cycle token."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{BASE_URL}}/diagnostics/rca/cycle-token-001",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "diagnostics",
+                    "rca",
+                    "cycle-token-001"
+                  ]
+                },
+                "description": "Fetch RCA report by cycle token."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get RCA Report executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/diagnostics/rca/cycle-token-001\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create Machine Commissioning",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/commissioning/{{MACHINE_ID}}",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "commissioning",
+                "{{MACHINE_ID}}"
+              ]
+            },
+            "description": "Run machine commissioning task.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"task\": \"FULL_CHECK\",\n  \"scenario\": \"POST_INSTALLATION\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/commissioning/{{MACHINE_ID}}",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "commissioning",
+                    "{{MACHINE_ID}}"
+                  ]
+                },
+                "description": "Run machine commissioning task.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"task\": \"FULL_CHECK\",\n  \"scenario\": \"POST_INSTALLATION\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Run Commissioning executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/commissioning/{{MACHINE_ID}}\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create Manual Recovery",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/recovery/{{MACHINE_ID}}",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "recovery",
+                "{{MACHINE_ID}}"
+              ]
+            },
+            "description": "Run manual industrial recovery.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"RESET_SEQUENCE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/recovery/{{MACHINE_ID}}",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "recovery",
+                    "{{MACHINE_ID}}"
+                  ]
+                },
+                "description": "Run manual industrial recovery.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"action\": \"RESET_SEQUENCE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Manual Recovery executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/recovery/{{MACHINE_ID}}\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create Safety Mode Update",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/safety/{{MACHINE_ID}}",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "safety",
+                "{{MACHINE_ID}}"
+              ]
+            },
+            "description": "Set industrial safety mode.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"maintenance\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/safety/{{MACHINE_ID}}",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "safety",
+                    "{{MACHINE_ID}}"
+                  ]
+                },
+                "description": "Set industrial safety mode.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"maintenance\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Set Safety Mode executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/safety/{{MACHINE_ID}}\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -13,7 +13,7 @@ import {
   Cpu, Target, Activity, Table2,
   CheckCircle2, XCircle, Package, Zap,
   PieChart as PieIcon, Settings2, Calendar,
-  List, LayoutDashboard, TrendingDown,
+  List, LayoutDashboard, TrendingDown, Eye, X,
 } from "lucide-react";
 import {
   LineChart as ReLineChart, Line, BarChart, Bar,
@@ -306,6 +306,7 @@ const ProductionCharts=()=>{
   const[partsFilter,setPartsFilter]=useState("all");
   const[partsPage,setPartsPage]=useState(1);
   const[partsPageSize,setPartsPageSize]=useState(25);
+  const[selectedMachineDetail,setSelectedMachineDetail]=useState(null);
   const refreshInFlightRef = useRef(false);
   const refreshQueuedRef = useRef(false);
   const refreshTimerRef = useRef(null);
@@ -494,6 +495,24 @@ const ProductionCharts=()=>{
     })),[report.hourlyProduction]);
 
   const machinePerformanceRows = useMemo(() => {
+    if (Array.isArray(report.machineCards) && report.machineCards.length > 0) {
+      return report.machineCards.map((row) => ({
+        machine_id: Number(row.machineId || row.machine_id || 0),
+        machineName: String(row.machineName || row.machine_name || `Machine ${row.machineId || ""}`),
+        lineName: row.lineName || row.line_name || "-",
+        stationNo: row.stationNo || row.station_no || "-",
+        ok: Number(row.okCount || row.ok || 0),
+        ng: Number(row.ngCount || row.ng || 0),
+        inProgress: Number(row.inProgressCount || 0),
+        interlocked: Number(row.interlockedCount || 0),
+        produced: Number(row.processedCount || row.actualProduction || 0),
+        target: Number(row.targetProduction ?? row.targetQty ?? 0),
+        achievementPct: Number(row.achievementPct ?? 0),
+        downtimeMinutes: Number(row.downtimeMinutes || 0),
+        oee: Number(row.oee || 0),
+        oa: Number(row.oa || 0),
+      }));
+    }
     const agg = new Map();
     (report.machineWise || []).forEach((r) => {
       agg.set(Number(r.machine_id), {
@@ -508,11 +527,21 @@ const ProductionCharts=()=>{
       return {
         machine_id: id,
         machineName: String(m.machineName || m.machine_name || m.machineNumber || `Machine ${id}`),
+        lineName: m.lineName || m.line_name || "-",
+        stationNo: m.operationNo || m.operation_no || "-",
         ok: perf.ok,
         ng: perf.ng,
+        inProgress: 0,
+        interlocked: 0,
+        produced: Number(perf.ok || 0) + Number(perf.ng || 0),
+        target: 0,
+        achievementPct: 0,
+        downtimeMinutes: 0,
+        oee: 0,
+        oa: 0,
       };
     });
-  }, [machines, report.machineWise]);
+  }, [machines, report.machineCards, report.machineWise]);
 
   const machineBarData=useMemo(()=>
     machinePerformanceRows.map((r)=>({
@@ -608,6 +637,27 @@ const ProductionCharts=()=>{
     }
     return p;
   },[partsList,partsSearch,partsFilter]);
+
+  const getPartFinalState = useCallback((part) => {
+    const raw = String(part?.status || part?.statusLabel || part?.result || part?.industrialResult || "").trim().toUpperCase();
+    if (["OK", "PASS", "PASSED", "COMPLETED", "ENDED_OK"].includes(raw)) return "passed";
+    if (["NG", "FAIL", "FAILED", "ENDED_NG", "REJECTED"].includes(raw)) return "failed";
+    if (["INTERLOCKED", "BLOCKED", "PLC_COMM_ERROR", "COMM_ERROR", "TIMEOUT", "PLC_TIMEOUT"].includes(raw)) return "blocked";
+    return "progress";
+  }, []);
+
+  const selectedMachineParts = useMemo(() => {
+    if (!selectedMachineDetail) return [];
+    const machineId = Number(selectedMachineDetail.machine_id || 0);
+    return (partsList || []).filter((part) => Number(part.machineId || part.machine_id || 0) === machineId);
+  }, [partsList, selectedMachineDetail]);
+
+  const selectedMachineCounts = useMemo(() => {
+    return selectedMachineParts.reduce((acc, part) => {
+      acc[getPartFinalState(part)] += 1;
+      return acc;
+    }, { passed: 0, failed: 0, progress: 0, blocked: 0 });
+  }, [getPartFinalState, selectedMachineParts]);
 
   useEffect(() => {
     setPartsPage(1);
@@ -1055,7 +1105,7 @@ const ProductionCharts=()=>{
             <Card title="Parts Status" subtitle="Breakdown" icon={Settings2} accent={C.navy()}>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:8}}>
                 {[
-                  {l:"Completed",  v:summary.parts?.completed||0,  c:C.ok()  },
+                  {l:"Completed",  v:summary.quality?.ok||0,       c:C.ok()  },
                   {l:"In Progress",v:summary.parts?.inProgress||0, c:C.steel()},
                   {l:"Interlocked",v:summary.parts?.interlocked||0,c:C.wip() },
                   {l:"Rework",     v:summary.parts?.rework||0,     c:C.ng()  },
@@ -1205,17 +1255,17 @@ const ProductionCharts=()=>{
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                 <thead>
                   <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
-                    {["#","Machine","Total","Pass","Fail","Quality %","Progress","Status"].map(h=>(
+                    {["#","Machine","Total","Pass","Fail","In Progress","Target","Achieved","OEE","OA","Downtime","View"].map(h=>(
                       <th key={h} style={{padding:"9px 13px",textAlign:"left",fontSize:9,fontWeight:800,
                         textTransform:"uppercase",letterSpacing:"0.09em",color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {(report.machineWise||[]).length===0?(
-                    <tr><td colSpan={8} style={{padding:"36px",textAlign:"center",color:C.txt("muted"),fontSize:12}}>No data.</td></tr>
+                  {machinePerformanceRows.length===0?(
+                    <tr><td colSpan={12} style={{padding:"36px",textAlign:"center",color:C.txt("muted"),fontSize:12}}>No data.</td></tr>
                   ):machinePerformanceRows.map((row,i)=>{
-                    const t=(Number(row.ok||0))+(Number(row.ng||0));
+                    const t=Number(row.produced ?? ((Number(row.ok||0))+(Number(row.ng||0))));
                     const eff=t>0?Math.round(Number(row.ok||0)/t*100):0;
                     const name = String(row.machineName || `Machine ${row.machine_id}`);
                     const v=eff>=85?"ok":eff>=60?"wip":"ng";
@@ -1230,15 +1280,24 @@ const ProductionCharts=()=>{
                         <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.txt("pri"),textAlign:"center"}}>{t}</td>
                         <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.ok(),textAlign:"center"}}>{row.ok||0}</td>
                         <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.ng(),textAlign:"center"}}>{row.ng||0}</td>
+                        <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.wip(),textAlign:"center"}}>{row.inProgress||0}</td>
+                        <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.txt("muted"),textAlign:"center"}}>{row.target||0}</td>
                         <td style={{padding:"10px 13px",textAlign:"center"}}>
-                          <span style={{fontSize:13,fontWeight:800,color:vc,fontFamily:"'DM Mono',monospace"}}>{eff}%</span>
+                          <span style={{fontSize:13,fontWeight:800,color:vc,fontFamily:"'DM Mono',monospace"}}>{Number(row.achievementPct || 0)}%</span>
                         </td>
-                        <td style={{padding:"10px 13px",minWidth:90}}>
-                          <div style={{height:5,borderRadius:99,background:C.bdr(0.14),overflow:"hidden"}}>
-                            <div style={{height:"100%",background:vc,width:`${eff}%`,transition:"width .5s"}}/>
-                          </div>
+                        <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.steel(),textAlign:"center"}}>{Math.round(Number(row.oee || 0))}%</td>
+                        <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.amber(),textAlign:"center"}}>{Math.round(Number(row.oa || 0))}%</td>
+                        <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.txt("muted"),textAlign:"center"}}>{Math.round(Number(row.downtimeMinutes || 0))}m</td>
+                        <td style={{padding:"10px 13px",textAlign:"center"}}>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedMachineDetail(row)}
+                            title="View machine data"
+                            style={{width:30,height:30,borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.steel(),display:"inline-flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}
+                          >
+                            <Eye size={14}/>
+                          </button>
                         </td>
-                        <td style={{padding:"10px 13px"}}><Bdg v={v} l={v==="ok"?"Good":v==="wip"?"Average":"Low"}/></td>
                       </tr>
                     );
                   })}
@@ -1533,6 +1592,84 @@ const ProductionCharts=()=>{
             </div>
             </>
           )}
+        </div>
+      )}
+
+      {selectedMachineDetail && (
+        <div style={{position:"fixed",inset:0,zIndex:80,display:"flex",alignItems:"center",justifyContent:"center",padding:18}}>
+          <div
+            onClick={()=>setSelectedMachineDetail(null)}
+            style={{position:"absolute",inset:0,background:"rgba(5,10,20,0.72)",backdropFilter:"blur(6px)"}}
+          />
+          <div style={{position:"relative",width:"min(1040px,96vw)",maxHeight:"88vh",overflow:"hidden",background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,boxShadow:SHM,display:"flex",flexDirection:"column"}}>
+            <div style={{padding:"14px 18px",borderBottom:`1px solid ${C.bdr()}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,background:C.bg("surf")}}>
+              <div>
+                <p style={{fontSize:15,fontWeight:900,color:C.txt("pri")}}>{selectedMachineDetail.machineName}</p>
+                <p style={{fontSize:11,color:C.txt("muted"),marginTop:3}}>
+                  {selectedMachineDetail.lineName || "-"} · {selectedMachineDetail.stationNo || "-"} · {timeLabel}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={()=>setSelectedMachineDetail(null)}
+                title="Close"
+                style={{width:32,height:32,borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("card"),color:C.txt("sec"),display:"inline-flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}
+              >
+                <X size={16}/>
+              </button>
+            </div>
+
+            <div style={{padding:16,display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,borderBottom:`1px solid ${C.bdr()}`}}>
+              {[
+                {label:"Produced",value:selectedMachineDetail.produced||0,color:C.txt("pri")},
+                {label:"Target",value:selectedMachineDetail.target||0,color:C.steel()},
+                {label:"Achieved",value:`${Number(selectedMachineDetail.achievementPct||0)}%`,color:C.amber()},
+                {label:"Passed",value:selectedMachineCounts.passed,color:C.ok()},
+                {label:"Failed",value:selectedMachineCounts.failed,color:C.ng()},
+                {label:"In Progress",value:selectedMachineCounts.progress,color:C.wip()},
+                {label:"Blocked",value:selectedMachineCounts.blocked,color:C.amber()},
+                {label:"Downtime",value:`${Math.round(Number(selectedMachineDetail.downtimeMinutes||0))}m`,color:C.txt("muted")},
+              ].map((item)=>(
+                <div key={item.label} style={{padding:"10px 12px",borderRadius:10,border:`1px solid ${C.bdr()}`,background:C.bg("surf")}}>
+                  <p style={{fontSize:9,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.08em",color:C.txt("muted"),marginBottom:5}}>{item.label}</p>
+                  <p style={{fontSize:20,fontWeight:900,fontFamily:"'DM Mono',monospace",color:item.color,lineHeight:1}}>{item.value}</p>
+                </div>
+              ))}
+            </div>
+
+            <div style={{padding:16,overflow:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead>
+                  <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
+                    {["#","Part ID","Status","Result","Reason","Scanned At"].map((h)=>(
+                      <th key={h} style={{padding:"9px 11px",textAlign:"left",fontSize:9,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.08em",color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedMachineParts.length === 0 ? (
+                    <tr><td colSpan={6} style={{padding:"34px",textAlign:"center",color:C.txt("muted")}}>No part records found for this machine and filter.</td></tr>
+                  ) : selectedMachineParts.slice(0, 200).map((part, idx) => {
+                    const state = getPartFinalState(part);
+                    const badge = state === "passed" ? {v:"ok", l:"Passed"} : state === "failed" ? {v:"ng", l:"Failed"} : state === "blocked" ? {v:"wip", l:"Blocked"} : {v:"idle", l:"In Progress"};
+                    return (
+                      <tr key={part.id || `${part.partId}-${idx}`} style={{borderBottom:`1px solid ${C.bdr()}`,background:idx%2===1?C.bg("surf"):"transparent"}}>
+                        <td style={{padding:"9px 11px",color:C.txt("muted")}}>{idx+1}</td>
+                        <td style={{padding:"9px 11px",fontWeight:800,color:C.txt("pri"),fontFamily:"'DM Mono',monospace"}}>{part.partId || part.part_id || "-"}</td>
+                        <td style={{padding:"9px 11px"}}><Bdg v={badge.v} l={badge.l}/></td>
+                        <td style={{padding:"9px 11px",color:C.txt("sec")}}>{part.result || part.status || "-"}</td>
+                        <td style={{padding:"9px 11px",color:C.txt("muted"),maxWidth:260,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{part.reason || part.interlockReason || "-"}</td>
+                        <td style={{padding:"9px 11px",color:C.txt("sec"),whiteSpace:"nowrap"}}>{part.createdAt ? new Date(part.createdAt).toLocaleString("en-IN") : "-"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {selectedMachineParts.length > 200 && (
+                <p style={{fontSize:11,color:C.txt("muted"),marginTop:10}}>Showing latest 200 of {selectedMachineParts.length} records.</p>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

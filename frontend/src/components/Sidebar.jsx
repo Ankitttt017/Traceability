@@ -76,6 +76,7 @@ const Sidebar = ({ onClose }) => {
         name: t("pages.partProcessFlow", "Part Process Flow"),
         path: APP_ROUTES.partProcessFlow,
         icon: Route,
+        moduleKey: "part_process_flow",
       },
       {
         name: t("pages.processFlow", "Process Flow"),
@@ -106,7 +107,7 @@ const Sidebar = ({ onClose }) => {
         name: t("pages.reports", "Reports"),
         path: APP_ROUTES.reports,
         icon: BarChart3,
-        moduleKey: "production",
+        moduleKey: "reports",
       },
       {
         name: t("pages.packing", "Packing"),
@@ -130,13 +131,13 @@ const Sidebar = ({ onClose }) => {
         name: t("pages.scannerMonitor", "Scanner Monitor"),
         path: APP_ROUTES.scannerMonitor,
         icon: Wifi,
-        moduleKey: "scanners",
+        moduleKey: "scanner_monitor",
       },
       {
         name: t("pages.controlPlan", "Control Plan"),
         path: APP_ROUTES.controlPlan,
         icon: Sheet,
-        moduleKey: "operator_view",
+        moduleKey: "control_plan",
         newTab: true,
       },
     ],
@@ -179,13 +180,13 @@ const Sidebar = ({ onClose }) => {
         name: t("pages.stationControls", "Station Controls"),
         path: APP_ROUTES.stationControls,
         icon: Settings2,
-        moduleKey: "master_settings",
+        moduleKey: "station_control",
       },
       {
         name: t("pages.reportConfig", "Report Config"),
         path: APP_ROUTES.masterReports,
         icon: FileText,
-        moduleKey: "master_settings",
+        moduleKey: "report_config",
       },
       {
         name: t("pages.shiftManager", "Shift Manager"),

@@ -32,6 +32,22 @@ async function resolveActivePartIdForMachine(machine, stationNo) {
   return String(activeLog?.part_id || "").trim();
 }
 
+async function resolveMappedPartId(inputCode) {
+  const raw = String(inputCode || "").trim();
+  if (!raw) return { resolvedPartId: "", customerQrCode: null };
+  const row = await PartCodeMapping.findOne({
+    where: { customer_qr: raw, is_active: true },
+    order: [["updatedAt", "DESC"]],
+  });
+  if (!row) {
+    return { resolvedPartId: raw, customerQrCode: null };
+  }
+  return {
+    resolvedPartId: String(row.old_part_id || raw).trim(),
+    customerQrCode: String(row.customer_qr || raw).trim(),
+  };
+}
+
 async function processIncomingScannerPayload({ scannerIp, payload }) {
   const partId = sanitizeScannerPayload(payload);
   if (!partId) return;
@@ -220,14 +236,23 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
     return;
   }
 
-  const response = await saveScan(partId, stationNo, "OK", machine.id, null, {
+  const resolvedCode = await resolveMappedPartId(partId);
+  const normalizedPartId = resolvedCode.resolvedPartId;
+  const isMappedCustomerQrScan =
+    Boolean(resolvedCode.customerQrCode) && resolvedCode.customerQrCode === partId;
+
+  const response = await saveScan(normalizedPartId, stationNo, "OK", machine.id, null, {
     resultSource: "TCP_PUSH_SCANNER",
     resultInput: "OK",
+    skipQrFormatValidation: isMappedCustomerQrScan,
+    skipShotValidation: isMappedCustomerQrScan,
+    skipCustomerCodeValidation: isMappedCustomerQrScan,
   });
 
   emitRealtime("scan_event", {
     sourceEvent: "scan_event",
-    partId,
+    partId: normalizedPartId,
+    customerQrCode: resolvedCode.customerQrCode || null,
     stationNo,
     machineId: machine.id,
     machineName: machine.machine_name,
@@ -249,7 +274,8 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
   );
   emitRealtime("operator_popup", {
     type: response?.decision === "ALLOW" ? "INFO" : "ERROR",
-    partId,
+    partId: normalizedPartId,
+    customerQrCode: resolvedCode.customerQrCode || null,
     stationNo,
     machineId: machine.id,
     machineName: machine.machine_name,

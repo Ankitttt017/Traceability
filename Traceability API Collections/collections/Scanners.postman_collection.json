@@ -1,0 +1,670 @@
+{
+  "info": {
+    "name": "Traceability API - Scanners",
+    "description": "Postman collection for Scanners APIs split from the Traceability backend.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "BASE_URL",
+      "value": "http://localhost:4000/api/v1"
+    },
+    {
+      "key": "TOKEN",
+      "value": ""
+    },
+    {
+      "key": "MACHINE_ID",
+      "value": "1"
+    },
+    {
+      "key": "PART_ID",
+      "value": "PART-0001"
+    },
+    {
+      "key": "STATION_ID",
+      "value": "10"
+    },
+    {
+      "key": "SHIFT_ID",
+      "value": "1"
+    },
+    {
+      "key": "USER_ID",
+      "value": "1"
+    }
+  ],
+  "item": [
+    {
+      "name": "Scanners",
+      "item": [
+        {
+          "name": "Get All Scanners",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/scanners",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "scanners"
+              ]
+            },
+            "description": "Fetch all scanner configurations."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/scanners",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "scanners"
+                  ]
+                },
+                "description": "Fetch all scanner configurations."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get All Scanners executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/scanners\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Scanner Connections",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/scanners/connections",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "scanners",
+                "connections"
+              ]
+            },
+            "description": "Fetch scanner connection status."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/scanners/connections",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "scanners",
+                    "connections"
+                  ]
+                },
+                "description": "Fetch scanner connection status."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get Scanner Connections executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/scanners/connections\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Test Scanner Read",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/scanners/test-read",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "scanners",
+                "test-read"
+              ]
+            },
+            "description": "Test scanner read payload handling.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"scannerId\": 1,\n  \"barcode\": \"TEST-QR-0001\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/scanners/test-read",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "scanners",
+                    "test-read"
+                  ]
+                },
+                "description": "Test scanner read payload handling.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"scannerId\": 1,\n  \"barcode\": \"TEST-QR-0001\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Test Scanner Read executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/scanners/test-read\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create USB Activity Log",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/scanners/usb-activity",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "scanners",
+                "usb-activity"
+              ]
+            },
+            "description": "Mark USB scanner activity.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"scannerId\": 1,\n  \"event\": \"SCAN_RECEIVED\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/scanners/usb-activity",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "scanners",
+                    "usb-activity"
+                  ]
+                },
+                "description": "Mark USB scanner activity.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"scannerId\": 1,\n  \"event\": \"SCAN_RECEIVED\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Mark USB Activity executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/scanners/usb-activity\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Test Scanner Connection By ID",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/scanners/{{MACHINE_ID}}/test-connection",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "scanners",
+                "{{MACHINE_ID}}",
+                "test-connection"
+              ]
+            },
+            "description": "Test a scanner connection by scanner id.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"timeoutMs\": 3000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/scanners/{{MACHINE_ID}}/test-connection",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "scanners",
+                    "{{MACHINE_ID}}",
+                    "test-connection"
+                  ]
+                },
+                "description": "Test a scanner connection by scanner id.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"timeoutMs\": 3000\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Test Scanner Connection executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/scanners/{{MACHINE_ID}}/test-connection\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create Scanner",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/scanners",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "scanners"
+              ]
+            },
+            "description": "Create a new scanner.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scannerName\": \"Scanner 01\",\n  \"scannerCode\": \"SCN-01\",\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"scannerIp\": \"192.168.100.60\",\n  \"scannerPort\": 9000,\n  \"protocol\": \"TCP\",\n  \"isActive\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/scanners",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "scanners"
+                  ]
+                },
+                "description": "Create a new scanner.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"scannerName\": \"Scanner 01\",\n  \"scannerCode\": \"SCN-01\",\n  \"machineId\": \"{{MACHINE_ID}}\",\n  \"scannerIp\": \"192.168.100.60\",\n  \"scannerPort\": 9000,\n  \"protocol\": \"TCP\",\n  \"isActive\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Create Scanner executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/scanners\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update Scanner",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/scanners/{{MACHINE_ID}}",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "scanners",
+                "{{MACHINE_ID}}"
+              ]
+            },
+            "description": "Update scanner configuration.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scannerName\": \"Scanner 01 Updated\",\n  \"scannerIp\": \"192.168.100.61\",\n  \"scannerPort\": 9000,\n  \"protocol\": \"TCP\",\n  \"isActive\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/scanners/{{MACHINE_ID}}",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "scanners",
+                    "{{MACHINE_ID}}"
+                  ]
+                },
+                "description": "Update scanner configuration.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"scannerName\": \"Scanner 01 Updated\",\n  \"scannerIp\": \"192.168.100.61\",\n  \"scannerPort\": 9000,\n  \"protocol\": \"TCP\",\n  \"isActive\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Update Scanner executed successfully\",\n  \"method\": \"PUT\",\n  \"endpoint\": \"{{BASE_URL}}/scanners/{{MACHINE_ID}}\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Delete Scanner",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/scanners/{{MACHINE_ID}}",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "scanners",
+                "{{MACHINE_ID}}"
+              ]
+            },
+            "description": "Delete a scanner."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/scanners/{{MACHINE_ID}}",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "scanners",
+                    "{{MACHINE_ID}}"
+                  ]
+                },
+                "description": "Delete a scanner."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Delete Scanner executed successfully\",\n  \"method\": \"DELETE\",\n  \"endpoint\": \"{{BASE_URL}}/scanners/{{MACHINE_ID}}\",\n  \"data\": {\n    \"deleted\": true\n  }\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

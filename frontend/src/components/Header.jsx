@@ -76,6 +76,7 @@ const Header = ({ onMenuClick }) => {
       {
         name: t("pages.traceability", "Traceability"),
         path: APP_ROUTES.traceability,
+        moduleKey: "traceability",
         description: "Track part lifecycle and scans",
         keywords: ["part", "scan", "history"],
       },
@@ -89,7 +90,7 @@ const Header = ({ onMenuClick }) => {
       {
         name: t("pages.scannerMonitor", "Scanner Monitor"),
         path: APP_ROUTES.scannerMonitor,
-        moduleKey: "scanners",
+        moduleKey: "scanner_monitor",
         description: "Scanner connection health",
         keywords: ["scanner", "device"],
       },
@@ -124,14 +125,14 @@ const Header = ({ onMenuClick }) => {
       {
         name: t("pages.stationControls", "Station Controls"),
         path: APP_ROUTES.stationControls,
-        moduleKey: "master_settings",
+        moduleKey: "station_control",
         description: "Station configuration",
         keywords: ["station", "controls"],
       },
       {
         name: t("pages.reportConfig", "Report Config"),
         path: APP_ROUTES.masterReports,
-        moduleKey: "master_settings",
+        moduleKey: "report_config",
         description: "Master report configuration",
         keywords: ["report", "config"],
       },
@@ -180,6 +181,7 @@ const Header = ({ onMenuClick }) => {
       {
         name: t("pages.faq", "FAQ & Logic Guide"),
         path: APP_ROUTES.faq,
+        moduleKey: "faq",
         description: "KPI formulas and rejection categories",
         keywords: ["faq", "logic", "oee", "oa", "formula"],
       },

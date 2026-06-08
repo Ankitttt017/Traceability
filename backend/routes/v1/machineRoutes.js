@@ -1,22 +1,23 @@
 const express = require("express");
 const machineController = require("../../controllers/machineController");
-const { verifyToken, isAdmin, isAdminOrEngineerStrict } = require("../../middleware/authMiddleware");
+const { verifyToken } = require("../../middleware/authMiddleware");
+const { requireModuleAccess } = require("../../middleware/roleAccessMiddleware");
 
 const router = express.Router();
 
-router.get("/", verifyToken, machineController.getMachines);
-router.get("/:id", verifyToken, machineController.getMachineById);
-router.post("/test-plc", verifyToken, isAdminOrEngineerStrict, machineController.testPlc);
-router.post("/test-connection", verifyToken, isAdminOrEngineerStrict, machineController.testConnection);
-router.post("/reset-plc", verifyToken, isAdminOrEngineerStrict, machineController.resetPlc);
-router.post("/plc-command", verifyToken, isAdminOrEngineerStrict, machineController.sendPlcCommand);
-router.post("/read-plc-value", verifyToken, isAdminOrEngineerStrict, machineController.readPlcValue);
-router.post("/read-plc-registers", verifyToken, isAdminOrEngineerStrict, machineController.readPlcRegisters);
-router.post("/debug-plc-effective-config", verifyToken, isAdminOrEngineerStrict, machineController.debugPlcEffectiveConfig);
-router.post("/write-plc-value", verifyToken, isAdminOrEngineerStrict, machineController.writePlcValue);
-router.patch("/:id/target", verifyToken, isAdminOrEngineerStrict, machineController.updateMachineTarget);
-router.post("/", verifyToken, isAdmin, machineController.createMachine);
-router.put("/:id", verifyToken, isAdmin, machineController.updateMachine);
-router.delete("/:id", verifyToken, isAdmin, machineController.deleteMachine);
+router.get("/", verifyToken, requireModuleAccess("machines", "view"), machineController.getMachines);
+router.get("/:id", verifyToken, requireModuleAccess("machines", "view"), machineController.getMachineById);
+router.post("/test-plc", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.testPlc);
+router.post("/test-connection", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.testConnection);
+router.post("/reset-plc", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.resetPlc);
+router.post("/plc-command", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.sendPlcCommand);
+router.post("/read-plc-value", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.readPlcValue);
+router.post("/read-plc-registers", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.readPlcRegisters);
+router.post("/debug-plc-effective-config", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.debugPlcEffectiveConfig);
+router.post("/write-plc-value", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.writePlcValue);
+router.patch("/:id/target", verifyToken, requireModuleAccess("machines", "edit"), machineController.updateMachineTarget);
+router.post("/", verifyToken, requireModuleAccess("machines", "edit"), machineController.createMachine);
+router.put("/:id", verifyToken, requireModuleAccess("machines", "edit"), machineController.updateMachine);
+router.delete("/:id", verifyToken, requireModuleAccess("machines", "edit"), machineController.deleteMachine);
 
 module.exports = router;

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Save, ShieldCheck, Monitor, Eye, EyeOff, Lock, AlertCircle, CheckCircle, Users, HardDrive } from "lucide-react";
+import { Save, ShieldCheck, Monitor, Eye, EyeOff, Lock, AlertCircle, CheckCircle, Users, HardDrive, UserRound } from "lucide-react";
 import { roleAccessApi } from "../api/services";
 import {
   ACCESS_LEVEL_OPTIONS,
   MODULE_ACCESS_META,
+  canEditModule,
   getRoleAccessSettings,
   normalizeRoleAccessSettings,
   saveRoleAccessSettings,
@@ -13,8 +14,8 @@ import {
 const ACCESS_LEVEL_COLORS = {
   "HIDDEN": { bg: "bg-danger/10", text: "text-danger", border: "border-danger/20", badge: "Hidden", icon: <EyeOff size={12} /> },
   "VIEW": { bg: "bg-warning/10", text: "text-warning", border: "border-warning/20", badge: "View Only", icon: <Eye size={12} /> },
-  "EDIT": { bg: "bg-accent/10", text: "text-accent", border: "border-accent/20", badge: "Edit", icon: <CheckCircle size={12} /> },
-  "FULL": { bg: "bg-primary/10", text: "text-primary", border: "border-primary/20", badge: "Full Access", icon: <ShieldCheck size={12} /> },
+  "VIEW_EDIT": { bg: "bg-accent/10", text: "text-accent", border: "border-accent/20", badge: "View/Edit", icon: <CheckCircle size={12} /> },
+  "VIEW_CONTROL": { bg: "bg-primary/10", text: "text-primary", border: "border-primary/20", badge: "View/Control", icon: <ShieldCheck size={12} /> },
 };
 
 const ROLE_LABELS = {
@@ -22,7 +23,10 @@ const ROLE_LABELS = {
   engineer: { label: "Engineer", icon: <HardDrive size={14} />, color: "text-accent" },
   supervisor: { label: "Supervisor", icon: <Users size={14} />, color: "text-warning" },
   operator: { label: "Operator", icon: <Monitor size={14} />, color: "text-primary" },
+  other: { label: "Other", icon: <UserRound size={14} />, color: "text-text-muted" },
 };
+
+const ROLE_KEYS = Object.keys(ROLE_LABELS);
 
 const RoleAccess = () => {
   const user = useMemo(() => {
@@ -32,16 +36,20 @@ const RoleAccess = () => {
       return {};
     }
   }, []);
-  const isAdmin = String(user.role || "").trim().toLowerCase() === "admin";
+  const viewerRoleAccess = useMemo(() => getRoleAccessSettings(), []);
 
   const [roleAccessSettings, setRoleAccessSettings] = useState(() => getRoleAccessSettings());
   const [loading, setLoading] = useState(true);
-  const [popup, setPopup] = useState(null);
+  const [, setPopup] = useState(null);
   const [saving, setSaving] = useState(false);
 
   const normalizedRoleAccess = useMemo(
     () => normalizeRoleAccessSettings(roleAccessSettings),
     [roleAccessSettings]
+  );
+  const canEditPermissions = useMemo(
+    () => canEditModule(user.role, "master_settings", viewerRoleAccess),
+    [user.role, viewerRoleAccess]
   );
 
   const loadData = useCallback(async () => {
@@ -61,11 +69,11 @@ const RoleAccess = () => {
   }, [loadData]);
 
   const saveSettings = async () => {
-    if (!isAdmin) {
+    if (!canEditPermissions) {
       setPopup({
         type: "ERROR",
         title: "Access Denied",
-        message: "Only administrators can modify role permissions.",
+        message: "You do not have permission to modify role permissions.",
       });
       return;
     }
@@ -96,7 +104,7 @@ const RoleAccess = () => {
   // Calculate statistics
   const stats = useMemo(() => {
     const modules = MODULE_ACCESS_META.length;
-    const roles = ["admin", "engineer", "supervisor", "operator"];
+    const roles = ROLE_KEYS;
     let fullAccess = 0;
     let editAccess = 0;
     let viewAccess = 0;
@@ -105,8 +113,8 @@ const RoleAccess = () => {
     roles.forEach(role => {
       MODULE_ACCESS_META.forEach(module => {
         const level = normalizedRoleAccess[module.key]?.[role] || "HIDDEN";
-        if (level === "FULL") fullAccess++;
-        else if (level === "EDIT") editAccess++;
+        if (level === "VIEW_CONTROL") fullAccess++;
+        else if (level === "VIEW_EDIT") editAccess++;
         else if (level === "VIEW") viewAccess++;
         else hidden++;
       });
@@ -134,7 +142,7 @@ const RoleAccess = () => {
           <div className="flex items-center gap-3">
             <button 
               onClick={saveSettings} 
-              disabled={!isAdmin || saving} 
+              disabled={!canEditPermissions || saving} 
               className="db-action-btn"
             >
               {saving ? <div className="animate-spin">⏳</div> : <Save size={14} />} 
@@ -211,7 +219,7 @@ const RoleAccess = () => {
               <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">Permission Matrix</h2>
             </div>
             <div className="flex items-center gap-3">
-              {!isAdmin && (
+              {!canEditPermissions && (
                 <div className="flex items-center gap-1.5 px-2 py-1 bg-warning/10 border border-warning/20 rounded">
                   <AlertCircle size={10} className="text-warning" />
                   <span className="text-[9px] font-black text-warning uppercase tracking-wider">Read-Only Mode</span>
@@ -263,10 +271,10 @@ const RoleAccess = () => {
                         </span>
                       </div>
                     </td>
-                    {["admin", "engineer", "supervisor", "operator"].map((roleKey) => {
+                    {ROLE_KEYS.map((roleKey) => {
                       const level = normalizedRoleAccess[row.key]?.[roleKey] || "HIDDEN";
                       const levelStyle = getAccessLevelStyle(level);
-                      const isEditable = isAdmin;
+                      const isEditable = canEditPermissions;
                       
                       return (
                         <td key={roleKey} className="px-4 py-3 text-center">

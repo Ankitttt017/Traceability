@@ -61,6 +61,8 @@ const {
   ensureTraceabilityColumnsExist,
   ensureScannerColumnsExist,
   ensurePlcLinkColumnsExist,
+  ensureRoleAccessSchema,
+  ensureUserRoleSchema,
 } = require("./services/machineSchemaService");
 const { runStartupRecovery } = require("./services/startupRecoveryService");
 const {
@@ -436,6 +438,8 @@ async function startServer() {
       await runStartupDbTask("ensureTraceabilityColumnsExist", () => ensureTraceabilityColumnsExist());
       await runStartupDbTask("ensureScannerColumnsExist", () => ensureScannerColumnsExist());
       await runStartupDbTask("ensurePlcLinkColumnsExist", () => ensurePlcLinkColumnsExist());
+      await runStartupDbTask("ensureRoleAccessSchema", () => ensureRoleAccessSchema());
+      await runStartupDbTask("ensureUserRoleSchema", () => ensureUserRoleSchema());
       await runStartupDbTask("ensureMachineQrScannerUniqueness", () => ensureMachineQrScannerUniqueness());
       await runStartupDbTask("resetAllMachineLocks", () => resetAllMachineLocks());
       await runStartupDbTask("resetAllScannerConnectionStates", () => scannerService.resetAllScannerConnectionStates());

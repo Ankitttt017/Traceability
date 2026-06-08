@@ -1,11 +1,10 @@
-// Part Journey routes
 const express = require("express");
 const { getPartJourney } = require("../../controllers/partJourneyController");
 const { verifyToken } = require("../../middleware/authMiddleware");
+const { requireModuleAccess } = require("../../middleware/roleAccessMiddleware");
 
 const router = express.Router();
 
-// GET /api/parts/:partId/journey — Traceability timeline for a specific part
-router.get("/:partId/journey", verifyToken, getPartJourney);
+router.get("/:partId/journey", verifyToken, requireModuleAccess("part_journey", "view"), getPartJourney);
 
 module.exports = router;

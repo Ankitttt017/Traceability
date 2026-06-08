@@ -1,5 +1,5 @@
 import React from 'react';
-import { Target, CheckCircle2, XCircle, AlertTriangle, Activity, Layers, BarChart3 } from 'lucide-react';
+import { CheckCircle2, XCircle, AlertTriangle, Activity, Clock3, BarChart3 } from 'lucide-react';
 
 const SummaryCard = ({ label, value, icon: Icon, colorClass, subValue }) => (
   <div className="bg-bg-card border border-border rounded-xl p-5 shadow-sm">
@@ -44,6 +44,13 @@ const ReportSummaryCards = ({ metrics = {} }) => {
       subValue: "Process Fail"
     },
     {
+      label: "In Progress",
+      value: metrics.inProgress || 0,
+      icon: Clock3,
+      colorClass: "bg-orange-500",
+      subValue: "Running"
+    },
+    {
       label: "Validation Rejects",
       value: metrics.validationRejects || 0,
       icon: AlertTriangle,
@@ -60,7 +67,7 @@ const ReportSummaryCards = ({ metrics = {} }) => {
   ];
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
       {cards.map((card, i) => <SummaryCard key={i} {...card} />)}
     </div>
   );

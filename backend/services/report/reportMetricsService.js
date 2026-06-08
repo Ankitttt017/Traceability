@@ -13,6 +13,7 @@ function calculateProductionMetrics(rows) {
     totalProduction: 0,
     totalOK: 0,
     totalNG: 0,
+    inProgress: 0,
     validationRejects: 0,
     passRate: 0, // (OK / (OK + NG)) * 100
     byMachine: {},
@@ -28,9 +29,9 @@ function calculateProductionMetrics(rows) {
     const lName = row.lineName    || "Unknown Line";
 
     // Initialize groupings
-    if (!metrics.byMachine[mName]) metrics.byMachine[mName] = { total: 0, ok: 0, ng: 0, rejects: 0 };
-    if (!metrics.byShift[sCode])   metrics.byShift[sCode]   = { total: 0, ok: 0, ng: 0, rejects: 0 };
-    if (!metrics.byLine[lName])    metrics.byLine[lName]    = { total: 0, ok: 0, ng: 0, rejects: 0 };
+    if (!metrics.byMachine[mName]) metrics.byMachine[mName] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
+    if (!metrics.byShift[sCode])   metrics.byShift[sCode]   = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
+    if (!metrics.byLine[lName])    metrics.byLine[lName]    = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
 
     if (category === "PRODUCTION") {
       metrics.totalProduction++;
@@ -54,6 +55,14 @@ function calculateProductionMetrics(rows) {
       metrics.byMachine[mName].rejects++;
       metrics.byShift[sCode].rejects++;
       metrics.byLine[lName].rejects++;
+    } else {
+      const normalizedStatus = String(status || "").trim().toUpperCase();
+      if (normalizedStatus === "IN PROGRESS" || normalizedStatus === "IN_PROGRESS") {
+        metrics.inProgress++;
+        metrics.byMachine[mName].inProgress++;
+        metrics.byShift[sCode].inProgress++;
+        metrics.byLine[lName].inProgress++;
+      }
     }
   });
 

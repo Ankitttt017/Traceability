@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Users, UserPlus, Edit, Trash2, Search, Shield, UserCog,
-  X, Save, Calendar, RefreshCw, ChevronUp, ChevronDown, CheckCircle, Layout,
+  X, Calendar, RefreshCw, ChevronUp, ChevronDown, CheckCircle, Layout,
   Key, BadgeCheck, AlertCircle
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { userApi } from "../api/services";
 import ConfirmModal from "../components/ConfirmModal";
+import { getUserRole } from "../utils/authStorage";
+import { canEditModule, getRoleAccessSettings } from "../utils/roleAccess";
 
 const DEFAULT_FORM = { username: "", password: "", role: "Operator", status: "ACTIVE" };
 
@@ -15,13 +17,7 @@ const ROLE_STYLE = {
   Engineer:   "bg-accent/10 text-accent border-accent/20",
   Supervisor: "bg-warning/10 text-warning border-warning/20",
   Operator:   "bg-primary/10 text-primary border-primary/20",
-};
-
-const ROLE_SELECTED_STYLE = {
-  Admin:      "border-danger bg-danger/10 text-danger",
-  Engineer:   "border-accent bg-accent/10 text-accent",
-  Supervisor: "border-warning bg-warning/10 text-warning",
-  Operator:   "border-primary bg-primary/10 text-primary",
+  Other:      "bg-bg-dark text-text-muted border-border",
 };
 
 const ROLE_ICONS = {
@@ -29,7 +25,10 @@ const ROLE_ICONS = {
   Engineer:   <UserCog size={12} />,
   Supervisor: <BadgeCheck size={12} />,
   Operator:   <Users size={12} />,
+  Other:      <Shield size={12} />,
 };
+
+const USER_ROLES = ["Operator", "Engineer", "Supervisor", "Admin", "Other"];
 
 const UsersPage = () => {
   const [users, setUsers] = useState([]);
@@ -42,6 +41,10 @@ const UsersPage = () => {
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [loading, setLoading] = useState(false);
   const [showRoleDropdown, setShowRoleDropdown] = useState(false);
+  const canManageUsers = useMemo(
+    () => canEditModule(getUserRole(), "users", getRoleAccessSettings()),
+    []
+  );
 
   const fetchUsers = useCallback(async () => {
     try {
@@ -56,6 +59,10 @@ const UsersPage = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!canManageUsers) {
+      toast.error("You do not have permission to manage users.");
+      return;
+    }
     setLoading(true);
     try {
       if (editingUser) {
@@ -79,6 +86,11 @@ const UsersPage = () => {
 
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
+    if (!canManageUsers) {
+      toast.error("You do not have permission to manage users.");
+      setDeleteTarget(null);
+      return;
+    }
     try {
       await userApi.remove(deleteTarget.id);
       toast.success(`Access revoked for ${deleteTarget.username}`);
@@ -91,6 +103,10 @@ const UsersPage = () => {
   };
 
   const handleOpenEdit = (user) => {
+    if (!canManageUsers) {
+      toast.error("You do not have permission to edit users.");
+      return;
+    }
     setEditingUser(user);
     setFormData({
       username: user.username || "",
@@ -126,7 +142,7 @@ const UsersPage = () => {
 
   const roleCount = useMemo(() => {
     return Object.fromEntries(
-      ["Admin", "Engineer", "Supervisor", "Operator"].map((r) => [
+      USER_ROLES.map((r) => [
         r, 
         users.filter((u) => u.role === r).length
       ])
@@ -157,7 +173,15 @@ const UsersPage = () => {
               <RefreshCw size={14} /> Refresh
             </button>
             <button 
-              onClick={() => { resetForm(); setShowModal(true); }}
+              onClick={() => {
+                if (!canManageUsers) {
+                  toast.error("You do not have permission to add users.");
+                  return;
+                }
+                resetForm();
+                setShowModal(true);
+              }}
+              disabled={!canManageUsers}
               className="db-action-btn"
             >
               <UserPlus size={14} /> Add User
@@ -223,7 +247,7 @@ const UsersPage = () => {
                 >
                   All Roles
                 </div>
-                {["Admin", "Engineer", "Supervisor", "Operator"].map((r) => (
+                {USER_ROLES.map((r) => (
                   <div 
                     key={r}
                     onClick={() => { setRoleFilter(r); setShowRoleDropdown(false); }}
@@ -323,13 +347,15 @@ const UsersPage = () => {
                       <div className="flex items-center justify-end gap-1">
                         <button 
                           onClick={() => handleOpenEdit(user)} 
+                          disabled={!canManageUsers}
                           className="p-1.5 text-text-muted hover:text-primary hover:bg-primary/10 rounded transition-all"
                           title="Edit user"
                         >
                           <Edit size={13} />
                         </button>
                         <button 
-                          onClick={() => setDeleteTarget(user)} 
+                          onClick={() => canManageUsers ? setDeleteTarget(user) : toast.error("You do not have permission to delete users.")} 
+                          disabled={!canManageUsers}
                           className="p-1.5 text-text-muted hover:text-danger hover:bg-danger/10 rounded transition-all"
                           title="Delete user"
                         >
@@ -409,23 +435,17 @@ const UsersPage = () => {
                 <label className="text-[9px] font-black text-text-muted uppercase tracking-widest flex items-center gap-1.5">
                   <Shield size={10} /> Role
                 </label>
-                <div className="grid grid-cols-2 gap-2">
-                  {["Operator", "Engineer", "Supervisor", "Admin"].map(role => (
-                    <button 
-                      key={role} 
-                      type="button" 
-                      onClick={() => setFormData({...formData, role})}
-                      className={`py-2 rounded-lg border text-[9px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${
-                        formData.role === role 
-                          ? ROLE_SELECTED_STYLE[role] + ' border-current' 
-                          : 'border-border bg-bg-dark/40 text-text-muted hover:border-text-muted'
-                      }`}
-                    >
-                      {ROLE_ICONS[role]}
+                <select
+                  value={formData.role}
+                  onChange={e => setFormData({ ...formData, role: e.target.value })}
+                  className="w-full bg-bg-dark border border-border rounded-lg p-2.5 text-text-main text-sm outline-none focus:border-primary/50 transition-all font-medium"
+                >
+                  {USER_ROLES.map((role) => (
+                    <option key={role} value={role}>
                       {role}
-                    </button>
+                    </option>
                   ))}
-                </div>
+                </select>
               </div>
               
               <div className="space-y-1">

@@ -1,0 +1,409 @@
+{
+  "info": {
+    "name": "Traceability API - Station Control",
+    "description": "Postman collection for Station Control APIs split from the Traceability backend.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "BASE_URL",
+      "value": "http://localhost:4000/api/v1"
+    },
+    {
+      "key": "TOKEN",
+      "value": ""
+    },
+    {
+      "key": "MACHINE_ID",
+      "value": "1"
+    },
+    {
+      "key": "PART_ID",
+      "value": "PART-0001"
+    },
+    {
+      "key": "STATION_ID",
+      "value": "10"
+    },
+    {
+      "key": "SHIFT_ID",
+      "value": "1"
+    },
+    {
+      "key": "USER_ID",
+      "value": "1"
+    }
+  ],
+  "item": [
+    {
+      "name": "Station Control",
+      "item": [
+        {
+          "name": "Get Station Settings",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/station-settings",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "station-settings"
+              ]
+            },
+            "description": "Fetch station feature settings."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/station-settings",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "station-settings"
+                  ]
+                },
+                "description": "Fetch station feature settings."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get Station Settings executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/station-settings\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update Station Settings",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/station-settings",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "station-settings"
+              ]
+            },
+            "description": "Save station feature settings.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"settings\": {\n    \"rejectionBin\": true,\n    \"manualResetAllowed\": true,\n    \"scannerBindingStrict\": false\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{TOKEN}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/station-settings",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "station-settings"
+                  ]
+                },
+                "description": "Save station feature settings.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"settings\": {\n    \"rejectionBin\": true,\n    \"manualResetAllowed\": true,\n    \"scannerBindingStrict\": false\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Update Station Settings executed successfully\",\n  \"method\": \"PUT\",\n  \"endpoint\": \"{{BASE_URL}}/station-settings\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Recent Alarms",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/alarms",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "alarms"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Fetch recent unresolved alarms."
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{BASE_URL}}/alarms",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "alarms"
+                  ],
+                  "query": [
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                },
+                "description": "Fetch recent unresolved alarms."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Get Recent Alarms executed successfully\",\n  \"method\": \"GET\",\n  \"endpoint\": \"{{BASE_URL}}/alarms\",\n  \"data\": []\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update Alarm Resolve Status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/alarms/1/resolve",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "alarms",
+                "1",
+                "resolve"
+              ]
+            },
+            "description": "Resolve a single alarm.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"resolvedBy\": \"postman-user\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/alarms/1/resolve",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "alarms",
+                    "1",
+                    "resolve"
+                  ]
+                },
+                "description": "Resolve a single alarm.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"resolvedBy\": \"postman-user\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Resolve Alarm executed successfully\",\n  \"method\": \"PATCH\",\n  \"endpoint\": \"{{BASE_URL}}/alarms/1/resolve\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update All Alarms Resolve Status",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/alarms/resolve-all",
+              "host": [
+                "{{BASE_URL}}"
+              ],
+              "path": [
+                "alarms",
+                "resolve-all"
+              ]
+            },
+            "description": "Resolve all alarms.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"resolvedBy\": \"postman-user\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "Sample Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/alarms/resolve-all",
+                  "host": [
+                    "{{BASE_URL}}"
+                  ],
+                  "path": [
+                    "alarms",
+                    "resolve-all"
+                  ]
+                },
+                "description": "Resolve all alarms.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"resolvedBy\": \"postman-user\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Resolve All Alarms executed successfully\",\n  \"method\": \"POST\",\n  \"endpoint\": \"{{BASE_URL}}/alarms/resolve-all\",\n  \"data\": {\n    \"id\": 1\n  }\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -29,6 +29,11 @@ const RoleAccessSetting = sequelize.define("RoleAccessSetting", {
     allowNull: false,
     defaultValue: "HIDDEN",
   },
+  other_access: {
+    type: DataTypes.ENUM(...ACCESS_ENUM),
+    allowNull: false,
+    defaultValue: "HIDDEN",
+  },
   updated_by: {
     type: DataTypes.INTEGER,
     allowNull: true,

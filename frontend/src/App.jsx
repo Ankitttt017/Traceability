@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
 import { useAlarmToasts } from "./hooks/useAlarmToasts.jsx";
 import { NotificationProvider } from "./context/NotificationContext";
@@ -35,8 +35,34 @@ const ProtectedRoute = ({ children }) => {
   return isAuthenticated() ? children : <Navigate to={APP_ROUTES.login} replace />;
 };
 
+const NoAccessScreen = () => (
+  <div className="min-h-screen flex items-center justify-center bg-bg-base px-6">
+    <div className="max-w-md w-full rounded-2xl border border-border bg-bg-card p-8 text-center shadow-xl">
+      <h1 className="text-2xl font-black text-text-main mb-3">No Page Access</h1>
+      <p className="text-sm text-text-muted">
+        Your role does not currently have access to any page. Please ask an administrator to enable at least one module.
+      </p>
+    </div>
+  </div>
+);
+
+function getFirstAccessibleRoute() {
+  const role = getUserRole();
+  const settings = getRoleAccessSettings();
+  for (const entry of MODULE_REDIRECT_ORDER) {
+    if (canAccessModule(role, entry.moduleKey, settings)) {
+      return entry.path;
+    }
+  }
+  return null;
+}
+
 const PublicOnlyRoute = ({ children }) => {
-  return isAuthenticated() ? <Navigate to={APP_ROUTES.dashboard} replace /> : children;
+  if (!isAuthenticated()) {
+    return children;
+  }
+  const fallback = getFirstAccessibleRoute();
+  return fallback ? <Navigate to={fallback} replace /> : <NoAccessScreen />;
 };
 
 const MODULE_REDIRECT_ORDER = [
@@ -45,38 +71,37 @@ const MODULE_REDIRECT_ORDER = [
   { moduleKey: "packing", path: APP_ROUTES.packing },
   { moduleKey: "packing_management", path: APP_ROUTES.packingManagement },
   { moduleKey: "production", path: APP_ROUTES.production },
-  { moduleKey: "production", path: APP_ROUTES.reports },
+  { moduleKey: "reports", path: APP_ROUTES.reports },
+  { moduleKey: "traceability", path: APP_ROUTES.traceability },
   { moduleKey: "io_monitor", path: APP_ROUTES.ioMonitor },
   { moduleKey: "part_journey", path: APP_ROUTES.partJourney },
+  { moduleKey: "part_process_flow", path: APP_ROUTES.partProcessFlow },
   { moduleKey: "process_flow", path: APP_ROUTES.processFlow },
   { moduleKey: "master_settings", path: APP_ROUTES.masterSettings },
+  { moduleKey: "station_control", path: APP_ROUTES.stationControls },
+  { moduleKey: "report_config", path: APP_ROUTES.masterReports },
   { moduleKey: "machines", path: APP_ROUTES.machines },
   { moduleKey: "plc_config", path: APP_ROUTES.plcConfig },
   { moduleKey: "scanners", path: APP_ROUTES.scanners },
-  { moduleKey: "scanners", path: APP_ROUTES.scannerMonitor },
+  { moduleKey: "scanner_monitor", path: APP_ROUTES.scannerMonitor },
   { moduleKey: "shifts", path: APP_ROUTES.shifts },
   { moduleKey: "qr_rules", path: APP_ROUTES.qrRules },
   { moduleKey: "users", path: APP_ROUTES.users },
+  { moduleKey: "faq", path: APP_ROUTES.faq },
 ];
-
-function resolveFirstAccessibleRoute() {
-  const role = getUserRole();
-  const settings = getRoleAccessSettings();
-  for (const entry of MODULE_REDIRECT_ORDER) {
-    if (canAccessModule(role, entry.moduleKey, settings)) {
-      return entry.path;
-    }
-  }
-  return APP_ROUTES.login;
-}
 
 const ModuleRoute = ({ moduleKey, children }) => {
   const role = getUserRole();
   const settings = getRoleAccessSettings();
+  const location = useLocation();
   if (canAccessModule(role, moduleKey, settings)) {
     return children;
   }
-  return <Navigate to={resolveFirstAccessibleRoute()} replace />;
+  const fallback = getFirstAccessibleRoute();
+  if (!fallback || fallback === location.pathname) {
+    return <NoAccessScreen />;
+  }
+  return <Navigate to={fallback} replace />;
 };
 
 function App() {
@@ -145,7 +170,7 @@ function App() {
             path={APP_ROUTES.controlPlan}
             element={
               <ProtectedRoute>
-                <ModuleRoute moduleKey="operator_view">
+                <ModuleRoute moduleKey="control_plan">
                   <ControlPlan />
                 </ModuleRoute>
               </ProtectedRoute>
@@ -160,7 +185,14 @@ function App() {
               </ProtectedRoute>
             }
           >
-            <Route index element={<Navigate to={resolveFirstAccessibleRoute()} replace />} />
+            <Route
+              index
+              element={
+                getFirstAccessibleRoute()
+                  ? <Navigate to={getFirstAccessibleRoute()} replace />
+                  : <NoAccessScreen />
+              }
+            />
             <Route
               path={APP_ROUTES.dashboard.slice(1)}
               element={
@@ -180,7 +212,7 @@ function App() {
             <Route
               path={APP_ROUTES.stationControls.slice(1)}
               element={
-                <ModuleRoute moduleKey="master_settings">
+                <ModuleRoute moduleKey="station_control">
                   <StationControls />
                 </ModuleRoute>
               }
@@ -189,7 +221,7 @@ function App() {
             <Route
               path={APP_ROUTES.masterReports.slice(1)}
               element={
-                <ModuleRoute moduleKey="master_settings">
+                <ModuleRoute moduleKey="report_config">
                   <ReportConfiguration />
                 </ModuleRoute>
               }
@@ -207,12 +239,19 @@ function App() {
             <Route
               path={APP_ROUTES.reports.slice(1)}
               element={
-                <ModuleRoute moduleKey="production">
+                <ModuleRoute moduleKey="reports">
                   <ReportsPage />
                 </ModuleRoute>
               }
             />
-            <Route path={APP_ROUTES.traceability.slice(1)} element={<Traceability />} />
+            <Route
+              path={APP_ROUTES.traceability.slice(1)}
+              element={
+                <ModuleRoute moduleKey="traceability">
+                  <Traceability />
+                </ModuleRoute>
+              }
+            />
             <Route
               path={APP_ROUTES.machines.slice(1)}
               element={
@@ -256,7 +295,7 @@ function App() {
             <Route
               path={APP_ROUTES.scannerMonitor.slice(1)}
               element={
-                <ModuleRoute moduleKey="scanners">
+                <ModuleRoute moduleKey="scanner_monitor">
                   <ScannerMonitor />
                 </ModuleRoute>
               }
@@ -277,7 +316,14 @@ function App() {
                 </ModuleRoute>
               }
             />
-            <Route path="admin" element={<Dashboard />} />
+            <Route
+              path="admin"
+              element={
+                <ModuleRoute moduleKey="dashboard">
+                  <Dashboard />
+                </ModuleRoute>
+              }
+            />
             <Route
               path={APP_ROUTES.partJourney.slice(1)}
               element={
@@ -312,11 +358,19 @@ function App() {
             />
             <Route
               path={APP_ROUTES.faq.slice(1)}
-              element={<FaqPage />}
+              element={
+                <ModuleRoute moduleKey="faq">
+                  <FaqPage />
+                </ModuleRoute>
+              }
             />
             <Route
               path={APP_ROUTES.partProcessFlow.slice(1)}
-              element={<PartProcessflow />}
+              element={
+                <ModuleRoute moduleKey="part_process_flow">
+                  <PartProcessflow />
+                </ModuleRoute>
+              }
             />
             <Route
               path={APP_ROUTES.packingManagement.slice(1)}
