@@ -2,6 +2,7 @@ const { Op } = require("sequelize");
 const PackingSession = require("../models/PackingSession");
 const PackingItem = require("../models/PackingItem");
 const Part = require("../models/Part");
+const PartCodeMapping = require("../models/PartCodeMapping");
 const OperationLog = require("../models/OperationLog");
 const Machine = require("../models/Machine");
 const {
@@ -19,9 +20,109 @@ const {
   reserveNextAutoBox,
 } = require("../services/packingManagementService");
 
+async function buildPackingItemPayload(items = []) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return [];
+  }
+
+  const partIds = [
+    ...new Set(items.map((item) => String(item.part_id || "").trim()).filter(Boolean)),
+  ];
+
+  const [parts, operationLogs, mappings] = await Promise.all([
+    partIds.length
+      ? Part.findAll({
+          where: { part_id: { [Op.in]: partIds } },
+        })
+      : [],
+    partIds.length
+      ? OperationLog.findAll({
+          where: { part_id: { [Op.in]: partIds } },
+          order: [["createdAt", "DESC"]],
+        })
+      : [],
+    partIds.length
+      ? PartCodeMapping.findAll({
+          where: {
+            old_part_id: { [Op.in]: partIds },
+            is_active: true,
+          },
+          order: [["updatedAt", "DESC"]],
+        })
+      : [],
+  ]);
+
+  const machineIds = [
+    ...new Set(operationLogs.map((row) => Number(row.machine_id || 0)).filter((value) => value > 0)),
+  ];
+  const machines = machineIds.length
+    ? await Machine.findAll({
+        where: { id: { [Op.in]: machineIds } },
+      })
+    : [];
+
+  const partById = parts.reduce((acc, row) => {
+    acc[String(row.part_id || "").trim()] = row;
+    return acc;
+  }, {});
+
+  const latestLogByPart = operationLogs.reduce((acc, row) => {
+    const key = String(row.part_id || "").trim();
+    if (!key || acc[key]) {
+      return acc;
+    }
+    acc[key] = row;
+    return acc;
+  }, {});
+
+  const latestMappingByPart = mappings.reduce((acc, row) => {
+    const key = String(row.old_part_id || "").trim();
+    if (!key || acc[key]) {
+      return acc;
+    }
+    acc[key] = row;
+    return acc;
+  }, {});
+
+  const machineById = machines.reduce((acc, row) => {
+    acc[Number(row.id)] = row;
+    return acc;
+  }, {});
+
+  return items.map((item) => {
+    const partId = String(item.part_id || "").trim();
+    const part = partById[partId] || null;
+    const latestLog = latestLogByPart[partId] || null;
+    const mapping = latestMappingByPart[partId] || null;
+    const machine = machineById[Number(latestLog?.machine_id || 0)] || null;
+    const stationNo =
+      latestLog?.station_no ||
+      latestLog?.operation_no ||
+      part?.current_station ||
+      null;
+
+    return {
+      id: item.id,
+      partId,
+      customerQrCode: String(mapping?.customer_qr || "").trim() || null,
+      slotNo: item.slot_no,
+      packedAt: item.createdAt,
+      qrCode: String(mapping?.customer_qr || partId).trim(),
+      partStatus: part?.status || null,
+      currentStation: part?.current_station || null,
+      operationNo: latestLog?.operation_no || latestLog?.station_no || null,
+      stationNo,
+      operationResult: latestLog?.result || null,
+      plcStatus: latestLog?.plc_status || null,
+      machineName: machine?.machine_name || null,
+    };
+  });
+}
+
 exports.getOverview = async (_req, res) => {
   try {
     const overview = await getPackingOverview();
+    const activeItems = await buildPackingItemPayload(overview.activeItems || []);
     res.json({
       activeSession: overview.activeSession
         ? {
@@ -37,12 +138,7 @@ exports.getOverview = async (_req, res) => {
             createdAt: overview.activeSession.createdAt,
           }
         : null,
-      activeItems: overview.activeItems.map((item) => ({
-        id: item.id,
-        partId: item.part_id,
-        slotNo: item.slot_no,
-        packedAt: item.createdAt,
-      })),
+      activeItems,
       recentSessions: overview.recentSessions.map((session) => ({
         id: session.id,
         boxNumber: session.box_number,
@@ -180,47 +276,7 @@ exports.getSessionByBox = async (req, res) => {
       where: { session_id: session.id },
       order: [["slot_no", "ASC"]],
     });
-
-    const partIds = items.map((item) => String(item.part_id || "").trim()).filter(Boolean);
-    const [parts, operationLogs] = await Promise.all([
-      partIds.length
-        ? Part.findAll({
-            where: { part_id: { [Op.in]: partIds } },
-          })
-        : [],
-      partIds.length
-        ? OperationLog.findAll({
-            where: { part_id: { [Op.in]: partIds } },
-            order: [["createdAt", "DESC"]],
-          })
-        : [],
-    ]);
-
-    const machineIds = [
-      ...new Set(operationLogs.map((row) => Number(row.machine_id || 0)).filter((value) => value > 0)),
-    ];
-    const machines = machineIds.length
-      ? await Machine.findAll({
-          where: { id: { [Op.in]: machineIds } },
-        })
-      : [];
-
-    const partById = parts.reduce((acc, row) => {
-      acc[row.part_id] = row;
-      return acc;
-    }, {});
-    const latestLogByPart = operationLogs.reduce((acc, row) => {
-      const key = String(row.part_id || "").trim();
-      if (!key || acc[key]) {
-        return acc;
-      }
-      acc[key] = row;
-      return acc;
-    }, {});
-    const machineById = machines.reduce((acc, row) => {
-      acc[row.id] = row;
-      return acc;
-    }, {});
+    const payloadItems = await buildPackingItemPayload(items);
 
     res.json({
       id: session.id,
@@ -233,19 +289,7 @@ exports.getSessionByBox = async (req, res) => {
       closedAt: session.closed_at || null,
       generationSource: session.generation_source || "AUTO",
       createdAt: session.createdAt,
-      items: items.map((item) => ({
-        id: item.id,
-        partId: item.part_id,
-        slotNo: item.slot_no,
-        packedAt: item.createdAt,
-        qrCode: item.part_id,
-        partStatus: partById[item.part_id]?.status || null,
-        currentStation: partById[item.part_id]?.current_station || null,
-        operationNo: latestLogByPart[item.part_id]?.operation_no || latestLogByPart[item.part_id]?.station_no || null,
-        operationResult: latestLogByPart[item.part_id]?.result || null,
-        plcStatus: latestLogByPart[item.part_id]?.plc_status || null,
-        machineName: machineById[latestLogByPart[item.part_id]?.machine_id]?.machine_name || null,
-      })),
+      items: payloadItems,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

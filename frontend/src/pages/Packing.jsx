@@ -189,16 +189,17 @@ function printBoxLabel(session,items,t){
       <td style="color:#94a3b8;font-size:9px">${i+1}</td>
       <td style="font-family:monospace;font-weight:700;color:#547792">${item.slotNo||"—"}</td>
       <td style="font-family:monospace;font-weight:700;color:#1a3263">${item.partId||"—"}</td>
-      <td style="color:#374151">${item.operationNo||"—"}</td>
-      <td style="color:#22C55E;font-weight:700">✓ Pass</td>
+      <td style="font-family:monospace;color:#374151">${item.customerQrCode||"-"}</td>
+      <td style="color:#374151">${item.stationNo||item.operationNo||"-"}</td>
       <td style="font-family:monospace;font-size:9px;color:#6b7280">${item.packedAt?new Date(item.packedAt).toLocaleString():"—"}</td>
     </tr>`).join("");
 
   const packedLabel = t?.("packing.packed", "Packed") ?? "Packed";
   const statusLabel = t?.("packing.status", "Status") ?? "Status";
+  const packedAtLabel = t?.("packing.packedAt", "Packed At") ?? "Packed At";
 
   const html=`<!DOCTYPE html><html><head>
-<meta charset="UTF-8"/><title>Packing Label — ${session.boxNumber}</title>
+<meta charset="UTF-8"/><title>${t?.("packing.packingLabel", "Packing Label") ?? "Packing Label"} — ${session.boxNumber}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',Arial,sans-serif;background:#fff;color:#0f172a;font-size:11px}
@@ -221,21 +222,21 @@ tbody td{padding:6px 10px;border-bottom:1px solid #f1f5f9}
 @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 </style></head>
 <body><div class="page">
-<div class="hdr"><div><h1>📦 Certified Packing List</h1><p>IndusTrace MES — Final Goods Registry</p></div><div class="certified">✓ QUALITY CERTIFIED</div></div>
+<div class="hdr"><div><h1>📦 ${t?.("packing.certifiedPackingList", "Certified Packing List") ?? "Certified Packing List"}</h1><p>IndusTrace MES — ${t?.("packing.finalGoodsRegistry", "Final Goods Registry") ?? "Final Goods Registry"}</p></div><div class="certified">✓ ${t?.("packing.qualityCertified", "Quality Certified") ?? "Quality Certified"}</div></div>
 <div class="label-area"><div class="qr-col">${qSvg}<div style="font-family:monospace;font-size:10px;font-weight:900">${labelCode}</div></div>
 <div class="meta-col"><div class="meta-grid">
-<div class="meta-item"><div class="lbl">Box ID</div><div class="val">${session.boxNumber}</div></div>
+<div class="meta-item"><div class="lbl">${t?.("packing.boxId", "Box ID") ?? "Box ID"}</div><div class="val">${session.boxNumber}</div></div>
 <div class="meta-item"><div class="lbl">${packedLabel}</div><div class="val" style="color:#22C55E">${items.length} / ${session.capacity}</div></div>
-<div class="meta-item"><div class="lbl">${statusLabel}</div><div class="val" style="color:#22C55E">${session.status||"OPEN"}</div></div>
+<div class="meta-item"><div class="lbl">${statusLabel}</div><div class="val" style="color:#22C55E">${t?.(`packing.${String(session.status || "OPEN").trim().toLowerCase()}`, String(session.status || "OPEN")) ?? String(session.status || "OPEN")}</div></div>
 </div></div></div>
-<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Slot</th><th>Part Serial</th><th>Operation</th><th>QC</th><th>${packedLabel} At</th></tr></thead><tbody>${partsRows}</tbody></table></div>
-<div class="footer"><span>IndusTrace MES — Box: ${session.boxNumber}</span><span>Printed: ${new Date().toLocaleString()}</span></div>
+<div class="tbl-wrap"><table><thead><tr><th>#</th><th>${t?.("packing.slot", "Slot") ?? "Slot"}</th><th>${t?.("packing.partSerial", "Part Serial") ?? "Part Serial"}</th><th>${t?.("packing.customerQr", "Customer QR") ?? "Customer QR"}</th><th>${t?.("packing.station", "Station") ?? "Station"}</th><th>${packedAtLabel}</th></tr></thead><tbody>${partsRows}</tbody></table></div>
+<div class="footer"><span>IndusTrace MES — ${t?.("packing.box", "Box") ?? "Box"}: ${session.boxNumber}</span><span>${t?.("packing.printed", "Printed") ?? "Printed"}: ${new Date().toLocaleString()}</span></div>
 </div>
 <script>window.onload=function(){setTimeout(function(){window.print();},700);}</script>
 </body></html>`;
 
   const w=window.open("","_blank","width=1020,height=780");
-  if(!w){alert("Allow popups to print label.");return;}
+  if(!w){alert(t?.("packing.allowPopups", "Allow popups to print label.") ?? "Allow popups to print label.");return;}
   w.document.write(html);w.document.close();
 }
 
@@ -312,6 +313,13 @@ function normalizeScanValue(value) {
 const Packing=()=>{
   injectDS();
   const { t } = useLanguage();
+  const translateSessionStatus = useCallback((status) => {
+    const normalized = String(status || "OPEN").trim().toUpperCase();
+    if (normalized === "OPEN") return t("packing.open", "Open");
+    if (normalized === "CLOSED") return t("packing.closed", "Closed");
+    if (normalized === "ACTIVE") return t("packing.active", "Active");
+    return normalized || "OPEN";
+  }, [t]);
 
   const[overview,    setOverview]    =useState({activeSession:null,activeItems:[],recentSessions:[],finalPackingStations:[],managementSettings:null});
   const[selectedBox, setSelectedBox]  =useState("");
@@ -335,7 +343,7 @@ const Packing=()=>{
   const displayItems=useMemo(()=>{
     if(!displaySess)return[];
     if(activeSession&&Number(displaySess.id)===Number(activeSession.id))
-      return activeItems.map(i=>({...i,qrCode:i.partId,packedAt:i.packedAt||i.createdAt}));
+      return activeItems.map(i=>({...i,qrCode:i.qrCode||i.customerQrCode||i.partId,packedAt:i.packedAt||i.createdAt}));
     return selectedItems;
   },[displaySess,activeSession,activeItems,selectedItems]);
 
@@ -399,15 +407,15 @@ const Packing=()=>{
       await loadOverview(selectedBoxRef.current||packed?.box?.boxNumber||"");
       setPopup({
         type:"SUCCESS",
-        title:"Packing Ready",
-        message:`Packed ${packed?.resolvedPartId||packed?.item?.partId||scanned} into ${packed?.box?.boxNumber||selectedBoxRef.current||"active box"}.`,
-        subtitle:packed?.customerQrCode?`Customer QR: ${packed.customerQrCode}`:"",
+        title:t("packing.packingReady", "Packing Ready"),
+        message:`${t("packing.packed", "Packed")} ${packed?.resolvedPartId||packed?.item?.partId||scanned} ${t("packing.intoBox", "into")} ${packed?.box?.boxNumber||selectedBoxRef.current||t("packing.activeBox", "active box")}.`,
+        subtitle:packed?.customerQrCode?`${t("packing.customerQr", "Customer QR")}: ${packed.customerQrCode}`:"",
       });
     }catch(error){
-      const message=String(error?.response?.data?.error||error?.message||"Packing scan failed");
+      const message=String(error?.response?.data?.error||error?.message||t("packing.scanFailed", "Packing scan failed"));
       setPopup({
         type:"ERROR",
-        title:"Packing Blocked",
+        title:t("packing.packingBlocked", "Packing Blocked"),
         message,
         subtitle:scanned,
       });
@@ -438,8 +446,8 @@ const Packing=()=>{
       if(!isPackingPopup && !isFinalStationPopup) return;
       setPopup({
         type:String(payload.type||"INFO").toUpperCase()==="ERROR"?"ERROR":"SUCCESS",
-        title:isFinalStationPopup?"Ready For Packing":"Packing Update",
-        message:String(payload.message||"Packing status updated"),
+        title:isFinalStationPopup?t("packing.readyForPacking", "Ready For Packing"):t("packing.packingUpdate", "Packing Update"),
+        message:String(payload.message||t("packing.statusUpdated", "Packing status updated")),
         subtitle:[payload.partId||payload.part_id, sourceStation||targetStation].filter(Boolean).join(" • "),
       });
       if(payload.partId || payload.part_id){
@@ -498,7 +506,7 @@ const Packing=()=>{
               {popup.type==="ERROR"?<AlertCircle size={16} color={C.ng()}/>:<CheckCircle2 size={16} color={C.ok()}/>}
             </div>
             <div style={{minWidth:0,flex:1}}>
-              <div style={{fontSize:13,fontWeight:800,color:C.txt("pri"),marginBottom:4}}>{popup.title||"Packing Update"}</div>
+              <div style={{fontSize:13,fontWeight:800,color:C.txt("pri"),marginBottom:4}}>{popup.title||t("packing.packingUpdate", "Packing Update")}</div>
               <div style={{fontSize:12,color:C.txt("sec"),lineHeight:1.45}}>{popup.message}</div>
               {popup.subtitle&&<div style={{fontSize:10,color:C.txt("muted"),marginTop:6,fontFamily:"'DM Mono',monospace"}}>{popup.subtitle}</div>}
             </div>
@@ -530,8 +538,8 @@ const Packing=()=>{
                 </div>
                 <div>
                   <p style={{fontSize:9,fontWeight:800,textTransform:"uppercase",
-                    letterSpacing:"0.1em",color:C.txt("muted"),marginBottom:1}}>QR Scan Result</p>
-                  <p style={{fontSize:13,fontWeight:700,color:C.ok()}}>Box Found</p>
+                    letterSpacing:"0.1em",color:C.txt("muted"),marginBottom:1}}>{t("packing.qrScanResult", "QR Scan Result")}</p>
+                  <p style={{fontSize:13,fontWeight:700,color:C.ok()}}>{t("packing.boxFound", "Box Found")}</p>
                 </div>
               </div>
               <button onClick={()=>setScanResult(null)} style={{width:28,height:28,
@@ -544,9 +552,9 @@ const Packing=()=>{
             <div style={{padding:"18px 20px 22px"}}>
               <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
                 {[
-                  {label:"Box ID", value:displaySess?.boxNumber||scanResult.boxNumber,mono:true},
+                  {label:t("packing.boxId", "Box ID"), value:displaySess?.boxNumber||scanResult.boxNumber,mono:true},
                   {label:`${t("packing.packed", "Packed")} / Total`,value:`${filledCount} / ${capacity}`,mono:true},
-                  {label:t("packing.status", "Status"), value:displaySess?.status||"OPEN",mono:false},
+                  {label:t("packing.status", "Status"), value:translateSessionStatus(displaySess?.status),mono:false},
                 ].map((f,i)=>(
                   <div key={i} style={{background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
                     borderRadius:9,padding:"9px 11px"}}>
@@ -559,7 +567,7 @@ const Packing=()=>{
               </div>
               <div style={{marginBottom:14}}>
                 <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:C.txt("muted"),marginBottom:5}}>
-                  <span>Fill level</span>
+                  <span>{t("packing.fillLevel", "Fill level")}</span>
                   <span style={{fontFamily:"'DM Mono',monospace",fontWeight:700,color:fillColor}}>{progressPct}%</span>
                 </div>
                 <div style={{height:8,borderRadius:99,background:C.bdr(0.15),overflow:"hidden"}}>
@@ -569,13 +577,13 @@ const Packing=()=>{
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>setScanResult(null)}
                   style={{flex:1,height:38,borderRadius:9,fontSize:12,fontWeight:700,
-                    cursor:"pointer",background:"transparent",border:`1px solid ${C.bdr()}`,color:C.txt("sec")}}>Close</button>
+                    cursor:"pointer",background:"transparent",border:`1px solid ${C.bdr()}`,color:C.txt("sec")}}>{t("common.close", "Close")}</button>
                 <button onClick={()=>{setScanResult(null);handlePrint();}}
                   style={{flex:2,height:38,borderRadius:9,fontSize:12,fontWeight:800,
                     cursor:"pointer",background:C.amber(),border:"none",color:C.navy(),
                     display:"flex",alignItems:"center",justifyContent:"center",gap:6,
                     boxShadow:`0 3px 12px ${C.amber(0.3)}`}}>
-                  <Printer size={14}/> Print Label
+                  <Printer size={14}/> {t("packing.printLabel", "Print Label")}
                 </button>
               </div>
             </div>
@@ -603,8 +611,8 @@ const Packing=()=>{
                 </div>
                 <div>
                   <p style={{fontSize:9,fontWeight:800,textTransform:"uppercase",
-                    letterSpacing:"0.1em",color:C.txt("muted"),marginBottom:1}}>Box QR Code</p>
-                  <p style={{fontSize:13,fontWeight:700,color:C.amber()}}>Scan to Verify</p>
+                    letterSpacing:"0.1em",color:C.txt("muted"),marginBottom:1}}>{t("packing.boxQrCode", "Box QR Code")}</p>
+                  <p style={{fontSize:13,fontWeight:700,color:C.amber()}}>{t("packing.scanToVerify", "Scan to Verify")}</p>
                 </div>
               </div>
               <button onClick={()=>setShowQRModal(false)} style={{width:28,height:28,
@@ -660,17 +668,17 @@ const Packing=()=>{
               <div>
                 <div style={{display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
                   <h1 style={{fontSize:17,fontWeight:800,color:C.txt("pri"),letterSpacing:"-0.02em"}}>
-                    Final Packing Station
+                    {t("packing.finalPackingStation", "Final Packing Station")}
                   </h1>
                   <span style={{fontSize:10,fontWeight:700,color:C.ok(),
                     background:C.ok(0.1),padding:"2px 9px",borderRadius:99,
                     border:`1px solid ${C.ok(0.3)}`,display:"flex",alignItems:"center",gap:4}}>
                     <span style={{width:5,height:5,borderRadius:"50%",background:C.ok(),
-                      animation:"pkPulse 1.2s ease-in-out infinite"}}/>LIVE
+                      animation:"pkPulse 1.2s ease-in-out infinite"}}/>{t("packing.live", "Live").toUpperCase()}
                   </span>
                 </div>
                 <p style={{fontSize:11,color:C.txt("muted"),marginTop:3}}>
-                  Auto-mapping enabled · Scan QR to lookup box
+                  {t("packing.autoMappingEnabled", "Auto-mapping enabled")} · {t("packing.scanQrLookupBox", "Scan QR to lookup box")}
                 </p>
               </div>
             </div>
@@ -684,7 +692,7 @@ const Packing=()=>{
                   cursor:displaySess?"pointer":"not-allowed",
                   color:C.txt("sec"),opacity:displaySess?1:0.5,
                   transition:"all .15s"}}
-                title="View Box QR Code">
+                title={t("packing.viewBoxQrCode", "View Box QR Code")}>
                 <Eye size={14}/>
               </button>
 
@@ -696,9 +704,9 @@ const Packing=()=>{
                   style={{background:"transparent",border:"none",outline:"none",
                     fontSize:12,fontWeight:700,color:C.txt("pri"),cursor:"pointer",
                     fontFamily:"'DM Mono',monospace"}}>
-                  {activeSession&&<option value={activeSession.boxNumber}>{activeSession.boxNumber} — ACTIVE</option>}
-                  {(overview.recentSessions||[]).map(s=><option key={s.id} value={s.boxNumber}>{s.boxNumber} — {s.status}</option>)}
-                  {!activeSession&&!(overview.recentSessions||[]).length&&<option value="">No box sessions</option>}
+                  {activeSession&&<option value={activeSession.boxNumber}>{activeSession.boxNumber} — {t("packing.active", "Active").toUpperCase()}</option>}
+                  {(overview.recentSessions||[]).map(s=><option key={s.id} value={s.boxNumber}>{s.boxNumber} — {translateSessionStatus(s.status)}</option>)}
+                  {!activeSession&&!(overview.recentSessions||[]).length&&<option value="">{t("packing.noBoxSessions", "No box sessions")}</option>}
                 </select>
               </div>
 
@@ -718,7 +726,7 @@ const Packing=()=>{
                   border:"none",color:displaySess?C.navy():C.txt("muted"),
                   boxShadow:displaySess?`0 3px 12px ${C.amber(0.3)}`:"none",
                   opacity:displaySess?1:0.5,transition:"all .15s"}}>
-                <Printer size={14}/> Print Label
+                <Printer size={14}/> {t("packing.printLabel", "Print Label")}
               </button>
             </div>
           </div>
@@ -738,7 +746,7 @@ const Packing=()=>{
           </div>
         </div>
         <p style={{fontSize:12,fontWeight:600,color:scanFlash?C.ok():C.txt("muted"),transition:"color .2s"}}>
-          {scanFlash?"QR code detected — loading box details…":"Ready to scan — point any barcode or QR scanner at this screen"}
+          {scanFlash?t("packing.qrDetectedLoading", "QR code detected — loading box details..."):t("packing.readyToScan", "Ready to scan — point any barcode or QR scanner at this screen")}
         </p>
       </div>
 
@@ -755,9 +763,9 @@ const Packing=()=>{
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
               marginBottom:8,flexWrap:"wrap",gap:8}}>
               <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                <span style={{fontSize:13,fontWeight:700,color:C.txt("pri")}}>Box Fill {t("packing.status", "Status")}</span>
+                <span style={{fontSize:13,fontWeight:700,color:C.txt("pri")}}>{t("packing.boxFillStatus", "Box Fill Status")}</span>
                 <Badge v={progressPct>=90?"ok":progressPct>=50?"amber":"idle"}
-                  l={`${filledCount} / ${capacity} packed`}/>
+                  l={`${filledCount} / ${capacity} ${t("packing.packed", "Packed").toLowerCase()}`}/>
               </div>
               <div style={{display:"flex",alignItems:"center",gap:10}}>
                 <span style={{fontSize:18,fontWeight:900,color:fillColor,
@@ -787,28 +795,28 @@ const Packing=()=>{
           </div>
 
           {/* Box Slot Grid */}
-          <Card noPad title="Box Slot Map" subtitle="Digital Twin" icon={LayoutGrid}
+          <Card noPad title={t("packing.boxSlotMap", "Box Slot Map")} subtitle={t("packing.digitalTwin", "Digital Twin")} icon={LayoutGrid}
             accent={C.steel()}
             right={displaySess&&(
               <div style={{display:"flex",alignItems:"center",gap:6}}>
                 <span style={{fontSize:9,color:C.txt("muted")}}>
-                  Box: <strong style={{fontFamily:"'DM Mono',monospace",color:C.txt("pri")}}>
+                  {t("packing.box", "Box")}: <strong style={{fontFamily:"'DM Mono',monospace",color:C.txt("pri")}}>
                     {displaySess.boxNumber}
                   </strong>
                 </span>
-                <Badge v={displaySess?.status==="CLOSED"?"ok":"amber"} l={displaySess?.status||"OPEN"}/>
+                <Badge v={displaySess?.status==="CLOSED"?"ok":"amber"} l={translateSessionStatus(displaySess?.status)} />
               </div>
             )}>
             {loadingOv||loadingSess?(
               <div style={{padding:"48px 24px",textAlign:"center"}}>
                 <RefreshCw size={22} color={C.txt("muted")} style={{margin:"0 auto 12px",animation:"pkSpin .9s linear infinite"}}/>
-                <p style={{fontSize:12,color:C.txt("muted")}}>Loading box data…</p>
+                <p style={{fontSize:12,color:C.txt("muted")}}>{t("packing.loadingBoxData", "Loading box data...")}</p>
               </div>
             ):!displaySess?(
               <div style={{padding:"56px 24px",textAlign:"center"}}>
                 <Boxes size={32} color={C.txt("muted")} style={{margin:"0 auto 14px"}}/>
-                <p style={{fontSize:13,fontWeight:600,color:C.txt("sec"),marginBottom:6}}>No box selected</p>
-                <p style={{fontSize:12,color:C.txt("muted")}}>Select a box from the dropdown or scan a QR code.</p>
+                <p style={{fontSize:13,fontWeight:600,color:C.txt("sec"),marginBottom:6}}>{t("packing.noBoxSelected", "No box selected")}</p>
+                <p style={{fontSize:12,color:C.txt("muted")}}>{t("packing.selectBoxOrScan", "Select a box from the dropdown or scan a QR code.")}</p>
               </div>
             ):view==="grid"?(
               <div style={{padding:20}}>
@@ -854,6 +862,11 @@ const Packing=()=>{
                               letterSpacing:"0.08em",color:C.ok(),marginBottom:4}}>✓ Slot {slotId}</p>
                             <p style={{fontFamily:"'DM Mono',monospace",fontSize:11,fontWeight:700,
                               color:C.txt("pri"),marginBottom:2}}>{item.partId}</p>
+                            {item.customerQrCode&&(
+                              <p style={{fontFamily:"'DM Mono',monospace",fontSize:9,color:C.txt("sec"),marginBottom:2}}>
+                                {t("packing.customerQr", "Customer QR")}: {item.customerQrCode}
+                              </p>
+                            )}
                             <p style={{fontSize:9,color:C.txt("muted")}}>{fmtDT(item.packedAt||item.createdAt)}</p>
                           </div>
                         )}
@@ -880,7 +893,7 @@ const Packing=()=>{
               <div style={{overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                   <thead><tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
-                    {["Slot","Part Serial No.","Operation","Result",`${t("packing.packed", "Packed")} At`].map(h=>(
+                    {[t("packing.slot", "Slot"),t("packing.partId", "Part ID"),t("packing.customerQrCode", "Customer QR Code"),t("packing.station", "Station"),t("packing.machine", "Machine"),t("packing.packedAt", "Packed At")].map(h=>(
                       <th key={h} style={{padding:"9px 14px",textAlign:"left",fontSize:9,
                         fontWeight:800,textTransform:"uppercase",letterSpacing:"0.09em",
                         color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
@@ -888,14 +901,15 @@ const Packing=()=>{
                   </tr></thead>
                   <tbody>
                     {displayItems.length===0?(
-                      <tr><td colSpan={5} style={{padding:"32px",textAlign:"center",color:C.txt("muted")}}>{t("packing.noPartsYet", "No parts yet")}</td></tr>
+                      <tr><td colSpan={6} style={{padding:"32px",textAlign:"center",color:C.txt("muted")}}>{t("packing.noPartsYet", "No parts yet")}</td></tr>
                     ):displayItems.map((item,i)=>(
                       <tr key={i} style={{borderBottom:`1px solid ${C.bdr()}`,
                         background:i%2===1?C.bg("surf"):"transparent"}}>
                         <td style={{padding:"9px 14px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.steel()}}>{item.slotNo||"—"}</td>
                         <td style={{padding:"9px 14px",fontFamily:"'DM Mono',monospace",fontSize:11,fontWeight:700,color:C.txt("pri")}}>{item.partId||"—"}</td>
-                        <td style={{padding:"9px 14px",fontSize:11,color:C.txt("sec")}}>{item.operationNo||"—"}</td>
-                        <td style={{padding:"9px 14px"}}><Badge v="ok" l="✓ Pass"/></td>
+                        <td style={{padding:"9px 14px",fontFamily:"'DM Mono',monospace",fontSize:10,color:C.txt("sec")}}>{item.customerQrCode||"-"}</td>
+                        <td style={{padding:"9px 14px",fontSize:11,color:C.txt("sec")}}>{item.stationNo||item.operationNo||item.currentStation||"-"}</td>
+                        <td style={{padding:"9px 14px",fontSize:10,color:C.txt("pri")}}>{item.machineName||"-"}</td>
                         <td style={{padding:"9px 14px",fontSize:10,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>{fmtTime(item.packedAt||item.createdAt)}</td>
                       </tr>
                     ))}
@@ -919,7 +933,7 @@ const Packing=()=>{
               </div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span style={{fontSize:11,color:C.txt("muted")}}>{t("packing.status", "Status")}</span>
-                <Badge v={displaySess?.status==="CLOSED"?"ok":"wip"} l={displaySess?.status||"OPEN"} pulse={!!activeSession}/>
+                <Badge v={displaySess?.status==="CLOSED"?"ok":"wip"} l={translateSessionStatus(displaySess?.status)} pulse={!!activeSession}/>
               </div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span style={{fontSize:11,color:C.txt("muted")}}>{t("packing.packingRate", "Packing Rate")}</span>
@@ -955,7 +969,7 @@ const Packing=()=>{
       </div>
 
       {/* ══ PACKED PARTS TABLE ─────────────────────────────────────── */}
-      <Card noPad title={`{t("packing.packed", "Packed")} Parts — ${displayItems.length} of ${capacity} slots filled`}
+      <Card noPad title={`${t("packing.packedParts", "Packed Parts")} - ${displayItems.length} ${t("packing.of", "of")} ${capacity} ${t("packing.slotsFilled", "slots filled")}`}
         subtitle={t("packing.liveRecord", "Live Record")} icon={List} accent={C.ok()}
         right={
           <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -975,7 +989,7 @@ const Packing=()=>{
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
               <thead><tr style={{background:`linear-gradient(90deg,${C.navy()},${C.steel(0.9)})`}}>
-                {["#","Slot","Part ID","Operation","Station","Machine","QC",`${t("packing.packed", "Packed")} At`].map(h=>(
+                {["#",t("packing.slot", "Slot"),t("packing.partId", "Part ID"),t("packing.customerQrCode", "Customer QR Code"),t("packing.station", "Station"),t("packing.machine", "Machine"),t("packing.packingTime", "Packing Time")].map(h=>(
                   <th key={h} style={{padding:"9px 12px",textAlign:"left",fontSize:8,
                     fontWeight:800,textTransform:"uppercase",letterSpacing:"0.09em",
                     color:C.linen(0.85),whiteSpace:"nowrap"}}>{h}</th>
@@ -988,10 +1002,9 @@ const Packing=()=>{
                     <td style={{padding:"8px 12px",color:C.txt("muted"),fontSize:9,fontFamily:"'DM Mono',monospace"}}>{i+1}</td>
                     <td style={{padding:"8px 12px"}}><div style={{display:"inline-flex",alignItems:"center",justifyContent:"center",width:28,height:28,borderRadius:6,background:C.ok(0.1),border:`1px solid ${C.ok(0.3)}`,fontSize:11,fontWeight:800,color:C.ok()}}>{item.slotNo||"—"}</div></td>
                     <td style={{padding:"8px 12px",fontFamily:"'DM Mono',monospace",fontSize:11,fontWeight:700,color:C.txt("pri")}}>{item.partId||"—"}</td>
-                    <td style={{padding:"8px 12px",fontSize:10,color:C.txt("sec")}}>{item.operationNo||"—"}</td>
-                    <td style={{padding:"8px 12px",fontSize:10,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>{item.stationNo||"—"}</td>
-                    <td style={{padding:"8px 12px",fontSize:10,color:C.txt("pri")}}>{item.machineName||"—"}</td>
-                    <td style={{padding:"8px 12px"}}><Badge v="ok" l="Pass"/></td>
+                    <td style={{padding:"8px 12px",fontFamily:"'DM Mono',monospace",fontSize:10,color:C.txt("sec")}}>{item.customerQrCode||"-"}</td>
+                    <td style={{padding:"8px 12px",fontSize:10,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>{item.stationNo||item.operationNo||item.currentStation||"-"}</td>
+                    <td style={{padding:"8px 12px",fontSize:10,color:C.txt("pri")}}>{item.machineName||"-"}</td>
                     <td style={{padding:"8px 12px",fontSize:9,color:C.txt("muted"),fontFamily:"'DM Mono',monospace",whiteSpace:"nowrap"}}>{fmtTime(item.packedAt||item.createdAt)}</td>
                   </tr>
                 ))}

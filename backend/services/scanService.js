@@ -4,15 +4,39 @@ const ProductionLog = require("../models/ProductionLog");
 const Machine = require("../models/Machine");
 const StationFeatureSetting = require("../models/StationFeatureSetting");
 const QrFormatRule = require("../models/QrFormatRule");
+const PartCodeMapping = require("../models/PartCodeMapping");
 const { emitRealtime } = require("./realtimeService");
 const { testQrPattern } = require("../utils/qrRegex");
 const { getStationFeatureConfig } = require("./stationFeatureService");
 const { isMachineBypassEnabled } = require("./machineBypassService");
+const {
+  LEAKTEST_OPERATION,
+  buildLeaktestIndex,
+  getLeaktestReadingForPartStation,
+  getLeaktestStageState,
+} = require("./leaktestLookupService");
 const sequelize = require("../config/db");
 const { Op } = require("sequelize");
 const RECENT_DUPLICATE_GRACE_MS = Math.max(Number(process.env.RECENT_DUPLICATE_GRACE_MS || 1500), 0);
 const SCAN_INFLIGHT_GUARD_MS = Math.max(Number(process.env.SCAN_INFLIGHT_GUARD_MS || 8000), 1000);
 const scanInflightKeys = new Map();
+const TERMINAL_SUCCESS_PLC_STATUSES = new Set(["ENDED_OK", "PASSED", "COMPLETED_OK"]);
+const TERMINAL_FAILURE_PLC_STATUSES = new Set(["ENDED_NG", "FAILED", "COMPLETED_NG"]);
+const NON_TERMINAL_PLC_STATUSES = new Set([
+  "PENDING",
+  "STARTED",
+  "RUNNING",
+  "WAITING_PLC",
+  "START_SENT",
+  "WAITING_RUNNING",
+  "WAITING_END",
+  "INTERLOCKED",
+  "BLOCKED",
+  "PLC_COMM_ERROR",
+  "RESET",
+  "RETRY",
+  "VALIDATION_ONLY",
+]);
 
 function parseBarcodeToCycleReadingFields(barcode) {
   const result = {
@@ -475,30 +499,22 @@ async function hasRealCompletedOperationBefore(partId, currentStation, sequence)
   if (!partId || stationIndex <= 0) return false;
 
   const previousStations = sequence.slice(0, stationIndex);
-  const row = await OperationLog.findOne({
+  const rows = await OperationLog.findAll({
     where: {
       part_id: partId,
       station_no: { [Op.in]: previousStations },
-      [Op.and]: [
-        {
-          [Op.or]: [
-            { is_bypassed: false },
-            { is_bypassed: null },
-          ],
-        },
-        {
-          [Op.or]: [
-            { plc_status: { [Op.in]: ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"] } },
-            { result: { [Op.in]: ["OK", "NG", "PASS", "FAIL"] } },
-          ],
-        },
-      ],
     },
-    attributes: ["id"],
+    attributes: ["id", "plc_status", "result", "is_bypassed"],
     order: [["createdAt", "DESC"]],
+    limit: 200,
   });
 
-  return Boolean(row);
+  if (rows.some((row) => row?.is_bypassed !== true && isTerminalOperationLog(row))) {
+    return true;
+  }
+
+  const leaktestState = await getLeaktestSequenceStateForPart(partId, sequence);
+  return previousStations.includes(LEAKTEST_OPERATION) && leaktestState?.state === "PASSED";
 }
 
 function normalizeResult(result) {
@@ -509,6 +525,27 @@ function normalizeStation(stationNo) {
   return String(stationNo || "")
     .trim()
     .toUpperCase();
+}
+
+function getNormalizedOperationState(log) {
+  return {
+    plcStatus: String(log?.plc_status || "").trim().toUpperCase(),
+    result: String(log?.result || "").trim().toUpperCase(),
+  };
+}
+
+function isTerminalOperationLog(log) {
+  if (!log) return false;
+  const { plcStatus, result } = getNormalizedOperationState(log);
+
+  if (TERMINAL_SUCCESS_PLC_STATUSES.has(plcStatus) || TERMINAL_FAILURE_PLC_STATUSES.has(plcStatus)) {
+    return true;
+  }
+  if (NON_TERMINAL_PLC_STATUSES.has(plcStatus)) {
+    return false;
+  }
+
+  return ["OK", "NG", "PASS", "FAIL", "PASSED", "FAILED"].includes(result);
 }
 
 function normalizeResultSource(value) {
@@ -644,6 +681,57 @@ async function getActiveStations() {
   return plan.validationSequence;
 }
 
+async function getLeaktestSequenceStateForPart(partId, sequence) {
+  const normalizedPartId = String(partId || "").trim();
+  if (!normalizedPartId || !Array.isArray(sequence) || !sequence.includes(LEAKTEST_OPERATION)) {
+    return null;
+  }
+
+  const mapping = await PartCodeMapping.findOne({
+    where: {
+      old_part_id: normalizedPartId,
+      is_active: true,
+    },
+    attributes: ["old_part_id", "customer_qr"],
+    order: [["updatedAt", "DESC"]],
+    raw: true,
+  });
+  const customerQr = String(mapping?.customer_qr || "").trim();
+  if (!customerQr) {
+    return null;
+  }
+
+  const machines = await Machine.findAll({
+    where: {
+      is_active: true,
+      operation_no: LEAKTEST_OPERATION,
+    },
+    attributes: ["id", "machine_name", "operation_no", "plc_ip", "qr_scanner_ip", "machine_ip"],
+    raw: true,
+  });
+  if (!machines.length) {
+    return null;
+  }
+
+  const index = await buildLeaktestIndex({
+    partIds: [normalizedPartId],
+    customerQrByPartId: {
+      [normalizedPartId.toUpperCase()]: customerQr,
+    },
+    machines,
+  });
+  const reading = getLeaktestReadingForPartStation(index.byPartAndStation, normalizedPartId, LEAKTEST_OPERATION);
+  if (!reading) {
+    return null;
+  }
+
+  return {
+    state: getLeaktestStageState(reading),
+    reading,
+    customerQr,
+  };
+}
+
 async function autoPassSkippedStationsBefore({
   part,
   partId,
@@ -672,11 +760,11 @@ async function autoPassSkippedStationsBefore({
     });
     if (existing) {
       const plcStatus = String(existing.plc_status || "").trim().toUpperCase();
-      const result = String(existing.result || "").trim().toUpperCase();
       const reason = String(existing.interlock_reason || "").trim().toUpperCase();
       const isTerminal =
-        ["ENDED_OK", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"].includes(plcStatus) ||
-        ["OK", "NG", "PASS", "FAIL"].includes(result) ||
+        TERMINAL_SUCCESS_PLC_STATUSES.has(plcStatus) ||
+        TERMINAL_FAILURE_PLC_STATUSES.has(plcStatus) ||
+        isTerminalOperationLog(existing) ||
         existing.is_bypassed === true;
       const isRealInterlock = plcStatus === "INTERLOCKED" && reason && !["PREVIOUS_STATION_NOT_COMPLETED", "STATION_NOT_CONFIGURED"].includes(reason);
       if (isTerminal || isRealInterlock) continue;
@@ -798,18 +886,17 @@ async function deriveSequenceStateFromHistory(partId, sequence) {
 
   const completedStations = new Set();
   for (const log of logs) {
-    const plcStatus = String(log.plc_status || "").trim().toUpperCase();
-    const result = String(log.result || "").trim().toUpperCase();
     const station = normalizeStation(log.station_no || log.operation_no);
     if (!station || !sequence.includes(station)) continue;
 
-    const isCompleted =
-      ["ENDED_OK", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"].includes(plcStatus) ||
-      ["OK", "NG"].includes(result);
-
-    if (isCompleted) {
+    if (isTerminalOperationLog(log)) {
       completedStations.add(station);
     }
+  }
+
+  const leaktestState = await getLeaktestSequenceStateForPart(partId, sequence);
+  if (leaktestState?.state === "PASSED") {
+    completedStations.add(LEAKTEST_OPERATION);
   }
 
   let lastCompletedIndex = -1;
@@ -825,12 +912,14 @@ async function deriveSequenceStateFromHistory(partId, sequence) {
     return {
       expectedStation: sequence[0] || null,
       lastCompletedStation: null,
+      blockedStationDueToNg: leaktestState?.state === "FAILED" ? LEAKTEST_OPERATION : null,
     };
   }
 
   return {
     expectedStation: sequence[lastCompletedIndex + 1] || null,
     lastCompletedStation: sequence[lastCompletedIndex] || null,
+    blockedStationDueToNg: leaktestState?.state === "FAILED" ? LEAKTEST_OPERATION : null,
   };
 }
 
@@ -1065,6 +1154,8 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     const lastCompletedStation =
       derivedSequenceState.lastCompletedStation ||
       normalizeStation(part.current_operation || part.current_station);
+    const leakNgBlockedStation = normalizeStation(derivedSequenceState.blockedStationDueToNg);
+    const leakNgBlockedIndex = leakNgBlockedStation ? sequence.indexOf(leakNgBlockedStation) : -1;
 
     if (
       derivedSequenceState.lastCompletedStation &&
@@ -1075,33 +1166,41 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       await part.save();
     }
 
+    if (!part.is_rework && leakNgBlockedIndex >= 0 && stationSequenceIndex > leakNgBlockedIndex) {
+      part.status = "NG";
+      part.is_interlocked = true;
+      part.interlock_reason = "LEAK_TEST_NG";
+      part.last_validation_result = "FAILED";
+      await part.save();
+      return {
+        decision: "BLOCK",
+        reason: "LEAK_TEST_NG",
+        qrStatus: "FAILED",
+        operationStatus: "BLOCKED",
+        message: "Leak Test is NG. Further operations are not allowed.",
+        currentStatus: part.status,
+        expectedStation: leakNgBlockedStation,
+        lastCompletedStation,
+        forceNg: true,
+      };
+    }
+
     // 1. DUPLICATE VALIDATION
     // Once a station has a real success for this part, any later attempt is a duplicate
     // unless the part is explicitly in rework.
-    const latestStationLog = await OperationLog.findOne({
+    const stationLogs = await OperationLog.findAll({
       where: {
         part_id: normalizedPartId,
         station_no: station,
       },
       order: [["createdAt", "DESC"]],
+      limit: 50,
     });
-    const anySuccessfulStationLog = await OperationLog.findOne({
-      where: {
-        part_id: normalizedPartId,
-        station_no: station,
-        [Op.or]: [
-          { plc_status: { [Op.in]: ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"] } },
-          { result: { [Op.in]: ["OK", "NG", "PASS", "FAIL"] } },
-        ],
-      },
-      order: [["createdAt", "DESC"]],
-    });
+    const latestStationLog = stationLogs[0] || null;
     const latestStationStatus = String(latestStationLog?.plc_status || "").trim().toUpperCase();
-    const latestStationResult = String(latestStationLog?.result || "").trim().toUpperCase();
     const hasExistingSuccess =
-      Boolean(anySuccessfulStationLog) ||
-      ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"].includes(latestStationStatus) ||
-      ["OK", "NG", "PASS", "FAIL"].includes(latestStationResult);
+      stationLogs.some((row) => isTerminalOperationLog(row)) ||
+      ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"].includes(latestStationStatus);
 
     const scanAttemptType = hasExistingSuccess ? "RE-SCAN" : "INITIAL";
 

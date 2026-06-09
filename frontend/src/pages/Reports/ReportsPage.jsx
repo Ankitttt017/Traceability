@@ -19,6 +19,39 @@ const DEFAULT_PLC_CYCLE_COLUMNS = [
   "fix_1_flow","fix_2_flow","fix_3_flow","mov_1_flow","mov_2_flow","mov_3_flow","vacuum_pressure_mmhg",
   "average_die_clamp_tonnage_count","time_for_stroke","stroke","shot_status"
 ];
+const LEAK_TEST_OPERATION = "OP150";
+const LEAK_TEST_SHARED_KEY = "__LEAK_TEST_OP150__";
+const LEAK_TEST_COLUMNS = [
+  { key: "Body_Leak_Value", label: "Body Leak Value" },
+  { key: "Gall_1", label: "Gall_1" },
+  { key: "Gall_2", label: "Gall_2" },
+  { key: "Cycle_Time", label: "Cycle Time" },
+  { key: "Running_Mode", label: "Running Mode" },
+  { key: "Manual", label: "Manual" },
+  { key: "Dry", label: "Dry" },
+  { key: "Wey", label: "Wey" },
+  { key: "Both", label: "Both" },
+];
+const getLeakTestStatus = (reading) => {
+  const result = String(reading?.Result || reading?.result || "").trim().toUpperCase();
+  if (result === "OK") return "OK";
+  if (result === "NG") return "NG";
+  if (!reading) return "";
+  return "IN_PROGRESS";
+};
+const getLeakTestValue = (reading, key) => {
+  if (!reading) return "-";
+  if (key === "Machine") {
+    return reading.Machine || reading.machineName || reading.matchedMachineName || "-";
+  }
+  if (key === "Cycle_End_Time") {
+    const raw = reading.Cycle_End_Time || reading.cycleEndTime || "";
+    if (!raw) return "-";
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? String(raw) : parsed.toLocaleString("en-IN");
+  }
+  return reading[key] ?? "-";
+};
 
 const normResult = (v, reason = "", row = null) => {
   const s = String(v || "").toUpperCase().trim();
@@ -29,8 +62,8 @@ const normResult = (v, reason = "", row = null) => {
     return "OK";
   }
   if (r === "NG_SHOT_STATUS" && ["BLOCK", "INTERLOCKED"].includes(s)) return "NG";
-  if (["OK", "PASS", "COMPLETED", "ENDED_OK"].includes(s)) return "OK";
-  if (["NG", "FAIL", "FAILED", "ENDED_NG", "INTERLOCKED"].includes(s)) return "NG";
+  if (["OK", "PASS", "PASSED", "COMPLETED", "ENDED_OK", "COMPLETED_OK"].includes(s)) return "OK";
+  if (["NG", "FAIL", "FAILED", "ENDED_NG", "COMPLETED_NG", "INTERLOCKED"].includes(s)) return "NG";
   if (!s || s === "-" || s === "UNKNOWN") return "";
   return "IN_PROGRESS";
 };
@@ -43,6 +76,18 @@ const resultRank = (value) => {
 const pickPreferredResult = (current, candidate) => {
   const currentRank = resultRank(current);
   const candidateRank = resultRank(candidate);
+  if (candidateRank > currentRank) return candidate;
+  return current || candidate;
+};
+const operationResultRank = (value) => {
+  if (value === "OK") return 3;
+  if (value === "NG") return 2;
+  if (value === "IN_PROGRESS") return 1;
+  return 0;
+};
+const pickPreferredOperationResult = (current, candidate) => {
+  const currentRank = operationResultRank(current);
+  const candidateRank = operationResultRank(candidate);
   if (candidateRank > currentRank) return candidate;
   return current || candidate;
 };
@@ -243,6 +288,9 @@ const ReportsPage = () => {
         const machineName = String(m.machineName || m.machine_name || "").trim();
         const op = String(m.operationNo || m.operation_no || m.stationNo || m.station_no || "").trim();
         if (!machineName || !op) return null;
+        if (String(op).trim().toUpperCase() === LEAK_TEST_OPERATION) {
+          return { key: LEAK_TEST_SHARED_KEY, machineName: "Leak Test", op, label: "Leak Test OP150", sharedLeakOperation: true };
+        }
         return { key: `${machineName}__${op}`, machineName, op, label: `${machineName} + ${op}` };
       })
       .filter(Boolean);
@@ -252,6 +300,9 @@ const ReportsPage = () => {
         const machineName = String(r.machineName || "").trim();
         const op = String(r.operationNo || r.stationNo || "").trim();
         if (!machineName || !op) return null;
+        if (String(op).trim().toUpperCase() === LEAK_TEST_OPERATION) {
+          return { key: LEAK_TEST_SHARED_KEY, machineName: "Leak Test", op, label: "Leak Test OP150", sharedLeakOperation: true };
+        }
         return { key: `${machineName}__${op}`, machineName, op, label: `${machineName} + ${op}` };
       })
       .filter(Boolean);
@@ -260,6 +311,13 @@ const ReportsPage = () => {
     });
     const stationPairs = Array.from(machineStationMap.values()).sort((a, b) =>
       a.op.localeCompare(b.op, undefined, { numeric: true, sensitivity: "base" }) || a.machineName.localeCompare(b.machineName)
+    );
+    const requiredOperations = Array.from(
+      new Set(
+        stationPairs
+          .map((s) => String(s.op || "").trim().toUpperCase())
+          .filter(Boolean)
+      )
     );
     const plcKeys = DEFAULT_PLC_CYCLE_COLUMNS.filter((key) => !["machine_name", "shot_number", "shot_date", "shot_time"].includes(key));
     const plcColumns = (() => {
@@ -275,8 +333,7 @@ const ReportsPage = () => {
     const grouped = new Map();
     sourceRows.forEach((row, idx) => {
       const partKey = String(row.partId || row.part_id || row.barcode || row.shot_uid || `row_${idx}`).trim();
-      const machineKey = String(row.machineId || row.machine_id || row.machineName || "").trim();
-      const key = `${machineKey || "machine"}__${partKey || `row_${idx}`}`;
+      const key = partKey || `row_${idx}`;
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key).push(row);
     });
@@ -289,9 +346,15 @@ const ReportsPage = () => {
       { key: "partName", label: "Part Name" },
       { key: "plc_machine_name", label: "Machine Name" },
       { key: "createdAt", label: "Scanned Date & Time" },
-      ...stationPairs.map((s) => ({ key: `station_${s.key}`, label: s.label })),
+      ...stationPairs.map((s) => ({
+        key: `station_${s.key}`,
+        label: s.label,
+        renderAsText: Boolean(s.sharedLeakOperation),
+        renderLeakOperation: Boolean(s.sharedLeakOperation),
+      })),
       { key: "overallStatus", label: "Final Status" },
       ...plcColumns.map((c) => ({ key: `plc_${c.key}`, label: c.label })),
+      ...LEAK_TEST_COLUMNS.map((c) => ({ key: `leak_${c.key}`, label: c.label })),
       { key: "ngReason", label: "Reason / Remark" },
     ];
 
@@ -299,8 +362,11 @@ const ReportsPage = () => {
       const first = entries[0] || {};
       const partKey = String(first.partId || first.part_id || first.barcode || first.shot_uid || `row_${idx}`).trim();
       const stationResults = {};
+      const stationDisplayValues = {};
+      const operationResults = {};
       const stationCycleTimes = {};
       const plcData = {};
+      let leakData = null;
       const firstScanAt = entries.reduce((earliest, row) => {
         const raw = row.firstScanCreatedAt || row.createdAtRaw || row.createdAt || null;
         if (!raw) return earliest;
@@ -311,13 +377,24 @@ const ReportsPage = () => {
         const stationOp = String(row.operationNo || row.stationNo || "").trim();
         const stationMachine = String(row.machineName || "").trim();
         const stationKey = stationMachine && stationOp ? `${stationMachine}__${stationOp}` : "";
+        const rowLeakData = row.leakTestReading && typeof row.leakTestReading === "object" ? row.leakTestReading : null;
+        if (!leakData && rowLeakData) {
+          leakData = rowLeakData;
+        }
         if (stationKey) {
           const normalizedStationResult = normResult(
-            String(row.industrialResult || row.statusLabel || row.result || "-").toUpperCase(),
+            stationOp === LEAK_TEST_OPERATION
+              ? ""
+              : String(row.industrialResult || row.statusLabel || row.result || "-").toUpperCase(),
             row.reason || row.interlock_reason,
             row
           );
-          stationResults[stationKey] = pickPreferredResult(stationResults[stationKey], normalizedStationResult);
+          if (normalizedStationResult) {
+            stationResults[stationKey] = pickPreferredResult(stationResults[stationKey], normalizedStationResult);
+          }
+          if (stationOp && normalizedStationResult) {
+            operationResults[stationOp] = pickPreferredOperationResult(operationResults[stationOp], normalizedStationResult);
+          }
           stationCycleTimes[stationKey] = row.cycleTime || "-";
         }
         const nextPlcData = {
@@ -326,7 +403,6 @@ const ReportsPage = () => {
           ...(row.plcReadings || {}),
           ...(row.plcCycleReadings || {}),
           ...(row.plc_cycle_readings || {}),
-          ...(row.leakTestReading || {}),
         };
         Object.keys(nextPlcData).forEach((key) => {
           if (plcData[key] === undefined || plcData[key] === null || plcData[key] === "" || plcData[key] === "-") {
@@ -334,6 +410,15 @@ const ReportsPage = () => {
           }
         });
       });
+      if (leakData) {
+        const leakStatus = getLeakTestStatus(leakData);
+        const leakMachineName = String(leakData.matchedMachineName || leakData.Machine || leakData.machineName || "").trim();
+        stationResults[LEAK_TEST_SHARED_KEY] = pickPreferredResult(stationResults[LEAK_TEST_SHARED_KEY], leakStatus);
+        stationDisplayValues[LEAK_TEST_SHARED_KEY] = leakMachineName
+          ? `${leakMachineName} ${leakStatus || "-"}`.trim()
+          : (leakStatus || "-");
+        operationResults[LEAK_TEST_OPERATION] = pickPreferredOperationResult(operationResults[LEAK_TEST_OPERATION], leakStatus);
+      }
       if (!Object.keys(plcData).length) {
         const shot = String(first.shot_number || first.shotNumber || extractShotFromPartId(partKey) || "").trim();
         if (shot && plcByShot.has(shot)) Object.assign(plcData, plcByShot.get(shot));
@@ -347,18 +432,33 @@ const ReportsPage = () => {
         partName: plcData.part_name || first.partName || first.modelName || first.componentName || "-",
         customerCode: first.customerQrCode || first.customer_qr || "-",
         overallStatus: (() => {
-          const vals = stationPairs.map((s) => normResult(stationResults[s.key]));
+          const vals = requiredOperations.map((operation) => normResult(operationResults[operation])).filter(Boolean);
           if (vals.some((v) => v === "NG")) return "NG";
-          if (stationPairs.length > 0 && vals.every((v) => v === "OK")) return "PASSED";
-          if (vals.some((v) => v === "IN_PROGRESS") || vals.some((v) => !v)) return "IN_PROGRESS";
+          if (requiredOperations.length > 0 && requiredOperations.every((operation) => normResult(operationResults[operation]) === "OK")) {
+            return "PASSED";
+          }
+          if (vals.some((v) => v === "IN_PROGRESS") || vals.length < requiredOperations.length) return "IN_PROGRESS";
           return "IN_PROGRESS";
         })(),
-        ngReason: first.reason || first.interlock_reason || "-",
+        ngReason: (() => {
+          const rawReason = first.reason || first.interlock_reason || "";
+          const normalizedReason = String(rawReason || "").trim().toUpperCase();
+          if (!rawReason || rawReason === "-" || normalizedReason === "RECOVERY_PENDING_AFTER_BACKEND_RESTART") {
+            return "";
+          }
+          return rawReason;
+        })(),
         cycleStartTime: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
         cycleTimeValue: stationPairs.length ? (stationCycleTimes[stationPairs[stationPairs.length - 1].key] || "-") : "-",
       };
       stationPairs.forEach((s) => {
-        shaped[`station_${s.key}`] = normResult(stationResults[s.key]) || "-";
+        shaped[`station_${s.key}`] = s.sharedLeakOperation
+          ? ({
+              machineName: String(leakData?.matchedMachineName || leakData?.Machine || leakData?.machineName || "").trim(),
+              status: String(getLeakTestStatus(leakData) || "").trim().toUpperCase() || "-",
+              text: stationDisplayValues[s.key] || "-",
+            })
+          : (normResult(stationResults[s.key]) || "-");
         shaped[`cycle_${s.key}`] = stationCycleTimes[s.key] || "-";
       });
       plcColumns.forEach(({ key }) => {
@@ -379,11 +479,43 @@ const ReportsPage = () => {
           shaped[`plc_${key}`] = plcData[key] ?? first[key] ?? "-";
         }
       });
+      LEAK_TEST_COLUMNS.forEach(({ key }) => {
+        shaped[`leak_${key}`] = getLeakTestValue(leakData, key);
+      });
       return shaped;
     });
 
     return { columns: dynamicColumns, rows: dynamicRows };
   }, [data.rows, filters.machineId, machines]);
+
+  const reportSummaryMetrics = useMemo(() => {
+    const rows = Array.isArray(reportTable.rows) ? reportTable.rows : [];
+    const sourceRows = Array.isArray(data.rows) ? data.rows : [];
+    const validationRejectParts = new Set(
+      sourceRows
+        .filter((row) => String(row?.category || "").trim().toUpperCase() === "VALIDATION")
+        .map((row) => String(row?.partId || row?.part_id || "").trim())
+        .filter(Boolean)
+    );
+    const summary = rows.reduce((acc, row) => {
+      const status = String(row?.overallStatus || "").trim().toUpperCase();
+      acc.totalProduction += 1;
+      if (status === "PASSED") acc.totalOK += 1;
+      else if (status === "NG" || status === "FAILED") acc.totalNG += 1;
+      else acc.inProgress += 1;
+      return acc;
+    }, {
+      totalProduction: 0,
+      totalOK: 0,
+      totalNG: 0,
+      inProgress: 0,
+      validationRejects: validationRejectParts.size,
+      passRate: 0,
+    });
+    const tested = summary.totalOK + summary.totalNG;
+    summary.passRate = tested > 0 ? Number(((summary.totalOK / tested) * 100).toFixed(2)) : 0;
+    return summary;
+  }, [data.rows, reportTable.rows]);
   const availableLines = useMemo(
     () => [...new Set((machines || []).map((m) => String(m.line_name || m.lineName || "").trim()).filter(Boolean))],
     [machines]
@@ -520,7 +652,7 @@ const ReportsPage = () => {
         </button>
       </div>
 
-      <ReportSummaryCards metrics={data.metrics} />
+      <ReportSummaryCards metrics={reportSummaryMetrics} />
 
       <ReportTable rows={reportTable.rows} columns={reportTable.columns} loading={loading} />
     </div>

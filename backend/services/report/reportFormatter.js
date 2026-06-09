@@ -49,12 +49,26 @@ function resolveIndustrialResult(row) {
   }
 
   // 2. Production OK
-  if (rawResult === "OK" || rawResult === "PASSED" || plcStatus === "ENDED_OK" || plcStatus === "PASSED") {
+  if (
+    rawResult === "OK" ||
+    rawResult === "PASSED" ||
+    rawResult === "PASS" ||
+    plcStatus === "ENDED_OK" ||
+    plcStatus === "PASSED" ||
+    plcStatus === "COMPLETED_OK"
+  ) {
     return { status: "OK", category: "PRODUCTION" };
   }
 
   // 3. Production NG (True failure)
-  if (rawResult === "NG" || rawResult === "FAILED" || plcStatus === "ENDED_NG" || plcStatus === "FAILED") {
+  if (
+    rawResult === "NG" ||
+    rawResult === "FAILED" ||
+    rawResult === "FAIL" ||
+    plcStatus === "ENDED_NG" ||
+    plcStatus === "FAILED" ||
+    plcStatus === "COMPLETED_NG"
+  ) {
     return { status: "NG", category: "PRODUCTION" };
   }
 

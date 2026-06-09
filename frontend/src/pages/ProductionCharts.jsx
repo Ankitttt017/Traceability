@@ -5,7 +5,7 @@
 //  ? Excel exports: Full / Parts / Audit
 //  ? Navy/Steel/Amber/Linen theme
 // ============================================================
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import {
   TrendingUp, Download, RefreshCw, BarChart3,
@@ -18,13 +18,14 @@ import {
 import {
   LineChart as ReLineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, PieChart as RePieChart,
+  PieChart as RePieChart,
   Pie, Cell, AreaChart, Area, Legend,
 } from "recharts";
 import { dashboardApi, machineApi, reportApi } from "../api/services";
 import { CHART_COLORS, STATUS_COLORS } from "../constants/chartTheme";
 import SafeChart from "../components/charts/SafeChart";
 import { SOCKET_URL } from "../constants/network";
+import { useLanguage } from "../context/LanguageContext";
 
 // -- Design tokens ----------------------------------------------------------
 const DS = `
@@ -94,6 +95,7 @@ const C={
 };
 const SH =`0 2px 12px rgba(var(--pc-navy),.08),0 1px 3px rgba(var(--pc-navy),.05)`;
 const SHM=`0 6px 24px rgba(var(--pc-navy),.14),0 2px 8px rgba(var(--pc-navy),.07)`;
+const HIDDEN_REASON_TOKENS = new Set(["RECOVERY_PENDING_AFTER_BACKEND_RESTART"]);
 
 const DEFAULT_PLC_CYCLE_COLUMNS = [
   "machine_name","shot_date","shot_time","shot_number","cycle_time","die_close_core_in_time","pouring_time","shot_fwd_time",
@@ -105,6 +107,40 @@ const DEFAULT_PLC_CYCLE_COLUMNS = [
   "fix_1_flow","fix_2_flow","fix_3_flow","mov_1_flow","mov_2_flow","mov_3_flow","vacuum_pressure_mmhg","average_die_clamp_tonnage_count",
   "time_for_stroke","stroke","shot_status"
 ];
+const LEAK_TEST_OPERATION = "OP150";
+const LEAK_TEST_SHARED_KEY = "__LEAK_TEST_OP150__";
+const LEAK_TEST_COLUMNS = [
+  { key: "Body_Leak_Value", label: "Body Leak Value" },
+  { key: "Gall_1", label: "Gall_1" },
+  { key: "Gall_2", label: "Gall_2" },
+  { key: "Cycle_Time", label: "Cycle Time" },
+  { key: "Running_Mode", label: "Running Mode" },
+  { key: "Manual", label: "Manual" },
+  { key: "Dry", label: "Dry" },
+  { key: "Wey", label: "Wey" },
+  { key: "Both", label: "Both" },
+];
+const getLeakTestStatus = (reading) => {
+  const result = String(reading?.Result || reading?.result || "").trim().toUpperCase();
+  if (result === "OK") return "OK";
+  if (result === "NG") return "NG";
+  if (!reading) return "";
+  return "IN_PROGRESS";
+};
+const getLeakTestValue = (reading, key) => {
+  if (!reading) return "—";
+  if (key === "Machine") {
+    return reading.Machine || reading.machineName || reading.matchedMachineName || "—";
+  }
+  if (key === "Cycle_End_Time") {
+    const raw = reading.Cycle_End_Time || reading.cycleEndTime || "";
+    if (!raw) return "—";
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? String(raw) : parsed.toLocaleString("en-IN");
+  }
+  const value = reading[key];
+  return value === undefined || value === null || value === "" ? "—" : value;
+};
 
 // -- Helpers ----------------------------------------------------------------
 function downloadBlob(blob,filename){
@@ -167,6 +203,23 @@ function renderCellValue(value){
   }
   return String(value);
 }
+const sanitizeDisplayReason = (value) => {
+  const raw = String(value || "").trim();
+  const normalized = raw.toUpperCase();
+  if (!raw || raw === "-" || HIDDEN_REASON_TOKENS.has(normalized)) return "";
+  return raw;
+};
+const extractShotFromPartId = (partId) => {
+  const s = String(partId || "").trim();
+  if (!s) return "";
+  const machineCompact = s.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+  if (machineCompact?.groups?.shot) return String(machineCompact.groups.shot).trim();
+  const legacyCompact = s.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<shot>\d{1,6})$/);
+  if (legacyCompact?.groups?.shot) return String(legacyCompact.groups.shot).trim();
+  const digits = s.replace(/\D/g, "");
+  if (digits.length > 12) return digits.slice(12);
+  return "";
+};
 const fmtH  =h=>(h!==undefined&&h!==null&&!Number.isNaN(Number(h)))?`${String(Number(h)).padStart(2,"0")}:00`:String(h||"");
 const fmtNow=()=>new Date().toLocaleString("en-IN",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"});
 const dateStr=()=>new Date().toISOString().slice(0,10);
@@ -243,8 +296,8 @@ const KpiCard=({label,value,sub,color,bgC,bdC,icon:Icon})=>{
 };
 
 // -- Shift card -------------------------------------------------------------
-const ShiftCard=({label,row,colorFn,icon:SIcon})=>{
-  const t=Number(row?.total||0),ok=Number(row?.ok||0),ng=t-ok,eff=t>0?Math.round(ok/t*100):0;
+const ShiftCard=({label,row,colorFn,icon:SIcon,t})=>{
+  const total=Number(row?.total||0),ok=Number(row?.ok||0),ng=total-ok,eff=total>0?Math.round(ok/total*100):0;
   return(
     <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
       borderLeft:`3px solid ${colorFn()}`,borderRadius:12,padding:"14px 16px",boxShadow:SH}}>
@@ -260,17 +313,17 @@ const ShiftCard=({label,row,colorFn,icon:SIcon})=>{
           </div>
         </div>
         <div style={{textAlign:"right"}}>
-          <p style={{fontSize:18,fontWeight:900,color:colorFn(),fontFamily:"'DM Mono',monospace",lineHeight:1}}>{t}</p>
+          <p style={{fontSize:18,fontWeight:900,color:colorFn(),fontFamily:"'DM Mono',monospace",lineHeight:1}}>{total}</p>
           <p style={{fontSize:9,color:C.txt("muted"),marginTop:1}}>units</p>
         </div>
       </div>
       <div style={{height:5,borderRadius:99,background:C.bdr(0.14),overflow:"hidden",marginBottom:7,display:"flex"}}>
-        <div style={{background:C.ok(),height:"100%",width:`${t>0?ok/t*100:0}%`,transition:"width .5s"}}/>
-        <div style={{background:C.ng(),height:"100%",width:`${t>0?ng/t*100:0}%`,transition:"width .5s"}}/>
+        <div style={{background:C.ok(),height:"100%",width:`${total>0?ok/total*100:0}%`,transition:"width .5s"}}/>
+        <div style={{background:C.ng(),height:"100%",width:`${total>0?ng/total*100:0}%`,transition:"width .5s"}}/>
       </div>
       <div style={{display:"flex",justifyContent:"space-between",fontSize:11}}>
-        <span style={{color:C.ok(),fontWeight:700}}>? {ok} Pass</span>
-        <span style={{color:C.ng(),fontWeight:700}}>? {ng} Fail</span>
+        <span style={{color:C.ok(),fontWeight:700}}>? {ok} {t("production.pass", "Pass")}</span>
+        <span style={{color:C.ng(),fontWeight:700}}>? {ng} {t("production.fail", "Fail")}</span>
         <span style={{fontWeight:800,fontFamily:"'DM Mono',monospace",
           color:eff>=85?C.ok():eff>=60?C.wip():C.ng()}}>{eff}%</span>
       </div>
@@ -293,6 +346,7 @@ const Bdg=({v="idle",l})=>{
 // --------------------------------------------------------------------------
 const ProductionCharts=()=>{
   injectDS();
+  const { t } = useLanguage();
 
   const[timeRange, setTimeRange] =useState("weekly");
   const[customDate,setCustomDate]=useState({from:"",to:""});
@@ -302,6 +356,7 @@ const ProductionCharts=()=>{
   const[error,     setError]     =useState("");
   const[machines,  setMachines]  =useState([]);
   const[partsList, setPartsList] =useState([]);
+  const[reportRows, setReportRows] =useState([]);
   const[partsSearch,setPartsSearch]=useState("");
   const[partsFilter,setPartsFilter]=useState("all");
   const[partsPage,setPartsPage]=useState(1);
@@ -337,18 +392,7 @@ const ProductionCharts=()=>{
   });
 
   const consolidatePartsList = useCallback((rows = []) => {
-    const map = new Map();
-    for (const row of Array.isArray(rows) ? rows : []) {
-      const partId = String(row?.partId || row?.part_id || "").trim();
-      if (!partId) continue;
-      const prev = map.get(partId);
-      const rowTs = new Date(row?.createdAt || row?.createdAtRaw || 0).getTime() || 0;
-      const prevTs = prev ? (new Date(prev?.createdAt || prev?.createdAtRaw || 0).getTime() || 0) : -1;
-      if (!prev || rowTs >= prevTs) {
-        map.set(partId, row);
-      }
-    }
-    return Array.from(map.values()).sort((a, b) => {
+    return (Array.isArray(rows) ? rows : []).slice().sort((a, b) => {
       const ta = new Date(a?.createdAt || a?.createdAtRaw || 0).getTime() || 0;
       const tb = new Date(b?.createdAt || b?.createdAtRaw || 0).getTime() || 0;
       return tb - ta;
@@ -390,6 +434,7 @@ const ProductionCharts=()=>{
       setSummary(s||summary);
       setReport(r||report);
       setMachines(m||[]);
+      setReportRows(Array.isArray(reportData?.rows) ? reportData.rows : []);
       // Load parts list if available
       try{
         const parts=await dashboardApi.partsList?.(query)||r?.partsList||[];
@@ -416,7 +461,7 @@ const ProductionCharts=()=>{
         });
         setPartsList(consolidatePartsList(mergedParts));
       }catch{}
-    }catch(e){setError(e.response?.data?.error||"Failed to load analytics data.");}
+    }catch(e){setError(e.response?.data?.error||t("production.failedLoadAnalytics", "Failed to load analytics data."));}
     finally{
       setLoading(false);
       refreshInFlightRef.current = false;
@@ -425,7 +470,7 @@ const ProductionCharts=()=>{
         loadData();
       }
     }
-  },[query, consolidatePartsList]);
+  },[consolidatePartsList, query, t]);
 
   const scheduleRefresh = useCallback((cooldownMs = 350) => {
     const elapsed = Date.now() - lastRefreshAtRef.current;
@@ -468,26 +513,26 @@ const ProductionCharts=()=>{
     if (selectedMachineId) {
       const selected = machines.find((m) => Number(m.id) === selectedMachineId);
       if (selected?.lineName) {
-        return `Line: ${selected.lineName}`;
+        return `${t("production.lineLabel", "Line")}: ${selected.lineName}`;
       }
     }
     if (filters.lineName) {
-      return `Line: ${filters.lineName}`;
+      return `${t("production.lineLabel", "Line")}: ${filters.lineName}`;
     }
     const lineSet = new Set((machines || []).map((m) => String(m.lineName || "").trim()).filter(Boolean));
-    if (lineSet.size === 0) return "Line: All";
-    if (lineSet.size === 1) return `Line: ${Array.from(lineSet)[0]}`;
-    return `Line: All (${lineSet.size})`;
-  }, [machines, filters.machineId, filters.lineName]);
-  const totalOk   =Number(summary.quality?.ok||0);
-  const totalNg   =Number(summary.quality?.ng||0);
-  const totalUnits=totalOk+totalNg;
-  const efficiency=totalUnits>0?Math.round(totalOk/totalUnits*100):0;
+    if (lineSet.size === 0) return `${t("production.lineLabel", "Line")}: ${t("production.all", "All")}`;
+    if (lineSet.size === 1) return `${t("production.lineLabel", "Line")}: ${Array.from(lineSet)[0]}`;
+    return `${t("production.lineLabel", "Line")}: ${t("production.all", "All")} (${lineSet.size})`;
+  }, [filters.lineName, filters.machineId, machines, t]);
+  const summaryTotalOk   =Number(summary.quality?.ok||0);
+  const summaryTotalNg   =Number(summary.quality?.ng||0);
+  const summaryTotalUnits=summaryTotalOk+summaryTotalNg;
+  const summaryEfficiency=summaryTotalUnits>0?Math.round(summaryTotalOk/summaryTotalUnits*100):0;
 
   const qualityPie=useMemo(()=>[
-    {name:"Pass (OK)",value:totalOk},
-    {name:"Fail (NG)",value:totalNg},
-  ],[totalOk,totalNg]);
+    {name:t("production.passOk", "Pass (OK)"),value:summaryTotalOk},
+    {name:t("production.failNg", "Fail (NG)"),value:summaryTotalNg},
+  ],[summaryTotalOk,summaryTotalNg,t]);
 
   const productionData=useMemo(()=>
     (report.hourlyProduction||[]).map(r=>({
@@ -495,53 +540,134 @@ const ProductionCharts=()=>{
     })),[report.hourlyProduction]);
 
   const machinePerformanceRows = useMemo(() => {
-    if (Array.isArray(report.machineCards) && report.machineCards.length > 0) {
-      return report.machineCards.map((row) => ({
-        machine_id: Number(row.machineId || row.machine_id || 0),
-        machineName: String(row.machineName || row.machine_name || `Machine ${row.machineId || ""}`),
-        lineName: row.lineName || row.line_name || "-",
-        stationNo: row.stationNo || row.station_no || "-",
-        ok: Number(row.okCount || row.ok || 0),
-        ng: Number(row.ngCount || row.ng || 0),
-        inProgress: Number(row.inProgressCount || 0),
-        interlocked: Number(row.interlockedCount || 0),
-        produced: Number(row.processedCount || row.actualProduction || 0),
-        target: Number(row.targetProduction ?? row.targetQty ?? 0),
-        achievementPct: Number(row.achievementPct ?? 0),
-        downtimeMinutes: Number(row.downtimeMinutes || 0),
-        oee: Number(row.oee || 0),
-        oa: Number(row.oa || 0),
-      }));
-    }
-    const agg = new Map();
-    (report.machineWise || []).forEach((r) => {
-      agg.set(Number(r.machine_id), {
-        machine_id: Number(r.machine_id),
-        ok: Number(r.ok || 0),
-        ng: Number(r.ng || 0),
-      });
+    const normalizeMachineStatus = (value, reason = "", row = null) => {
+      const s = String(value || "").trim().toUpperCase();
+      const r = String(reason || "").trim().toUpperCase();
+      const bypassStatus = Boolean(row?.bypassStatus || row?.is_bypassed || row?.isBypassed);
+      const bypassReason = String(row?.bypassReason || row?.bypass_reason || "").trim().toUpperCase();
+      if (bypassStatus || ["MACHINE_BYPASS_AUTO_OK", "STATION_BYPASS_AUTO_OK", "STATION_OPERATION_DISABLED_AUTO_OK"].includes(bypassReason)) return "OK";
+      if (r === "NG_SHOT_STATUS" && ["BLOCK", "INTERLOCKED"].includes(s)) return "NG";
+      if (!s) return "";
+      if (["OK", "PASS", "PASSED", "COMPLETED", "ENDED_OK", "COMPLETED_OK"].includes(s)) return "OK";
+      if (["NG", "FAIL", "FAILED", "ENDED_NG", "COMPLETED_NG", "INTERLOCKED", "REJECTED"].includes(s)) return "NG";
+      if (["IN_PROGRESS", "WIP", "RUNNING", "PENDING"].includes(s)) return "IN_PROGRESS";
+      return s;
+    };
+    const getMachineStatusPriority = (value) => {
+      if (value === "OK") return 3;
+      if (value === "NG") return 2;
+      if (value === "IN_PROGRESS") return 1;
+      return 0;
+    };
+    const machineCountsFromParts = new Map();
+    (partsList || []).forEach((row) => {
+      const machineId = Number(row?.machineId || row?.machine_id || 0);
+      const partId = String(row?.partId || row?.part_id || "").trim();
+      if (!machineId || !partId) return;
+
+      const normalizedStatus = normalizeMachineStatus(
+        row?.result || row?.status || row?.statusLabel || row?.industrialResult,
+        row?.interlockReason || row?.reason,
+        row
+      );
+      const createdAtMs = new Date(row?.createdAt || row?.createdAtRaw || 0).getTime() || 0;
+      if (!machineCountsFromParts.has(machineId)) {
+        machineCountsFromParts.set(machineId, new Map());
+      }
+      const byPart = machineCountsFromParts.get(machineId);
+      const existing = byPart.get(partId);
+      const existingTs = existing ? (new Date(existing.createdAt || existing.createdAtRaw || 0).getTime() || 0) : -1;
+      const nextPriority = getMachineStatusPriority(normalizedStatus);
+      const existingPriority = existing ? getMachineStatusPriority(existing.normalizedStatus) : -1;
+
+      if (!existing || createdAtMs > existingTs || (createdAtMs === existingTs && nextPriority >= existingPriority)) {
+        byPart.set(partId, {
+          normalizedStatus,
+          createdAt: row?.createdAt || row?.createdAtRaw || null,
+        });
+      }
     });
-    return (machines || []).map((m) => {
-      const id = Number(m.id);
-      const perf = agg.get(id) || { machine_id: id, ok: 0, ng: 0 };
+
+    const machineCountSummary = new Map();
+    machineCountsFromParts.forEach((partMap, machineId) => {
+      const summary = { ok: 0, ng: 0, inProgress: 0, interlocked: 0, produced: 0 };
+      partMap.forEach((row) => {
+        if (row.normalizedStatus === "OK") {
+          summary.ok += 1;
+        } else if (row.normalizedStatus === "NG") {
+          summary.ng += 1;
+        } else if (row.normalizedStatus === "IN_PROGRESS") {
+          summary.inProgress += 1;
+        }
+      });
+      summary.produced = summary.ok + summary.ng;
+      machineCountSummary.set(machineId, summary);
+    });
+
+    const baseRows = Array.isArray(report.machineCards) && report.machineCards.length > 0
+      ? report.machineCards.map((row) => ({
+          machine_id: Number(row.machineId || row.machine_id || 0),
+          machineName: String(row.machineName || row.machine_name || `Machine ${row.machineId || ""}`),
+          lineName: row.lineName || row.line_name || "-",
+          stationNo: row.stationNo || row.station_no || "-",
+          ok: Number(row.okCount || row.ok || 0),
+          ng: Number(row.ngCount || row.ng || 0),
+          inProgress: Number(row.inProgressCount || 0),
+          interlocked: Number(row.interlockedCount || 0),
+          produced: Number(row.processedCount || row.actualProduction || 0),
+          target: Number(row.targetProduction ?? row.targetQty ?? 0),
+          achievementPct: Number(row.achievementPct ?? 0),
+          downtimeMinutes: Number(row.downtimeMinutes || 0),
+          oee: Number(row.oee || 0),
+          oa: Number(row.oa || 0),
+        }))
+      : (() => {
+          const agg = new Map();
+          (report.machineWise || []).forEach((r) => {
+            agg.set(Number(r.machine_id), {
+              machine_id: Number(r.machine_id),
+              ok: Number(r.ok || 0),
+              ng: Number(r.ng || 0),
+            });
+          });
+          return (machines || []).map((m) => {
+            const id = Number(m.id);
+            const perf = agg.get(id) || { machine_id: id, ok: 0, ng: 0 };
+            return {
+              machine_id: id,
+              machineName: String(m.machineName || m.machine_name || m.machineNumber || `Machine ${id}`),
+              lineName: m.lineName || m.line_name || "-",
+              stationNo: m.operationNo || m.operation_no || "-",
+              ok: perf.ok,
+              ng: perf.ng,
+              inProgress: 0,
+              interlocked: 0,
+              produced: Number(perf.ok || 0) + Number(perf.ng || 0),
+              target: 0,
+              achievementPct: 0,
+              downtimeMinutes: 0,
+              oee: 0,
+              oa: 0,
+            };
+          });
+        })();
+
+    return baseRows.map((row) => {
+      const derived = machineCountSummary.get(Number(row.machine_id || 0));
+      if (!derived) return row;
+      const produced = Number(derived.produced || 0);
+      const target = Number(row.target || 0);
       return {
-        machine_id: id,
-        machineName: String(m.machineName || m.machine_name || m.machineNumber || `Machine ${id}`),
-        lineName: m.lineName || m.line_name || "-",
-        stationNo: m.operationNo || m.operation_no || "-",
-        ok: perf.ok,
-        ng: perf.ng,
-        inProgress: 0,
-        interlocked: 0,
-        produced: Number(perf.ok || 0) + Number(perf.ng || 0),
-        target: 0,
-        achievementPct: 0,
-        downtimeMinutes: 0,
-        oee: 0,
-        oa: 0,
+        ...row,
+        ok: Number(derived.ok || 0),
+        ng: Number(derived.ng || 0),
+        inProgress: Number(derived.inProgress || 0),
+        interlocked: Number(derived.interlocked || 0),
+        produced,
+        achievementPct: target > 0 ? Number(((produced / target) * 100).toFixed(2)) : Number(row.achievementPct || 0),
       };
     });
-  }, [machines, report.machineCards, report.machineWise]);
+  }, [machines, partsList, report.machineCards, report.machineWise]);
 
   const machineBarData=useMemo(()=>
     machinePerformanceRows.map((r)=>({
@@ -595,69 +721,542 @@ const ProductionCharts=()=>{
   }, [report.shiftProduction, report.shiftWiseMetrics]);
 
   const timeLabel=useMemo(()=>{
-    if(timeRange==="daily")return"Today";
-    if(timeRange==="weekly")return"Last 7 Days";
-    if(timeRange==="monthly")return"Last 30 Days";
+    if(timeRange==="daily")return t("production.today", "Today");
+    if(timeRange==="weekly")return t("production.last7Days", "Last 7 Days");
+    if(timeRange==="monthly")return t("production.last30Days", "Last 30 Days");
     if(customDate.from&&customDate.to){
       const from = new Date(customDate.from);
       const to = new Date(customDate.to);
-      return `${Number.isNaN(from.getTime()) ? customDate.from : from.toLocaleString("en-IN")} to ${Number.isNaN(to.getTime()) ? customDate.to : to.toLocaleString("en-IN")}`;
+      return `${Number.isNaN(from.getTime()) ? customDate.from : from.toLocaleString("en-IN")} - ${Number.isNaN(to.getTime()) ? customDate.to : to.toLocaleString("en-IN")}`;
     }
-    return"Custom";
-  },[timeRange,customDate]);
+    return t("production.custom", "Custom");
+  },[customDate,timeRange,t]);
   const selectedFilterCount = useMemo(() => {
     const base = Object.values(filters).filter(Boolean).length;
     const timeFilters = (customDate.from ? 1 : 0) + (customDate.to ? 1 : 0);
     return base + timeFilters;
   }, [filters, customDate]);
 
-  // Filtered parts for Parts tab
-  const filteredParts=useMemo(()=>{
-    const seen = new Set();
-    let p = (partsList || []).filter((row) => {
-      const key = String(row?.partId || row?.part_id || "").trim();
-      if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
+  const normalizeStationResult = (value, reason = "", row = null) => {
+    const s = String(value || "").trim().toUpperCase();
+    const r = String(reason || "").trim().toUpperCase();
+    const bypassStatus = Boolean(row?.bypassStatus || row?.is_bypassed || row?.isBypassed);
+    const bypassReason = String(row?.bypassReason || row?.bypass_reason || "").trim().toUpperCase();
+    if (bypassStatus || ["MACHINE_BYPASS_AUTO_OK", "STATION_BYPASS_AUTO_OK", "STATION_OPERATION_DISABLED_AUTO_OK"].includes(bypassReason)) return "OK";
+    if (r === "NG_SHOT_STATUS" && ["BLOCK", "INTERLOCKED"].includes(s)) return "NG";
+    if (!s) return "";
+    if (["OK", "PASS", "PASSED", "COMPLETED", "ENDED_OK", "COMPLETED_OK"].includes(s)) return "OK";
+    if (["NG", "FAIL", "FAILED", "ENDED_NG", "COMPLETED_NG", "INTERLOCKED", "REJECTED"].includes(s)) return "NG";
+    if (["IN_PROGRESS", "WIP", "RUNNING", "PENDING"].includes(s)) return "IN_PROGRESS";
+    return s;
+  };
+
+  const getStatusPriority = useCallback((value) => {
+    if (value === "NG") return 4;
+    if (value === "OK") return 3;
+    if (value === "IN_PROGRESS") return 2;
+    if (value) return 1;
+    return 0;
+  }, []);
+
+  const getOperationStatusPriority = useCallback((value) => {
+    if (value === "OK") return 3;
+    if (value === "NG") return 2;
+    if (value === "IN_PROGRESS") return 1;
+    return 0;
+  }, []);
+
+  const aggregatedPartsList = useMemo(() => {
+    const grouped = new Map();
+
+    (partsList || []).forEach((row, idx) => {
+      const partId = String(row?.partId || row?.part_id || "").trim();
+      if (!partId) return;
+
+      const machineName = (row.machineName || machineMap.get(Number(row.machineId || row.machine_id || 0))?.machineName || "").toString().trim();
+      const stationNo = (row.stationNo || row.station_no || row.operationNo || row.operation_no || "").toString().trim();
+      const status = normalizeStationResult(row.result || row.status || row.statusLabel || row.industrialResult, row.interlockReason || row.reason, row);
+      const stationKey = `${machineName}__${stationNo}`;
+      const createdAtMs = new Date(row.createdAt || 0).getTime();
+
+      if (!grouped.has(partId)) {
+        grouped.set(partId, {
+          ...row,
+          __sourceIndex: idx,
+          partId,
+          stationTimeline: [],
+          createdAt: row.createdAt || null,
+          latestCreatedAt: row.createdAt || null,
+        });
+      }
+
+      const entry = grouped.get(partId);
+      if (Number.isFinite(createdAtMs) && createdAtMs > new Date(entry.latestCreatedAt || 0).getTime()) {
+        Object.assign(entry, row, {
+          partId,
+          stationTimeline: entry.stationTimeline,
+          __sourceIndex: entry.__sourceIndex,
+          createdAt: entry.createdAt || row.createdAt || null,
+          latestCreatedAt: row.createdAt || null,
+        });
+      } else if (!entry.createdAt || (Number.isFinite(createdAtMs) && createdAtMs < new Date(entry.createdAt || 0).getTime())) {
+        entry.createdAt = row.createdAt || entry.createdAt;
+      }
+
+      if (!entry.customerQrCode && (row.customerQrCode || row.customerQR || row.markingCode)) {
+        entry.customerQrCode = row.customerQrCode || row.customerQR || row.markingCode;
+      }
+      if ((!entry.partName || entry.partName === "—") && row.partName) {
+        entry.partName = row.partName;
+      }
+      if (!entry.plcReading && row.plcReading) {
+        entry.plcReading = row.plcReading;
+      } else if (entry.plcReading && row.plcReading) {
+        entry.plcReading = { ...row.plcReading, ...entry.plcReading };
+      }
+      if (!entry.leakTestReading && row.leakTestReading) {
+        entry.leakTestReading = row.leakTestReading;
+      }
+
+      const existingIdx = entry.stationTimeline.findIndex((item) => item.stationKey === stationKey);
+      const timelineItem = {
+        stationKey,
+        machineId: row.machineId || row.machine_id || null,
+        machineName,
+        stationNo,
+        operationNo: row.operationNo || row.operation_no || stationNo,
+        status,
+        result: row.result || row.status || row.statusLabel || row.industrialResult || "",
+        reason: row.reason || row.interlockReason || null,
+        interlockReason: row.interlockReason || row.reason || null,
+        bypassReason: row.bypassReason || row.bypass_reason || null,
+        bypassStatus: Boolean(row.bypassStatus || row.is_bypassed || row.isBypassed),
+        createdAt: row.createdAt || null,
+      };
+
+      if (existingIdx === -1) {
+        entry.stationTimeline.push(timelineItem);
+      } else {
+        const existing = entry.stationTimeline[existingIdx];
+        const existingPriority = getStatusPriority(existing.status);
+        const nextPriority = getStatusPriority(status);
+        const shouldReplace =
+          nextPriority > existingPriority ||
+          (nextPriority === existingPriority && new Date(timelineItem.createdAt || 0).getTime() > new Date(existing.createdAt || 0).getTime());
+        if (shouldReplace) {
+          entry.stationTimeline[existingIdx] = timelineItem;
+        }
+      }
+
+      if (entry.leakTestReading) {
+        const leakMachineName = String(entry.leakTestReading.matchedMachineName || entry.leakTestReading.Machine || "").trim();
+        const leakStationKey = leakMachineName ? `${leakMachineName}__${LEAK_TEST_OPERATION}` : "";
+        const leakStatus = getLeakTestStatus(entry.leakTestReading);
+        if (leakStationKey) {
+          const leakTimelineItem = {
+            stationKey: leakStationKey,
+            machineId: entry.leakTestReading.matchedMachineId || null,
+            machineName: leakMachineName,
+            stationNo: LEAK_TEST_OPERATION,
+            operationNo: LEAK_TEST_OPERATION,
+            status: leakStatus,
+            result: leakStatus,
+            reason: null,
+            interlockReason: null,
+            bypassReason: null,
+            bypassStatus: false,
+            createdAt: entry.leakTestReading.Cycle_End_Time || entry.leakTestReading.cycleEndTime || row.createdAt || null,
+          };
+          const leakExistingIdx = entry.stationTimeline.findIndex((item) => item.stationKey === leakStationKey);
+          if (leakExistingIdx === -1) {
+            entry.stationTimeline.push(leakTimelineItem);
+          } else {
+            entry.stationTimeline[leakExistingIdx] = leakTimelineItem;
+          }
+        }
+      }
     });
-    if(partsSearch){
-      const s=partsSearch.toLowerCase();
-      p=p.filter(x=>(x.partId||"").toLowerCase().includes(s)||(x.batchNo||x.batch||"").toLowerCase().includes(s));
-    }
-    if(partsFilter!=="all"){
-      p=p.filter(x=>{
-        const r=String(x.result||x.status||"").toUpperCase();
-        const isOk=["OK","PASS","COMPLETED","ENDED_OK"].includes(r);
-        const isNg=["NG","FAIL","FAILED","ENDED_NG","INTERLOCKED"].includes(r);
-        if(partsFilter==="pass")return isOk;
-        if(partsFilter==="fail")return isNg;
-        if(partsFilter==="progress")return!isOk&&!isNg;
-        return true;
-      });
-    }
-    return p;
-  },[partsList,partsSearch,partsFilter]);
+
+    return Array.from(grouped.values())
+      .map((entry) => ({
+        ...entry,
+        stationTimeline: [...entry.stationTimeline].sort((a, b) =>
+          String(a.stationNo || "").localeCompare(String(b.stationNo || ""), undefined, { numeric: true, sensitivity: "base" })
+        ),
+      }))
+      .sort((a, b) => new Date(b.latestCreatedAt || b.createdAt || 0).getTime() - new Date(a.latestCreatedAt || a.createdAt || 0).getTime());
+  }, [getStatusPriority, machineMap, normalizeStationResult, partsList]);
+
+  const resolveTimelineFinalStatus = useCallback((part) => {
+    const timeline = Array.isArray(part?.stationTimeline) && part.stationTimeline.length
+      ? part.stationTimeline
+      : [{
+          status: part?.status || part?.statusLabel || part?.result || part?.industrialResult || "",
+          result: part?.result || part?.status || part?.statusLabel || part?.industrialResult || "",
+          reason: part?.interlockReason || part?.reason || "",
+          interlockReason: part?.interlockReason || part?.reason || "",
+          bypassReason: part?.bypassReason || part?.bypass_reason || "",
+          bypassStatus: Boolean(part?.bypassStatus || part?.is_bypassed || part?.isBypassed),
+          operationNo: part?.operationNo || part?.stationNo || "",
+          stationNo: part?.stationNo || part?.operationNo || "",
+        }];
+
+    const groupedByOperation = new Map();
+    const requiredOperations = Array.from(
+      new Set(
+        (machines || [])
+          .map((machine) => String(machine.operationNo || machine.operation_no || machine.stationNo || machine.station_no || "").trim().toUpperCase())
+          .filter(Boolean)
+      )
+    );
+    timeline.forEach((item) => {
+      const operationKey = String(item.operationNo || item.stationNo || "").trim().toUpperCase() || "__UNKNOWN__";
+      const status = normalizeStationResult(item.result || item.status || item.opStatus, item.interlockReason || item.reason, item);
+      const existing = groupedByOperation.get(operationKey);
+      if (!existing || getOperationStatusPriority(status) > getOperationStatusPriority(existing)) {
+        groupedByOperation.set(operationKey, status);
+      }
+    });
+
+    const statuses = requiredOperations.map((operation) => groupedByOperation.get(operation)).filter(Boolean);
+
+    if (statuses.some((status) => status === "NG")) return "FAILED";
+    if (requiredOperations.length > 0 && requiredOperations.every((operation) => groupedByOperation.get(operation) === "OK")) return "PASSED";
+    return "IN_PROGRESS";
+  }, [getOperationStatusPriority, machines, normalizeStationResult]);
 
   const getPartFinalState = useCallback((part) => {
+    const finalStatus = resolveTimelineFinalStatus(part);
+    if (finalStatus === "PASSED") return "passed";
+    if (finalStatus === "FAILED") return "failed";
     const raw = String(part?.status || part?.statusLabel || part?.result || part?.industrialResult || "").trim().toUpperCase();
-    if (["OK", "PASS", "PASSED", "COMPLETED", "ENDED_OK"].includes(raw)) return "passed";
-    if (["NG", "FAIL", "FAILED", "ENDED_NG", "REJECTED"].includes(raw)) return "failed";
     if (["INTERLOCKED", "BLOCKED", "PLC_COMM_ERROR", "COMM_ERROR", "TIMEOUT", "PLC_TIMEOUT"].includes(raw)) return "blocked";
     return "progress";
-  }, []);
+  }, [resolveTimelineFinalStatus]);
 
   const selectedMachineParts = useMemo(() => {
     if (!selectedMachineDetail) return [];
     const machineId = Number(selectedMachineDetail.machine_id || 0);
-    return (partsList || []).filter((part) => Number(part.machineId || part.machine_id || 0) === machineId);
-  }, [partsList, selectedMachineDetail]);
+    return aggregatedPartsList.filter((part) =>
+      Number(part.machineId || part.machine_id || 0) === machineId ||
+      (Array.isArray(part.stationTimeline) && part.stationTimeline.some((stage) => Number(stage.machineId || 0) === machineId))
+    );
+  }, [aggregatedPartsList, selectedMachineDetail]);
+
+  const getSelectedMachineStageSnapshot = useCallback((part) => {
+    if (!selectedMachineDetail) {
+      return {
+        state: "progress",
+        normalizedStatus: "",
+        result: part?.result || part?.status || "-",
+        reason: part?.reason || part?.interlockReason || "",
+        createdAt: part?.createdAt || null,
+      };
+    }
+    const machineId = Number(selectedMachineDetail.machine_id || 0);
+    const timeline = Array.isArray(part?.stationTimeline) ? part.stationTimeline : [];
+    const directCandidate = Number(part?.machineId || part?.machine_id || 0) === machineId
+      ? {
+          machineId,
+          status: part?.status || part?.statusLabel || part?.result || part?.industrialResult || "",
+          result: part?.result || part?.status || part?.statusLabel || part?.industrialResult || "",
+          reason: part?.reason || part?.interlockReason || "",
+          interlockReason: part?.interlockReason || part?.reason || "",
+          createdAt: part?.createdAt || null,
+        }
+      : null;
+    const matchingStages = [
+      ...timeline.filter((stage) => Number(stage?.machineId || 0) === machineId),
+      ...(directCandidate ? [directCandidate] : []),
+    ];
+    const preferredStage = matchingStages.reduce((best, stage) => {
+      if (!stage) return best;
+      const normalized = normalizeStationResult(stage.result || stage.status || stage.opStatus, stage.interlockReason || stage.reason, stage);
+      const nextPriority = getOperationStatusPriority(normalized);
+      const bestNormalized = best
+        ? normalizeStationResult(best.result || best.status || best.opStatus, best.interlockReason || best.reason, best)
+        : "";
+      const bestPriority = getOperationStatusPriority(bestNormalized);
+      const nextTs = new Date(stage.createdAt || 0).getTime() || 0;
+      const bestTs = best ? (new Date(best.createdAt || 0).getTime() || 0) : -1;
+      if (!best || nextPriority > bestPriority || (nextPriority === bestPriority && nextTs >= bestTs)) {
+        return stage;
+      }
+      return best;
+    }, null);
+    const normalizedStatus = normalizeStationResult(
+      preferredStage?.result || preferredStage?.status || preferredStage?.opStatus,
+      preferredStage?.interlockReason || preferredStage?.reason,
+      preferredStage
+    );
+    return {
+      state: normalizedStatus === "OK" ? "passed" : normalizedStatus === "NG" ? "failed" : "progress",
+      normalizedStatus,
+      result: preferredStage?.result || preferredStage?.status || preferredStage?.opStatus || "-",
+      reason: preferredStage?.reason || preferredStage?.interlockReason || "",
+      createdAt: preferredStage?.createdAt || part?.createdAt || null,
+    };
+  }, [getOperationStatusPriority, normalizeStationResult, selectedMachineDetail]);
 
   const selectedMachineCounts = useMemo(() => {
     return selectedMachineParts.reduce((acc, part) => {
-      acc[getPartFinalState(part)] += 1;
+      const state = getSelectedMachineStageSnapshot(part).state;
+      acc[state] += 1;
+      return acc;
+    }, { passed: 0, failed: 0, progress: 0 });
+  }, [getSelectedMachineStageSnapshot, selectedMachineParts]);
+
+  const getPartStationStatusMap = useCallback((part) => {
+    const map = new Map();
+    const machineName = (part.machineName || machineMap.get(Number(part.machineId))?.machineName || "").toString().trim();
+    const op = (part.stationNo || part.operationNo || "").toString().trim();
+    const directKey = `${machineName}__${op}`;
+    const directStatus = normalizeStationResult(part.result || part.status, part.interlockReason || part.reason, part);
+    if ((machineName || op) && op !== LEAK_TEST_OPERATION) map.set(directKey, directStatus);
+
+    const timeline = Array.isArray(part.stationTimeline) ? part.stationTimeline : [];
+    timeline.forEach((t) => {
+      const tMachine = (t.machineName || t.machine_name || machineName || "").toString().trim();
+      const tOp = (t.stationNo || t.station_no || t.operationNo || t.operation_no || "").toString().trim();
+      const tKey = `${tMachine}__${tOp}`;
+      const tStatus = normalizeStationResult(t.result || t.status || t.opStatus, t.interlockReason || t.reason, t);
+      if ((tMachine || tOp) && tOp !== LEAK_TEST_OPERATION) map.set(tKey, tStatus);
+    });
+    if (part?.leakTestReading) {
+      const leakMachine = (part.leakTestReading.matchedMachineName || part.leakTestReading.Machine || "").toString().trim();
+      const leakKey = `${leakMachine}__${LEAK_TEST_OPERATION}`;
+      const leakStatus = getLeakTestStatus(part.leakTestReading);
+      if (leakMachine && leakStatus) {
+        map.set(leakKey, leakStatus);
+      }
+    }
+    return map;
+  }, [machineMap]);
+
+  const getFinalPartStatus = useCallback((part) => {
+    return resolveTimelineFinalStatus(part);
+  }, [resolveTimelineFinalStatus]);
+
+  const finalPartCounts = useMemo(() => {
+    return aggregatedPartsList.reduce((acc, part) => {
+      const state = getPartFinalState(part);
+      if (state === "passed") acc.passed += 1;
+      else if (state === "failed") acc.failed += 1;
+      else if (state === "blocked") acc.blocked += 1;
+      else acc.progress += 1;
       return acc;
     }, { passed: 0, failed: 0, progress: 0, blocked: 0 });
-  }, [getPartFinalState, selectedMachineParts]);
+  }, [aggregatedPartsList, getPartFinalState]);
+
+  const totalOk = finalPartCounts.passed;
+  const totalNg = finalPartCounts.failed;
+  const totalUnits = totalOk + totalNg;
+  const efficiency = totalUnits > 0 ? Math.round((totalOk / totalUnits) * 100) : 0;
+
+  const reportStylePartsTable = useMemo(() => {
+    const sourceRows = Array.isArray(reportRows) ? reportRows : [];
+    const reportPlcColumns = (() => {
+      const sorted = [
+        "shot_datetime",
+        ...DEFAULT_PLC_CYCLE_COLUMNS.filter((key) => !["machine_name", "shot_number", "shot_date", "shot_time"].includes(key)),
+      ];
+      const usedLabels = new Map();
+      return sorted.map((key) => {
+        const baseLabel = key === "shot_datetime" ? "Shot Date & Time" : formatPlcColumnLabel(key);
+        const count = usedLabels.get(baseLabel) || 0;
+        usedLabels.set(baseLabel, count + 1);
+        return { key, label: count === 0 ? baseLabel : `${baseLabel} (${count + 1})` };
+      });
+    })();
+    const machineStationPairs = (machines || [])
+      .map((m) => {
+        const machineName = String(m.machineName || m.machine_name || "").trim();
+        const op = String(m.operationNo || m.operation_no || m.stationNo || m.station_no || "").trim();
+        if (!machineName || !op) return null;
+        if (String(op).trim().toUpperCase() === LEAK_TEST_OPERATION) {
+          return { key: LEAK_TEST_SHARED_KEY, machineName: "Leak Test", op, label: "Leak Test OP150", sharedLeakOperation: true };
+        }
+        return { key: `${machineName}__${op}`, machineName, op, label: `${machineName} + ${op}` };
+      })
+      .filter(Boolean);
+    const machineStationMap = new Map(machineStationPairs.map((item) => [item.key, item]));
+    sourceRows.forEach((row) => {
+      const machineName = String(row.machineName || "").trim();
+      const op = String(row.operationNo || row.stationNo || "").trim();
+      if (!machineName || !op) return;
+      const pair = String(op).trim().toUpperCase() === LEAK_TEST_OPERATION
+        ? { key: LEAK_TEST_SHARED_KEY, machineName: "Leak Test", op, label: "Leak Test OP150", sharedLeakOperation: true }
+        : { key: `${machineName}__${op}`, machineName, op, label: `${machineName} + ${op}` };
+      if (!machineStationMap.has(pair.key)) {
+        machineStationMap.set(pair.key, pair);
+      }
+    });
+    const stationPairs = Array.from(machineStationMap.values()).sort((a, b) =>
+      a.op.localeCompare(b.op, undefined, { numeric: true, sensitivity: "base" }) || a.machineName.localeCompare(b.machineName)
+    );
+    const requiredOperations = Array.from(
+      new Set(stationPairs.map((item) => String(item.op || "").trim().toUpperCase()).filter(Boolean))
+    );
+    const grouped = new Map();
+    sourceRows.forEach((row, idx) => {
+      const partKey = String(row.partId || row.part_id || row.barcode || row.shot_uid || `row_${idx}`).trim();
+      const key = partKey || `row_${idx}`;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(row);
+    });
+    const rows = Array.from(grouped.values()).map((entries, idx) => {
+      const first = entries[0] || {};
+      const partKey = String(first.partId || first.part_id || first.barcode || first.shot_uid || `row_${idx}`).trim();
+      const stationResults = {};
+      const stationDisplayValues = {};
+      const operationResults = {};
+      const plcData = {};
+      let leakData = null;
+      const firstScanAt = entries.reduce((earliest, row) => {
+        const raw = row.firstScanCreatedAt || row.createdAtRaw || row.createdAt || null;
+        if (!raw) return earliest;
+        if (!earliest) return raw;
+        return new Date(raw).getTime() < new Date(earliest).getTime() ? raw : earliest;
+      }, null);
+      entries.forEach((row) => {
+        const stationOp = String(row.operationNo || row.stationNo || "").trim();
+        const stationMachine = String(row.machineName || "").trim();
+        const stationKey = stationMachine && stationOp ? `${stationMachine}__${stationOp}` : "";
+        const rowLeakData = row.leakTestReading && typeof row.leakTestReading === "object" ? row.leakTestReading : null;
+        if (!leakData && rowLeakData) leakData = rowLeakData;
+        if (stationKey) {
+          const normalizedStationResult = normalizeStationResult(
+            stationOp === LEAK_TEST_OPERATION ? "" : String(row.industrialResult || row.statusLabel || row.result || "-").toUpperCase(),
+            row.reason || row.interlock_reason,
+            row
+          );
+          if (normalizedStationResult) {
+            const current = stationResults[stationKey];
+            stationResults[stationKey] = getStatusPriority(normalizedStationResult) > getStatusPriority(current)
+              ? normalizedStationResult
+              : (current || normalizedStationResult);
+          }
+          if (stationOp && normalizedStationResult) {
+            const current = operationResults[stationOp];
+            operationResults[stationOp] = getOperationStatusPriority(normalizedStationResult) > getOperationStatusPriority(current)
+              ? normalizedStationResult
+              : (current || normalizedStationResult);
+          }
+        }
+        const nextPlcData = {
+          ...(row.plcReading || {}),
+          ...(row.plc_reading || {}),
+          ...(row.plcReadings || {}),
+          ...(row.plcCycleReadings || {}),
+          ...(row.plc_cycle_readings || {}),
+        };
+        Object.keys(nextPlcData).forEach((key) => {
+          if (plcData[key] === undefined || plcData[key] === null || plcData[key] === "" || plcData[key] === "-") {
+            plcData[key] = nextPlcData[key];
+          }
+        });
+      });
+      if (leakData) {
+        const leakStatus = getLeakTestStatus(leakData);
+        const leakMachineName = String(leakData.matchedMachineName || leakData.Machine || leakData.machineName || "").trim();
+        const currentLeak = stationResults[LEAK_TEST_SHARED_KEY];
+        stationResults[LEAK_TEST_SHARED_KEY] = getStatusPriority(leakStatus) > getStatusPriority(currentLeak)
+          ? leakStatus
+          : (currentLeak || leakStatus);
+        stationDisplayValues[LEAK_TEST_SHARED_KEY] = leakMachineName ? `${leakMachineName} ${leakStatus || "-"}`.trim() : (leakStatus || "-");
+        const currentOp = operationResults[LEAK_TEST_OPERATION];
+        operationResults[LEAK_TEST_OPERATION] = getOperationStatusPriority(leakStatus) > getOperationStatusPriority(currentOp)
+          ? leakStatus
+          : (currentOp || leakStatus);
+      }
+      const overallStatus = (() => {
+        const vals = requiredOperations.map((operation) => normalizeStationResult(operationResults[operation])).filter(Boolean);
+        if (vals.some((value) => value === "NG")) return "FAILED";
+        if (requiredOperations.length > 0 && requiredOperations.every((operation) => normalizeStationResult(operationResults[operation]) === "OK")) {
+          return "PASSED";
+        }
+        return "IN_PROGRESS";
+      })();
+      const shaped = {
+        id: partKey || `row_${idx}`,
+        barcode: partKey || "—",
+        plc_shot_number: plcData.shot_number ?? first.shot_number ?? first.shotNumber ?? extractShotFromPartId(partKey) ?? "-",
+        plc_machine_name: plcData.machine_name || first.machineName || "-",
+        createdAt: firstScanAt || first.createdAt || null,
+        createdAtDisplay: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
+        partName: plcData.part_name || first.partName || first.modelName || first.componentName || "-",
+        customerCode: first.customerQrCode || first.customer_qr || "-",
+        overallStatus,
+        ngReason: (() => {
+          const rawReason = first.reason || first.interlock_reason || "";
+          const normalizedReason = String(rawReason || "").trim().toUpperCase();
+          if (!rawReason || rawReason === "-" || normalizedReason === "RECOVERY_PENDING_AFTER_BACKEND_RESTART") return "";
+          return rawReason;
+        })(),
+      };
+      stationPairs.forEach((item) => {
+        shaped[`station_${item.key}`] = item.sharedLeakOperation
+          ? ({
+              machineName: String(leakData?.matchedMachineName || leakData?.Machine || leakData?.machineName || "").trim(),
+              status: String(getLeakTestStatus(leakData) || "").trim().toUpperCase() || "-",
+              text: stationDisplayValues[item.key] || "-",
+            })
+          : (normalizeStationResult(stationResults[item.key]) || "-");
+      });
+      reportPlcColumns.forEach(({ key }) => {
+        if (key === "shot_datetime") {
+          const y = plcData.shot_year ?? first.shot_year;
+          const m = plcData.shot_month ?? first.shot_month;
+          const d = plcData.shot_day ?? first.shot_day;
+          const hh = plcData.shot_hour ?? first.shot_hour;
+          const mm = plcData.shot_minute ?? first.shot_minute;
+          const ss = plcData.shot_second ?? first.shot_second;
+          shaped[`plc_${key}`] = (y !== undefined && m !== undefined && d !== undefined && hh !== undefined && mm !== undefined && ss !== undefined)
+            ? `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")} ${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`
+            : `${plcData.shot_date ?? first.shot_date ?? "-"} ${plcData.shot_time ?? first.shot_time ?? ""}`.trim();
+        } else if (key === "shot_status") {
+          const code = Number(plcData[key] ?? first[key]);
+          shaped[`plc_${key}`] = ({ 1: "OK", 3: "WARM UP SHOT", 5: "OFF SHOT" }[code] || (plcData[key] ?? first[key] ?? "-"));
+        } else {
+          shaped[`plc_${key}`] = plcData[key] ?? first[key] ?? "-";
+        }
+      });
+      LEAK_TEST_COLUMNS.forEach(({ key }) => {
+        shaped[`leak_${key}`] = getLeakTestValue(leakData, key);
+      });
+      return shaped;
+    }).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    return { stationPairs, plcColumns: reportPlcColumns, rows };
+  }, [getOperationStatusPriority, getStatusPriority, machines, normalizeStationResult, reportRows]);
+
+  const isSingleMachineView = Boolean(filters.machineId);
+
+  const plcColumns = useMemo(() => {
+    return reportStylePartsTable.plcColumns || [];
+  }, [reportStylePartsTable.plcColumns]);
+
+  // Filtered parts for Parts tab
+  const filteredParts=useMemo(()=>{
+    let p = [...(reportStylePartsTable.rows || [])];
+    if(partsSearch){
+      const s=partsSearch.toLowerCase();
+      p=p.filter(x=>
+        String(x.barcode || "").toLowerCase().includes(s) ||
+        String(x.customerCode || "").toLowerCase().includes(s) ||
+        String(x.partName || "").toLowerCase().includes(s)
+      );
+    }
+    if(partsFilter!=="all"){
+      p=p.filter(x=>{
+        const finalState = String(x.overallStatus || "").trim().toUpperCase();
+        if(partsFilter==="pass")return finalState === "PASSED";
+        if(partsFilter==="fail")return finalState === "FAILED" || finalState === "NG";
+        if(partsFilter==="progress")return finalState !== "PASSED" && finalState !== "FAILED" && finalState !== "NG";
+        return true;
+      });
+    }
+    return p;
+  },[partsFilter, partsSearch, reportStylePartsTable.rows]);
 
   useEffect(() => {
     setPartsPage(1);
@@ -670,86 +1269,9 @@ const ProductionCharts=()=>{
 
   const totalPartsPages = Math.max(1, Math.ceil(filteredParts.length / partsPageSize));
 
-  const normalizeStationResult = (value, reason = "", row = null) => {
-    const s = String(value || "").trim().toUpperCase();
-    const r = String(reason || "").trim().toUpperCase();
-    const bypassStatus = Boolean(row?.bypassStatus || row?.is_bypassed || row?.isBypassed);
-    const bypassReason = String(row?.bypassReason || row?.bypass_reason || "").trim().toUpperCase();
-    if (bypassStatus || ["MACHINE_BYPASS_AUTO_OK", "STATION_BYPASS_AUTO_OK", "STATION_OPERATION_DISABLED_AUTO_OK"].includes(bypassReason)) return "OK";
-    if (r === "NG_SHOT_STATUS" && ["BLOCK", "INTERLOCKED"].includes(s)) return "NG";
-    if (!s) return "";
-    if (["OK", "PASS", "COMPLETED", "ENDED_OK"].includes(s)) return "OK";
-    if (["NG", "FAIL", "FAILED", "ENDED_NG", "INTERLOCKED", "REJECTED"].includes(s)) return "NG";
-    if (["IN_PROGRESS", "WIP", "RUNNING", "PENDING"].includes(s)) return "IN_PROGRESS";
-    return s;
-  };
-
   const stationColumns = useMemo(() => {
-    const keyMap = new Map();
-    const fromMachines = (machines || []).map((m) => {
-      const op = (m.operationNo || m.operation_no || m.stationNo || m.station_no || "").toString().trim();
-      const machineName = (m.machineName || m.machine_name || "").toString().trim();
-      const key = `${machineName}__${op}`;
-      const label = op ? `${machineName} + ${op}` : machineName;
-      return { key, label };
-    }).filter((x) => x.label);
-
-    fromMachines.forEach((c) => keyMap.set(c.key, c));
-
-    (filteredParts || []).forEach((p) => {
-      const machineName = (p.machineName || machineMap.get(Number(p.machineId))?.machineName || "").toString().trim();
-      const op = (p.stationNo || p.operationNo || "").toString().trim();
-      const key = `${machineName}__${op}`;
-      const label = op ? `${machineName} + ${op}` : machineName;
-      if (label) keyMap.set(key, { key, label });
-    });
-
-    return Array.from(keyMap.values());
-  }, [machines, filteredParts, machineMap]);
-
-  const getPartStationStatusMap = useCallback((part) => {
-    const map = new Map();
-    const machineName = (part.machineName || machineMap.get(Number(part.machineId))?.machineName || "").toString().trim();
-    const op = (part.stationNo || part.operationNo || "").toString().trim();
-    const directKey = `${machineName}__${op}`;
-    const directStatus = normalizeStationResult(part.result || part.status, part.interlockReason || part.reason, part);
-    if (machineName || op) map.set(directKey, directStatus);
-
-    const timeline = Array.isArray(part.stationTimeline) ? part.stationTimeline : [];
-    timeline.forEach((t) => {
-      const tMachine = (t.machineName || t.machine_name || machineName || "").toString().trim();
-      const tOp = (t.stationNo || t.station_no || t.operationNo || t.operation_no || "").toString().trim();
-      const tKey = `${tMachine}__${tOp}`;
-      const tStatus = normalizeStationResult(t.result || t.status || t.opStatus, t.interlockReason || t.reason, t);
-      if (tMachine || tOp) map.set(tKey, tStatus);
-    });
-    return map;
-  }, [machineMap]);
-
-  const getFinalPartStatus = useCallback((part) => {
-    const statusMap = getPartStationStatusMap(part);
-    const allStatuses = stationColumns.map((c) => statusMap.get(c.key)).filter(Boolean);
-    if (allStatuses.some((s) => s === "NG")) return "FAILED";
-    if (stationColumns.length > 0 && stationColumns.every((c) => statusMap.get(c.key) === "OK")) return "PASSED";
-    return "IN_PROGRESS";
-  }, [getPartStationStatusMap, stationColumns]);
-
-  const isSingleMachineView = Boolean(filters.machineId);
-
-  const plcColumns = useMemo(() => {
-    const sorted = [
-      "shot_datetime",
-      ...DEFAULT_PLC_CYCLE_COLUMNS.filter((key) => !["machine_name", "shot_number", "shot_date", "shot_time"].includes(key)),
-    ];
-    const usedLabels = new Map();
-    return sorted.map((key) => {
-      const baseLabel = key === "shot_datetime" ? "Shot Date & Time" : formatPlcColumnLabel(key);
-      const count = usedLabels.get(baseLabel) || 0;
-      usedLabels.set(baseLabel, count + 1);
-      const label = count === 0 ? baseLabel : `${baseLabel} (${count + 1})`;
-      return { key, label };
-    });
-  }, [filteredParts, report.plcReadingColumns]);
+    return (reportStylePartsTable.stationPairs || []).map((item) => ({ key: item.key, label: item.label, sharedLeakOperation: item.sharedLeakOperation }));
+  }, [reportStylePartsTable.stationPairs]);
 
   const getPlcValue = (part, key) => {
     if (part?.plcReading && typeof part.plcReading === "object" && key in part.plcReading) {
@@ -795,7 +1317,7 @@ const ProductionCharts=()=>{
         `Production_Report_${dateStr()}.xlsx`
       );
     } catch {
-      setError("Full report export failed.");
+      setError(t("production.fullReportExportFailed", "Full report export failed."));
     }
   };
 
@@ -807,7 +1329,7 @@ const ProductionCharts=()=>{
         `Production_Parts_${dateStr()}.xlsx`
       );
     } catch {
-      setError("Parts report export failed.");
+      setError(t("production.partsReportExportFailed", "Parts report export failed."));
     }
   };
 
@@ -816,12 +1338,21 @@ const ProductionCharts=()=>{
   const axStyle={fontSize:11,fill:C.txt("muted"),fontFamily:"monospace"};
 
   const TABS=[
-    {key:"overview",  label:"Overview",      icon:LayoutDashboard},
-    {key:"hourly",    label:"Hourly Trend",  icon:BarChart3      },
-    {key:"machine",   label:"By Machine",    icon:Cpu            },
-    {key:"shift",     label:"By Shift",      icon:Zap            },
-    {key:"parts",     label:`Parts List${partsList.length?` (${partsList.length})`:""}`, icon:List},
+    {key:"overview",  label:t("production.overview", "Overview"),      icon:LayoutDashboard},
+    {key:"hourly",    label:t("production.hourlyTrend", "Hourly Trend"),  icon:BarChart3      },
+    {key:"machine",   label:t("production.byMachine", "By Machine"),    icon:Cpu            },
+    {key:"shift",     label:t("production.byShift", "By Shift"),      icon:Zap            },
+    {key:"parts",     label:`${t("production.partsList", "Parts List")}${reportStylePartsTable.rows.length?` (${reportStylePartsTable.rows.length})`:""}`, icon:List},
   ];
+  const shiftCards = [
+    {key:"SHIFT_A",label:t("production.shiftAMorning", "Shift A — Morning"),colorFn:C.steel,icon:Zap},
+    {key:"SHIFT_B",label:t("production.shiftBAfternoon", "Shift B — Afternoon"),colorFn:C.amber,icon:Activity},
+    {key:"SHIFT_C",label:t("production.shiftCNight", "Shift C — Night"),colorFn:C.idle,icon:Clock},
+  ];
+  const machineTableHeaders = ["#",t("production.machineName", "Machine Name"),t("production.total", "Total"),t("production.pass", "Pass"),t("production.fail", "Fail"),t("production.inProgress", "In Progress"),t("production.target", "Target"),t("production.achieved", "Achieved"),"OEE","OA",t("dashboard.downtime", "Downtime"),t("production.view", "View")];
+  const shiftTableHeaders = [t("production.shift", "Shift"),t("production.total", "Total"),t("production.passOk", "Pass (OK)"),t("production.failNg", "Fail (NG)"),t("production.qualityRate", "Quality Rate"),t("production.progress", "Progress")];
+  const partsTableHeaders = [t("production.shotNumber", "Shot Number"),t("production.partSerialNo", "Part Serial No."),t("production.customerQrCode", "Customer QR Code"),t("production.partName", "Part Name"),t("production.machineName", "Machine Name"),t("production.scannedDateTime", "Scanned Date & Time"),t("production.finalStatus", "Final Status"),t("production.reasonRemark", "Reason / Remark")];
+  const machineDetailHeaders = ["#",t("production.partId", "Part ID"),t("production.status", "Status"),t("production.result", "Result"),t("production.reason", "Reason"),t("production.scannedAt", "Scanned At")];
 
   // -- RENDER -------------------------------------------------------------
   return(
@@ -844,11 +1375,11 @@ const ProductionCharts=()=>{
               <div>
                 <div style={{display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
                   <h1 style={{fontSize:17,fontWeight:800,color:C.txt("pri"),letterSpacing:"-0.02em"}}>
-                    Production Analytics
+                    {t("production.analyticsTitle", "Production Analytics")}
                   </h1>
                   <span style={{fontSize:10,fontWeight:700,color:C.amber(),
                     background:C.amber(0.1),padding:"2px 9px",borderRadius:99,
-                    border:`1px solid ${C.amber(0.3)}`}}>LIVE</span>
+                    border:`1px solid ${C.amber(0.3)}`}}>{t("production.live", "LIVE")}</span>
                 </div>
                 <p style={{fontSize:11,color:C.txt("muted"),marginTop:3}}>
                   {timeLabel} · {fmtNow()} · {lineContextLabel}
@@ -865,7 +1396,7 @@ const ProductionCharts=()=>{
                     background:timeRange===k&&!customDate.from?C.navy():"transparent",
                     border:`1px solid ${timeRange===k&&!customDate.from?C.navy(0.5):C.bdr()}`,
                     color:timeRange===k&&!customDate.from?C.linen():C.txt("muted")}}>
-                  {k==="daily"?"Today":k==="weekly"?"7 Days":"30 Days"}
+                  {k==="daily"?t("production.today", "Today"):k==="weekly"?t("production.last7Days", "7 Days"):t("production.last30Days", "30 Days")}
                 </button>
               ))}
               <div style={{display:"flex",alignItems:"center",gap:5,padding:"0 9px",height:32,
@@ -885,7 +1416,7 @@ const ProductionCharts=()=>{
                   color:C.txt("sec"),opacity:loading?0.5:1,
                   display:"inline-flex",alignItems:"center",gap:5,transition:"all .15s"}}>
                 <RefreshCw size={12} style={{animation:loading?"pcSpin .9s linear infinite":"none"}}/>
-                {loading?"Loading…":"Refresh"}
+                {loading?t("common.loading", "Loading..."):t("production.refresh", "Refresh")}
               </button>
             </div>
           </div>
@@ -908,7 +1439,7 @@ const ProductionCharts=()=>{
           onChange={(e)=>setFilters((prev)=>({...prev,lineName:e.target.value,machineId:""}))}
           style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.txt("pri"),fontSize:12}}
         >
-          <option value="">All Lines</option>
+          <option value="">{t("production.allLines", "All Lines")}</option>
           {(report.availableLines || []).map((line)=>(
             <option key={line} value={line}>{line}</option>
           ))}
@@ -918,7 +1449,7 @@ const ProductionCharts=()=>{
           onChange={(e)=>setFilters((prev)=>({...prev,machineId:e.target.value}))}
           style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.txt("pri"),fontSize:12}}
         >
-          <option value="">All Machines</option>
+          <option value="">{t("production.allMachines", "All Machines")}</option>
           {machines
             .filter((m)=>!filters.lineName || String(m.lineName || "").trim() === filters.lineName)
             .map((m)=>(
@@ -928,7 +1459,7 @@ const ProductionCharts=()=>{
         <input
           value={filters.partId}
           onChange={(e)=>setFilters((prev)=>({...prev,partId:e.target.value}))}
-          placeholder="Part ID"
+          placeholder={t("reports.partId", "Part ID")}
           style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.txt("pri"),fontSize:12}}
         />
         <select
@@ -936,16 +1467,16 @@ const ProductionCharts=()=>{
           onChange={(e)=>setFilters((prev)=>({...prev,status:e.target.value}))}
           style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.txt("pri"),fontSize:12}}
         >
-          <option value="">All Status</option>
-          <option value="OK">PASSED</option>
-          <option value="NG">FAILED</option>
+          <option value="">{t("reports.allStatus", "All Status")}</option>
+          <option value="OK">{t("reports.passed", "PASSED")}</option>
+          <option value="NG">{t("reports.failed", "FAILED")}</option>
         </select>
         <select
           value={filters.shiftCode}
           onChange={(e)=>setFilters((prev)=>({...prev,shiftCode:e.target.value}))}
           style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.txt("pri"),fontSize:12}}
         >
-          <option value="">All Shifts</option>
+          <option value="">{t("production.allShifts", "All Shifts")}</option>
           {(report.availableShifts || []).map((shift)=>(
             <option key={shift.shiftCode} value={shift.shiftCode}>{shift.shiftName || shift.shiftCode}</option>
           ))}
@@ -954,7 +1485,7 @@ const ProductionCharts=()=>{
           onClick={()=>setFilters({machineId:"",lineName:"",partId:"",status:"",shiftCode:""})}
           style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.ng(0.3)}`,background:C.ng(0.08),color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer"}}
         >
-          Clear
+          {t("reports.clear", "Clear")}
         </button>
       </div>
 
@@ -972,7 +1503,7 @@ const ProductionCharts=()=>{
             <Download size={16} color={C.navy()}/>
           </div>
           <div>
-            <p style={{fontSize:13,fontWeight:800,color:C.txt("pri")}}>Export & Filters</p>
+            <p style={{fontSize:13,fontWeight:800,color:C.txt("pri")}}>{t("production.exportFilters", "Export & Filters")}</p>
             <p style={{fontSize:10,color:C.txt("muted")}}>
               {timeLabel} · {totalUnits} units · {efficiency}% quality rate
             </p>
@@ -993,7 +1524,7 @@ const ProductionCharts=()=>{
               background: `linear-gradient(135deg, ${C.navy(0.12)}, ${C.amber(0.12)})`,
             }}
           >
-            Filters Selected: {selectedFilterCount}
+            {t("production.filtersSelected", "Filters Selected")}: {selectedFilterCount}
           </span>
           <button onClick={handleDownloadReport}
             style={{display:"inline-flex",alignItems:"center",gap:6,height:36,padding:"0 14px",
@@ -1001,7 +1532,7 @@ const ProductionCharts=()=>{
               background:C.steel(0.1),border:`1px solid ${C.steel(0.3)}`,color:C.steel(),transition:"all .15s"}}
             onMouseEnter={e=>e.currentTarget.style.background=C.steel(0.2)}
             onMouseLeave={e=>e.currentTarget.style.background=C.steel(0.1)}>
-            <Download size={13}/> Download Report
+            <Download size={13}/> {t("reports.downloadReport", "Download Report")}
           </button>
         </div>
       </div>
@@ -1016,20 +1547,16 @@ const ProductionCharts=()=>{
 
       {/* -- KPI ROW ---------------------------------------------------- */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:11}}>
-        <KpiCard label="Total Produced" value={totalUnits} sub={`Period: ${timeLabel}`} icon={Package}
-          color={C.navy()} bgC={C.navy(0.07)} bdC={C.navy(0.22)}/>
-        <KpiCard label="Pass (OK)"      value={totalOk}   sub="Quality approved" icon={CheckCircle2}
+        <KpiCard label={t("production.passOk", "Pass (OK)")}      value={totalOk}   sub={t("production.qualityApproved", "Quality approved")} icon={CheckCircle2}
           color={C.ok()} bgC={C.ok(0.07)} bdC={C.ok(0.22)}/>
-        <KpiCard label="Fail (NG)"      value={totalNg}   sub="Failed quality check" icon={XCircle}
+        <KpiCard label={t("production.failNg", "Fail (NG)")}      value={totalNg}   sub={t("production.failedQualityCheck", "Failed quality check")} icon={XCircle}
           color={C.ng()} bgC={C.ng(0.07)} bdC={C.ng(0.22)}/>
-        <KpiCard label="Quality Rate"   value={`${efficiency}%`} sub="Pass / Total" icon={TrendingUp}
+        <KpiCard label={t("production.qualityRate", "Quality Rate")}   value={`${efficiency}%`} sub={t("production.passVsTotal", "Pass / Total")} icon={TrendingUp}
           color={efficiency>=85?C.ok():efficiency>=60?C.wip():C.ng()}
           bgC={efficiency>=85?C.ok(0.07):efficiency>=60?C.wip(0.07):C.ng(0.07)}
           bdC={efficiency>=85?C.ok(0.22):efficiency>=60?C.wip(0.22):C.ng(0.22)}/>
-        <KpiCard label="In Progress"    value={summary.parts?.inProgress||0} sub="Currently processing" icon={Activity}
+        <KpiCard label={t("production.inProgress", "In Progress")}    value={finalPartCounts.progress||0} sub={t("production.currentlyProcessing", "Currently processing")} icon={Activity}
           color={C.steel()} bgC={C.steel(0.07)} bdC={C.steel(0.22)}/>
-        <KpiCard label="Interlocked"    value={summary.parts?.interlocked||0} sub="PLC blocked" icon={AlertCircle}
-          color={C.wip()} bgC={C.wip(0.07)} bdC={C.wip(0.22)}/>
       </div>
 
       {/* -- TABS ------------------------------------------------------- */}
@@ -1060,35 +1587,31 @@ const ProductionCharts=()=>{
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(320px,1fr))",gap:14,alignItems:"start",animation:"pcFadeIn .2s ease"}}>
           {/* Quality donut + parts status */}
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
-            <Card title="Quality Summary" subtitle="Pass vs Fail ratio" icon={PieIcon} accent={C.amber()}>
+            <Card title={t("production.qualitySummary", "Quality Summary")} subtitle={t("production.passVsFailRatio", "Pass vs Fail ratio")} icon={PieIcon} accent={C.amber()}>
               <div style={{display:"flex",alignItems:"center",gap:24,padding:"8px 0",flexWrap:"wrap"}}>
                 {/* Donut */}
                 <div style={{position:"relative",width:160,height:160,flexShrink:0,minWidth:160,minHeight:160}}>
-                  <div style={{width:160,height:160,minWidth:1,minHeight:1}}>
-                  <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
-                    <RePieChart>
-                      <Pie data={qualityPie} cx="50%" cy="50%" innerRadius={52} outerRadius={72}
-                        paddingAngle={3} dataKey="value" strokeWidth={0}>
-                        <Cell fill={C.ok()}/><Cell fill={C.ng()}/>
-                      </Pie>
-                      <Tooltip content={<TipBox/>}/>
-                    </RePieChart>
-                  </ResponsiveContainer>
-                  </div>
+                  <RePieChart width={160} height={160}>
+                    <Pie data={qualityPie} cx="50%" cy="50%" innerRadius={52} outerRadius={72}
+                      paddingAngle={3} dataKey="value" strokeWidth={0}>
+                      <Cell fill={C.ok()}/><Cell fill={C.ng()}/>
+                    </Pie>
+                    <Tooltip content={<TipBox/>}/>
+                  </RePieChart>
                   <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",
                     alignItems:"center",justifyContent:"center"}}>
                     <p style={{fontSize:22,fontWeight:900,lineHeight:1,
                       color:efficiency>=85?C.ok():efficiency>=60?C.wip():C.ng(),
                       fontFamily:"'DM Mono',monospace"}}>{efficiency}%</p>
                     <p style={{fontSize:9,color:C.txt("muted"),marginTop:3,
-                      textTransform:"uppercase",letterSpacing:"0.07em"}}>Quality</p>
+                      textTransform:"uppercase",letterSpacing:"0.07em"}}>{t("production.quality", "Quality")}</p>
                   </div>
                 </div>
                 {/* Stats */}
                 <div style={{flex:1,minWidth:220,display:"flex",flexDirection:"column",gap:10}}>
                   {[
-                    {l:"Pass (OK)",  v:totalOk,  c:C.ok(),   bg:C.ok(0.08),  bd:C.ok(0.2)},
-                    {l:"Fail (NG)",  v:totalNg,  c:C.ng(),   bg:C.ng(0.08),  bd:C.ng(0.2)},
+                    {l:t("production.passOk", "Pass (OK)"),  v:totalOk,  c:C.ok(),   bg:C.ok(0.08),  bd:C.ok(0.2)},
+                    {l:t("production.failNg", "Fail (NG)"),  v:totalNg,  c:C.ng(),   bg:C.ng(0.08),  bd:C.ng(0.2)},
                   ].map(s=>(
                     <div key={s.l} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
                       padding:"11px 14px",borderRadius:9,background:s.bg,border:`1px solid ${s.bd}`}}>
@@ -1102,13 +1625,12 @@ const ProductionCharts=()=>{
             </Card>
 
             {/* Parts status */}
-            <Card title="Parts Status" subtitle="Breakdown" icon={Settings2} accent={C.navy()}>
+            <Card title={t("production.partsStatus", "Parts Status")} subtitle={t("production.breakdown", "Breakdown")} icon={Settings2} accent={C.navy()}>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:8}}>
                 {[
-                  {l:"Completed",  v:summary.quality?.ok||0,       c:C.ok()  },
-                  {l:"In Progress",v:summary.parts?.inProgress||0, c:C.steel()},
-                  {l:"Interlocked",v:summary.parts?.interlocked||0,c:C.wip() },
-                  {l:"Rework",     v:summary.parts?.rework||0,     c:C.ng()  },
+                  {l:t("production.completed", "Completed"),  v:summary.quality?.ok||0,       c:C.ok()  },
+                  {l:t("production.inProgress", "In Progress"),v:summary.parts?.inProgress||0, c:C.steel()},
+                  {l:t("production.rework", "Rework"),     v:summary.parts?.rework||0,     c:C.ng()  },
                 ].map(s=>(
                   <div key={s.l} style={{padding:"10px 13px",borderRadius:9,
                     background:C.bg("surf"),border:`1px solid ${C.bdr()}`}}>
@@ -1128,14 +1650,11 @@ const ProductionCharts=()=>{
           {/* Shift cards */}
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <p style={{fontSize:9,fontWeight:800,textTransform:"uppercase",
-              letterSpacing:"0.1em",color:C.txt("muted")}}>Shift Performance</p>
-            {[{key:"SHIFT_A",label:"Shift A — Morning",  colorFn:C.steel,icon:Zap    },
-              {key:"SHIFT_B",label:"Shift B — Afternoon",colorFn:C.amber,icon:Activity},
-              {key:"SHIFT_C",label:"Shift C — Night",    colorFn:C.idle, icon:Clock  }
-            ].map(s=>(
+              letterSpacing:"0.1em",color:C.txt("muted")}}>{t("production.shiftPerformance", "Shift Performance")}</p>
+            {shiftCards.map(s=>(
               <ShiftCard key={s.key} label={s.label}
                 row={shiftRowsNormalized?.[s.key]}
-                colorFn={s.colorFn} icon={s.icon}/>
+                colorFn={s.colorFn} icon={s.icon} t={t}/>
             ))}
           </div>
         </div>
@@ -1144,23 +1663,23 @@ const ProductionCharts=()=>{
       {/* -- TAB: HOURLY ----------------------------------------------- */}
       {activeTab==="hourly"&&(
         <div style={{animation:"pcFadeIn .2s ease"}}>
-          <Card title="Hourly Production" subtitle="Pass vs Fail per hour" icon={BarChart3} accent={C.steel()}
+          <Card title={t("production.hourlyProduction", "Hourly Production")} subtitle={t("production.passVsFailPerHour", "Pass vs Fail per hour")} icon={BarChart3} accent={C.steel()}
             right={
               <div style={{display:"flex",alignItems:"center",gap:8}}>
                 <div style={{display:"flex",gap:8,marginRight:4}}>
-                  {[{c:C.ok(),l:"Pass"},{c:C.ng(),l:"Fail"}].map(s=>(
+                  {[{c:C.ok(),l:t("production.pass", "Pass")},{c:C.ng(),l:t("production.fail", "Fail")}].map(s=>(
                     <div key={s.l} style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:C.txt("muted")}}>
                       <div style={{width:10,height:10,borderRadius:3,background:s.c}}/>{s.l}
                     </div>
                   ))}
                 </div>
-                {[{k:"bar",label:"Bar"},{k:"line",label:"Line"},{k:"area",label:"Area"}].map(t=>(
-                  <button key={t.k} onClick={()=>setChartType(t.k)}
+                {[{k:"bar",label:t("production.bar", "Bar")},{k:"line",label:t("production.line", "Line")},{k:"area",label:t("production.area", "Area")}].map(type=>(
+                  <button key={type.k} onClick={()=>setChartType(type.k)}
                     style={{height:28,padding:"0 10px",borderRadius:6,fontSize:11,cursor:"pointer",
-                      background:chartType===t.k?C.navy():"transparent",
-                      border:`1px solid ${chartType===t.k?C.navy(0.5):C.bdr()}`,
-                      color:chartType===t.k?C.linen():C.txt("muted"),fontWeight:700,transition:"all .12s"}}>
-                    {t.label}
+                      background:chartType===type.k?C.navy():"transparent",
+                      border:`1px solid ${chartType===type.k?C.navy(0.5):C.bdr()}`,
+                      color:chartType===type.k?C.linen():C.txt("muted"),fontWeight:700,transition:"all .12s"}}>
+                    {type.label}
                   </button>
                 ))}
               </div>
@@ -1168,14 +1687,14 @@ const ProductionCharts=()=>{
             {productionData.length===0?(
               <div style={{height:350,display:"flex",alignItems:"center",justifyContent:"center",
                 flexDirection:"column",gap:8,color:C.txt("muted"),fontSize:12}}>
-                <BarChart3 size={28} color={C.txt("muted")}/>No hourly data for this period.
+                <BarChart3 size={28} color={C.txt("muted")}/>{t("production.noHourlyData", "No hourly data for this period.")}
               </div>
             ):(
               <SafeChart height={350}>
-                <div style={{width:"100%",height:350,minWidth:1,minHeight:1}}>
-                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
+                {({ width, height }) => (
+                <Fragment>
                   {chartType==="area"?(
-                    <AreaChart data={productionData} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <AreaChart width={width} height={height} data={productionData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <defs>
                         <linearGradient id="gOk" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="5%" stopColor={C.ok()} stopOpacity={0.22}/><stop offset="95%" stopColor={C.ok()} stopOpacity={0.02}/>
@@ -1188,32 +1707,32 @@ const ProductionCharts=()=>{
                       <XAxis dataKey="hour" tick={axStyle} axisLine={false} tickLine={false}/>
                       <YAxis tick={axStyle} axisLine={false} tickLine={false}/>
                       <Tooltip content={<TipBox/>}/>
-                      <Area type="monotone" dataKey="Pass" stroke={C.ok()} strokeWidth={2.5} fill="url(#gOk)" dot={false}/>
-                      <Area type="monotone" dataKey="Fail" stroke={C.ng()} strokeWidth={2} fill="url(#gNg)" dot={false}/>
+                      <Area type="monotone" dataKey="Pass" name={t("production.pass", "Pass")} stroke={C.ok()} strokeWidth={2.5} fill="url(#gOk)" dot={false}/>
+                      <Area type="monotone" dataKey="Fail" name={t("production.fail", "Fail")} stroke={C.ng()} strokeWidth={2} fill="url(#gNg)" dot={false}/>
                     </AreaChart>
                   ):chartType==="line"?(
-                    <ReLineChart data={productionData} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <ReLineChart width={width} height={height} data={productionData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <CartesianGrid stroke={C.bdr(0.1)} strokeDasharray="3 4" vertical={false}/>
                       <XAxis dataKey="hour" tick={axStyle} axisLine={false} tickLine={false}/>
                       <YAxis tick={axStyle} axisLine={false} tickLine={false}/>
                       <Tooltip content={<TipBox/>}/>
-                      <Line type="monotone" dataKey="Pass" stroke={C.ok()} strokeWidth={2.5} dot={false} activeDot={{r:4,fill:C.ok()}}/>
-                      <Line type="monotone" dataKey="Fail" stroke={C.ng()} strokeWidth={2} dot={false} strokeDasharray="5 3" activeDot={{r:4,fill:C.ng()}}/>
-                      <Line type="monotone" dataKey="Total" stroke={C.steel()} strokeWidth={1.5} dot={false} strokeDasharray="2 5"/>
+                      <Line type="monotone" dataKey="Pass" name={t("production.pass", "Pass")} stroke={C.ok()} strokeWidth={2.5} dot={false} activeDot={{r:4,fill:C.ok()}}/>
+                      <Line type="monotone" dataKey="Fail" name={t("production.fail", "Fail")} stroke={C.ng()} strokeWidth={2} dot={false} strokeDasharray="5 3" activeDot={{r:4,fill:C.ng()}}/>
+                      <Line type="monotone" dataKey="Total" name={t("production.total", "Total")} stroke={C.steel()} strokeWidth={1.5} dot={false} strokeDasharray="2 5"/>
                     </ReLineChart>
                   ):(
-                    <BarChart data={productionData} barGap={3} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <BarChart width={width} height={height} data={productionData} barGap={3} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <CartesianGrid stroke={C.bdr(0.1)} strokeDasharray="3 4" vertical={false}/>
                       <XAxis dataKey="hour" tick={axStyle} axisLine={false} tickLine={false}/>
                       <YAxis tick={axStyle} axisLine={false} tickLine={false}/>
                       <Tooltip content={<TipBox/>}/>
-                      <Bar dataKey="Pass" fill={C.ok()} radius={[4,4,0,0]} maxBarSize={22}/>
-                      <Bar dataKey="Fail" fill={C.ng()} radius={[4,4,0,0]} maxBarSize={22}/>
+                      <Bar dataKey="Pass" name={t("production.pass", "Pass")} fill={C.ok()} radius={[4,4,0,0]} maxBarSize={22}/>
+                      <Bar dataKey="Fail" name={t("production.fail", "Fail")} fill={C.ng()} radius={[4,4,0,0]} maxBarSize={22}/>
                       <Legend iconType="circle" iconSize={8} wrapperStyle={{fontSize:11,paddingTop:8,color:C.txt("muted")}}/>
                     </BarChart>
                   )}
-                </ResponsiveContainer>
-                </div>
+                </Fragment>
+                )}
               </SafeChart>
             )}
           </Card>
@@ -1224,38 +1743,36 @@ const ProductionCharts=()=>{
       {activeTab==="machine"&&(
         <div style={{display:"flex",flexDirection:"column",gap:14,animation:"pcFadeIn .2s ease"}}>
           {/* Chart */}
-          <Card title="Machine-wise Production" subtitle="Pass vs Fail per machine" icon={Cpu} accent={C.navy()}>
+          <Card title={t("production.machineWiseProduction", "Machine-wise Production")} subtitle={t("production.passVsFailPerMachine", "Pass vs Fail per machine")} icon={Cpu} accent={C.navy()}>
             {machineBarData.length===0?(
               <div style={{height:260,display:"flex",alignItems:"center",justifyContent:"center",
                 flexDirection:"column",gap:8,color:C.txt("muted"),fontSize:12}}>
-                <Cpu size={26} color={C.txt("muted")}/>No machine data.
+                <Cpu size={26} color={C.txt("muted")}/>{t("production.noMachineData", "No machine data.")}
               </div>
             ):(
               <SafeChart height={260}>
-                <div style={{width:"100%",height:260,minWidth:1,minHeight:1}}>
-                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
-                  <BarChart data={machineBarData} barGap={3} margin={{top:4,right:8,bottom:0,left:-10}}>
+                {({ width, height }) => (
+                  <BarChart width={width} height={height} data={machineBarData} barGap={3} margin={{top:4,right:8,bottom:0,left:-10}}>
                     <CartesianGrid stroke={C.bdr(0.1)} strokeDasharray="3 4" vertical={false}/>
                     <XAxis dataKey="name" tick={{...axStyle,fontSize:10}} axisLine={false} tickLine={false}/>
                     <YAxis tick={axStyle} axisLine={false} tickLine={false}/>
                     <Tooltip content={<TipBox/>}/>
-                    <Bar dataKey="Pass" fill={C.ok()} radius={[4,4,0,0]} maxBarSize={22}/>
-                    <Bar dataKey="Fail" fill={C.ng()} radius={[4,4,0,0]} maxBarSize={22}/>
+                    <Bar dataKey="Pass" name={t("production.pass", "Pass")} fill={C.ok()} radius={[4,4,0,0]} maxBarSize={22}/>
+                    <Bar dataKey="Fail" name={t("production.fail", "Fail")} fill={C.ng()} radius={[4,4,0,0]} maxBarSize={22}/>
                     <Legend iconType="circle" iconSize={8} wrapperStyle={{fontSize:11,paddingTop:8,color:C.txt("muted")}}/>
                   </BarChart>
-                </ResponsiveContainer>
-                </div>
+                )}
               </SafeChart>
             )}
           </Card>
           {/* Machine table */}
-          <Card noPad title="Machine Performance Summary" subtitle="Quality rate per machine" icon={Cpu} accent={C.steel()}
+          <Card noPad title={t("production.machinePerformanceSummary", "Machine Performance Summary")} subtitle={t("production.qualityRatePerMachine", "Quality rate per machine")} icon={Cpu} accent={C.steel()}
             right={<div style={{display:"flex",gap:8}}><Bdg v="ok" l="=85%"/><Bdg v="wip" l="60-84%"/><Bdg v="ng" l="<60%"/></div>}>
             <div style={{overflowX:"auto"}}>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                 <thead>
                   <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
-                    {["#","Machine","Total","Pass","Fail","In Progress","Target","Achieved","OEE","OA","Downtime","View"].map(h=>(
+                    {machineTableHeaders.map(h=>(
                       <th key={h} style={{padding:"9px 13px",textAlign:"left",fontSize:9,fontWeight:800,
                         textTransform:"uppercase",letterSpacing:"0.09em",color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
                     ))}
@@ -1263,10 +1780,10 @@ const ProductionCharts=()=>{
                 </thead>
                 <tbody>
                   {machinePerformanceRows.length===0?(
-                    <tr><td colSpan={12} style={{padding:"36px",textAlign:"center",color:C.txt("muted"),fontSize:12}}>No data.</td></tr>
+                    <tr><td colSpan={12} style={{padding:"36px",textAlign:"center",color:C.txt("muted"),fontSize:12}}>{t("production.noData", "No data available")}</td></tr>
                   ):machinePerformanceRows.map((row,i)=>{
-                    const t=Number(row.produced ?? ((Number(row.ok||0))+(Number(row.ng||0))));
-                    const eff=t>0?Math.round(Number(row.ok||0)/t*100):0;
+                    const producedUnits=Number(row.produced ?? ((Number(row.ok||0))+(Number(row.ng||0))));
+                    const eff=producedUnits>0?Math.round(Number(row.ok||0)/producedUnits*100):0;
                     const name = String(row.machineName || `Machine ${row.machine_id}`);
                     const v=eff>=85?"ok":eff>=60?"wip":"ng";
                     const vc=v==="ok"?C.ok():v==="wip"?C.wip():C.ng();
@@ -1277,7 +1794,7 @@ const ProductionCharts=()=>{
                         onMouseLeave={e=>e.currentTarget.style.background=i%2===1?C.bg("surf"):"transparent"}>
                         <td style={{padding:"10px 13px",color:C.txt("muted"),fontSize:11}}>{i+1}</td>
                         <td style={{padding:"10px 13px",fontWeight:700,color:C.txt("pri")}}>{name}</td>
-                        <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.txt("pri"),textAlign:"center"}}>{t}</td>
+                        <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.txt("pri"),textAlign:"center"}}>{producedUnits}</td>
                         <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.ok(),textAlign:"center"}}>{row.ok||0}</td>
                         <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.ng(),textAlign:"center"}}>{row.ng||0}</td>
                         <td style={{padding:"10px 13px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:C.wip(),textAlign:"center"}}>{row.inProgress||0}</td>
@@ -1292,7 +1809,7 @@ const ProductionCharts=()=>{
                           <button
                             type="button"
                             onClick={() => setSelectedMachineDetail(row)}
-                            title="View machine data"
+                            title={t("production.viewMachineData", "View machine data")}
                             style={{width:30,height:30,borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.steel(),display:"inline-flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}
                           >
                             <Eye size={14}/>
@@ -1312,22 +1829,19 @@ const ProductionCharts=()=>{
       {activeTab==="shift"&&(
         <div style={{animation:"pcFadeIn .2s ease"}}>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14}}>
-            {[{key:"SHIFT_A",label:"Shift A — Morning",  colorFn:C.steel,icon:Zap    },
-              {key:"SHIFT_B",label:"Shift B — Afternoon",colorFn:C.amber,icon:Activity},
-              {key:"SHIFT_C",label:"Shift C — Night",    colorFn:C.idle, icon:Clock  }
-            ].map(s=>(
+            {shiftCards.map(s=>(
               <ShiftCard key={s.key} label={s.label}
                 row={shiftRowsNormalized?.[s.key]}
-                colorFn={s.colorFn} icon={s.icon}/>
+                colorFn={s.colorFn} icon={s.icon} t={t}/>
             ))}
           </div>
           {/* Shift table */}
           <div style={{marginTop:14}}>
-            <Card noPad title="Shift Performance Details" subtitle="Complete breakdown" icon={Activity} accent={C.amber()}>
+            <Card noPad title={`${t("production.shiftPerformance", "Shift Performance")} ${t("production.details", "Details")}`} subtitle={t("production.completeBreakdown", "Complete breakdown")} icon={Activity} accent={C.amber()}>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                 <thead>
                   <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
-                    {["Shift","Total Produced","Pass (OK)","Fail (NG)","Quality Rate","Progress"].map(h=>(
+                    {shiftTableHeaders.map(h=>(
                       <th key={h} style={{padding:"10px 16px",textAlign:"left",fontSize:9,fontWeight:800,
                         textTransform:"uppercase",letterSpacing:"0.09em",color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
                     ))}
@@ -1375,7 +1889,7 @@ const ProductionCharts=()=>{
             {/* Search */}
             <div style={{position:"relative",flex:"1 1 200px",minWidth:160}}>
               <input value={partsSearch} onChange={e=>setPartsSearch(e.target.value)}
-                placeholder="Search part serial or batch…"
+                placeholder={t("production.searchPartSerialOrBatch", "Search part serial or batch...")}
                 style={{width:"100%",height:36,paddingLeft:14,paddingRight:12,
                   background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
                   borderRadius:8,fontSize:12,color:C.txt("pri"),outline:"none",
@@ -1384,10 +1898,10 @@ const ProductionCharts=()=>{
             {/* Filter buttons */}
             <div style={{display:"flex",gap:5,padding:3,background:C.bg("surf"),
               border:`1px solid ${C.bdr()}`,borderRadius:8}}>
-              {[{k:"all",l:"All"},
-                {k:"pass",l:`? Pass`},
-                {k:"fail",l:`? Fail`},
-                {k:"progress",l:"In Progress"}].map(f=>(
+              {[{k:"all",l:t("common.current", "All").replace("Current","All")},
+                {k:"pass",l:t("dashboard.pass", "Pass")},
+                {k:"fail",l:t("dashboard.fail", "Fail")},
+                {k:"progress",l:t("production.inProgress", "In Progress")}].map(f=>(
                 <button key={f.k} onClick={()=>setPartsFilter(f.k)}
                   style={{height:28,padding:"0 11px",borderRadius:5,fontSize:11,fontWeight:700,
                     cursor:"pointer",border:"none",transition:"all .12s",
@@ -1400,42 +1914,37 @@ const ProductionCharts=()=>{
             {/* Stats */}
             <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:"auto",flexWrap:"wrap"}}>
               <span style={{fontSize:11,color:C.txt("muted")}}>
-                Showing <strong style={{color:C.txt("pri")}}>{filteredParts.length}</strong> of <strong style={{color:C.txt("pri")}}>{partsList.length}</strong> parts
+                Showing <strong style={{color:C.txt("pri")}}>{filteredParts.length}</strong> of <strong style={{color:C.txt("pri")}}>{reportStylePartsTable.rows.length}</strong> parts
               </span>
             </div>
           </div>
 
-          {partsList.length===0?(
+          {reportStylePartsTable.rows.length===0?(
             <div style={{padding:"56px 24px",textAlign:"center",
               background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14}}>
               <List size={32} color={C.txt("muted")} style={{margin:"0 auto 14px"}}/>
               <p style={{fontSize:14,fontWeight:600,color:C.txt("sec"),marginBottom:6}}>
-                No parts data available
+                {t("production.noPartsDataAvailable", "No parts data available")}
               </p>
               <p style={{fontSize:12,color:C.txt("muted")}}>
-                Parts list is populated from the production scan history for this period.
+                {t("production.partsListPopulated", "Parts list is populated from the production scan history for this period.")}
               </p>
             </div>
           ):(
             <>
-            <Card noPad title={`Production Parts List — ${filteredParts.length} records`}
-              subtitle="All scanned parts this period" icon={List} accent={C.navy()}>
+            <Card noPad title={`${t("production.productionPartsList", "Production Parts List")} — ${filteredParts.length} ${t("production.records", "records")}`}
+              subtitle={t("production.allScannedPartsThisPeriod", "All scanned parts this period")} icon={List} accent={C.navy()}>
               <div className="pc-thin-scroll" style={{overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,fontFamily:"inherit"}}>
                   <thead>
                     <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
                       {[
-                        "Shot Number",
-                        "Part Serial No.",
-                        "Customer QR Code",
-                        "Part Name",
-                        "Machine Name",
-                        "Scanned Date & Time",
+                        ...partsTableHeaders.slice(0, 6),
                         ...stationColumns.map((c)=>c.label),
-                        "Final Status",
-                        ...(isSingleMachineView ? ["Cycle Time (s)"] : []),
+                        partsTableHeaders[6],
                         ...plcColumns.map((c) => c.label),
-                        "Reason / Remark"
+                        ...LEAK_TEST_COLUMNS.map((c) => c.label),
+                        partsTableHeaders[7]
                       ].map((h, idx)=>(
                         <th key={`${h}-${idx}`} style={{padding:"9px 13px",textAlign:"center",fontSize:10,
                           fontWeight:900,textTransform:"uppercase",letterSpacing:"0.06em",
@@ -1445,36 +1954,34 @@ const ProductionCharts=()=>{
                   </thead>
                   <tbody>
                     {pagedParts.map((p,i)=>{
-                      const res=String(p.result||p.status||"").toUpperCase();
-                      const isNg=["NG","FAIL","FAILED","ENDED_NG","INTERLOCKED"].includes(res);
-                      const statusMap = getPartStationStatusMap(p);
-                      const finalStatus = getFinalPartStatus(p);
+                      const finalStatus = String(p.overallStatus || "").trim().toUpperCase();
+                      const isNg = finalStatus === "FAILED" || finalStatus === "NG";
                       const finalBadge =
                         finalStatus === "PASSED"
-                          ? { v: "ok", l: "Passed" }
-                          : finalStatus === "FAILED"
-                            ? { v: "ng", l: "Failed" }
-                            : { v: "wip", l: "In Progress" };
+                          ? { v: "ok", l: t("production.passed", "Passed") }
+                          : finalStatus === "FAILED" || finalStatus === "NG"
+                            ? { v: "ng", l: t("production.failed", "Failed") }
+                            : { v: "wip", l: t("production.inProgress", "In Progress") };
                       return(
                         <tr key={i} style={{borderBottom:`1px solid ${C.bdr()}`,
                           background:i%2===1?C.bg("surf"):"transparent",transition:"background .1s"}}
                           onMouseEnter={e=>e.currentTarget.style.background=C.steel(0.04)}
                           onMouseLeave={e=>e.currentTarget.style.background=i%2===1?C.bg("surf"):"transparent"}>
                           <td style={{padding:"9px 13px",fontSize:11,color:"#111827",fontWeight:600,whiteSpace:"nowrap"}}>
-                            {getPlcValue(p, "shot_number") || "—"}
+                            {renderCellValue(p.plc_shot_number)}
                           </td>
                           <td style={{padding:"9px 13px"}}>
                             <span style={{fontFamily:"inherit",fontSize:11,
-                              fontWeight:700,color:"#111827"}}>{p.partId||"—"}</span>
+                              fontWeight:700,color:"#111827"}}>{p.barcode||"—"}</span>
                           </td>
                           <td style={{padding:"9px 13px",fontSize:11,color:C.txt("sec")}}>
-                            {p.customerQrCode || p.customerQR || p.markingCode || "—"}
+                            {p.customerCode || "—"}
                           </td>
                           <td style={{padding:"9px 13px",fontSize:11,color:"#111827",fontWeight:600,whiteSpace:"nowrap"}}>
-                            {getPlcValue(p, "part_name") || p.partName || p.modelName || p.componentName || "—"}
+                            {p.partName || "—"}
                           </td>
                           <td style={{padding:"9px 13px",fontSize:11,color:"#111827",fontWeight:600,whiteSpace:"nowrap"}}>
-                            {getPlcValue(p, "machine_name") || p.machineName || machineMap.get(Number(p.machineId))?.machineName || "—"}
+                            {p.plc_machine_name || "—"}
                           </td>
                           <td style={{padding:"9px 13px",fontSize:11,color:"#111827",
                             fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>
@@ -1482,14 +1989,17 @@ const ProductionCharts=()=>{
                               day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):"—"}
                           </td>
                           {stationColumns.map((col) => {
-                            const st = statusMap.get(col.key) || "";
+                            const cellValue = p[`station_${col.key}`];
+                            const st = typeof cellValue === "object"
+                              ? String(cellValue?.status || "").trim().toUpperCase()
+                              : String(cellValue || "").trim().toUpperCase();
                             const badge =
                               st === "OK"
                                 ? { v: "ok", l: "OK" }
                                 : st === "NG"
                                   ? { v: "ng", l: "NG" }
                                   : st === "IN_PROGRESS"
-                                    ? { v: "wip", l: "In Progress" }
+                                    ? { v: "wip", l: t("production.inProgress", "In Progress") }
                                     : null;
                             return (
                               <td key={`${i}-${col.key}`} style={{padding:"9px 13px"}}>
@@ -1500,55 +2010,34 @@ const ProductionCharts=()=>{
                           <td style={{padding:"9px 13px",minWidth:170,textAlign:"center"}}>
                             <Bdg v={finalBadge.v} l={finalBadge.l}/>
                           </td>
-                          {isSingleMachineView && (
-                          <td style={{padding:"9px 13px"}}>
-                            <div style={{display:"flex",flexDirection:"column",gap:2}}>
-                              <div style={{display:"flex",alignItems:"center",gap:6}}>
-                                <span style={{fontFamily:"inherit",fontSize:11,fontWeight:600,
-                                  color:p.cycleTime ? "#111827" : C.txt("muted")}}>
-                                  {p.cycleTime || "—"}
-                                </span>
-                                {p.cycleTime && (() => {
-                                  const m = machineMap.get(Number(p.machineId));
-                                  const std = (Number(m?.cycle_time || 0) + Number(m?.loading_time || 0));
-                                  if (std > 0) {
-                                    const diff = Number(p.cycleTime) - std;
-                                    const isSlow = diff > 2; // Tolerance 2s
-                                    return (
-                                      <span style={{fontSize:9,fontWeight:800,padding:"1px 4px",borderRadius:4,
-                                        background:isSlow ? C.ng(0.1) : C.ok(0.1),
-                                        color:isSlow ? C.ng() : C.ok()}}>
-                                        {isSlow ? `+${diff.toFixed(1)}s` : "Std"}
-                                      </span>
-                                    );
-                                  }
-                                  return null;
-                                })()}
-                              </div>
-                              {p.cycleTime && (
-                                <span style={{fontSize:9,color:C.txt("muted")}}>
-                                  sec
-                                </span>
-                              )}
-                            </div>
-                          </td>
-                          )}
                           {plcColumns.map((c) => (
                             <td key={`${i}-plc-${c.key}`} style={{padding:"9px 13px",fontSize:11,color:"#111827",fontFamily:"inherit",fontWeight:500,textAlign:"center",whiteSpace:"nowrap",maxWidth:220,overflow:"hidden",textOverflow:"ellipsis"}}>
                               {c.key === "shot_status"
                                 ? (() => {
-                                    const code = Number(getPlcValue(p, c.key));
-                                    if (code === 1) return <Bdg v="ok" l="OK" />;
-                                    if (code === 3) return <Bdg v="ng" l="WARM UP SHOT" />;
-                                    if (code === 5) return <Bdg v="ng" l="OFF SHOT" />;
-                                    return renderCellValue(getPlcValue(p, c.key));
+                                    const rawValue = p[`plc_${c.key}`];
+                                    const textValue = String(rawValue || "").trim().toUpperCase();
+                                    if (textValue === "OK") return <Bdg v="ok" l="OK" />;
+                                    if (textValue === "WARM UP SHOT") return <Bdg v="ng" l="WARM UP SHOT" />;
+                                    if (textValue === "OFF SHOT") return <Bdg v="ng" l="OFF SHOT" />;
+                                    return renderCellValue(rawValue);
                                   })()
-                                : renderCellValue(getPlcValue(p, c.key))}
+                                : renderCellValue(p[`plc_${c.key}`])}
+                            </td>
+                          ))}
+                          {LEAK_TEST_COLUMNS.map((c) => (
+                            <td key={`${i}-leak-${c.key}`} style={{padding:"9px 13px",fontSize:11,color:"#111827",fontFamily:"inherit",fontWeight:500,textAlign:"center",whiteSpace:"nowrap",maxWidth:220,overflow:"hidden",textOverflow:"ellipsis"}}>
+                              {(() => {
+                                const leakValue = renderCellValue(p[`leak_${c.key}`]);
+                                if (leakValue === "-" || leakValue === "—") {
+                                  return <Bdg v="idle" l="-" />;
+                                }
+                                return leakValue;
+                              })()}
                             </td>
                           ))}
                           <td style={{padding:"9px 13px",fontSize:10,color:isNg?C.ng():C.txt("muted"),
-                            maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                            {p.interlockReason||p.reason||"—"}
+                              maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                            {sanitizeDisplayReason(p.ngReason)||""}
                           </td>
                         </tr>
                       );
@@ -1560,7 +2049,7 @@ const ProductionCharts=()=>{
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap",
               padding:"10px 12px",borderRadius:10,background:C.bg("card"),border:`1px solid ${C.bdr()}`}}>
               <div style={{display:"flex",alignItems:"center",gap:8,fontSize:11,color:C.txt("muted")}}>
-                <span>Rows / page</span>
+                <span>{t("production.rowsPerPage", "Rows / page")}</span>
                 <select
                   value={partsPageSize}
                   onChange={(e)=>setPartsPageSize(Number(e.target.value) || 25)}
@@ -1579,7 +2068,7 @@ const ProductionCharts=()=>{
                 </button>
                 <span style={{height:30,padding:"0 12px",borderRadius:6,display:"inline-flex",alignItems:"center",
                   background:C.navy(),color:C.linen(),fontWeight:800,fontSize:11}}>
-                  Page {partsPage} / {totalPartsPages}
+                  {t("production.page", "Page")} {partsPage} / {totalPartsPages}
                 </span>
                 <button
                   onClick={()=>setPartsPage((p)=>Math.min(totalPartsPages, p+1))}
@@ -1621,14 +2110,13 @@ const ProductionCharts=()=>{
 
             <div style={{padding:16,display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,borderBottom:`1px solid ${C.bdr()}`}}>
               {[
-                {label:"Produced",value:selectedMachineDetail.produced||0,color:C.txt("pri")},
-                {label:"Target",value:selectedMachineDetail.target||0,color:C.steel()},
-                {label:"Achieved",value:`${Number(selectedMachineDetail.achievementPct||0)}%`,color:C.amber()},
-                {label:"Passed",value:selectedMachineCounts.passed,color:C.ok()},
-                {label:"Failed",value:selectedMachineCounts.failed,color:C.ng()},
-                {label:"In Progress",value:selectedMachineCounts.progress,color:C.wip()},
-                {label:"Blocked",value:selectedMachineCounts.blocked,color:C.amber()},
-                {label:"Downtime",value:`${Math.round(Number(selectedMachineDetail.downtimeMinutes||0))}m`,color:C.txt("muted")},
+                {label:t("production.total", "Total"),value:selectedMachineCounts.passed + selectedMachineCounts.failed,color:C.txt("pri")},
+                {label:t("production.target", "Target"),value:selectedMachineDetail.target||0,color:C.steel()},
+                {label:t("production.achieved", "Achieved"),value:`${Number(selectedMachineDetail.achievementPct||0)}%`,color:C.amber()},
+                {label:t("production.passed", "Passed"),value:selectedMachineCounts.passed,color:C.ok()},
+                {label:t("production.failed", "Failed"),value:selectedMachineCounts.failed,color:C.ng()},
+                {label:t("production.inProgress", "In Progress"),value:selectedMachineCounts.progress,color:C.wip()},
+                {label:t("dashboard.downtime", "Downtime"),value:`${Math.round(Number(selectedMachineDetail.downtimeMinutes||0))}m`,color:C.txt("muted")},
               ].map((item)=>(
                 <div key={item.label} style={{padding:"10px 12px",borderRadius:10,border:`1px solid ${C.bdr()}`,background:C.bg("surf")}}>
                   <p style={{fontSize:9,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.08em",color:C.txt("muted"),marginBottom:5}}>{item.label}</p>
@@ -1641,32 +2129,32 @@ const ProductionCharts=()=>{
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                 <thead>
                   <tr style={{background:C.bg("surf"),borderBottom:`1px solid ${C.bdr()}`}}>
-                    {["#","Part ID","Status","Result","Reason","Scanned At"].map((h)=>(
+                    {machineDetailHeaders.map((h)=>(
                       <th key={h} style={{padding:"9px 11px",textAlign:"left",fontSize:9,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.08em",color:C.txt("muted"),whiteSpace:"nowrap"}}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {selectedMachineParts.length === 0 ? (
-                    <tr><td colSpan={6} style={{padding:"34px",textAlign:"center",color:C.txt("muted")}}>No part records found for this machine and filter.</td></tr>
+                    <tr><td colSpan={6} style={{padding:"34px",textAlign:"center",color:C.txt("muted")}}>{t("production.noPartRecordsForMachine", "No part records found for this machine and filter.")}</td></tr>
                   ) : selectedMachineParts.slice(0, 200).map((part, idx) => {
-                    const state = getPartFinalState(part);
-                    const badge = state === "passed" ? {v:"ok", l:"Passed"} : state === "failed" ? {v:"ng", l:"Failed"} : state === "blocked" ? {v:"wip", l:"Blocked"} : {v:"idle", l:"In Progress"};
+                    const stageSnapshot = getSelectedMachineStageSnapshot(part);
+                    const badge = stageSnapshot.state === "passed" ? {v:"ok", l:t("production.passed", "Passed")} : stageSnapshot.state === "failed" ? {v:"ng", l:t("production.failed", "Failed")} : {v:"idle", l:t("production.inProgress", "In Progress")};
                     return (
                       <tr key={part.id || `${part.partId}-${idx}`} style={{borderBottom:`1px solid ${C.bdr()}`,background:idx%2===1?C.bg("surf"):"transparent"}}>
                         <td style={{padding:"9px 11px",color:C.txt("muted")}}>{idx+1}</td>
                         <td style={{padding:"9px 11px",fontWeight:800,color:C.txt("pri"),fontFamily:"'DM Mono',monospace"}}>{part.partId || part.part_id || "-"}</td>
                         <td style={{padding:"9px 11px"}}><Bdg v={badge.v} l={badge.l}/></td>
-                        <td style={{padding:"9px 11px",color:C.txt("sec")}}>{part.result || part.status || "-"}</td>
-                        <td style={{padding:"9px 11px",color:C.txt("muted"),maxWidth:260,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{part.reason || part.interlockReason || "-"}</td>
-                        <td style={{padding:"9px 11px",color:C.txt("sec"),whiteSpace:"nowrap"}}>{part.createdAt ? new Date(part.createdAt).toLocaleString("en-IN") : "-"}</td>
+                        <td style={{padding:"9px 11px",color:C.txt("sec")}}>{stageSnapshot.normalizedStatus === "OK" ? "OK" : stageSnapshot.normalizedStatus === "NG" ? "NG" : (stageSnapshot.result || "-")}</td>
+                        <td style={{padding:"9px 11px",color:C.txt("muted"),maxWidth:260,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{sanitizeDisplayReason(stageSnapshot.reason) || ""}</td>
+                        <td style={{padding:"9px 11px",color:C.txt("sec"),whiteSpace:"nowrap"}}>{stageSnapshot.createdAt ? new Date(stageSnapshot.createdAt).toLocaleString("en-IN") : "-"}</td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
               {selectedMachineParts.length > 200 && (
-                <p style={{fontSize:11,color:C.txt("muted"),marginTop:10}}>Showing latest 200 of {selectedMachineParts.length} records.</p>
+                <p style={{fontSize:11,color:C.txt("muted"),marginTop:10}}>{t("production.showingLatest200", "Showing latest 200 records.")} ({selectedMachineParts.length})</p>
               )}
             </div>
           </div>

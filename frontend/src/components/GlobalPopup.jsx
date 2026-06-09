@@ -24,6 +24,32 @@ const StationIcon = React.memo(() => (
 function sanitizeScannerCode(value) {
   return String(value || "").replace(/[\u0000-\u001F\u007F]/g, "").trim();
 }
+const LEAK_TEST_PREVIEW_FIELDS = [
+  ["Machine Name", "Machine"],
+  ["Part QR", "Part_QR_Code"],
+  ["Result", "Result"],
+  ["Body Leak Value", "Body_Leak_Value"],
+  ["Gall_1", "Gall_1"],
+  ["Gall_2", "Gall_2"],
+  ["Cycle Time", "Cycle_Time"],
+  ["Running Mode", "Running_Mode"],
+  ["Manual", "Manual"],
+  ["Dry", "Dry"],
+  ["Wey", "Wey"],
+  ["Both", "Both"],
+];
+function formatLeakPreviewValue(reading, key) {
+  if (!reading) return "—";
+  if (key === "Machine") return reading.Machine || reading.machineName || reading.matchedMachineName || "—";
+  if (key === "Cycle_End_Time") {
+    const raw = reading.Cycle_End_Time || reading.cycleEndTime || "";
+    if (!raw) return "—";
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? String(raw) : parsed.toLocaleString("en-IN");
+  }
+  const value = reading[key];
+  return value === undefined || value === null || value === "" ? "—" : String(value);
+}
 
 // ---------------------------------------------
 // OIL PAN K12 DEFECT MASTER
@@ -1537,14 +1563,29 @@ const GlobalPopup = ({
           {plcReadingPreview && (
             <div className="mb-3 rounded-lg border border-sky-500/30 bg-sky-950/20 p-3">
               <div className="flex items-center justify-between gap-2 mb-2">
-                <p className="text-[10px] font-bold text-sky-200 uppercase tracking-widest">{t("globalPopup.plcReading", "PLC Reading")}</p>
+                <p className="text-[10px] font-bold text-sky-200 uppercase tracking-widest">
+                  {plcReadingPreview?.Result ? "Leak Test Reading" : t("globalPopup.plcReading", "PLC Reading")}
+                </p>
                 <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${plcOnline ? "bg-emerald-500/20 text-emerald-200" : "bg-rose-500/20 text-rose-200"}`}>
                   {plcOnline ? t("operatorView.online", "Online") : t("operatorView.offline", "Offline")}
                 </span>
               </div>
-              <pre className="text-[11px] text-slate-100 bg-slate-900/70 rounded-md p-2 overflow-auto max-h-36">
-                {JSON.stringify(plcReadingPreview, null, 2)}
-              </pre>
+              {plcReadingPreview?.Result ? (
+                <div className="grid grid-cols-1 gap-2 rounded-md bg-slate-900/70 p-2 md:grid-cols-2">
+                  {LEAK_TEST_PREVIEW_FIELDS.map(([label, key]) => (
+                    <div key={key} className="rounded border border-slate-800/80 bg-slate-950/60 px-2 py-1.5">
+                      <p className="text-[9px] font-bold uppercase tracking-wider text-sky-200">{label}</p>
+                      <p className="mt-0.5 break-all text-[11px] font-semibold text-slate-100">
+                        {formatLeakPreviewValue(plcReadingPreview, key)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <pre className="text-[11px] text-slate-100 bg-slate-900/70 rounded-md p-2 overflow-auto max-h-36">
+                  {JSON.stringify(plcReadingPreview, null, 2)}
+                </pre>
+              )}
             </div>
           )}
 
