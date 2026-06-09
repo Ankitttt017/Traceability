@@ -182,6 +182,37 @@ function getStationMeta(status) {
   if (["RUNNING","IN_PROGRESS","STARTED","REWORK"].includes(s)) return {variant:"wip",label:"In Progress",icon:Clock3};
   return {variant:"idle",label:"Waiting",icon:Clock3};
 }
+const LEAK_TEST_FIELDS = [
+  ["Machine Name", "Machine"],
+  ["Part QR", "Part_QR_Code"],
+  ["Result", "Result"],
+  ["Body Leak Value", "Body_Leak_Value"],
+  ["Gall_1", "Gall_1"],
+  ["Gall_2", "Gall_2"],
+  ["Cycle Time", "Cycle_Time"],
+  ["Running Mode", "Running_Mode"],
+  ["Manual", "Manual"],
+  ["Dry", "Dry"],
+  ["Wey", "Wey"],
+  ["Both", "Both"],
+];
+function formatLeakFieldValue(reading, key) {
+  if (!reading) return "—";
+  if (key === "Machine") return reading.Machine || reading.machineName || reading.matchedMachineName || "—";
+  if (key === "Cycle_End_Time") {
+    const raw = reading.Cycle_End_Time || reading.cycleEndTime || "";
+    if (!raw) return "—";
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? String(raw) : parsed.toLocaleString("en-IN");
+  }
+  return reading[key] ?? "—";
+}
+function getLeakResultMeta(reading) {
+  const result = String(reading?.Result || reading?.result || "").trim().toUpperCase();
+  if (result === "OK") return { variant: "ok", label: "Leak OK" };
+  if (result === "NG") return { variant: "ng", label: "Leak NG" };
+  return { variant: "idle", label: "Leak -" };
+}
 function getPartMeta(status) {
   const s=String(status||"").trim().toUpperCase();
   if (["COMPLETED", "PASSED", "COMPLETED_OK"].includes(s)) return {label:"Pass", variant:"ok"};
@@ -1345,6 +1376,7 @@ const ComponentJourney = () => {
                 const effectiveStageState = getJourneyStationState(station, qrMeta, settings);
                 const meta     = getStationMeta(effectiveStageState);
                 const sColor   = STATUS[meta.variant]||STATUS.idle;
+                const leakMeta = station.leakTestReading ? getLeakResultMeta(station.leakTestReading) : null;
                 const isReset  = resettingStation===station.stationNo;
                 const bypassed = isStationBypassed(station);
                 const modules  = [
@@ -1410,6 +1442,15 @@ const ComponentJourney = () => {
                               <span style={{fontSize:10,color:C.txt("muted"),display:"flex",alignItems:"center",gap:3}}>
                                 <Clock3 size={10}/> Read: {formatTime(station.customerQrMappedAt)}
                               </span>
+                            </div>
+                          )}
+                          {station.leakTestReading && (
+                            <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap",alignItems:"center"}}>
+                              <span style={{fontSize:10,fontWeight:800,color:C.steel(),
+                                background:C.steel(0.12),padding:"2px 6px",borderRadius:5}}>
+                                Leak Machine: {station.leakTestReading.matchedMachineName || station.leakTestReading.Machine || "—"}
+                              </span>
+                              {leakMeta && <Badge variant={leakMeta.variant} label={leakMeta.label} />}
                             </div>
                           )}
                         </div>
@@ -1481,6 +1522,23 @@ const ComponentJourney = () => {
                         <span style={{fontSize:12,color:C.ng(0.9),lineHeight:1.5}}>
                           {station.latestInterlockReason||"Rejection / NG detected at this station"}
                         </span>
+                      </div>
+                    )}
+                    {station.leakTestReading && (
+                      <div style={{marginTop:8,borderRadius:8,padding:"10px 12px",background:C.info(0.08),border:`1px solid ${C.info(0.25)}`}}>
+                        <p style={{fontSize:10,fontWeight:800,color:C.info(),textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>
+                          Leak Test Details
+                        </p>
+                        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:8}}>
+                          {LEAK_TEST_FIELDS.map(([label, key]) => (
+                            <div key={key} style={{display:"flex",flexDirection:"column",gap:2}}>
+                              <span style={{fontSize:10,color:C.txt("muted"),fontWeight:700}}>{label}</span>
+                              <span style={{fontSize:11,color:C.txt("primary"),fontWeight:700,wordBreak:"break-word"}}>
+                                {formatLeakFieldValue(station.leakTestReading, key)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     )}
                   </div>

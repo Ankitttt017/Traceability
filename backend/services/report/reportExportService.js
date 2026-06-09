@@ -12,9 +12,16 @@ const Part = require("../../models/Part");
 const PartCodeMapping = require("../../models/PartCodeMapping");
 const Shift = require("../../models/Shift");
 const QrFormatRule = require("../../models/QrFormatRule");
+const MachineModel = require("../../models/Machine");
 const { calculateProductionMetrics } = require("./reportMetricsService");
 const { generateIndustrialExcel } = require("./excelTemplateEngine");
 const { resolveIndustrialResult } = require("./reportFormatter");
+const {
+  LEAKTEST_OPERATION,
+  buildLeaktestIndex,
+  getLeaktestReadingForPartStation,
+  getLeaktestStageState,
+} = require("../leaktestLookupService");
 const PLC_READING_TABLE = "PlcCycleReadings";
 
 const PLC_PART_ID_CANDIDATE_COLUMNS = [
@@ -633,6 +640,21 @@ async function fetchProductionData(filters = {}, options = {}) {
     acc[normalizeKey(row.old_part_id)] = String(row.customer_qr || "").trim();
     return acc;
   }, {});
+  const leakLookupMachines = await MachineModel.findAll({
+    where: {
+      is_active: true,
+      ...(lineName ? { line_name: lineName } : {}),
+    },
+    attributes: ["id", "machine_name", "operation_no", "plc_ip", "qr_scanner_ip", "machine_ip"],
+    raw: true,
+  });
+  const leaktestIndex = (
+    await buildLeaktestIndex({
+      partIds,
+      customerQrByPartId: partCodeMap,
+      machines: leakLookupMachines,
+    })
+  ).byPartAndStation;
 
   const qrRules = await QrFormatRule.findAll({ attributes: ["format_name", "model_code"], raw: true });
   const qrMap = qrRules.reduce((acc, q) => {
@@ -727,13 +749,25 @@ async function fetchProductionData(filters = {}, options = {}) {
     const partIdValue = String(log.part_id || "").trim();
     const mappedCustomerQr = String(partCodeMap[normalizeKey(partIdValue)] || "").trim();
     const recoveryCompletedByCustomerQr = shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr);
+    const stationNo = String(log.operation_no || log.station_no || "").trim().toUpperCase();
+    const leakTestReading = getLeaktestReadingForPartStation(leaktestIndex, partIdValue, LEAKTEST_OPERATION);
+    const leakStageState = stationNo === LEAKTEST_OPERATION && leakTestReading
+      ? getLeaktestStageState(leakTestReading)
+      : null;
     const { status: industrialResultRaw, category: categoryRaw } = resolveIndustrialResult({
       result: log.result,
       plc_status: log.plc_status,
       interlock_reason: log.interlock_reason
     });
-    const industrialResult = recoveryCompletedByCustomerQr ? "OK" : industrialResultRaw;
+    const industrialResult = leakStageState === "PASSED"
+      ? "OK"
+      : leakStageState === "FAILED"
+        ? "NG"
+        : recoveryCompletedByCustomerQr
+          ? "OK"
+          : industrialResultRaw;
     const category = recoveryCompletedByCustomerQr ? "PRODUCTION" : categoryRaw;
+    const displayReason = (recoveryCompletedByCustomerQr || stationNo === LEAKTEST_OPERATION) ? "" : (log.interlock_reason || "");
 
     const partLookupKey = normalizeKey(partIdValue);
     const compactQrKey = parseCompactQrPartId(partIdValue)?.key || "";
@@ -775,14 +809,15 @@ async function fetchProductionData(filters = {}, options = {}) {
       modelCode:    qrMap[part.qr_format_name] || "-",
       shiftCode:    log.shift_code || "A",
       cycleStartTime: cycleStartTime ? new Date(cycleStartTime).toLocaleString() : "-",
-      cycleEndTime:   cycleEndTime   ? new Date(cycleEndTime).toLocaleString()   : "-",
-      cycleTime:    cycleTime ? Number(cycleTime).toFixed(2) : "0.00",
+      cycleEndTime:   (leakTestReading?.cycleEndTime || cycleEndTime) ? new Date(leakTestReading?.cycleEndTime || cycleEndTime).toLocaleString()   : "-",
+      cycleTime:    stationNo === LEAKTEST_OPERATION && leakTestReading?.cycleTime != null ? String(leakTestReading.cycleTime) : (cycleTime ? Number(cycleTime).toFixed(2) : "0.00"),
       industrialResult,
       category,
       statusLabel: industrialResult,
       bypassStatus: Boolean(log.is_bypassed),
-      reason: log.interlock_reason || "-",
-      plcReading: plcReadingFromDb
+      reason: displayReason,
+      plcReading: plcReadingFromDb,
+      leakTestReading,
     };
   }));
 

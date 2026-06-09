@@ -16,7 +16,7 @@ import {
   Circle, Wifi, WifiOff,
 } from "lucide-react";
 import {
-  ResponsiveContainer, PieChart, Pie, Cell, Tooltip,
+  PieChart, Pie, Cell, Tooltip,
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   BarChart, Bar, Legend, AreaChart, Area,
 } from "recharts";
@@ -191,6 +191,33 @@ function uniqueStages(rows = []) {
   return out;
 }
 
+function normalizeDashboardStationResult(value, reason = "", row = null) {
+  const status = String(value || "").trim().toUpperCase();
+  const normalizedReason = String(reason || "").trim().toUpperCase();
+  const bypassStatus = Boolean(row?.bypassStatus || row?.is_bypassed || row?.isBypassed);
+  const bypassReason = String(row?.bypassReason || row?.bypass_reason || "").trim().toUpperCase();
+  if (bypassStatus || ["MACHINE_BYPASS_AUTO_OK", "STATION_BYPASS_AUTO_OK", "STATION_OPERATION_DISABLED_AUTO_OK"].includes(bypassReason)) return "OK";
+  if (normalizedReason === "NG_SHOT_STATUS" && ["BLOCK", "INTERLOCKED"].includes(status)) return "NG";
+  if (["OK", "PASS", "PASSED", "COMPLETED", "ENDED_OK", "COMPLETED_OK"].includes(status)) return "OK";
+  if (["NG", "FAIL", "FAILED", "ENDED_NG", "COMPLETED_NG", "INTERLOCKED", "REJECTED"].includes(status)) return "NG";
+  if (["IN_PROGRESS", "WIP", "RUNNING", "PENDING"].includes(status)) return "IN_PROGRESS";
+  return status ? "IN_PROGRESS" : "";
+}
+
+function getDashboardStatusPriority(value) {
+  if (value === "NG") return 4;
+  if (value === "OK") return 3;
+  if (value === "IN_PROGRESS") return 2;
+  return value ? 1 : 0;
+}
+
+function getDashboardOperationPriority(value) {
+  if (value === "OK") return 3;
+  if (value === "NG") return 2;
+  if (value === "IN_PROGRESS") return 1;
+  return 0;
+}
+
 const EMPTY_SUMMARY = {
   machines:{ total:0, active:0, inactive:0 },
   parts:{ inProgress:0, completed:0, ng:0, interlocked:0, rework:0 },
@@ -200,7 +227,7 @@ const EMPTY_SUMMARY = {
 const EMPTY_REPORT = {
   machineWise:[], machineCards:[], stationCards:[], hourlyProduction:[],
   shiftProduction:{ SHIFT_A:{total:0,ok:0,ng:0}, SHIFT_B:{total:0,ok:0,ng:0}, SHIFT_C:{total:0,ok:0,ng:0} },
-  interlockHistory:[], reworkCount:0, partJourney:[],
+  interlockHistory:[], reworkCount:0, partJourney:[], partsList: [],
 };
 
 // —— OEE Radial Gauge ——————————————————————————————————————————————————————————
@@ -270,7 +297,7 @@ const KpiCard = ({ label, value, icon:Icon, accent, sub }) => (
 );
 
 // —— Machine KPI Card ——————————————————————————————————————————————————————————
-const MachineCard = ({ row, plcOnline=null, scannerOnline=null, nowMs=0 }) => {
+const MachineCard = ({ row, plcOnline=null, scannerOnline=null, nowMs=0, t }) => {
   const acc   = Number(row.accuracy||0);
   const color = acc>=85 ? C.ok() : acc>=60 ? C.amber() : C.ng();
   const lastScan = row.lastScanTime ? new Date(row.lastScanTime) : null;
@@ -306,9 +333,9 @@ const MachineCard = ({ row, plcOnline=null, scannerOnline=null, nowMs=0 }) => {
       {/* Stats grid */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
         {[
-          { label:"Produced",  value:row.processedCount,       color:C.txt("pri")  },
-          { label:"Target",    value:(row.targetProduction ?? row.targetQty ?? 0), color:C.txt("muted")},
-          { label:"Achieved",  value:`${row.achievementPct||0}%`, color:color       },
+          { label:t("dashboard.passed", "Passed"),    value:row.okCount,              color:C.ok()        },
+          { label:t("dashboard.target", "Target"),    value:(row.targetProduction ?? row.targetQty ?? 0), color:C.txt("muted")},
+          { label:t("dashboard.achieved", "Achieved"),  value:`${row.achievementPct||0}%`, color:color       },
         ].map((s,i)=>(
           <div key={i} style={{background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
             borderRadius:9,padding:"8px 6px",textAlign:"center"}}>
@@ -330,15 +357,15 @@ const MachineCard = ({ row, plcOnline=null, scannerOnline=null, nowMs=0 }) => {
           </span>
         </div>
         <div style={{display:"flex",gap:12}}>
-          <span title={plcOnline === null ? "PLC status unknown / not assigned" : (plcOnline ? "PLC online" : "PLC offline")} style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:11,fontWeight:700,color:plcOnline===null?C.txt("muted"):(plcOnline?C.ok():C.ng())}}>
+          <span title={plcOnline === null ? t("dashboard.plcStatusUnknown", "PLC status unknown / not assigned") : (plcOnline ? t("dashboard.plcOnline", "PLC online") : t("dashboard.plcOffline", "PLC offline"))} style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:11,fontWeight:700,color:plcOnline===null?C.txt("muted"):(plcOnline?C.ok():C.ng())}}>
             {plcOnline ? <Wifi size={11} color={C.ok()}/> : <WifiOff size={11} color={plcOnline===null?C.steel():C.ng()}/>}
             PLC
           </span>
-          <span title={scannerOnline === null ? "Scanner status unknown / not assigned" : (scannerOnline ? "Scanner online" : "Scanner offline")} style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:11,fontWeight:700,color:scannerOnline===null?C.txt("muted"):(scannerOnline?C.ok():C.ng())}}>
+          <span title={scannerOnline === null ? t("dashboard.scannerStatusUnknown", "Scanner status unknown / not assigned") : (scannerOnline ? t("dashboard.scannerOnline", "Scanner online") : t("dashboard.scannerOffline", "Scanner offline"))} style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:11,fontWeight:700,color:scannerOnline===null?C.txt("muted"):(scannerOnline?C.ok():C.ng())}}>
             {scannerOnline ? <Wifi size={11} color={C.ok()}/> : <WifiOff size={11} color={scannerOnline===null?C.steel():C.ng()}/>}
             SCN
           </span>
-          <span title="Duration-based downtime from production log gaps" style={{fontSize:11,fontWeight:700,color:C.steel()}}>
+          <span title={t("dashboard.downtimeHelp", "Duration-based downtime from production log gaps")} style={{fontSize:11,fontWeight:700,color:C.steel()}}>
             DT Min {Math.round(Number(row.downtimeMinutes || 0))}
           </span>
           <span style={{fontSize:11,fontWeight:700,color:C.ng(0.85)}}>
@@ -462,16 +489,41 @@ const Dashboard = () => {
     refreshInFlightRef.current = true;
     try {
       setLoading(true);
-      const [m,s,r,o] = await Promise.all([
-        machineApi.list(),
-        dashboardApi.summary(query),
-        dashboardApi.report(query),
-        dashboardApi.oee().catch(()=>null),
+      const [machinesResult, summaryResult, reportResult, oeeResult] = await Promise.allSettled([
+        machineApi.list({ timeout: 20000 }),
+        dashboardApi.summary(query, { timeout: 25000 }),
+        dashboardApi.report(query, { timeout: 30000 }),
+        dashboardApi.oee({ timeout: 20000 }),
       ]);
-      setMachines(m||[]);
-      setSummary(s||EMPTY_SUMMARY);
-      setReport(r||EMPTY_REPORT);
-      if (o) setOeeData(o?.oee||[]);
+
+      if (machinesResult.status === "fulfilled") {
+        setMachines(machinesResult.value || []);
+      }
+      if (summaryResult.status === "fulfilled") {
+        setSummary(summaryResult.value || EMPTY_SUMMARY);
+      }
+      if (reportResult.status === "fulfilled") {
+        setReport(reportResult.value || EMPTY_REPORT);
+      }
+      if (oeeResult.status === "fulfilled" && oeeResult.value) {
+        setOeeData(oeeResult.value?.oee || []);
+      }
+
+      const failures = [
+        machinesResult.status === "rejected" ? machinesResult.reason : null,
+        summaryResult.status === "rejected" ? summaryResult.reason : null,
+        reportResult.status === "rejected" ? reportResult.reason : null,
+        oeeResult.status === "rejected" ? oeeResult.reason : null,
+      ].filter(Boolean);
+
+      if (
+        machinesResult.status === "rejected" &&
+        summaryResult.status === "rejected" &&
+        reportResult.status === "rejected" &&
+        oeeResult.status === "rejected"
+      ) {
+        console.error("Dashboard load error", failures[0]);
+      }
     } catch(e){
       console.error("Dashboard load error",e);
     } finally {
@@ -509,28 +561,35 @@ const Dashboard = () => {
   useEffect(()=>{ const t=setInterval(()=>setNowMs(Date.now()),30000); return()=>clearInterval(t); },[]);
 
   useEffect(()=>{
-    const sock=io(SOCKET_URL,{
-      path:"/socket.io/",
-      transports: ["polling"], upgrade: false,
-      reconnection:true,
-      reconnectionAttempts:Infinity,
-      reconnectionDelay:1000,
-      reconnectionDelayMax:5000,
-      timeout:10000,
-    });
-    sock.on("dashboard_refresh",()=>scheduleRefresh(350));
-    sock.on("plc_connection_event",d=>{
-      if (d.machineId) setPlcMap(p=>({...p,[d.machineId]:d.state==="COMPLETED"||d.state==="CLOSED"}));
-    });
-    return()=>sock.close();
+    let disposed = false;
+    let sock = null;
+    const connectTimer = setTimeout(() => {
+      if (disposed) return;
+      sock=io(SOCKET_URL,{
+        path:"/socket.io/",
+        transports: ["websocket", "polling"],
+        upgrade: true,
+        reconnection:true,
+        reconnectionAttempts:Infinity,
+        reconnectionDelay:1000,
+        reconnectionDelayMax:5000,
+        timeout:10000,
+      });
+      sock.on("dashboard_refresh",()=>scheduleRefresh(350));
+      sock.on("plc_connection_event",d=>{
+        if (d.machineId) setPlcMap(p=>({...p,[d.machineId]:d.state==="COMPLETED"||d.state==="CLOSED"}));
+      });
+    }, 0);
+    return()=>{
+      disposed = true;
+      clearTimeout(connectTimer);
+      if (sock) {
+        sock.off();
+        sock.disconnect();
+      }
+    };
   },[scheduleRefresh]);
 
-  const efficiency = useMemo(()=>{
-    const ok = Number(summary.quality?.ok || 0);
-    const ng = Number(summary.quality?.ng || 0);
-    const t = ok + ng;
-    return t > 0 ? Math.round((ok / t) * 100) : 0;
-  },[summary.quality]);
   const lineContextLabel = useMemo(() => {
     const selectedMachineId = Number(filters.machineId || 0);
     if (selectedMachineId) {
@@ -546,12 +605,200 @@ const Dashboard = () => {
     return `Line: All (${lines.length})`;
   }, [filters.machineId, filters.lineName, machines]);
 
+  const dashboardParts = useMemo(() => {
+    const grouped = new Map();
+    const rows = Array.isArray(report.partsList) ? report.partsList : [];
+    rows.forEach((row, index) => {
+      const partId = String(row?.partId || row?.part_id || "").trim();
+      if (!partId) return;
+      const machineName = String(row?.machineName || "").trim();
+      const stationNo = String(row?.stationNo || row?.station_no || row?.operationNo || row?.operation_no || "").trim();
+      const normalizedStatus = normalizeDashboardStationResult(row?.result || row?.status || row?.statusLabel || row?.industrialResult, row?.interlockReason || row?.reason, row);
+      const createdAtMs = new Date(row?.createdAt || 0).getTime() || 0;
+
+      if (!grouped.has(partId)) {
+        grouped.set(partId, {
+          id: partId,
+          partId,
+          createdAt: row?.createdAt || null,
+          latestCreatedAt: row?.createdAt || null,
+          latestRawStatus: String(row?.status || row?.statusLabel || row?.result || row?.industrialResult || "").trim().toUpperCase(),
+          latestReason: row?.interlockReason || row?.reason || "",
+          customerQrCode: row?.customerQrCode || row?.customer_qr || null,
+          partName: row?.partName || null,
+          stationTimeline: [],
+          __sourceIndex: index,
+        });
+      }
+
+      const entry = grouped.get(partId);
+      if (createdAtMs > (new Date(entry.latestCreatedAt || 0).getTime() || 0)) {
+        entry.latestCreatedAt = row?.createdAt || entry.latestCreatedAt;
+        entry.latestRawStatus = String(row?.status || row?.statusLabel || row?.result || row?.industrialResult || "").trim().toUpperCase();
+        entry.latestReason = row?.interlockReason || row?.reason || "";
+      }
+      if (!entry.createdAt || createdAtMs < (new Date(entry.createdAt || 0).getTime() || Number.MAX_SAFE_INTEGER)) {
+        entry.createdAt = row?.createdAt || entry.createdAt;
+      }
+
+      const stationKey = `${machineName}__${stationNo}`;
+      const stage = {
+        stationKey,
+        machineName,
+        stationNo,
+        normalizedStatus,
+        result: row?.result || row?.status || row?.statusLabel || row?.industrialResult || "",
+        reason: row?.interlockReason || row?.reason || "",
+        createdAt: row?.createdAt || null,
+      };
+      const existingIndex = entry.stationTimeline.findIndex((item) => item.stationKey === stationKey);
+      if (existingIndex === -1) {
+        entry.stationTimeline.push(stage);
+      } else {
+        const existing = entry.stationTimeline[existingIndex];
+        const nextPriority = getDashboardStatusPriority(normalizedStatus);
+        const existingPriority = getDashboardStatusPriority(existing.normalizedStatus);
+        const existingTs = new Date(existing.createdAt || 0).getTime() || 0;
+        if (nextPriority > existingPriority || (nextPriority === existingPriority && createdAtMs >= existingTs)) {
+          entry.stationTimeline[existingIndex] = stage;
+        }
+      }
+    });
+
+    const requiredOperations = Array.from(
+      new Set(
+        (machines || [])
+          .map((machine) => String(machine.operationNo || machine.operation_no || machine.stationNo || machine.station_no || "").trim().toUpperCase())
+          .filter(Boolean)
+      )
+    );
+
+    return Array.from(grouped.values()).map((entry) => {
+      const operationResults = new Map();
+      entry.stationTimeline.forEach((stage) => {
+        const operationKey = String(stage.stationNo || "").trim().toUpperCase();
+        const current = operationResults.get(operationKey);
+        if (!current || getDashboardOperationPriority(stage.normalizedStatus) > getDashboardOperationPriority(current)) {
+          operationResults.set(operationKey, stage.normalizedStatus);
+        }
+      });
+
+      const statuses = requiredOperations.map((operation) => operationResults.get(operation)).filter(Boolean);
+      const finalStatus = statuses.some((status) => status === "NG")
+        ? "FAILED"
+        : (requiredOperations.length > 0 && requiredOperations.every((operation) => operationResults.get(operation) === "OK"))
+          ? "PASSED"
+          : "IN_PROGRESS";
+      const latestReason = String(entry.latestReason || "").trim();
+      const normalizedLatestReason = latestReason.toUpperCase();
+      const blocked = finalStatus !== "PASSED" && finalStatus !== "FAILED" && (
+        ["INTERLOCKED", "BLOCKED", "PLC_COMM_ERROR", "COMM_ERROR", "TIMEOUT", "PLC_TIMEOUT"].includes(String(entry.latestRawStatus || "").trim().toUpperCase()) ||
+        (latestReason && normalizedLatestReason !== "RECOVERY_PENDING_AFTER_BACKEND_RESTART")
+      );
+      const failureStage = entry.stationTimeline.find((stage) => stage.normalizedStatus === "NG" && String(stage.reason || "").trim());
+
+      return {
+        ...entry,
+        finalStatus,
+        blocked,
+        rejectionReason: failureStage?.reason || (normalizedLatestReason === "RECOVERY_PENDING_AFTER_BACKEND_RESTART" ? "" : latestReason),
+      };
+    });
+  }, [machines, report.partsList]);
+
+  const dashboardPartCounts = useMemo(() => {
+    return dashboardParts.reduce((acc, part) => {
+      if (part.finalStatus === "PASSED") acc.passed += 1;
+      else if (part.finalStatus === "FAILED") acc.failed += 1;
+      else if (part.blocked) acc.blocked += 1;
+      else acc.inProgress += 1;
+      return acc;
+    }, { passed: 0, failed: 0, blocked: 0, inProgress: 0 });
+  }, [dashboardParts]);
+
+  const dashboardMachineCards = useMemo(() => {
+    const machineCountsFromParts = new Map();
+
+    (report.partsList || []).forEach((row) => {
+      const machineId = Number(row?.machineId || row?.machine_id || 0);
+      const partId = String(row?.partId || row?.part_id || "").trim();
+      if (!machineId || !partId) return;
+
+      const normalizedStatus = normalizeDashboardStationResult(
+        row?.result || row?.status || row?.statusLabel || row?.industrialResult,
+        row?.interlockReason || row?.reason,
+        row
+      );
+      const createdAtMs = new Date(row?.createdAt || row?.createdAtRaw || 0).getTime() || 0;
+
+      if (!machineCountsFromParts.has(machineId)) {
+        machineCountsFromParts.set(machineId, new Map());
+      }
+
+      const byPart = machineCountsFromParts.get(machineId);
+      const existing = byPart.get(partId);
+      const existingTs = existing ? (new Date(existing.createdAt || 0).getTime() || 0) : -1;
+      const nextPriority = getDashboardStatusPriority(normalizedStatus);
+      const existingPriority = existing ? getDashboardStatusPriority(existing.normalizedStatus) : -1;
+
+      if (!existing || createdAtMs > existingTs || (createdAtMs === existingTs && nextPriority >= existingPriority)) {
+        byPart.set(partId, {
+          normalizedStatus,
+          createdAt: row?.createdAt || row?.createdAtRaw || null,
+        });
+      }
+    });
+
+    const machineCountSummary = new Map();
+    machineCountsFromParts.forEach((partMap, machineId) => {
+      const summary = { ok: 0, ng: 0, inProgress: 0 };
+      partMap.forEach((entry) => {
+        if (entry.normalizedStatus === "OK") summary.ok += 1;
+        else if (entry.normalizedStatus === "NG") summary.ng += 1;
+        else if (entry.normalizedStatus === "IN_PROGRESS") summary.inProgress += 1;
+      });
+      machineCountSummary.set(machineId, summary);
+    });
+
+    return (report.machineCards || []).map((row) => {
+      const machineId = Number(row.machineId || row.machine_id || 0);
+      const derived = machineCountSummary.get(machineId);
+      if (!derived) {
+        return {
+          ...row,
+          interlockedCount: 0,
+        };
+      }
+
+      const processedCount = Number(derived.ok || 0) + Number(derived.ng || 0);
+      const target = Number(row.targetProduction ?? row.targetQty ?? 0);
+
+      return {
+        ...row,
+        okCount: Number(derived.ok || 0),
+        ngCount: Number(derived.ng || 0),
+        inProgressCount: Number(derived.inProgress || 0),
+        interlockedCount: 0,
+        processedCount,
+        actualProduction: processedCount,
+        accuracy: processedCount > 0 ? Number(((Number(derived.ok || 0) / processedCount) * 100).toFixed(2)) : 0,
+        achievementPct: target > 0 ? Number(((processedCount / target) * 100).toFixed(2)) : Number(row.achievementPct || 0),
+      };
+    });
+  }, [report.machineCards, report.partsList]);
+
+  const efficiency = useMemo(()=>{
+    const ok = Number(dashboardPartCounts.passed || 0);
+    const ng = Number(dashboardPartCounts.failed || 0);
+    const t = ok + ng;
+    return t > 0 ? Math.round((ok / t) * 100) : 0;
+  },[dashboardPartCounts]);
+
   // Pie data
   const pieData = useMemo(()=>[
-    { name:"Pass",    value:Number(summary.quality?.ok || 0)               },
-    { name:"Fail",    value:Number(summary.quality?.ng || 0)               },
-    { name:"Blocked", value:Number(summary.parts?.interlocked || summary.quality?.interlocked || 0) },
-  ],[summary.parts, summary.quality]);
+    { name:t("dashboard.pass", "Pass"),    value:Number(dashboardPartCounts.passed || 0)  },
+    { name:t("dashboard.fail", "Fail"),    value:Number(dashboardPartCounts.failed || 0)  },
+  ],[dashboardPartCounts]);
 
   // Shift bar data
   const shiftData = useMemo(() => {
@@ -604,25 +851,16 @@ const Dashboard = () => {
   const selectedFilterCount = useMemo(() => Object.values(filters).filter(Boolean).length, [filters]);
   
   const rejectionAnalysisRows = useMemo(() => {
-    const historyRows = Array.isArray(report.interlockHistory) ? report.interlockHistory : [];
-    if (historyRows.length > 0) {
-      return historyRows.map((row) => ({
-        partId: row.partId || row.part_id || "-",
-        reason: row.reason || row.interlock_reason || row.message || "Unknown reason",
+    return dashboardParts
+      .filter((part) => part.finalStatus === "FAILED")
+      .map((part) => ({
+        partId: part.partId || "-",
+        reason: String(part.rejectionReason || "").trim(),
         result: "NG",
-        createdAt: row.createdAt || row.timestamp || null,
-      }));
-    }
-    const fallbackRows = Array.isArray(report.partsList) ? report.partsList : [];
-    return fallbackRows
-      .filter((row) => String(row.result || "").toUpperCase() === "NG")
-      .map((row) => ({
-        partId: row.partId || row.part_id || "-",
-        reason: row.reason || row.interlock_reason || row.message || "Unknown reason",
-        result: "NG",
-        createdAt: row.createdAt || row.timestamp || null,
-      }));
-  }, [report.interlockHistory, report.partsList]);
+        createdAt: part.latestCreatedAt || part.createdAt || null,
+      }))
+      .filter((part) => part.reason);
+  }, [dashboardParts]);
 
   const rejectionPieData = useMemo(() => {
     const grouped = rejectionAnalysisRows.reduce((acc, row) => {
@@ -639,7 +877,8 @@ const Dashboard = () => {
 
   const rejectionTopReasons = useMemo(() => {
     const grouped = rejectionAnalysisRows.reduce((acc, row) => {
-      const reason = String(row.reason || row.interlock_reason || "Unknown reason").trim() || "Unknown reason";
+      const reason = String(row.reason || row.interlock_reason || "").trim();
+      if (!reason) return acc;
       acc[reason] = (acc[reason] || 0) + 1;
       return acc;
     }, {});
@@ -681,20 +920,18 @@ const Dashboard = () => {
 
   const productionTrendData = useMemo(() => {
     if (!isMultiDayRange) return report.hourlyProduction || [];
-    const rows = Array.isArray(report.partsList) ? report.partsList : [];
-    const bucket = rows.reduce((acc, row) => {
-      const ts = new Date(row.createdAt || row.createdAtRaw || Date.now());
+    const bucket = dashboardParts.reduce((acc, row) => {
+      const ts = new Date(row.latestCreatedAt || row.createdAt || Date.now());
       if (Number.isNaN(ts.getTime())) return acc;
       const key = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}-${String(ts.getDate()).padStart(2, "0")}`;
       if (!acc[key]) acc[key] = { date: key, ok: 0, ng: 0, total: 0 };
-      const result = String(row.result || row.status || "").toUpperCase();
-      if (result === "OK" || result === "PASSED") acc[key].ok += 1;
-      else if (result === "NG" || result === "FAILED") acc[key].ng += 1;
+      if (row.finalStatus === "PASSED") acc[key].ok += 1;
+      else if (row.finalStatus === "FAILED") acc[key].ng += 1;
       acc[key].total += 1;
       return acc;
     }, {});
     return Object.values(bucket).sort((a, b) => String(a.date).localeCompare(String(b.date)));
-  }, [isMultiDayRange, report.hourlyProduction, report.partsList]);
+  }, [dashboardParts, isMultiDayRange, report.hourlyProduction]);
 
   const rejectionTrendData = useMemo(() => {
     if (!isMultiDayRange) return rejectionTrend;
@@ -722,11 +959,11 @@ const Dashboard = () => {
 
   // —— Tabs config ——
   const TABS = [
-    { id:"overview",  label:"Overview",          icon:BarChart3  },
-    { id:"machines",  label:"Machine KPIs",      icon:Cpu        },
-    { id:"oee",       label:"OEE Analysis",      icon:Activity   },
-    { id:"oa",        label:"OA Analysis",       icon:Target     },
-    { id:"rejection", label:"Rejection Analysis",icon:AlertTriangle },
+    { id:"overview",  label:t("dashboard.overviewTab", "Overview"),          icon:BarChart3  },
+    { id:"machines",  label:t("dashboard.machineKpisTab", "Machine KPIs"),      icon:Cpu        },
+    { id:"oee",       label:t("dashboard.oeeAnalysisTab", "OEE Analysis"),      icon:Activity   },
+    { id:"oa",        label:t("dashboard.oaAnalysisTab", "OA Analysis"),       icon:Target     },
+    { id:"rejection", label:t("dashboard.rejectionAnalysisTab", "Rejection Analysis"),icon:AlertTriangle },
       ];
 
   return (
@@ -753,7 +990,7 @@ const Dashboard = () => {
             <div>
               <h1 style={{fontSize:18,fontWeight:800,color:C.txt("pri"),
                 letterSpacing:"-0.02em",lineHeight:1.2, fontFamily:"var(--font-outfit)"}}>
-                Dashboard Overview
+                {t("dashboard.pageTitle", "Dashboard Overview")}
               </h1>
               <p style={{
                 marginTop:6,
@@ -785,7 +1022,7 @@ const Dashboard = () => {
                 color:hasFilters?C.navy():C.txt("sec"),
                 transition:"all 0.15s",
               }}>
-              <Filter size={13}/> Filters
+              <Filter size={13}/> {t("dashboard.filters", "Filters")}
               {hasFilters && (
                 <span style={{width:16,height:16,borderRadius:"50%",
                   background:C.amber(),color:C.navy(),
@@ -806,7 +1043,7 @@ const Dashboard = () => {
                 opacity:loading?0.6:1,
               }}>
               <RefreshCw size={13} style={{animation:loading?"dbSpin 0.9s linear infinite":"none"}}/>
-              {loading?"Updating…":"Refresh"}
+              {loading?t("dashboard.updating", "Updating..."):t("dashboard.refresh", "Refresh")}
             </button>
 
           </div>
@@ -820,7 +1057,7 @@ const Dashboard = () => {
             animation:"dbFadeIn 0.2s ease",
           }}>
             <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>From Date/Time</label>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.fromDateTime", "From Date/Time")}</label>
               <input
                 type="datetime-local"
                 value={filters.dateFrom}
@@ -836,7 +1073,7 @@ const Dashboard = () => {
               />
             </div>
             <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>To Date/Time</label>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.toDateTime", "To Date/Time")}</label>
               <input
                 type="datetime-local"
                 value={filters.dateTo}
@@ -852,7 +1089,7 @@ const Dashboard = () => {
               />
             </div>
             <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Date Range</label>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.dateRange", "Date Range")}</label>
               <select
                 value={filters.datePreset}
                 onChange={e=>setFilters(prev=>({...prev,datePreset:e.target.value, dateFrom:"", dateTo:""}))}
@@ -867,14 +1104,14 @@ const Dashboard = () => {
                   appearance:"auto",
                 }}>
                
-                <option value="today">Today</option>
-                <option value="last7">Last 7 Days</option>
-                <option value="last30">Last 1 Month</option>
+                <option value="today">{t("dashboard.today", "Today")}</option>
+                <option value="last7">{t("dashboard.last7Days", "Last 7 Days")}</option>
+                <option value="last30">{t("dashboard.last1Month", "Last 1 Month")}</option>
               </select>
             </div>
 
             <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Production Line</label>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.productionLine", "Production Line")}</label>
               <select
                 value={filters.lineName}
                 onChange={e=>setFilters(prev=>({...prev,lineName:e.target.value,machineId:""}))}
@@ -888,7 +1125,7 @@ const Dashboard = () => {
                   cursor:"pointer",
                   appearance:"auto",
                 }}>
-                <option value="">All Lines</option>
+                <option value="">{t("dashboard.allLines", "All Lines")}</option>
                 {uniqueStages((summary.availableLines || []).map((line) => String(line || "").trim()).filter(Boolean)).map((line)=>(
                   <option key={line} value={line}>{line}</option>
                 ))}
@@ -896,7 +1133,7 @@ const Dashboard = () => {
             </div>
 
             <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Machine Name</label>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.machineName", "Machine Name")}</label>
               <select
                 value={filters.machineId}
                 onChange={e=>setFilters(prev=>({...prev,machineId:e.target.value}))}
@@ -910,7 +1147,7 @@ const Dashboard = () => {
                   cursor:"pointer",
                   appearance:"auto",
                 }}>
-                <option value="">All Machines</option>
+                <option value="">{t("dashboard.allMachines", "All Machines")}</option>
                 {machines
                   .filter((m) => !filters.lineName || String(m.lineName || "").trim() === filters.lineName)
                   .map(m=>(
@@ -920,10 +1157,10 @@ const Dashboard = () => {
             </div>
 
             <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Part Serial No</label>
+              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.partSerialNo", "Part Serial No")}</label>
               <input
                 type="text"
-                placeholder="Search serial..."
+                placeholder={t("dashboard.searchSerial", "Search serial...")}
                 value={filters.partId}
                 onChange={e=>setFilters(prev=>({...prev,partId:e.target.value}))}
                 style={{
@@ -952,11 +1189,10 @@ const Dashboard = () => {
                   cursor:"pointer",
                   appearance:"auto",
                 }}>
-                <option value="">All Status</option>
-                <option value="OK">Pass (OK)</option>
-                <option value="NG">Fail (NG)</option>
-                <option value="WIP">In Progress</option>
-                <option value="INTERLOCKED">Interlocked</option>
+                <option value="">{t("dashboard.allStatus", "All Status")}</option>
+                <option value="OK">{t("dashboard.passOk", "Pass (OK)")}</option>
+                <option value="NG">{t("dashboard.failNg", "Fail (NG)")}</option>
+                <option value="WIP">{t("dashboard.inProgress", "In Progress")}</option>
               </select>
             </div>
 
@@ -975,7 +1211,7 @@ const Dashboard = () => {
                   cursor:"pointer",
                   appearance:"auto",
                 }}>
-                <option value="">All Shifts</option>
+                <option value="">{t("dashboard.allShifts", "All Shifts")}</option>
                 {(summary.availableShifts||["SHIFT_A","SHIFT_B","SHIFT_C"]).map(s=>(
                   <option key={typeof s === 'string' ? s : s.shiftCode} value={typeof s === 'string' ? s : s.shiftCode}>
                     {typeof s === 'string' ? s.replace("_"," ") : (s.shiftName || s.shiftCode)}
@@ -1011,7 +1247,7 @@ const Dashboard = () => {
               textTransform: "uppercase",
               letterSpacing: "0.05em"
             }}>
-              Active Filters
+              {t("dashboard.activeFilters", "Active Filters")}
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {filters.datePreset && <Badge variant="idle" label={`Range: ${filters.datePreset === "today" ? "Today" : filters.datePreset === "last7" ? "Last 7 Days" : "Last 1 Month"}`} />}
@@ -1040,7 +1276,7 @@ const Dashboard = () => {
               gap: 4
             }}
           >
-            <X size={14} /> Clear All
+            <X size={14} /> {t("dashboard.clearAll", "Clear All")}
           </button>
         </div>
       )}
@@ -1048,12 +1284,11 @@ const Dashboard = () => {
       {/* —— KPI Row —————————————————————————————————————————————————————————————— */}
       <div style={{display:"grid",
         gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
-        <KpiCard label="Total Quality Gates"  value={summary.machines.active}         icon={Cpu}          accent={C.steel()}  sub={`Out of ${summary.machines.total} total machines`}/>
-        <KpiCard label="In Progress"      value={summary.parts.inProgress}         icon={Zap}          accent={C.wip()}    sub="Parts being processed"/>
-        <KpiCard label="Completed (Pass)" value={summary.quality?.ok || 0}         icon={CheckCircle2} accent={C.ok()}     sub="Total OK this period"/>
-        <KpiCard label="Failed (NG)"      value={summary.quality?.ng || 0}         icon={XCircle}      accent={C.ng()}     sub="Requires attention"/>
-        <KpiCard label="Interlocked"      value={summary.parts.interlocked||0}     icon={AlertTriangle}accent={C.amber()}  sub="PLC blocked"/>
-        <KpiCard label="Quality Rate"        value={`${efficiency}%`}                 icon={TrendingUp}   accent={efficiency>=85?C.ok():efficiency>=60?C.amber():C.ng()} sub="Overall quality rate"/>
+        <KpiCard label={t("dashboard.totalQualityGates", "Total Quality Gates")}  value={summary.machines.active}         icon={Cpu}          accent={C.steel()}  sub={`${t("dashboard.outOf", "Out of")} ${summary.machines.total} ${t("dashboard.totalMachines", "total machines")}`}/>
+        <KpiCard label={t("dashboard.inProgress", "In Progress")}      value={dashboardPartCounts.inProgress}    icon={Zap}          accent={C.wip()}    sub={t("dashboard.partsBeingProcessed", "Parts being processed")}/>
+        <KpiCard label={t("dashboard.completedPass", "Completed (Pass)")} value={dashboardPartCounts.passed}        icon={CheckCircle2} accent={C.ok()}     sub={t("dashboard.totalOkPeriod", "Total OK this period")}/>
+        <KpiCard label={t("dashboard.failedNg", "Failed (NG)")}      value={dashboardPartCounts.failed}        icon={XCircle}      accent={C.ng()}     sub={t("dashboard.requiresAttention", "Requires attention")}/>
+        <KpiCard label={t("dashboard.qualityRate", "Quality Rate")}        value={`${efficiency}%`}                 icon={TrendingUp}   accent={efficiency>=85?C.ok():efficiency>=60?C.amber():C.ng()} sub={t("dashboard.overallQualityRate", "Overall quality rate")}/>
       </div>
 
       {/* —— Tabs ————————————————————————————————————————————————————————————————————— */}
@@ -1094,37 +1329,36 @@ const Dashboard = () => {
 
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title="Pass / Fail Split"/>
+              <SectionHead title={t("dashboard.passFailSplit", "Pass / Fail Split")}/>
               <div style={{display:"flex",justifyContent:"center",marginBottom:16}}>
                 <div style={{position:"relative",width:160,height:160,minWidth:1,minHeight:1}}>
                   <SafeChart height={160}>
-                  <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
-                    <PieChart>
+                  {({ width, height }) => (
+                    <PieChart width={width} height={height}>
                       <Pie data={pieData} cx="50%" cy="50%"
                         innerRadius={50} outerRadius={75}
                         paddingAngle={3} dataKey="value" strokeWidth={0}
                         labelLine={false}>
-                        <Cell fill={C.ok()} />
-                        <Cell fill={C.ng()} />
-                        <Cell fill={C.amber()} />
+                        {pieData.map((entry) => (
+                          <Cell key={entry.name} fill={entry.name === "Pass" ? C.ok() : C.ng()} />
+                        ))}
                       </Pie>
                       <Tooltip {...TooltipStyle}/>
                     </PieChart>
-                  </ResponsiveContainer>
+                  )}
                   </SafeChart>
                   <div style={{position:"absolute",inset:0,display:"flex",
                     flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
                     <p style={{fontSize:22,fontWeight:800,color:C.txt("pri"),
                       fontFamily:"'DM Mono',monospace",lineHeight:1}}>{efficiency}%</p>
-                    <p style={{fontSize:10,color:C.txt("muted"),marginTop:2}}>Quality Rate</p>
+                    <p style={{fontSize:10,color:C.txt("muted"),marginTop:2}}>{t("dashboard.qualityRate", "Quality Rate")}</p>
                   </div>
                 </div>
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
                 {[
-                  { label:"Pass",    value:summary.quality?.ok||0,       color:C.ok()    },
-                  { label:"Fail",    value:summary.quality?.ng||0,       color:C.ng()    },
-                  { label:"Blocked", value:summary.parts?.interlocked||0,color:C.amber() },
+                  { label:t("dashboard.pass", "Pass"),    value:dashboardPartCounts.passed||0,    color:C.ok()    },
+                  { label:t("dashboard.fail", "Fail"),    value:dashboardPartCounts.failed||0,    color:C.ng()    },
                 ].map(s=>(
                   <div key={s.label} style={{background:C.bg("surf"),
                     border:`1px solid ${C.bdr()}`,borderRadius:10,
@@ -1140,21 +1374,21 @@ const Dashboard = () => {
 
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title={isMultiDayRange ? "Production Trend" : "Hourly Production"}
+              <SectionHead title={isMultiDayRange ? t("dashboard.productionTrend", "Production Trend") : t("dashboard.hourlyProduction", "Hourly Production")}
                 right={
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
                     <ChartModeToggle mode={chartModeHourly} onChange={setChartModeHourly} />
                     <div style={{width:6,height:6,borderRadius:"50%",background:C.ok(),
                       animation:"dbPing 1.6s ease-out infinite",opacity:0.7}}/>
-                    <span style={{fontSize:11,color:C.ok(),fontWeight:700}}>Live</span>
+                    <span style={{fontSize:11,color:C.ok(),fontWeight:700}}>{t("dashboard.live", "Live")}</span>
                   </div>
                 }
               />
               <SafeChart height={220}>
-                <div style={{ width: "100%", height: 220, minWidth: 1, minHeight: 1 }}>
-                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
+                {({ width, height }) => (
+                  <>
                   {chartModeHourly === "line" && (
-                    <LineChart data={productionTrendData} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <LineChart width={width} height={height} data={productionTrendData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                       <XAxis dataKey={isMultiDayRange ? "date" : "hour"} tickFormatter={h=>isMultiDayRange ? String(h).slice(5) : `${String(h).padStart(2,"0")}:00`} tick={{fontSize:11,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
@@ -1165,7 +1399,7 @@ const Dashboard = () => {
                     </LineChart>
                   )}
                   {chartModeHourly === "bar" && (
-                    <BarChart data={productionTrendData} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <BarChart width={width} height={height} data={productionTrendData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                       <XAxis dataKey={isMultiDayRange ? "date" : "hour"} tickFormatter={h=>isMultiDayRange ? String(h).slice(5) : `${String(h).padStart(2,"0")}:00`} tick={{fontSize:11,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
@@ -1176,7 +1410,7 @@ const Dashboard = () => {
                     </BarChart>
                   )}
                   {chartModeHourly === "area" && (
-                    <AreaChart data={productionTrendData} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <AreaChart width={width} height={height} data={productionTrendData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                       <XAxis dataKey={isMultiDayRange ? "date" : "hour"} tickFormatter={h=>isMultiDayRange ? String(h).slice(5) : `${String(h).padStart(2,"0")}:00`} tick={{fontSize:11,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
@@ -1185,14 +1419,14 @@ const Dashboard = () => {
                       <Area type="monotone" dataKey="ng" stroke={C.ng()} fill={C.ng(0.2)} />
                     </AreaChart>
                   )}
-                </ResponsiveContainer>
-                </div>
+                  </>
+                )}
               </SafeChart>
               <div style={{display:"flex",gap:16,marginTop:10,flexWrap:"wrap"}}>
                 {[
-                  {color:C.ok(),   label:"Pass"},
-                  {color:C.ng(),   label:"Fail"},
-                  {color:C.steel(),label:"Total"},
+                  {color:C.ok(),   label:t("dashboard.pass", "Pass")},
+                  {color:C.ng(),   label:t("dashboard.fail", "Fail")},
+                  {color:C.steel(),label:t("dashboard.total", "Total")},
                 ].map(l=>(
                   <div key={l.label} style={{display:"flex",alignItems:"center",gap:5}}>
                     <div style={{width:18,height:2.5,borderRadius:2,background:l.color}}/>
@@ -1209,12 +1443,12 @@ const Dashboard = () => {
 
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title="Production by Shift" right={<ChartModeToggle mode={chartModeShift} onChange={setChartModeShift} />} />
+              <SectionHead title={t("dashboard.productionByShift", "Production by Shift")} right={<ChartModeToggle mode={chartModeShift} onChange={setChartModeShift} />} />
               <SafeChart height={200}>
-                <div style={{ width: "100%", height: 200, minWidth: 1, minHeight: 1 }}>
-                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
+                {({ width, height }) => (
+                  <>
                   {chartModeShift === "bar" && (
-                    <BarChart data={shiftData} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <BarChart width={width} height={height} data={shiftData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                       <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
@@ -1224,7 +1458,7 @@ const Dashboard = () => {
                     </BarChart>
                   )}
                   {chartModeShift === "line" && (
-                    <LineChart data={shiftData} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <LineChart width={width} height={height} data={shiftData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                       <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
@@ -1234,7 +1468,7 @@ const Dashboard = () => {
                     </LineChart>
                   )}
                   {chartModeShift === "area" && (
-                    <AreaChart data={shiftData} margin={{top:4,right:8,bottom:0,left:-10}}>
+                    <AreaChart width={width} height={height} data={shiftData} margin={{top:4,right:8,bottom:0,left:-10}}>
                       <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                       <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
@@ -1243,8 +1477,8 @@ const Dashboard = () => {
                       <Area type="monotone" dataKey="target" stroke={C.steel()} fill={C.steel(0.2)} />
                     </AreaChart>
                   )}
-                </ResponsiveContainer>
-                </div>
+                  </>
+                )}
               </SafeChart>
             </div>
 
@@ -1252,20 +1486,20 @@ const Dashboard = () => {
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
               <SectionHead title={t("dashboard.topRejectionReasons", "Top Rejection Reasons")}/>
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                {(report.recentScans||[]).filter(r=>r.result==="NG").slice(0,5).map((row,i)=>(
+                {rejectionAnalysisRows.slice(0,5).map((row,i)=>(
                   <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
                     padding:"10px 12px",background:C.bg("surf"),borderRadius:10,border:`1px solid ${C.bdr()}`}}>
                     <div style={{display:"flex",alignItems:"center",gap:10}}>
                       <div style={{width:8,height:8,borderRadius:"50%",background:C.ng()}}/>
-                      <span style={{fontSize:12,fontWeight:700,color:C.txt("pri")}}>{row.reason || "Unknown Defect"}</span>
+                        <span style={{fontSize:12,fontWeight:700,color:C.txt("pri")}}>{row.reason || t("dashboard.unknownDefect", "Unknown Defect")}</span>
                     </div>
                     <span style={{fontSize:10,fontWeight:800,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>
                       {row.partId}
                     </span>
                   </div>
                 ))}
-                {(report.recentScans||[]).filter(r=>r.result==="NG").length === 0 && (
-                  <p style={{fontSize:12, color:C.txt("muted"), textAlign:"center", py:10}}>No rejects found in this period.</p>
+                {rejectionAnalysisRows.length === 0 && (
+                  <p style={{fontSize:12, color:C.txt("muted"), textAlign:"center", py:10}}>{t("dashboard.noRejectsFound", "No rejects found in this period.")}</p>
                 )}
               </div>
             </div>
@@ -1276,13 +1510,14 @@ const Dashboard = () => {
       {/* —— TAB: Machines ——————————————————————————————————————————————————————————— */}
       {activeTab==="machines" && (
         <div className="db-tablet-cards" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:16}}>
-          {report.machineCards.map((row)=>(
+          {dashboardMachineCards.map((row)=>(
             <MachineCard
               key={row.machineId}
               row={row}
-              plcOnline={Object.prototype.hasOwnProperty.call(plcMap, row.machineId) ? plcMap[row.machineId] : (row.plcConnected ?? null)}
+              plcOnline={row.plcConnected ?? (Object.prototype.hasOwnProperty.call(plcMap, row.machineId) ? plcMap[row.machineId] : null)}
               scannerOnline={row.scannerConnected ?? null}
               nowMs={nowMs}
+              t={t}
             />
           ))}
         </div>
@@ -1309,17 +1544,13 @@ const Dashboard = () => {
                 </div>
                 <div style={{display:"flex",justifyContent:"center",marginBottom:12}}>
                   <div style={{width:150,height:150,position:"relative"}}>
-                    <div style={{ width: "100%", height: "100%", minWidth: 1, minHeight: 1 }}>
-                      <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
-                        <PieChart>
-                          <Pie data={makePie(oeeClamped)} dataKey="value" innerRadius={46} outerRadius={66} startAngle={90} endAngle={-270} strokeWidth={0}>
-                            <Cell fill={oeeClamped>=85 ? C.ok() : oeeClamped>=60 ? C.amber() : C.ng()} />
-                            <Cell fill={C.bdr(0.18)} />
-                          </Pie>
-                          <Tooltip {...TooltipStyle} />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </div>
+                    <PieChart width={150} height={150}>
+                      <Pie data={makePie(oeeClamped)} dataKey="value" innerRadius={46} outerRadius={66} startAngle={90} endAngle={-270} strokeWidth={0}>
+                        <Cell fill={oeeClamped>=85 ? C.ok() : oeeClamped>=60 ? C.amber() : C.ng()} />
+                        <Cell fill={C.bdr(0.18)} />
+                      </Pie>
+                      <Tooltip {...TooltipStyle} />
+                    </PieChart>
                     <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
                       <span style={{fontSize:22,fontWeight:800,color:C.txt("pri"),fontFamily:"'DM Mono',monospace"}}>{Math.round(oeeClamped)}%</span>
                       <span style={{fontSize:10,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.06em"}}>Overall OEE</span>
@@ -1330,17 +1561,13 @@ const Dashboard = () => {
                   {[{label:"Availability",value:availability,color:C.steel()},{label:"Performance",value:performance,color:C.amber()},{label:"Quality",value:quality,color:C.ok()}].map((m)=>(
                     <div key={m.label} style={{background:C.bg("surf"),border:`1px solid ${C.bdr()}`,borderRadius:9,padding:"8px 6px",textAlign:"center"}}>
                       <div style={{width:66,height:66,margin:"0 auto 6px"}}>
-                        <div style={{ width: "100%", height: "100%", minWidth: 1, minHeight: 1 }}>
-                          <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
-                            <PieChart>
-                              <Pie data={makePie(m.value)} dataKey="value" innerRadius={18} outerRadius={30} startAngle={90} endAngle={-270} strokeWidth={0}>
-                                <Cell fill={m.color} />
-                                <Cell fill={C.bdr(0.16)} />
-                              </Pie>
-                              <Tooltip {...TooltipStyle} />
-                            </PieChart>
-                          </ResponsiveContainer>
-                        </div>
+                        <PieChart width={66} height={66}>
+                          <Pie data={makePie(m.value)} dataKey="value" innerRadius={18} outerRadius={30} startAngle={90} endAngle={-270} strokeWidth={0}>
+                            <Cell fill={m.color} />
+                            <Cell fill={C.bdr(0.16)} />
+                          </Pie>
+                          <Tooltip {...TooltipStyle} />
+                        </PieChart>
                       </div>
                       <p style={{fontSize:14,fontWeight:800,color:C.txt("pri"),margin:0,fontFamily:"'DM Mono',monospace"}}>{Math.round(m.value)}%</p>
                       <p style={{fontSize:9,fontWeight:700,color:C.txt("muted"),marginTop:4,textTransform:"uppercase",letterSpacing:"0.05em"}}>{m.label}</p>
@@ -1369,17 +1596,15 @@ const Dashboard = () => {
                   <Badge variant={oa>=85 ? "ok" : oa>=60 ? "wip" : "ng"} label={`OA ${Math.round(oa)}%`} />
                 </div>
                 <SafeChart height={180}>
-                  <div style={{ width: "100%", height: 180, minWidth: 1, minHeight: 1 }}>
-                    <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
-                      <PieChart>
-                        <Pie data={makePie(oaClamped)} dataKey="value" innerRadius={50} outerRadius={72} startAngle={90} endAngle={-270} strokeWidth={0}>
-                          <Cell fill={oaClamped>=85 ? C.ok() : oaClamped>=60 ? C.amber() : C.ng()} />
-                          <Cell fill={C.bdr(0.18)} />
-                        </Pie>
-                        <Tooltip {...TooltipStyle} />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </div>
+                  {({ width, height }) => (
+                    <PieChart width={width} height={height}>
+                      <Pie data={makePie(oaClamped)} dataKey="value" innerRadius={50} outerRadius={72} startAngle={90} endAngle={-270} strokeWidth={0}>
+                        <Cell fill={oaClamped>=85 ? C.ok() : oaClamped>=60 ? C.amber() : C.ng()} />
+                        <Cell fill={C.bdr(0.18)} />
+                      </Pie>
+                      <Tooltip {...TooltipStyle} />
+                    </PieChart>
+                  )}
                 </SafeChart>
                 <div style={{marginTop:8,display:"flex",gap:8,flexWrap:"wrap"}}>
                   <Badge variant={oa>=85 ? "ok" : oa>=60 ? "wip" : "ng"} label={oa>=85 ? "Healthy" : oa>=60 ? "Watch" : "Critical"} />
@@ -1398,15 +1623,15 @@ const Dashboard = () => {
             <SectionHead title={t("dashboard.rejectionDistribution", "Rejection Distribution")}/>
             <div style={{display:"flex",justifyContent:"center",marginBottom:16}}>
               <SafeChart height={200}>
-                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
-                  <PieChart>
+                {({ width, height }) => (
+                  <PieChart width={width} height={height}>
                     <Pie data={rejectionPieData} dataKey="value" cx="50%" cy="50%" innerRadius={55} outerRadius={85} paddingAngle={3}
                       labelLine={false}>
                       {rejectionPieData.map((entry) => (<Cell key={entry.name} fill={entry.color} />))}
                     </Pie>
                     <Tooltip {...TooltipStyle} />
                   </PieChart>
-                </ResponsiveContainer>
+                )}
               </SafeChart>
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -1429,9 +1654,10 @@ const Dashboard = () => {
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
               <SectionHead title={isMultiDayRange ? t("dashboard.rejectionTrendByDay", "Rejection Trend by Day") : t("dashboard.rejectionTrendByHour", "Rejection Trend by Hour")} right={<ChartModeToggle mode={chartModeRejectTrend} onChange={setChartModeRejectTrend} />} />
               <SafeChart height={180}>
-              <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1} aspect={undefined}>
+              {({ width, height }) => (
+                <>
                 {chartModeRejectTrend === "area" && (
-                  <AreaChart data={rejectionTrendData} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
+                  <AreaChart width={width} height={height} data={rejectionTrendData} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
                     <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                     <XAxis dataKey={isMultiDayRange ? "date" : "slot"} tickFormatter={(v)=>isMultiDayRange ? String(v).slice(5) : v} tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                     <YAxis tick={{fontSize:10,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
@@ -1442,7 +1668,7 @@ const Dashboard = () => {
                   </AreaChart>
                 )}
                 {chartModeRejectTrend === "line" && (
-                  <LineChart data={rejectionTrendData} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
+                  <LineChart width={width} height={height} data={rejectionTrendData} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
                     <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                     <XAxis dataKey={isMultiDayRange ? "date" : "slot"} tickFormatter={(v)=>isMultiDayRange ? String(v).slice(5) : v} tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                     <YAxis tick={{fontSize:10,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
@@ -1453,7 +1679,7 @@ const Dashboard = () => {
                   </LineChart>
                 )}
                 {chartModeRejectTrend === "bar" && (
-                  <BarChart data={rejectionTrendData} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
+                  <BarChart width={width} height={height} data={rejectionTrendData} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
                     <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                     <XAxis dataKey={isMultiDayRange ? "date" : "slot"} tickFormatter={(v)=>isMultiDayRange ? String(v).slice(5) : v} tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                     <YAxis tick={{fontSize:10,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
@@ -1463,7 +1689,8 @@ const Dashboard = () => {
                     <Bar dataKey="mr" fill={C.steel()} radius={[3,3,0,0]} />
                   </BarChart>
                 )}
-              </ResponsiveContainer>
+                </>
+              )}
               </SafeChart>
             </div>
 

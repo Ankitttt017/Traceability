@@ -17,6 +17,18 @@ const DEFAULT_PLC_CYCLE_COLUMNS = [
   "fix_1_flow","fix_2_flow","fix_3_flow","mov_1_flow","mov_2_flow","mov_3_flow","vacuum_pressure_mmhg",
   "average_die_clamp_tonnage_count","time_for_stroke","stroke","shot_status"
 ];
+const LEAK_TEST_OPERATION = "OP150";
+const LEAK_TEST_COLUMNS = [
+  { key: "Body_Leak_Value", header: "Body Leak Value", width: 18 },
+  { key: "Gall_1", header: "Gall_1", width: 14 },
+  { key: "Gall_2", header: "Gall_2", width: 14 },
+  { key: "Cycle_Time", header: "Cycle Time", width: 14 },
+  { key: "Running_Mode", header: "Running Mode", width: 16 },
+  { key: "Manual", header: "Manual", width: 12 },
+  { key: "Dry", header: "Dry", width: 12 },
+  { key: "Wey", header: "Wey", width: 12 },
+  { key: "Both", header: "Both", width: 12 },
+];
 
 function stationResultRank(value) {
   const normalized = String(value || "").trim().toUpperCase();
@@ -27,6 +39,22 @@ function stationResultRank(value) {
 
 function pickPreferredStationResult(currentValue, nextValue) {
   return stationResultRank(nextValue) > stationResultRank(currentValue) ? nextValue : (currentValue || nextValue);
+}
+function getLeakTestStatus(reading) {
+  const result = String(reading?.Result || reading?.result || "").trim().toUpperCase();
+  if (result === "OK") return "OK";
+  if (result === "NG") return "NG";
+  return "-";
+}
+function getLeakTestValue(reading, key) {
+  if (!reading) return "-";
+  if (key === "Machine") return reading.Machine || reading.machineName || reading.matchedMachineName || "-";
+  if (key === "Cycle_End_Time") {
+    const raw = reading.Cycle_End_Time || reading.cycleEndTime || "";
+    return raw ? formatIndustrialTimestamp(raw) : "-";
+  }
+  const value = reading[key];
+  return value === undefined || value === null || value === "" ? "-" : value;
 }
 
 function nowStamp() {
@@ -160,6 +188,13 @@ async function generateIndustrialExcel(res, {
   const stationPairsFinal = Array.from(stationMap.values()).sort((a, b) =>
     a.op.localeCompare(b.op, undefined, { numeric: true, sensitivity: "base" }) || a.machineName.localeCompare(b.machineName)
   );
+  const requiredOperations = Array.from(
+    new Set(
+      stationPairsFinal
+        .map((station) => String(station.op || "").trim().toUpperCase())
+        .filter(Boolean)
+    )
+  );
 
   const grouped = new Map();
   rows.forEach((row) => {
@@ -181,6 +216,7 @@ async function generateIndustrialExcel(res, {
         reason: row.interlock_reason || row.reason || "-",
         stationResults: {},
         plcReading: {},
+        leakTestReading: row.leakTestReading || null,
       });
     }
     const bucket = grouped.get(partSerial);
@@ -189,7 +225,7 @@ async function generateIndustrialExcel(res, {
     const stationKey = machineName && op ? `${machineName}__${op}` : "";
     const resolved = row.industrialResult ? { status: row.industrialResult } : resolveIndustrialResult(row);
     const status = String(resolved.status || "").toUpperCase();
-    if (stationKey) {
+    if (stationKey && String(op || "").trim().toUpperCase() !== LEAK_TEST_OPERATION) {
       const normalizedStatus = status === "OK" || status === "NG" ? status : "-";
       bucket.stationResults[stationKey] = pickPreferredStationResult(bucket.stationResults[stationKey], normalizedStatus);
     }
@@ -199,6 +235,21 @@ async function generateIndustrialExcel(res, {
         bucket.plcReading[key] = nextPlcReading[key];
       }
     });
+    if (!bucket.leakTestReading && row.leakTestReading) {
+      bucket.leakTestReading = row.leakTestReading;
+    }
+    if (bucket.leakTestReading) {
+      const leakMachineName = String(
+        bucket.leakTestReading.matchedMachineName || bucket.leakTestReading.Machine || bucket.leakTestReading.machineName || ""
+      ).trim();
+      const leakStationKey = leakMachineName ? `${leakMachineName}__${LEAK_TEST_OPERATION}` : "";
+      if (leakStationKey) {
+        bucket.stationResults[leakStationKey] = pickPreferredStationResult(
+          bucket.stationResults[leakStationKey],
+          getLeakTestStatus(bucket.leakTestReading)
+        );
+      }
+    }
   });
 
   const matrixRows = [...grouped.values()];
@@ -238,7 +289,7 @@ async function generateIndustrialExcel(res, {
     key,
     width: Math.min(Math.max(String(key).length + 6, 14), 28),
   }));
-  const tailColumns = [{ header: "Reason / Remark", width: 34 }];
+  const tailColumns = [...LEAK_TEST_COLUMNS, { header: "Reason / Remark", width: 34 }];
   const columns = [...baseColumns, ...stationColumns, ...finalColumn, ...plcColumns, ...tailColumns];
 
   columns.forEach((col, i) => {
@@ -253,7 +304,19 @@ async function generateIndustrialExcel(res, {
 
   matrixRows.forEach((row, i) => {
     const stationResults = stationPairsFinal.map((s) => row.stationResults[s.key] || "-");
-    const overall = stationResults.includes("NG") ? "NG" : (stationResults.length > 0 && stationResults.every((x) => x === "OK")) ? "PASSED" : "IN_PROGRESS";
+    const operationResults = requiredOperations.map((operation) => {
+      const operationStationResults = stationPairsFinal
+        .filter((station) => String(station.op || "").trim().toUpperCase() === operation)
+        .map((station) => row.stationResults[station.key] || "-");
+      if (operationStationResults.includes("NG")) return "NG";
+      if (operationStationResults.includes("OK")) return "OK";
+      return "-";
+    });
+    const overall = operationResults.includes("NG")
+      ? "NG"
+      : (requiredOperations.length > 0 && requiredOperations.every((_, idx) => operationResults[idx] === "OK"))
+        ? "PASSED"
+        : "IN_PROGRESS";
     const plc = row.plcReading || {};
     const values = [
       i + 1,
@@ -289,6 +352,7 @@ async function generateIndustrialExcel(res, {
         const v = plc[c.key];
         return v === undefined || v === null || v === "" ? "-" : v;
       }),
+      ...LEAK_TEST_COLUMNS.map((column) => getLeakTestValue(row.leakTestReading, column.key)),
       row.reason,
     ];
 

@@ -10,6 +10,11 @@ const StatusChip = ({ status }) => {
   return <span className={`${base} bg-slate-500/10 text-slate-600 border-slate-500/30`}>-</span>;
 };
 
+const DashCell = () => {
+  const base = "inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold border";
+  return <span className={`${base} bg-slate-500/10 text-slate-600 border-slate-500/30`}>-</span>;
+};
+
 const ShotStatusChip = ({ value }) => {
   const normalized = String(value || "").trim().toUpperCase();
   const base = "inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold border";
@@ -74,6 +79,42 @@ const ReportTable = ({ rows = [], columns = [], loading }) => {
                 {columns.map((column) => {
                   const value = row[column.key];
                   const text = value === null || value === undefined || value === "" ? "-" : String(value);
+                  if (column.renderLeakOperation) {
+                    const machineName = String(value?.machineName || "").trim();
+                    const status = String(value?.status || "").trim().toUpperCase() || "-";
+                    if (!machineName || status === "-") {
+                      return (
+                        <td key={column.key} className="px-3 py-3 text-center whitespace-nowrap">
+                          <DashCell />
+                        </td>
+                      );
+                    }
+                    return (
+                      <td key={column.key} className="px-3 py-3 text-center whitespace-nowrap">
+                        <div className="inline-flex items-center gap-2">
+                          <span className="text-[11px] font-semibold text-[#111827]">{machineName}</span>
+                          <StatusChip status={status} />
+                        </div>
+                      </td>
+                    );
+                  }
+                  if (column.renderAsText) {
+                    if (text === "-") {
+                      return (
+                        <td key={column.key} className="px-3 py-3 text-center whitespace-nowrap">
+                          <DashCell />
+                        </td>
+                      );
+                    }
+                    return (
+                      <td
+                        key={column.key}
+                        className="px-3 py-3 text-[11px] text-[#111827] text-center font-medium whitespace-nowrap"
+                      >
+                        {text}
+                      </td>
+                    );
+                  }
                   if (isStatusLike(column.key)) {
                     return (
                       <td key={column.key} className="px-3 py-3 text-center whitespace-nowrap">
@@ -89,9 +130,17 @@ const ReportTable = ({ rows = [], columns = [], loading }) => {
                     );
                   }
                   if (column.key === "ngReason") {
+                    const reasonText = value === null || value === undefined ? "" : String(value);
                     return (
-                      <td key={column.key} className="px-3 py-3 text-[11px] text-red-600/90 max-w-[220px] truncate text-center" title={String(text)}>
-                        {text}
+                      <td key={column.key} className="px-3 py-3 text-[11px] text-red-600/90 max-w-[220px] truncate text-center" title={reasonText || undefined}>
+                        {reasonText}
+                      </td>
+                    );
+                  }
+                  if (column.key.startsWith("leak_") && text === "-") {
+                    return (
+                      <td key={column.key} className="px-3 py-3 text-center whitespace-nowrap">
+                        <DashCell />
                       </td>
                     );
                   }

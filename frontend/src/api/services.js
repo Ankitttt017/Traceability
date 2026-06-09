@@ -18,8 +18,8 @@ export const authApi = {
 };
 
 export const machineApi = {
-  list: async () => {
-    const { data } = await apiClient.get(ENDPOINTS.machines);
+  list: async (config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.machines, config);
     return data;
   },
   create: async (payload) => {
@@ -329,20 +329,20 @@ export const traceabilityApi = {
 };
 
 export const dashboardApi = {
-  oee: async () => {
-    const { data } = await apiClient.get(ENDPOINTS.dashboard.oee);
+  oee: async (config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.oee, config);
     return data;
   },
-  summary: async (params) => {
-    const { data } = await apiClient.get(ENDPOINTS.dashboard.summary, { params });
+  summary: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.summary, { ...config, params });
     return data;
   },
   trends: async (params) => {
     const { data } = await apiClient.get(ENDPOINTS.dashboard.trends, { params });
     return data;
   },
-  report: async (params) => {
-    const { data } = await apiClient.get(ENDPOINTS.dashboard.report, { params });
+  report: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.report, { ...config, params });
     return data;
   },
   exportReport: async (params) => {

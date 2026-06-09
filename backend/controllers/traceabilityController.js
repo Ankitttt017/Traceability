@@ -13,6 +13,12 @@ const MachineRuntimeState = require("../models/MachineRuntimeState");
 const { saveScan } = require("../services/scanService");
 const { captureLeakReadingsForScan } = require("../services/leakTestCaptureService");
 const LeakTestReading = require("../models/LeakTestReading");
+const {
+  LEAKTEST_OPERATION,
+  buildLeaktestIndex,
+  getLeaktestReadingForPartStation,
+  getLeaktestStageState,
+} = require("../services/leaktestLookupService");
 const { getPlcCircuitSnapshot } = require("../services/plcCommunicationService");
 const plcHandshakeEngine = require("../services/plcHandshakeEngine");
 const scannerConnectionManager = require("../services/scannerConnectionManager");
@@ -26,7 +32,8 @@ const {
 } = require("../services/plcIoService");
 const { getPlcHealthSnapshot } = require("../services/plcHealthService");
 const { getScannerHealthSnapshot } = require("../services/scannerHealthService");
-const { getScannerConnectionSnapshot } = require("../services/scannerConnectionService");
+const scannerConnectionService = require("../services/scannerConnectionService");
+const { getScannerConnectionSnapshot } = scannerConnectionService;
 const { emitRealtime } = require("../services/realtimeService");
 const { tryAcquireMachineLock, clearMachineLock } = require("../services/machineLockService");
 const { finalizeCycleAfterPlc } = require("../services/cycleFinalizationService");
@@ -749,7 +756,45 @@ function isJourneyNoiseLog(log) {
   return false;
 }
 
-function getQualitySummaryFromOperationLogs(rows) {
+function shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr) {
+  const plcStatus = String(log?.plc_status || "").trim().toUpperCase();
+  const result = String(log?.result || "").trim().toUpperCase();
+  const reason = String(log?.interlock_reason || "").trim().toUpperCase();
+
+  return (
+    Boolean(mappedCustomerQr) &&
+    result === "OK" &&
+    ["PENDING", "PLC_COMM_ERROR", "STARTED"].includes(plcStatus) &&
+    reason === "RECOVERY_PENDING_AFTER_BACKEND_RESTART"
+  );
+}
+
+function getEffectiveOperationOutcome(log, mappedCustomerQr = null) {
+  const plcStatus = String(log?.plc_status || "").trim().toUpperCase();
+  const result = String(log?.result || "").trim().toUpperCase();
+
+  if (shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr)) {
+    return "OK";
+  }
+  if (plcStatus === "ENDED_OK" && result === "OK") {
+    return "OK";
+  }
+  if (plcStatus === "ENDED_NG" || result === "NG") {
+    return "NG";
+  }
+  if (plcStatus === "INTERLOCKED" || plcStatus === "BLOCKED") {
+    return "INTERLOCKED";
+  }
+  if (plcStatus === "PLC_COMM_ERROR") {
+    return "COMM_ERROR";
+  }
+  if (plcStatus === "PENDING" || plcStatus === "STARTED" || plcStatus === "RUNNING" || plcStatus === "IN_PROGRESS") {
+    return "IN_PROGRESS";
+  }
+  return "";
+}
+
+function getQualitySummaryFromOperationLogs(rows, getMappedCustomerQr = null) {
   const summary = {
     okCount: 0,
     ngCount: 0,
@@ -759,23 +804,26 @@ function getQualitySummaryFromOperationLogs(rows) {
   };
 
   for (const row of rows) {
-    if (row.plc_status === "ENDED_OK" && row.result === "OK") {
+    const mappedCustomerQr = typeof getMappedCustomerQr === "function" ? getMappedCustomerQr(row) : null;
+    const effectiveOutcome = getEffectiveOperationOutcome(row, mappedCustomerQr);
+
+    if (effectiveOutcome === "OK") {
       summary.okCount += 1;
       continue;
     }
-    if (row.plc_status === "ENDED_NG" && row.result === "NG") {
+    if (effectiveOutcome === "NG") {
       summary.ngCount += 1;
       continue;
     }
-    if (row.plc_status === "INTERLOCKED") {
+    if (effectiveOutcome === "INTERLOCKED") {
       summary.interlockedCount += 1;
       continue;
     }
-    if (row.plc_status === "PLC_COMM_ERROR") {
+    if (effectiveOutcome === "COMM_ERROR") {
       summary.commErrorCount += 1;
       continue;
     }
-    if (row.plc_status === "PENDING" || row.plc_status === "STARTED") {
+    if (effectiveOutcome === "IN_PROGRESS") {
       summary.inProgressCount += 1;
     }
   }
@@ -927,10 +975,26 @@ async function buildScannerHealth(scanner, machineId) {
 
   const connectionSnapshot = await getScannerConnectionSnapshot(scanner.scanner_ip).catch(() => null);
   const connectionConnected = Boolean(connectionSnapshot?.connected);
+  const probeReachability = async () => {
+    const port = Number(scanner?.scanner_port || 0);
+    if (!scanner?.scanner_ip || !Number.isFinite(port) || port <= 0) {
+      return null;
+    }
+    return scannerConnectionService.probeScannerEndpoint({
+      ip: scanner.scanner_ip,
+      port,
+      timeoutMs: 1200,
+    }).catch(() => null);
+  };
 
   const byIpHealth = getScannerHealthSnapshot({ scannerIp: scanner.scanner_ip });
   if (byIpHealth) {
-    const connected = Boolean(byIpHealth.connected) || connectionConnected;
+    let connected = Boolean(byIpHealth.connected) || connectionConnected;
+    let reachability = null;
+    if (!connected) {
+      reachability = await probeReachability();
+      connected = Boolean(reachability?.reachable);
+    }
     return {
       ...byIpHealth,
       scannerId: byIpHealth.scannerId || scanner.id,
@@ -940,7 +1004,7 @@ async function buildScannerHealth(scanner, machineId) {
       status: connected ? "CONNECTED" : "DISCONNECTED",
       connectedAt: byIpHealth.lastSeenAt || connectionSnapshot?.connectedAt || null,
       lastDataAt: connectionSnapshot?.lastDataAt || byIpHealth.lastSeenAt || null,
-      source: connectionSnapshot?.source || "HEARTBEAT",
+      source: connected && reachability?.reachable ? "PROBE" : (connectionSnapshot?.source || "HEARTBEAT"),
     };
   }
 
@@ -952,7 +1016,12 @@ async function buildScannerHealth(scanner, machineId) {
       null;
 
     if (match) {
-      const connected = Boolean(match.connected) || connectionConnected;
+      let connected = Boolean(match.connected) || connectionConnected;
+      let reachability = null;
+      if (!connected) {
+        reachability = await probeReachability();
+        connected = Boolean(reachability?.reachable);
+      }
       return {
         ...match,
         scannerId: match.scannerId || scanner.id,
@@ -962,23 +1031,45 @@ async function buildScannerHealth(scanner, machineId) {
         status: connected ? "CONNECTED" : "DISCONNECTED",
         connectedAt: match.lastSeenAt || connectionSnapshot?.connectedAt || null,
         lastDataAt: connectionSnapshot?.lastDataAt || match.lastSeenAt || null,
-        source: connectionSnapshot?.source || "HEARTBEAT",
+        source: connected && reachability?.reachable ? "PROBE" : (connectionSnapshot?.source || "HEARTBEAT"),
       };
     }
   }
 
   if (connectionSnapshot) {
+    let connected = Boolean(connectionSnapshot.connected);
+    let reachability = null;
+    if (!connected) {
+      reachability = await probeReachability();
+      connected = Boolean(reachability?.reachable);
+    }
     return {
       scannerId: scanner.id,
       scannerIp: scanner.scanner_ip,
       scannerName: scanner.scanner_name,
       machineId: machineId || null,
-      status: String(connectionSnapshot.status || "DISCONNECTED").toUpperCase(),
-      connected: Boolean(connectionSnapshot.connected),
+      status: connected ? "CONNECTED" : String(connectionSnapshot.status || "DISCONNECTED").toUpperCase(),
+      connected,
       connectedAt: connectionSnapshot.connectedAt || null,
       lastDataAt: connectionSnapshot.lastDataAt || null,
       lastSeenAt: connectionSnapshot.lastDataAt || null,
-      source: connectionSnapshot.source || "DB",
+      source: connected && reachability?.reachable ? "PROBE" : (connectionSnapshot.source || "DB"),
+    };
+  }
+
+  const reachability = await probeReachability();
+  if (reachability?.reachable) {
+    return {
+      scannerId: scanner.id,
+      scannerIp: scanner.scanner_ip,
+      scannerName: scanner.scanner_name,
+      machineId: machineId || null,
+      status: "CONNECTED",
+      connected: true,
+      connectedAt: null,
+      lastDataAt: null,
+      lastSeenAt: null,
+      source: "PROBE",
     };
   }
 
@@ -2402,6 +2493,22 @@ exports.getPartJourney = async (req, res) => {
       };
       return acc;
     }, {});
+    const customerQrByPartId = customerMappings.reduce((acc, row) => {
+      const key = String(partId || "").trim().toUpperCase();
+      if (!key || acc[key]) return acc;
+      const customerQrCode = String(row.customer_qr || "").trim();
+      if (customerQrCode) {
+        acc[key] = customerQrCode;
+      }
+      return acc;
+    }, {});
+    const leaktestIndex = (
+      await buildLeaktestIndex({
+        partIds: [partId],
+        customerQrByPartId,
+        machines: Array.isArray(sequenceData?.machines) ? sequenceData.machines : [],
+      })
+    ).byPartAndStation;
 
     const currentStation = normalizeStation(part?.current_station);
     const currentIndex = sequenceData.sequence.findIndex((station) => station === currentStation);
@@ -2413,6 +2520,9 @@ exports.getPartJourney = async (req, res) => {
           : sequenceData.sequence[currentIndex + 1] || null;
 
     const stationTimeline = knownStations.map((stationNo, idx) => {
+      const leakTestReading = stationNo === LEAKTEST_OPERATION
+        ? getLeaktestReadingForPartStation(leaktestIndex, partId, stationNo)
+        : null;
       const attempts = (logsByStation[stationNo] || []).map((row) => ({
         id: row.id,
         plcStatus: row.plcStatus,
@@ -2441,7 +2551,9 @@ exports.getPartJourney = async (req, res) => {
       const representativeAttempt = productionAttempt || latestAttempt;
 
       let stageState = "PENDING";
-      if (endedOkAttempt) {
+      if (leakTestReading) {
+        stageState = getLeaktestStageState(leakTestReading);
+      } else if (endedOkAttempt) {
         stageState = "PASSED";
       } else if (endedNgAttempt) {
         stageState = "FAILED";
@@ -2463,7 +2575,7 @@ exports.getPartJourney = async (req, res) => {
       // cycleStartTime = createdAt of the PENDING log (moment QR was scanned)
       const pendingAttempt = attempts.find(a => a.plcStatus === "PENDING" || a.plcStatus === "STARTED");
       const cycleStartTime  = pendingAttempt?.createdAt || productionAttempt?.createdAt || null;
-      const cycleEndTime    = productionAttempt?.plcEndTime || null;
+      const cycleEndTime    = leakTestReading?.cycleEndTime || productionAttempt?.plcEndTime || null;
       const cycleDurationSec = (cycleStartTime && cycleEndTime)
         ? Math.max(0, (new Date(cycleEndTime) - new Date(cycleStartTime)) / 1000)
         : null;
@@ -2473,14 +2585,18 @@ exports.getPartJourney = async (req, res) => {
         sequenceIndex: idx + 1,
         stageState,
         isNextExpected: expectedNextStation === stationNo,
-        latestStatus: representativeAttempt?.plcStatus || null,
-        latestResult: representativeAttempt?.result || null,
+        latestStatus: leakTestReading
+          ? (leakTestReading.result === "OK" ? "ENDED_OK" : leakTestReading.result === "NG" ? "ENDED_NG" : "PENDING")
+          : (representativeAttempt?.plcStatus || null),
+        latestResult: leakTestReading?.result || representativeAttempt?.result || null,
         latestInterlockReason: representativeAttempt?.interlockReason || null,
-        latestAt: representativeAttempt?.createdAt || null,
+        latestAt: leakTestReading?.cycleEndTime || representativeAttempt?.createdAt || null,
         cycleStartTime,
         cycleEndTime,
         cycleDurationSec,
         attempts,
+        leakTestReading,
+        machineName: leakTestReading?.matchedMachineName || null,
         customerQrCode: customerMappingByStation[stationNo]?.customerQrCode || null,
         customerQrMappedAt: customerMappingByStation[stationNo]?.customerQrMappedAt || null,
         customerQrMachineId: customerMappingByStation[stationNo]?.customerQrMachineId || null,
@@ -2731,7 +2847,29 @@ exports.getMachineStationStats = async (req, res) => {
       limit: 800,
     });
 
-    const summary = getQualitySummaryFromOperationLogs(logs);
+    const partIdsForCustomerQr = [...new Set(logs.map((row) => String(row.part_id || "").trim()).filter(Boolean))];
+    const partCodeMappings = partIdsForCustomerQr.length > 0
+      ? await PartCodeMapping.findAll({
+          where: {
+            old_part_id: { [Op.in]: partIdsForCustomerQr },
+            is_active: true,
+          },
+          attributes: ["old_part_id", "customer_qr"],
+          raw: true,
+        })
+      : [];
+    const customerQrByPartId = partCodeMappings.reduce((acc, row) => {
+      const key = String(row.old_part_id || "").trim().toUpperCase();
+      if (!key) return acc;
+      acc[key] = String(row.customer_qr || "").trim();
+      return acc;
+    }, {});
+    const getMappedCustomerQr = (row) => customerQrByPartId[String(row?.part_id || "").trim().toUpperCase()] || null;
+
+    const stationLogs = logs.filter((row) => !isJourneyNoiseLog(row));
+    const effectiveLogs = stationLogs.length > 0 ? stationLogs : logs;
+
+    const summary = getQualitySummaryFromOperationLogs(effectiveLogs, getMappedCustomerQr);
     const shifts = await getActiveShiftDefinitions();
     const currentShift = resolveShift(new Date(), shifts);
     const targetProduction = computeTargetProduction({ machine, shift: currentShift });
@@ -2739,21 +2877,23 @@ exports.getMachineStationStats = async (req, res) => {
     const achievementPct = targetProduction > 0
       ? Number(((produced / targetProduction) * 100).toFixed(2))
       : 0;
-    const hourlyMap = logs.reduce((acc, row) => {
+    const hourlyMap = effectiveLogs.reduce((acc, row) => {
       const key = formatHourBucket(row.createdAt);
       if (!acc[key]) {
         acc[key] = { hour: key, ok: 0, ng: 0, interlocked: 0, commErrors: 0, total: 0 };
       }
 
-      if (row.plc_status === "ENDED_OK" && row.result === "OK") {
+      const effectiveOutcome = getEffectiveOperationOutcome(row, getMappedCustomerQr(row));
+
+      if (effectiveOutcome === "OK") {
         acc[key].ok += 1;
         acc[key].total += 1;
-      } else if (row.plc_status === "ENDED_NG" && row.result === "NG") {
+      } else if (effectiveOutcome === "NG") {
         acc[key].ng += 1;
         acc[key].total += 1;
-      } else if (row.plc_status === "INTERLOCKED") {
+      } else if (effectiveOutcome === "INTERLOCKED") {
         acc[key].interlocked += 1;
-      } else if (row.plc_status === "PLC_COMM_ERROR") {
+      } else if (effectiveOutcome === "COMM_ERROR") {
         acc[key].commErrors += 1;
       }
       return acc;
@@ -2763,14 +2903,14 @@ exports.getMachineStationStats = async (req, res) => {
       .sort((a, b) => String(a.hour).localeCompare(String(b.hour)))
       .slice(-12);
 
-    const current = resolveCurrentOperationForMachine(logs, machine);
-    const lastEvent = logs[0] || null;
-    const recentParts = logs.slice(0, 10).map((row) => ({
+    const current = resolveCurrentOperationForMachine(effectiveLogs, machine);
+    const lastEvent = effectiveLogs[0] || logs[0] || null;
+    const recentParts = effectiveLogs.slice(0, 10).map((row) => ({
       id: row.id,
       partId: row.part_id,
       plcStatus: row.plc_status,
-      result: row.result,
-      interlockReason: row.interlock_reason,
+      result: getEffectiveOperationOutcome(row, getMappedCustomerQr(row)) || row.result,
+      interlockReason: shouldTreatRecoveryPendingAsPassed(row, getMappedCustomerQr(row)) ? null : row.interlock_reason,
       isBypassed: row.is_bypassed,
       createdAt: row.createdAt,
     }));
@@ -5053,7 +5193,7 @@ exports.getDashboardReport = async (req, res) => {
     };
     const allMachineRowsRaw = await Machine.findAll({
       where: machineWhere,
-      attributes: ["id", "machine_name", "line_name", "operation_no", "sequence_no", "daily_target_qty", "cycle_time", "loading_time", "is_active", "machine_number", "updatedAt"],
+      attributes: ["id", "machine_name", "line_name", "operation_no", "sequence_no", "daily_target_qty", "cycle_time", "loading_time", "is_active", "machine_number", "updatedAt", "plc_ip", "qr_scanner_ip", "machine_ip"],
       order: [["sequence_no", "ASC"], ["updatedAt", "DESC"]],
       raw: true,
     });
@@ -5125,7 +5265,86 @@ exports.getDashboardReport = async (req, res) => {
       (row) => !isJourneyNoiseLog(row)
     );
 
-    const machineWiseMap = filteredRows.reduce((acc, row) => {
+    const dashboardPartIds = [...new Set(
+      productionOperationRows
+        .map((row) => String(row.part_id || "").trim())
+        .filter(Boolean)
+    )];
+    const dashboardPartCodeMappings = [];
+    for (let index = 0; index < dashboardPartIds.length; index += 1000) {
+      const chunk = dashboardPartIds.slice(index, index + 1000);
+      if (chunk.length === 0) {
+        continue;
+      }
+      const chunkRows = await PartCodeMapping.findAll({
+        where: {
+          old_part_id: { [Op.in]: chunk },
+          is_active: true,
+        },
+        attributes: ["old_part_id", "customer_qr"],
+        raw: true,
+      });
+      dashboardPartCodeMappings.push(...chunkRows);
+    }
+    const customerQrByPartId = dashboardPartCodeMappings.reduce((acc, row) => {
+      const key = String(row.old_part_id || "").trim().toUpperCase();
+      if (!key) return acc;
+      acc[key] = String(row.customer_qr || "").trim();
+      return acc;
+    }, {});
+    const getMappedCustomerQrForPart = (partIdValue) =>
+      customerQrByPartId[String(partIdValue || "").trim().toUpperCase()] || null;
+    const getEffectiveProductionStatus = (row) => {
+      const mappedCustomerQr = getMappedCustomerQrForPart(row?.part_id);
+      const plcStatus = String(row?.plc_status || "").trim().toUpperCase();
+      const result = String(row?.result || "").trim().toUpperCase();
+
+      if (shouldTreatRecoveryPendingAsPassed(row, mappedCustomerQr)) {
+        return "OK";
+      }
+      if (plcStatus === "ENDED_OK" && result === "OK") {
+        return "OK";
+      }
+      if (plcStatus === "ENDED_NG" || result === "NG") {
+        return "NG";
+      }
+      return null;
+    };
+    const effectiveProductionRows = (() => {
+      const mergedRows = filteredRows.map((row) => ({
+        ...row,
+        status: String(row.status || "").trim().toUpperCase(),
+      }));
+      const existingKeys = new Set(
+        mergedRows.map((row) => `${Number(row.machine_id || 0)}|${String(row.part_id || "").trim().toUpperCase()}`)
+      );
+      const addedKeys = new Set();
+
+      for (const row of productionOperationRows) {
+        const machineId = Number(row.machine_id || 0);
+        const partId = String(row.part_id || "").trim();
+        const status = getEffectiveProductionStatus(row);
+        if (!Number.isFinite(machineId) || machineId <= 0 || !partId || !status) {
+          continue;
+        }
+        const dedupeKey = `${machineId}|${partId.toUpperCase()}`;
+        if (existingKeys.has(dedupeKey) || addedKeys.has(dedupeKey)) {
+          continue;
+        }
+        mergedRows.push({
+          id: `operation-${row.id}`,
+          part_id: partId,
+          machine_id: machineId,
+          status,
+          createdAt: row.plc_end_time || row.plc_end_at || row.createdAt,
+        });
+        addedKeys.add(dedupeKey);
+      }
+
+      return mergedRows;
+    })();
+
+    const machineWiseMap = effectiveProductionRows.reduce((acc, row) => {
       if (!acc[row.machine_id]) {
         acc[row.machine_id] = { machine_id: row.machine_id, ok: 0, ng: 0 };
       }
@@ -5192,11 +5411,11 @@ exports.getDashboardReport = async (req, res) => {
       }
 
       const plcStatus = String(row.plc_status || "").trim().toUpperCase();
-      const result = String(row.result || "").trim().toUpperCase();
+      const effectiveStatus = getEffectiveProductionStatus(row);
 
-      if (plcStatus === "ENDED_OK" && result === "OK") {
+      if (effectiveStatus === "OK") {
         machineCardMap[machineId].okCount += 1;
-      } else if (plcStatus === "ENDED_NG" || result === "NG") {
+      } else if (effectiveStatus === "NG") {
         machineCardMap[machineId].ngCount += 1;
       } else if (plcStatus === "INTERLOCKED" || plcStatus === "BLOCKED") {
         machineCardMap[machineId].interlockedCount += 1;
@@ -5215,11 +5434,28 @@ exports.getDashboardReport = async (req, res) => {
       return acc;
     }, {});
 
+    const machineHealthEntries = await Promise.all(machineRows.map(async (machine) => {
+      const plcHealth = getPlcHealthSnapshot(machine.id) || null;
+      const scannerBundle = await buildMachineScannerBundle(machine.id);
+      return [
+        Number(machine.id),
+        {
+          plcConnected: plcHealth ? Boolean(plcHealth.healthy) : null,
+          plcHealth,
+          scannerConnected: scannerBundle.primaryHealth ? Boolean(scannerBundle.primaryHealth.connected) : null,
+          scannerHealth: scannerBundle.primaryHealth || null,
+          scanner: scannerBundle.primaryScanner || null,
+        },
+      ];
+    }));
+    const machineHealthById = Object.fromEntries(machineHealthEntries);
+
     const machineCards = Object.values(machineCardMap)
       .map((row) => {
         const machineLogs = (logsByMachineId[Number(row.machineId)] || []).slice().sort(
           (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
         );
+        const health = machineHealthById[Number(row.machineId)] || {};
         const processedCount = Number(row.okCount || 0) + Number(row.ngCount || 0);
         const downtime = computeDowntimeFromLogs(machineLogs);
         const downtimeEvents = Number(downtime.downtimeEvents || 0);
@@ -5248,6 +5484,11 @@ exports.getDashboardReport = async (req, res) => {
         const productionDate = getProductionDate(machineLogs[0]?.createdAt || from);
         return {
           ...row,
+          plcConnected: health.plcConnected ?? null,
+          plcHealth: health.plcHealth || null,
+          scannerConnected: health.scannerConnected ?? null,
+          scannerHealth: health.scannerHealth || null,
+          scanner: health.scanner || null,
           targetProduction: targetQty,
           actualProduction: processedCount,
           processedCount,
@@ -5329,7 +5570,7 @@ exports.getDashboardReport = async (req, res) => {
       })
       .sort((a, b) => String(a.stationNo || "").localeCompare(String(b.stationNo || "")));
 
-    const hourlyMap = filteredRows.reduce((acc, row) => {
+    const hourlyMap = effectiveProductionRows.reduce((acc, row) => {
       const key = formatHourBucket(row.createdAt);
       if (!acc[key]) {
         acc[key] = { hour: key, ok: 0, ng: 0, total: 0 };
@@ -5350,7 +5591,7 @@ exports.getDashboardReport = async (req, res) => {
     }, {});
     shiftProduction.UNASSIGNED = { total: 0, ok: 0, ng: 0 };
 
-    for (const row of filteredRows) {
+    for (const row of effectiveProductionRows) {
       const shiftCode = resolveShiftCodeForDate(row.createdAt, shifts);
       if (!shiftProduction[shiftCode]) {
         shiftProduction[shiftCode] = { total: 0, ok: 0, ng: 0 };
@@ -5506,14 +5747,43 @@ exports.getDashboardReport = async (req, res) => {
       return acc;
     }, {});
 
+    const partIdsForCustomerQr = [...new Set(partHistory.slice(0, 3000).map((row) => String(row.part_id || "").trim()).filter(Boolean))];
+    const leaktestIndex = (
+      await buildLeaktestIndex({
+        partIds: partIdsForCustomerQr,
+        customerQrByPartId,
+        machines: machineRows,
+      })
+    ).byPartAndStation;
+    const getLeakReadingForPart = (partIdValue) => getLeaktestReadingForPartStation(
+      leaktestIndex,
+      String(partIdValue || "").trim(),
+      LEAKTEST_OPERATION
+    );
+    const mapDashboardRowWithLeak = (row) => {
+      const stationNo = normalizeStation(row.station_no || row.operation_no);
+      const leakTestReading = getLeakReadingForPart(row.part_id);
+      if (stationNo === LEAKTEST_OPERATION && leakTestReading) {
+        const leakResult = String(leakTestReading.result || leakTestReading.Result || "").trim().toUpperCase();
+        return {
+          ...row,
+          result: leakResult || row.result,
+          plc_status: leakResult === "OK" ? "ENDED_OK" : leakResult === "NG" ? "ENDED_NG" : row.plc_status,
+          interlock_reason: null,
+          leakTestReading,
+        };
+      }
+      return {
+        ...row,
+        leakTestReading,
+      };
+    };
+
     const historyTotal = partHistory.length;
     const historyStart = (page - 1) * pageSize;
     const pagedHistory = partHistory
       .slice(historyStart, historyStart + pageSize)
-      .map((row) => ({
-        ...row,
-        leakTestReading: leakByPartHistory[String(row.part_id || "").trim()] || null,
-      }));
+      .map(mapDashboardRowWithLeak);
 
     const normalizeShotToken = (value) => {
       const raw = String(value ?? "").trim();
@@ -5598,34 +5868,31 @@ exports.getDashboardReport = async (req, res) => {
       return acc;
     }, {});
 
-    const partIdsForCustomerQr = [...new Set(partHistory.slice(0, 3000).map((row) => String(row.part_id || "").trim()).filter(Boolean))];
-    const partCodeMappings = partIdsForCustomerQr.length > 0
-      ? await PartCodeMapping.findAll({
-          where: {
-            old_part_id: { [Op.in]: partIdsForCustomerQr },
-            is_active: true,
-          },
-          attributes: ["old_part_id", "customer_qr"],
-          raw: true,
-        })
-      : [];
-    const customerQrByPartId = partCodeMappings.reduce((acc, row) => {
-      const key = String(row.old_part_id || "").trim().toUpperCase();
-      if (!key) return acc;
-      acc[key] = String(row.customer_qr || "").trim();
-      return acc;
-    }, {});
-
     const partsList = partHistory.slice(0, 3000).map((row) => {
       const machine = machineMetaById[Number(row.machine_id)] || machineRowMapById[Number(row.machine_id)] || {};
+      const mappedCustomerQr = customerQrByPartId[String(row.part_id || "").trim().toUpperCase()] || null;
       const plcStatus = String(row.plc_status || "").trim().toUpperCase();
       const result = String(row.result || "").trim().toUpperCase();
+      const stationNo = normalizeStation(row.station_no || row.operation_no);
+      const leakTestReading = getLeakReadingForPart(row.part_id);
+      const leakStageState = stationNo === LEAKTEST_OPERATION && leakTestReading
+        ? getLeaktestStageState(leakTestReading)
+        : null;
+      const recoveryCompletedByCustomerQr = shouldTreatRecoveryPendingAsPassed(row, mappedCustomerQr);
       let statusLabel = "IDLE";
-      if (plcStatus === "INTERLOCKED" || plcStatus === "PLC_COMM_ERROR") {
-        statusLabel = "BLOCKED";
-      } else if (plcStatus === "ENDED_OK" && result === "OK") {
+      if (stationNo === LEAKTEST_OPERATION && leakStageState === "PASSED") {
         statusLabel = "PASSED";
-      } else if (plcStatus === "ENDED_NG" || result === "NG") {
+      } else if (stationNo === LEAKTEST_OPERATION && leakStageState === "FAILED") {
+        statusLabel = "FAILED";
+      } else if (stationNo === LEAKTEST_OPERATION && leakStageState === "PENDING") {
+        statusLabel = "RUNNING";
+      } else if (recoveryCompletedByCustomerQr) {
+        statusLabel = "PASSED";
+      } else if (plcStatus === "INTERLOCKED" || plcStatus === "PLC_COMM_ERROR") {
+        statusLabel = "BLOCKED";
+      } else if (["ENDED_OK", "COMPLETED_OK", "PASSED"].includes(plcStatus) && ["OK", "PASS", "PASSED"].includes(result || "OK")) {
+        statusLabel = "PASSED";
+      } else if (["ENDED_NG", "COMPLETED_NG", "FAILED"].includes(plcStatus) || ["NG", "FAIL", "FAILED"].includes(result)) {
         statusLabel = "FAILED";
       } else if (["STARTED", "PENDING", "IN_PROGRESS"].includes(plcStatus)) {
         statusLabel = "RUNNING";
@@ -5636,6 +5903,9 @@ exports.getDashboardReport = async (req, res) => {
       let cycleTime = null;
       if (start && end) {
         cycleTime = Math.max(0, (new Date(end).getTime() - new Date(start).getTime()) / 1000).toFixed(1);
+      }
+      if (stationNo === LEAKTEST_OPERATION && leakTestReading?.cycleTime != null) {
+        cycleTime = leakTestReading.cycleTime;
       }
 
       const shotKey = normalizeShotToken(row.shot_number || row.shotNumber || "");
@@ -5656,22 +5926,22 @@ exports.getDashboardReport = async (req, res) => {
       return {
         id: row.id,
         partId: row.part_id,
-        customerQrCode: customerQrByPartId[String(row.part_id || "").trim().toUpperCase()] || null,
+        customerQrCode: mappedCustomerQr,
         partName: row.Part?.part_name || row.Part?.name || null,
         machineId: row.machine_id,
         machineName: machine.machineName || machine.machine_name || null,
         lineName: machine.lineName || machine.line_name || null,
-        stationNo: normalizeStation(row.station_no || row.operation_no),
+        stationNo,
         operationNo: row.operation_no || null,
-        result,
+        result: stationNo === LEAKTEST_OPERATION && leakTestReading?.result ? leakTestReading.result : result,
         status: statusLabel,
-        reason: row.interlock_reason || null,
-        interlockReason: row.interlock_reason || null,
+        reason: (recoveryCompletedByCustomerQr || stationNo === LEAKTEST_OPERATION) ? null : (row.interlock_reason || null),
+        interlockReason: (recoveryCompletedByCustomerQr || stationNo === LEAKTEST_OPERATION) ? null : (row.interlock_reason || null),
         cycleTime,
         createdAt: row.createdAt,
         shotNumber: shotKey || null,
         plcReading,
-        leakTestReading: leakByPart[String(row.part_id || "").trim()] || null,
+        leakTestReading,
       };
     });
 

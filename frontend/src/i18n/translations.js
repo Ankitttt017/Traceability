@@ -3,20 +3,8 @@ import hi from "./hi";
 
 const faqKpis = {
   en: [
-    {
-      title: "Plant / Pure Utilization",
-      formula:
-        "((Machine Runtime + Loading & Unloading Time) / (Total Available Time - Breaks)) * 100",
-      note:
-        "Use this when the production team wants a pure runtime-utilization view without adding deduction buckets.",
-    },
-    {
-      title: "Machine Utilization",
-      formula:
-        "((Machine Runtime + Loading & Unloading Time + Downtime Deductions (Planned Downtime + No Plan + Maintenance)) / (Total Available Time - Breaks)) * 100",
-      note:
-        "Use this when approved downtime buckets are adjusted into the machine utilization view.",
-    },
+  
+  
     {
       title: "Operator Efficiency",
       formula:
@@ -49,23 +37,9 @@ const faqKpis = {
       note:
         "Useful for comparing actual operating speed against the planned machine cycle standard.",
     },
-    {
-      title: "Running SPM",
-      formula: "Shift Production / (Machine Runtime + Loading & Unloading Time)",
-      note: "Production-team view of speed during productive running time only.",
-    },
-    {
-      title: "Average SPM",
-      formula:
-        "Shift Production / (Total Available Time - Breaks - Downtime Deductions (Planned Downtime + No Plan + Maintenance))",
-      note: "Shows average production speed over the adjusted available time window.",
-    },
-    {
-      title: "SPM (Hourly Production)",
-      formula:
-        "Hourly Production / (Total Available Time for that Hour (60 mins) - Breaks (if any))",
-      note: "Calculated independently for each hour bucket.",
-    },
+    
+    
+   
     {
       title: "Target Production (Used in Traceability Metrics)",
       formula:
@@ -81,20 +55,8 @@ const faqKpis = {
     },
   ],
   hi: [
-    {
-      title: "प्लांट / प्योर यूटिलाइजेशन",
-      formula:
-        "((Machine Runtime + Loading & Unloading Time) / (Total Available Time - Breaks)) * 100",
-      note:
-        "जब प्रोडक्शन टीम को बिना किसी अतिरिक्त deduction bucket के केवल शुद्ध runtime utilization देखना हो तब इसका उपयोग करें।",
-    },
-    {
-      title: "मशीन यूटिलाइजेशन",
-      formula:
-        "((Machine Runtime + Loading & Unloading Time + Downtime Deductions (Planned Downtime + No Plan + Maintenance)) / (Total Available Time - Breaks)) * 100",
-      note:
-        "जब approved downtime bucket को machine utilization में adjust करना हो तब इसका उपयोग करें।",
-    },
+    
+    
     {
       title: "ऑपरेटर एफिशिएंसी",
       formula:
@@ -126,23 +88,9 @@ const faqKpis = {
       note:
         "यह actual speed को planned machine cycle standard के साथ compare करने के लिए उपयोगी है।",
     },
-    {
-      title: "रनिंग SPM",
-      formula: "Shift Production / (Machine Runtime + Loading & Unloading Time)",
-      note: "यह productive running time के दौरान actual output speed दिखाता है।",
-    },
-    {
-      title: "औसत SPM",
-      formula:
-        "Shift Production / (Total Available Time - Breaks - Downtime Deductions (Planned Downtime + No Plan + Maintenance))",
-      note: "यह adjusted available time window पर average production speed दिखाता है।",
-    },
-    {
-      title: "SPM (प्रति घंटा प्रोडक्शन)",
-      formula:
-        "Hourly Production / (Total Available Time for that Hour (60 mins) - Breaks (if any))",
-      note: "यह हर घंटे के bucket के लिए अलग-अलग calculate होता है।",
-    },
+  
+  
+    
     {
       title: "टारगेट प्रोडक्शन (ट्रेसबिलिटी मेट्रिक्स में उपयोग)",
       formula:

@@ -4,13 +4,135 @@ const { markScannerHeartbeat } = require("../services/scannerHealthService");
 const Scanner = require("../models/Scanner");
 const Machine = require("../models/Machine");
 const OperationLog = require("../models/OperationLog");
+const Part = require("../models/Part");
 const PartCodeMapping = require("../models/PartCodeMapping");
+const ProductionLog = require("../models/ProductionLog");
 const { saveScan } = require("../services/scanService");
+const { getStationFeatureConfig } = require("../services/stationFeatureService");
 const { emitRealtime } = require("../services/realtimeService");
 const { Op } = require("sequelize");
 
 function sanitizeScannerPayload(value) {
   return String(value || "").replace(/[\u0000-\u001F\u007F]/g, "").trim();
+}
+
+function normalizeStation(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function uniqueStages(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const normalized = normalizeStation(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+async function getActiveStationSequence() {
+  const machines = await Machine.findAll({
+    where: { is_active: true },
+    attributes: ["operation_no"],
+    order: [["sequence_no", "ASC"], ["id", "ASC"]],
+    raw: true,
+  });
+  return uniqueStages(machines.map((machine) => machine.operation_no));
+}
+
+async function markOperationEndedOk({ operationLogId, partId, stationNo, machineId }) {
+  const opLog = await OperationLog.findByPk(operationLogId);
+  if (!opLog) {
+    return null;
+  }
+
+  await opLog.update({
+    plc_status: "ENDED_OK",
+    result: "OK",
+    machine_id: machineId,
+    plc_end_time: new Date(),
+    plc_end_at: new Date(),
+    interlock_reason: null,
+  });
+
+  const part = await Part.findOne({ where: { part_id: partId } });
+  if (part) {
+    const sequence = await getActiveStationSequence();
+    const station = normalizeStation(stationNo);
+    const isLastStation = sequence.length > 0 && station === sequence[sequence.length - 1];
+    part.current_station = station;
+    part.current_operation = station;
+    part.status = isLastStation ? "COMPLETED" : "IN_PROGRESS";
+    part.is_interlocked = false;
+    part.interlock_reason = null;
+    part.is_rework = false;
+    await part.save();
+  }
+
+  await ProductionLog.create({
+    part_id: partId,
+    machine_id: machineId,
+    user_id: null,
+    status: "OK",
+    ng_reason: "TCP_CUSTOMER_QR_AUTO_OK",
+  });
+
+  return opLog;
+}
+
+async function finalizeCustomerQrMappingIfEligible({ partId, stationNo, machine }) {
+  const station = normalizeStation(stationNo);
+  if (!partId || !station || !machine?.id) {
+    return { finalized: false, operationStatus: "WAITING" };
+  }
+
+  const features = await getStationFeatureConfig(station).catch(() => null);
+  const shouldAutoComplete =
+    features &&
+    features.manualResult !== true &&
+    features.plcCommunication === false;
+
+  if (!shouldAutoComplete) {
+    return { finalized: false, operationStatus: "WAITING" };
+  }
+
+  const latest = await OperationLog.findOne({
+    where: {
+      part_id: partId,
+      station_no: station,
+    },
+    order: [["createdAt", "DESC"]],
+  });
+
+  if (!latest) {
+    return { finalized: false, operationStatus: "WAITING" };
+  }
+
+  const plcStatus = String(latest.plc_status || "").trim().toUpperCase();
+  if (plcStatus === "ENDED_OK") {
+    return { finalized: true, operationStatus: "ENDED_OK", operationLogId: latest.id };
+  }
+  if (plcStatus === "ENDED_NG") {
+    return { finalized: false, operationStatus: "ENDED_NG", operationLogId: latest.id };
+  }
+
+  await markOperationEndedOk({
+    operationLogId: latest.id,
+    partId,
+    stationNo: station,
+    machineId: machine.id,
+  });
+
+  emitRealtime("dashboard_refresh", {
+    reason: "TCP_CUSTOMER_QR_AUTO_COMPLETED",
+    partId,
+    stationNo: station,
+    machineId: machine.id,
+  });
+
+  return { finalized: true, operationStatus: "ENDED_OK", operationLogId: latest.id };
 }
 
 async function resolveActivePartIdForMachine(machine, stationNo) {
@@ -194,6 +316,12 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
       is_active: true,
     });
 
+    const finalized = await finalizeCustomerQrMappingIfEligible({
+      partId: activePartId,
+      stationNo,
+      machine,
+    });
+
     emitRealtime("scan_event", {
       sourceEvent: "scan_event",
       partId: activePartId,
@@ -207,15 +335,17 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
       scannerIp,
       decision: "ALLOW",
       reason: "CUSTOMER_QR_MAPPED",
-      status: "SCANNED",
+      status: finalized.finalized ? "ENDED_OK" : "SCANNED",
       qrStatus: "PASSED",
-      operationStatus: "WAITING",
-      message: "Customer QR mapped successfully",
+      operationStatus: finalized.operationStatus || "WAITING",
+      message: finalized.finalized
+        ? "Customer QR mapped successfully. Operation passed."
+        : "Customer QR mapped successfully",
       timestamp: new Date().toISOString(),
     });
 
     emitRealtime("operator_popup", {
-      type: "INFO",
+      type: finalized.finalized ? "SUCCESS" : "INFO",
       partId: activePartId,
       customerQrCode: partId,
       stationNo,
@@ -226,11 +356,13 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
       scannerRole,
       scannerIp,
       qrStatus: "PASSED",
-      operationStatus: "WAITING",
-      status: "SCANNED",
-      plcStatus: "WAITING_PLC",
+      operationStatus: finalized.operationStatus || "WAITING",
+      status: finalized.finalized ? "ENDED_OK" : "SCANNED",
+      plcStatus: finalized.finalized ? "ENDED_OK" : "WAITING_PLC",
       reason: "CUSTOMER_QR_MAPPED",
-      message: "Customer QR mapped successfully to active part.",
+      message: finalized.finalized
+        ? "Customer QR mapped successfully. Operation passed."
+        : "Customer QR mapped successfully to active part.",
       timestamp: new Date().toISOString(),
     });
     return;

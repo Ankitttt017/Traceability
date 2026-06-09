@@ -715,6 +715,11 @@ const OperatorView = () => {
     ? Math.min(100, Number(((producedCount / targetCount) * 100).toFixed(1)))
     : 0;
   const qualityPct = Number(qualitySummary.accuracy || 0);
+  const availabilityPct = useMemo(() => {
+    const denominator = Number(producedCount || 0) + Number(qualitySummary.interlockedCount || 0) + Number(qualitySummary.inProgressCount || 0);
+    if (denominator <= 0) return 0;
+    return Math.round((Number(producedCount || 0) / denominator) * 100);
+  }, [producedCount, qualitySummary.inProgressCount, qualitySummary.interlockedCount]);
   const backendMachineState = String(liveState?.machineState?.state || "").trim().toUpperCase();
   const machineMode =
     ["RUNNING"].includes(backendMachineState)
@@ -2347,8 +2352,8 @@ const OperatorView = () => {
               </button>
             </div>
             <div style={{ display: "flex", gap: isCompact ? 6 : 10, flexWrap: "wrap" }}>
-              {[
-                { label: t("operatorView.availability", "Availability"), value: `${Math.max(0, 100 - (qualitySummary.interlockedCount || 0))}%` },
+              {[ 
+                { label: t("operatorView.availability", "Availability"), value: `${availabilityPct}%` },
                 { label: t("operatorView.quality", "Quality"), value: `${qualityPct}%` },
                 { label: t("operatorView.inProgress", "In Progress"), value: qualitySummary.inProgressCount || 0 },
               ].map((s, i) => (
