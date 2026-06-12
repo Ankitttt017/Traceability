@@ -1,12 +1,28 @@
 const express = require("express");
 const machineController = require("../../controllers/machineController");
 const { verifyToken } = require("../../middleware/authMiddleware");
-const { requireModuleAccess } = require("../../middleware/roleAccessMiddleware");
+const { requireAnyModuleAccess, requireModuleAccess } = require("../../middleware/roleAccessMiddleware");
 
 const router = express.Router();
 
-router.get("/", verifyToken, requireModuleAccess("machines", "view"), machineController.getMachines);
-router.get("/:id", verifyToken, requireModuleAccess("machines", "view"), machineController.getMachineById);
+router.get(
+  "/",
+  verifyToken,
+  requireAnyModuleAccess([
+    { moduleKey: "machines", mode: "view" },
+    { moduleKey: "operator_view", mode: "view" },
+  ]),
+  machineController.getMachines
+);
+router.get(
+  "/:id",
+  verifyToken,
+  requireAnyModuleAccess([
+    { moduleKey: "machines", mode: "view" },
+    { moduleKey: "operator_view", mode: "view" },
+  ]),
+  machineController.getMachineById
+);
 router.post("/test-plc", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.testPlc);
 router.post("/test-connection", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.testConnection);
 router.post("/reset-plc", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.resetPlc);

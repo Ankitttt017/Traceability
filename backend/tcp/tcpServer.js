@@ -32,6 +32,16 @@ function uniqueStages(values) {
   return result;
 }
 
+const CUSTOMER_QR_WAITING_OPERATIONS = new Set(["LASER", "LASER_MARKING", "LASER MARKING", "OP_LASER", "OP160", "OP170"]);
+
+function requiresCustomerQrForCompletion(machine = {}) {
+  const tokens = [
+    machine.operation_no,
+    machine.machine_name,
+  ].map((value) => String(value || "").trim().toUpperCase());
+  return tokens.some((token) => CUSTOMER_QR_WAITING_OPERATIONS.has(token) || token.includes("LASER"));
+}
+
 async function getActiveStationSequence() {
   const machines = await Machine.findAll({
     where: { is_active: true },
@@ -40,6 +50,38 @@ async function getActiveStationSequence() {
     raw: true,
   });
   return uniqueStages(machines.map((machine) => machine.operation_no));
+}
+
+async function getActiveMachineSequenceData() {
+  const machines = await Machine.findAll({
+    where: { is_active: true },
+    attributes: ["id", "operation_no", "machine_name"],
+    order: [["sequence_no", "ASC"], ["id", "ASC"]],
+    raw: true,
+  });
+  return {
+    machines,
+    sequence: uniqueStages(machines.map((machine) => machine.operation_no)),
+  };
+}
+
+async function shouldBlockMappedCustomerQrOnStartScan(stationNo) {
+  const station = normalizeStation(stationNo);
+  if (!station) return false;
+  const sequenceData = await getActiveMachineSequenceData();
+  const sequence = Array.isArray(sequenceData?.sequence) ? sequenceData.sequence : [];
+  const currentIndex = sequence.indexOf(station);
+  const customerQrStationIndex = sequence.findIndex((candidateStation) => {
+    const machines = (sequenceData?.machines || []).filter((machine) => normalizeStation(machine.operation_no) === candidateStation);
+    return machines.some((machine) => requiresCustomerQrForCompletion(machine));
+  });
+  if (customerQrStationIndex < 0) return true;
+  if (currentIndex < 0) return false;
+  return currentIndex <= customerQrStationIndex;
+}
+
+function wrongCustomerQrAtStartMessage(stationNo) {
+  return `Wrong QR scanned at ${normalizeStation(stationNo) || "this station"}. Scan Part Serial/Casting QR here. Customer QR is allowed only after Laser Marking.`;
 }
 
 async function markOperationEndedOk({ operationLogId, partId, stationNo, machineId }) {
@@ -175,11 +217,11 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
   if (!partId) return;
   if (partId.length < 4) return;
 
-  const scanner = await Scanner.findOne({
+  const scanners = await Scanner.findAll({
     where: { scanner_ip: scannerIp, is_active: true },
-    order: [["updatedAt", "DESC"]],
+    order: [["mapped_machine_id", "ASC"], ["id", "ASC"]],
   });
-  if (!scanner) {
+  if (!scanners.length) {
     const msg = `No active scanner mapping found for IP ${scannerIp}.`;
     console.warn(`[TCP] ${msg} Payload ignored: ${partId}`);
     emitRealtime("operator_popup", {
@@ -200,6 +242,13 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
     return;
   }
 
+  console.log(`[TCP] Routing payload from ${scannerIp} to ${scanners.length} scanner mapping(s). Payload=${partId}`);
+  for (const scanner of scanners) {
+    await processScannerPayloadForMapping({ scanner, scannerIp, partId });
+  }
+}
+
+async function processScannerPayloadForMapping({ scanner, scannerIp, partId }) {
   const scannerRole = String(scanner.scanner_role || "GENERAL").trim().toUpperCase() || "GENERAL";
   markScannerHeartbeat({
     scannerId: scanner.id,
@@ -372,6 +421,49 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
   const normalizedPartId = resolvedCode.resolvedPartId;
   const isMappedCustomerQrScan =
     Boolean(resolvedCode.customerQrCode) && resolvedCode.customerQrCode === partId;
+
+  if (isMappedCustomerQrScan && await shouldBlockMappedCustomerQrOnStartScan(stationNo)) {
+    const message = wrongCustomerQrAtStartMessage(stationNo);
+    emitRealtime("scan_event", {
+      sourceEvent: "scan_event",
+      partId: normalizedPartId,
+      customerQrCode: resolvedCode.customerQrCode || null,
+      stationNo,
+      machineId: machine.id,
+      machineName: machine.machine_name,
+      scannerId: scanner.id,
+      scannerName: scanner.scanner_name,
+      scannerRole,
+      scannerIp,
+      decision: "BLOCK",
+      reason: "CUSTOMER_QR_NOT_ALLOWED_AT_START_STATION",
+      status: "BLOCKED",
+      qrStatus: "FAILED",
+      operationStatus: "BLOCKED",
+      message,
+      timestamp: new Date().toISOString(),
+    });
+    emitRealtime("operator_popup", {
+      type: "ERROR",
+      partId: normalizedPartId,
+      customerQrCode: resolvedCode.customerQrCode || null,
+      stationNo,
+      machineId: machine.id,
+      machineName: machine.machine_name,
+      scannerId: scanner.id,
+      scannerName: scanner.scanner_name,
+      scannerRole,
+      scannerIp,
+      qrStatus: "FAILED",
+      operationStatus: "BLOCKED",
+      status: "BLOCKED",
+      plcStatus: "BLOCKED",
+      reason: "CUSTOMER_QR_NOT_ALLOWED_AT_START_STATION",
+      message,
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
 
   const response = await saveScan(normalizedPartId, stationNo, "OK", machine.id, null, {
     resultSource: "TCP_PUSH_SCANNER",

@@ -196,7 +196,8 @@ function resolveOperationState(popup = {}) {
     .toUpperCase();
 
   // STRICT RULE: Only backend-confirmed states determine the operation result.
-  if (["PASSED", "PASS", "ENDED_OK", "COMPLETED", "COMPLETED_OK", "COMPLETED_NG"].includes(raw)) return "PASS";
+  if (["PASSED", "PASS", "ENDED_OK", "COMPLETED", "COMPLETED_OK"].includes(raw)) return "PASS";
+  if (["COMPLETED_NG"].includes(raw)) return "FAIL";
   if (["FAILED", "FAIL", "ENDED_NG", "NG"].includes(raw)) return "FAIL";
   if (["RUNNING", "STARTED", "IN_PROGRESS", "IN PROCESS"].includes(raw)) return "RUN";
   if (["WAITING_MACHINE", "START_SENT", "WAITING_RUNNING", "WAITING_PLC"].includes(raw)) return "WAIT_OP";
@@ -379,20 +380,34 @@ function friendlyErrorMessage(rawMsg, popup = {}) {
   if (reason === "PREVIOUS_STATION_NOT_COMPLETED" || msgUpper.includes("PREVIOUS_STATION_NOT_COMPLETED")) {
     const expected = String(popup?.expectedStation || "").trim().toUpperCase();
     const lastCompleted = String(popup?.lastCompletedStation || popup?.last_completed_station || "").trim().toUpperCase();
+    if (msg && !msgUpper.includes("PREVIOUS_STATION_NOT_COMPLETED")) return msg;
     return expected && lastCompleted
-      ? `[SEQUENCE ERROR] Scan at ${expected} first. Last completed: ${lastCompleted}.`
+      ? `Wrong station. Scan ${expected} first. Last OK: ${lastCompleted}.`
       : expected
-      ? `[SEQUENCE ERROR] Scan at ${expected} first.`
-      : `[SEQUENCE ERROR] Previous station not completed.`;
+      ? `Wrong station. Scan ${expected} first.`
+      : `Wrong station. Previous OP not completed.`;
   }
   if (["DUPLICATE_SCAN", "ALREADY_COMPLETED", "DUPLICATE_SCAN_IN_FLIGHT"].includes(reason) || msgUpper.includes("DUPLICATE_SCAN") || msgUpper.includes("ALREADY_COMPLETED")) {
-    return `[DUPLICATE SCAN] This part has already passed. Re-scan is not allowed.`;
+    return msg || `Already passed at ${station || "this OP"}. Scan next operation.`;
   }
   if (reason === "SCAN_RESULT_NG" || msgUpper.includes("SCAN_RESULT_NG")) {
     return `[PART NG] This part is marked NG. Move to rejection flow.`;
   }
   if (reason === "STATION_NOT_CONFIGURED" || reason === "STATION_NOT_FOUND" || msgUpper.includes("STATION NOT FOUND")) {
     return `[STATION NOT CONFIGURED] Station ${station || "selected station"} is not in active route configuration.`;
+  }
+
+  if (msgUpper.includes("DUPLICATE") || msgUpper.includes("ALREADY_COMPLETED") || msgUpper.includes("ALREADY COMPLETED")) {
+    return msg || `Already passed at ${station || "this OP"}. Scan next operation.`;
+  }
+
+  if (msgUpper.includes("PREVIOUS_STATION") || msgUpper.includes("SEQUENCE")) {
+    const expected = String(popup?.expectedStation || "").trim().toUpperCase();
+    const lastCompleted = String(popup?.lastCompletedStation || popup?.last_completed_station || "").trim().toUpperCase();
+    if (msg && !msgUpper.includes("PREVIOUS_STATION")) return msg;
+    if (expected && lastCompleted) return `Wrong station. Scan ${expected} first. Last OK: ${lastCompleted}.`;
+    if (expected) return `Wrong station. Scan ${expected} first.`;
+    return "Wrong station. Previous OP not completed.";
   }
 
   // Raw socket/network errors
@@ -782,6 +797,11 @@ const GlobalPopup = ({
       setResetError(error?.response?.data?.error || error?.message || "Submission failed.");
       setAwaitingNextScan(false);
       setSubmittingManual(false);
+      if (manualSubmitTimerRef.current) clearTimeout(manualSubmitTimerRef.current);
+      manualSubmitTimerRef.current = setTimeout(() => {
+        setResetError("");
+        onClose?.();
+      }, 9000);
     }
   };
   useEffect(() => () => {

@@ -152,6 +152,7 @@ const Btn = ({ children, onClick, disabled, loading, variant = "ghost", size = "
 
 // ── Ping result modal ─────────────────────────────────────────────────────
 const PingModal = ({ scanner, onClose }) => {
+  const { t } = useLanguage();
   const [testing, setTesting] = useState(false);
   const [result,  setResult]  = useState(null);
 
@@ -659,11 +660,11 @@ const ScannerMonitor = () => {
                       </td>
 
                       {/* Linked machine */}
-                      <td style={{ padding: "12px 16px" }}>
+                      <td style={{ padding: "8px 16px" }}>
                         {row.mappedMachine ? (
                           <span style={{
-                            fontSize: 12, fontWeight: 600, color: C.txt("pri"),
-                            padding: "3px 9px", borderRadius: 5,
+                            fontSize: 10, fontWeight: 600, color: C.txt("pri"),
+                            padding: "2px 6px", borderRadius: 5,
                             background: C.navy(0.1), border: `1px solid ${C.navy(0.2)}`,
                           }}>
                             {formatMachineLabel(row.mappedMachine)}

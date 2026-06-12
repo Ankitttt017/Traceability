@@ -3,6 +3,7 @@ const Machine      = require("../models/Machine");
 const OperationLog = require("../models/OperationLog");
 const ProductionLog = require("../models/ProductionLog");
 const Part         = require("../models/Part");
+const PartCodeMapping = require("../models/PartCodeMapping");
 
 const NON_QUALITY_AUDIT_REASONS = new Set([
   "DUPLICATE_SCAN",
@@ -16,6 +17,8 @@ const NON_QUALITY_AUDIT_REASONS = new Set([
   "INVALID_INPUT",
 ]);
 
+const CUSTOMER_QR_WAITING_OPERATIONS = new Set(["LASER", "LASER_MARKING", "LASER MARKING", "OP_LASER", "OP160", "OP170"]);
+
 function toUpper(value) {
   return String(value || "").trim().toUpperCase();
 }
@@ -23,6 +26,14 @@ function toUpper(value) {
 function isQualityOutcomeLog(log) {
   const reason = String(log?.ng_reason || "").trim().toUpperCase();
   return !NON_QUALITY_AUDIT_REASONS.has(reason);
+}
+
+function requiresCustomerQrForCompletion(machine = {}) {
+  const tokens = [
+    machine.operation_no,
+    machine.machine_name,
+  ].map((value) => String(value || "").trim().toUpperCase());
+  return tokens.some((token) => CUSTOMER_QR_WAITING_OPERATIONS.has(token) || token.includes("LASER"));
 }
 
 /**
@@ -58,6 +69,23 @@ async function getPartJourney(req, res) {
       order: [["createdAt", "DESC"]],
       raw: true,
     });
+    const customerMappings = await PartCodeMapping.findAll({
+      where: { old_part_id: partId, is_active: true },
+      attributes: ["station_no", "machine_id", "customer_qr"],
+      raw: true,
+    });
+    const mappedCustomerQrMachines = new Set(
+      customerMappings
+        .filter((row) => String(row.customer_qr || "").trim())
+        .map((row) => Number(row.machine_id || 0))
+        .filter((id) => Number.isFinite(id) && id > 0)
+    );
+    const mappedCustomerQrStations = new Set(
+      customerMappings
+        .filter((row) => String(row.customer_qr || "").trim())
+        .map((row) => toUpper(row.station_no))
+        .filter(Boolean)
+    );
 
     // Index by machine_id for fast lookup
     const opByMachine  = new Map();
@@ -81,6 +109,9 @@ async function getPartJourney(req, res) {
       const ops  = opByMachine.get(machine.id) || [];
       const prod = prodByMachine.get(machine.id) || null;
       const hasActivity = activeMachineIds.has(machine.id);
+      const waitingForCustomerQr = requiresCustomerQrForCompletion(machine)
+        && !mappedCustomerQrMachines.has(Number(machine.id))
+        && !mappedCustomerQrStations.has(toUpper(machine.operation_no));
 
       // Determine qrVerification from most recent op log result
       let qrVerification = "WAIT";
@@ -109,7 +140,8 @@ async function getPartJourney(req, res) {
         else if (hasActivity) qrVerification = "RUN";
 
         // Operation: Prioritize Quality PASS > Quality FAIL > In Progress
-        if (opSuccessLog) operation = "PASS";
+        if (opSuccessLog && !waitingForCustomerQr) operation = "PASS";
+        else if (opSuccessLog && waitingForCustomerQr) operation = "RUN";
         else if (opNgLog) operation = "FAIL";
         else if (["STARTED", "IN_PROGRESS", "RUNNING"].includes(latestPlcSt)) operation = "RUN";
         else if (["PLC_COMM_ERROR", "TIMEOUT"].includes(latestPlcSt)) operation = "COMM";
@@ -146,6 +178,8 @@ async function getPartJourney(req, res) {
       // Station overall status
       if (qualityCheck === "FAIL" || operation === "FAIL" || operation === "COMM") {
         stationStatus = "FAILED";
+      } else if (waitingForCustomerQr && hasActivity) {
+        stationStatus = "IN_PROGRESS";
       } else if (prod || (operation === "PASS" && qualityCheck === "PASS")) {
         stationStatus = "COMPLETED";
       } else if (

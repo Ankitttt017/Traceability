@@ -204,7 +204,11 @@ const Scanners = () => {
       }
       const result = await scannerApi.testRead(payload);
       setTestReadResult(result);
-      toast.success("Scanner read test completed");
+      if (result?.waitingForPartId || result?.success === false) {
+        toast.error(result?.message || "Scanner/PLC is reachable but no part ID was read");
+      } else {
+        toast.success(result?.message || "Scanner read test completed");
+      }
     } catch (err) {
       const error = err.response?.data?.error || err.message || "Failed to test scanner read";
       setTestReadResult({ error });

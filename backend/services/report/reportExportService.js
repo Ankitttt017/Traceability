@@ -16,6 +16,7 @@ const MachineModel = require("../../models/Machine");
 const { calculateProductionMetrics } = require("./reportMetricsService");
 const { generateIndustrialExcel } = require("./excelTemplateEngine");
 const { resolveIndustrialResult } = require("./reportFormatter");
+const { toMinutes: parseShiftMinutes } = require("../../utils/time");
 const {
   LEAKTEST_OPERATION,
   buildLeaktestIndex,
@@ -207,10 +208,7 @@ function getMinutesForDate(dateValue) {
 }
 
 function toShiftMinutes(timeValue) {
-  if (!timeValue) return null;
-  const parts = String(timeValue).split(":").map((p) => Number(p));
-  if (parts.length < 2 || parts.some((p) => Number.isNaN(p))) return null;
-  return parts[0] * 60 + parts[1];
+  return parseShiftMinutes(timeValue);
 }
 
 function isDateInShift(dateValue, shift) {
@@ -236,8 +234,14 @@ async function getActiveShiftDefinitions() {
 function applyShiftFilter(rows, shiftCode, shifts) {
   if (!shiftCode) return rows;
   const target = String(shiftCode).trim().toUpperCase();
+  if (!target || ["ALL", "ANY", "ALL_SHIFTS", "ALL SHIFT", "ALL SHIFTS"].includes(target)) return rows;
+  const shift = shifts.find((s) => {
+    const code = String(s.shift_code || s.shiftCode || "").trim().toUpperCase();
+    const name = String(s.shift_name || s.shiftName || "").trim().toUpperCase();
+    return code === target || name === target;
+  });
+  if (!shift) return rows;
   return rows.filter((row) => {
-    const shift = shifts.find((s) => String(s.shift_code || "").trim().toUpperCase() === target);
     return shift && isDateInShift(row.createdAt, shift);
   });
 }
@@ -494,13 +498,19 @@ async function runIndustrialExport(res, { filters, reportConfig, type = "full" }
 async function fetchProductionData(filters = {}, options = {}) {
   const includePlcReadings = options.includePlcReadings !== false;
   let plcColumns = new Set();
+  const normalizeOptionalFilter = (value) => {
+    const token = String(value || "").trim();
+    const upper = token.toUpperCase();
+    return ["", "ALL", "ANY", "ALL_SHIFTS", "ALL SHIFT", "ALL SHIFTS"].includes(upper) ? "" : token;
+  };
   const {
     dateFrom, dateTo,
     machineId, lineName,
-    shiftCode, modelCode,
+    shiftCode: rawShiftCode, modelCode,
     operationNo, resultType,
     barcode, customerCode, station, operatorId, status
   } = filters;
+  const shiftCode = normalizeOptionalFilter(rawShiftCode);
 
   // Safe date defaults — always query last 24 hours if nothing specified
   const now = new Date();
@@ -570,7 +580,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     const target = String(shiftCode).trim().toUpperCase();
     const shifts = await getActiveShiftDefinitions();
     const byCode = productionLogs.filter(
-      (row) => String(row.shift_code || "").trim().toUpperCase() === target
+      (row) => String(row.shift_code || row.shiftCode || "").trim().toUpperCase() === target
     );
     const byTime = applyShiftFilter(productionLogs, shiftCode, shifts);
     const merged = new Map();
@@ -598,6 +608,7 @@ async function fetchProductionData(filters = {}, options = {}) {
 
   const earliestScanByPart = new Map();
   const latestAnchorScanByPart = new Map();
+  const latestAnchorLogByPart = new Map();
   fullProductionHistoryLogs.forEach((log) => {
     const partId = String(log.part_id || "").trim();
     if (!partId) return;
@@ -612,6 +623,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     const prev = latestAnchorScanByPart.get(partId);
     if (!prev || new Date(log.createdAt).getTime() > new Date(prev).getTime()) {
       latestAnchorScanByPart.set(partId, log.createdAt);
+      latestAnchorLogByPart.set(partId, log);
     }
   });
 
@@ -799,6 +811,10 @@ async function fetchProductionData(filters = {}, options = {}) {
       partId:      partIdValue || "-",
       firstScanCreatedAt: earliestScanByPart.get(partIdValue) || log.createdAt || null,
       latestAnchorCreatedAt: latestAnchorScanByPart.get(partIdValue) || log.createdAt || null,
+      anchorMachineName: latestAnchorLogByPart.get(partIdValue)?.Machine?.machine_name || log.Machine?.machine_name || "-",
+      anchorLineName: latestAnchorLogByPart.get(partIdValue)?.Machine?.line_name || log.Machine?.line_name || "-",
+      anchorShiftCode: latestAnchorLogByPart.get(partIdValue)?.shift_code || log.shift_code || "A",
+      isAnchorMachineRow: Number(latestAnchorLogByPart.get(partIdValue)?.machine_id || 0) === Number(log.machine_id || 0),
       customerCode: mappedCustomerQr || "-",
       customerQrCode: mappedCustomerQr || "-",
       machineName: log.Machine?.machine_name || "-",

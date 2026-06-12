@@ -1,6 +1,5 @@
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
-import { useAlarmToasts } from "./hooks/useAlarmToasts.jsx";
 import { NotificationProvider } from "./context/NotificationContext";
 import { LanguageProvider } from "./context/LanguageContext";
 import MainLayout from "./layouts/MainLayout";
@@ -105,9 +104,6 @@ const ModuleRoute = ({ moduleKey, children }) => {
 };
 
 function App() {
-  // Global Socket.IO alarm & scan toasts — active on every page
-  useAlarmToasts();
-
   return (
     <LanguageProvider>
     <NotificationProvider>

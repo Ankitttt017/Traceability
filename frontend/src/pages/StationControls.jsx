@@ -242,6 +242,9 @@ const StationControl = () => {
         ...row,
         lineNames: Array.from(row.lineNames).sort((a, b) => a.localeCompare(b)),
         machines: [...row.machines].sort((a, b) => a.sequenceNo - b.sequenceNo),
+        displayName: row.machines.length === 1
+          ? `${row.machines[0].machineName} + ${row.stationNo}`
+          : `${row.stationNo} (${row.machines.length} machines)`,
       }))
       .sort((a, b) => a.sequenceNo - b.sequenceNo);
   }, [machines]);
@@ -410,10 +413,10 @@ const StationControl = () => {
           `}</style>
 
           <div className="custom-scrollbar overflow-x-auto" style={{ scrollbarWidth: "thin" }}>
-            <table className="w-full text-left" style={{ minWidth: 1000 }}>
+            <table className="w-full text-left" style={{ minWidth: 1120 }}>
               <thead>
                 <tr style={{ background: "rgba(15,23,42,0.04)", borderBottom: "1px solid rgba(15,23,42,0.10)" }}>
-                  <th style={{ padding: "12px 16px", width: 280 }}><span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.1em", color: "rgba(15,23,42,0.75)" }}>Station / Line</span></th>
+                  <th style={{ padding: "12px 20px", width: 380, minWidth: 380 }}><span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.1em", color: "rgba(15,23,42,0.75)" }}>Station / Line</span></th>
                   <th style={{ padding: "12px 12px", width: 80, textAlign: "center" }}><span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.1em", color: "rgba(15,23,42,0.75)" }}>Status</span></th>
                   {FEATURE_COLS.map((col) => (
                     <th key={col.key} style={{ padding: "12px 10px", textAlign: "center", width: 65 }}>
@@ -438,14 +441,46 @@ const StationControl = () => {
                     <tr key={row.stationNo} style={{ background: isEven ? "rgba(15,23,42,0.02)" : "transparent", borderBottom: "1px solid rgba(15,23,42,0.06)", transition: "background 0.15s" }}
                       onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(59,130,246,0.03)"; }}
                       onMouseLeave={(e) => { e.currentTarget.style.background = isEven ? "rgba(15,23,42,0.02)" : "transparent"; }}>
-                      <td style={{ padding: "12px 16px" }}>
+                      <td style={{ padding: "12px 20px", width: 380, minWidth: 380 }}>
                         <div>
                           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                             <div style={{ width: 3, height: 18, borderRadius: 2, background: T.blue, flexShrink: 0 }} />
                             <div>
                               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                                <p style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 13, color: "#0f172a", margin: 0 }}>{row.stationNo}</p>
-                                <span style={{ fontSize: 9, color: "rgba(51,65,85,0.5)", fontWeight: 600, background: "rgba(0,0,0,0.03)", padding: "2px 6px", borderRadius: 4 }}>SEQ {String(row.sequenceNo).padStart(2, "0")}</span>
+                                <p
+                                  title={row.machines.map((machine) => `${machine.machineName} | Operation: ${machine.operationNo}`).join("\n")}
+                                  style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 13, color: "#0f172a", margin: 0, cursor: "help" }}
+                                >
+                                  {row.displayName}
+                                </p>
+                                <span style={{
+                                  fontSize: 10,
+                                  color: "#1d4ed8",
+                                  fontWeight: 900,
+                                  background: "linear-gradient(135deg, rgba(59,130,246,0.16), rgba(14,165,233,0.10))",
+                                  border: "1px solid rgba(59,130,246,0.30)",
+                                  boxShadow: "0 4px 10px rgba(59,130,246,0.12)",
+                                  padding: "3px 8px",
+                                  borderRadius: 999,
+                                  letterSpacing: "0.04em",
+                                  lineHeight: 1,
+                                }}>SEQ {String(row.sequenceNo).padStart(2, "0")}</span>
+                              </div>
+                              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+                                {row.machines.slice(0, 3).map((machine) => (
+                                  <span
+                                    key={machine.id}
+                                    title={`Machine: ${machine.machineName} | Operation: ${machine.operationNo}`}
+                                    style={{ fontSize: 9, color: "rgba(15,23,42,0.72)", fontWeight: 700, background: "rgba(15,23,42,0.05)", padding: "2px 6px", borderRadius: 4, cursor: "help" }}
+                                  >
+                                    {machine.machineName} + {machine.operationNo}
+                                  </span>
+                                ))}
+                                {row.machines.length > 3 && (
+                                  <span style={{ fontSize: 9, color: "rgba(15,23,42,0.55)", fontWeight: 700, padding: "2px 4px" }}>
+                                    +{row.machines.length - 3} more
+                                  </span>
+                                )}
                               </div>
                               {row.lineNames.length > 0 && row.lineNames[0] !== "-" && (
                                 <div style={{ marginTop: 4 }}>

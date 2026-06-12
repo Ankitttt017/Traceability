@@ -104,9 +104,9 @@ function calculateProductionMetrics(rows) {
 
     return {
       partId: String(latestRow.partId || latestRow.part_id || "").trim(),
-      machineName: latestRow.machineName || "Unknown Machine",
-      shiftCode: latestRow.shiftCode || "Unknown Shift",
-      lineName: latestRow.lineName || "Unknown Line",
+      machineName: latestRow.anchorMachineName || latestRow.machineName || "Unknown Machine",
+      shiftCode: latestRow.anchorShiftCode || latestRow.shiftCode || "Unknown Shift",
+      lineName: latestRow.anchorLineName || latestRow.lineName || "Unknown Line",
       overallStatus,
       hasValidationReject,
     };

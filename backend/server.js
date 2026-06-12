@@ -60,6 +60,7 @@ const {
   ensurePerformanceColumnsExist,
   ensureTraceabilityColumnsExist,
   ensureScannerColumnsExist,
+  ensureScannerIpCanBeShared,
   ensurePlcLinkColumnsExist,
   ensureRoleAccessSchema,
   ensureUserRoleSchema,
@@ -437,6 +438,7 @@ async function startServer() {
       await runStartupDbTask("ensurePerformanceColumnsExist", () => ensurePerformanceColumnsExist());
       await runStartupDbTask("ensureTraceabilityColumnsExist", () => ensureTraceabilityColumnsExist());
       await runStartupDbTask("ensureScannerColumnsExist", () => ensureScannerColumnsExist());
+      await runStartupDbTask("ensureScannerIpCanBeShared", () => ensureScannerIpCanBeShared());
       await runStartupDbTask("ensurePlcLinkColumnsExist", () => ensurePlcLinkColumnsExist());
       await runStartupDbTask("ensureRoleAccessSchema", () => ensureRoleAccessSchema());
       await runStartupDbTask("ensureUserRoleSchema", () => ensureUserRoleSchema());

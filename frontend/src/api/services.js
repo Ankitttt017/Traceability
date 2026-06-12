@@ -532,14 +532,33 @@ export const industrialApi = {
   },
 };
 
+function normalizeReportFilters(params = {}) {
+  const source = params && typeof params === "object" ? params : {};
+  const out = { ...source };
+  const shiftToken = String(out.shiftCode || "").trim();
+  if (!shiftToken || ["ALL", "ANY", "ALL_SHIFTS", "ALL SHIFT", "ALL SHIFTS"].includes(shiftToken.toUpperCase())) {
+    delete out.shiftCode;
+  } else {
+    out.shiftCode = shiftToken;
+  }
+  const partSearch = String(out.partId || out.barcode || "").trim();
+  if (partSearch) {
+    out.partId = partSearch;
+    out.barcode = partSearch;
+  }
+  return out;
+}
+
 export const reportApi = {
   getData: async (params) => {
-    const { data } = await apiClient.get(ENDPOINTS.reports.data, { params });
+    const cleanParams = normalizeReportFilters(params);
+    const { data } = await apiClient.get(ENDPOINTS.reports.data, { params: cleanParams });
     return data;
   },
   exportFull: async (params, reportConfig) => {
+    const cleanParams = normalizeReportFilters(params);
     const { data } = await apiClient.post(ENDPOINTS.reports.exportFull, {
-      filters: params || {},
+      filters: cleanParams,
       reportConfig: reportConfig || loadReportConfig(),
     }, {
       responseType: "blob",
@@ -547,8 +566,9 @@ export const reportApi = {
     return data;
   },
   exportNG: async (params, reportConfig) => {
+    const cleanParams = normalizeReportFilters(params);
     const { data } = await apiClient.post(ENDPOINTS.reports.exportNG, {
-      filters: params || {},
+      filters: cleanParams,
       reportConfig: reportConfig || loadReportConfig(),
     }, {
       responseType: "blob",
@@ -556,8 +576,9 @@ export const reportApi = {
     return data;
   },
   exportParts: async (params, reportConfig) => {
+    const cleanParams = normalizeReportFilters(params);
     const { data } = await apiClient.post(ENDPOINTS.reports.exportParts, {
-      filters: params || {},
+      filters: cleanParams,
       reportConfig: reportConfig || loadReportConfig(),
     }, {
       responseType: "blob",
@@ -565,8 +586,9 @@ export const reportApi = {
     return data;
   },
   exportAudit: async (params, reportConfig) => {
+    const cleanParams = normalizeReportFilters(params);
     const { data } = await apiClient.post(ENDPOINTS.reports.exportAudit, {
-      filters: params || {},
+      filters: cleanParams,
       reportConfig: reportConfig || loadReportConfig(),
     }, {
       responseType: "blob",

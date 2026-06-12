@@ -509,7 +509,7 @@ async function hasRealCompletedOperationBefore(partId, currentStation, sequence)
     limit: 200,
   });
 
-  if (rows.some((row) => row?.is_bypassed !== true && isTerminalOperationLog(row))) {
+  if (rows.some((row) => row?.is_bypassed !== true && isSuccessfulOperationLog(row))) {
     return true;
   }
 
@@ -546,6 +546,14 @@ function isTerminalOperationLog(log) {
   }
 
   return ["OK", "NG", "PASS", "FAIL", "PASSED", "FAILED"].includes(result);
+}
+
+function isSuccessfulOperationLog(log) {
+  if (!log) return false;
+  const { plcStatus, result } = getNormalizedOperationState(log);
+  if (TERMINAL_SUCCESS_PLC_STATUSES.has(plcStatus)) return true;
+  if (TERMINAL_FAILURE_PLC_STATUSES.has(plcStatus) || NON_TERMINAL_PLC_STATUSES.has(plcStatus)) return false;
+  return ["OK", "PASS", "PASSED"].includes(result);
 }
 
 function normalizeResultSource(value) {
@@ -889,7 +897,7 @@ async function deriveSequenceStateFromHistory(partId, sequence) {
     const station = normalizeStation(log.station_no || log.operation_no);
     if (!station || !sequence.includes(station)) continue;
 
-    if (isTerminalOperationLog(log)) {
+    if (isSuccessfulOperationLog(log)) {
       completedStations.add(station);
     }
   }
@@ -1151,6 +1159,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     const partExpectedStation = getExpectedStation(part, sequence);
     const derivedSequenceState = await deriveSequenceStateFromHistory(normalizedPartId, sequence);
     const expectedStation = derivedSequenceState.expectedStation || partExpectedStation;
+    const nextStationAfterCurrent = stationSequenceIndex >= 0 ? (sequence[stationSequenceIndex + 1] || null) : null;
     const lastCompletedStation =
       derivedSequenceState.lastCompletedStation ||
       normalizeStation(part.current_operation || part.current_station);
@@ -1228,7 +1237,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
         reason: "ALREADY_COMPLETED",
         qrStatus: "DUPLICATE",
         operationStatus: "PASSED",
-        message: `Duplicate scan. Operation has already passed.`,
+        message: `Already completed at ${station}. ${nextStationAfterCurrent ? `Scan next at ${nextStationAfterCurrent}.` : "Final operation already done."}`,
         currentStatus: part.status
       };
     }
@@ -1258,8 +1267,10 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
         reason: "DUPLICATE_SCAN",
         qrStatus: "DUPLICATE",
         operationStatus: "PASSED",
-        message: `Duplicate scan. Operation has already passed.`,
+        message: `Already passed at ${station}. ${nextStationAfterCurrent ? `Scan next at ${nextStationAfterCurrent}.` : "No next operation."}`,
         currentStatus: part.status,
+        expectedStation: nextStationAfterCurrent,
+        lastCompletedStation: station,
         operationLogId: blockedLog.id,
       };
     }
@@ -1295,7 +1306,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
             reason: "PREVIOUS_STATION_NOT_COMPLETED",
             qrStatus: "BLOCKED",
             operationStatus: "INTERLOCKED",
-            message: `Previous station not completed. Expected ${expectedStation}.`,
+            message: `Wrong station. Scan ${expectedStation} first, then ${station}.`,
             expectedStation,
             lastCompletedStation,
             scannedStation: station,

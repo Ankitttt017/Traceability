@@ -168,16 +168,17 @@ function formatScanErrorMessage(payload = {}, t = (_key, fallback) => fallback) 
   const expected = String(payload.expectedStation || payload.expected_station || "").trim().toUpperCase();
   const rawMessage = String(payload.message || payload.error || "").trim();
   const msgUpper = rawMessage.toUpperCase();
-  if (reason === "DUPLICATE_SCAN") return "Duplicate scan. Operation has already passed.";
-  if (reason === "ALREADY_COMPLETED") return "Duplicate scan. Operation has already passed.";
+  if (reason === "DUPLICATE_SCAN") return rawMessage || "Already passed. Scan next operation.";
+  if (reason === "ALREADY_COMPLETED") return rawMessage || "Part already completed. No further operation.";
   if (reason === "DUPLICATE_SCAN_IN_FLIGHT") return "Scan already in progress. Wait for current cycle processing.";
   if (reason === "RESET_REQUIRED_AFTER_PLC_COMM_ERROR") return `Previous PLC cycle timed out at ${station || "station"}. Use Reset Operation, then scan again.`;
   if (reason.startsWith("PLC_TIMEOUT")) return "PLC response timeout. Use Reset Operation, then scan again.";
   if (reason === "PREVIOUS_STATION_NOT_COMPLETED") {
     const lastCompleted = String(payload.lastCompletedStation || payload.last_completed_station || "").trim().toUpperCase();
-    if (expected && lastCompleted) return `Sequence mismatch. Scan at ${expected} first. Last completed station: ${lastCompleted}.`;
-    if (expected) return `Sequence mismatch. Scan at ${expected} first.`;
-    return "Station sequence error. Previous station is not completed.";
+    if (rawMessage) return rawMessage;
+    if (expected && lastCompleted) return `Wrong station. Scan ${expected} first. Last OK: ${lastCompleted}.`;
+    if (expected) return `Wrong station. Scan ${expected} first.`;
+    return "Wrong station. Previous OP not completed.";
   }
   if (reason === "INVALID_QR_FORMAT") return rawMessage || "Invalid QR format. Scan correct component code.";
   if (reason === "PART_NOT_FOUND" || msgUpper.includes("PART NOT FOUND") || msgUpper.includes("NOT FOUND IN MOULDING")) {
@@ -193,9 +194,9 @@ function formatScanErrorMessage(payload = {}, t = (_key, fallback) => fallback) 
   if (reason === "CUSTOMER_CODE_RULE_INVALID") return "Customer code rule configuration is invalid. Contact supervisor.";
   if (reason === "INVALID_INPUT") return "Invalid scan input. Re-scan the QR code.";
   if (reason === "SCAN_RESULT_NG") return "This part is marked NG. Please reject this part and send to rejection flow.";
-  if (msgUpper.includes("PREVIOUS_STATION_NOT_COMPLETED")) return expected ? `Previous station not completed with OP number ${expected}.` : "Station sequence error. Previous station not completed.";
+  if (msgUpper.includes("PREVIOUS_STATION_NOT_COMPLETED")) return expected ? `Wrong station. Scan ${expected} first.` : "Wrong station. Previous OP not completed.";
   if (msgUpper.includes("INVALID_QR_FORMAT") || msgUpper.includes("QR FORMAT MISMATCH")) return "QR format mismatch. Scan correct component code.";
-  if (msgUpper.includes("DUPLICATE_SCAN") || msgUpper.includes("ALREADY_COMPLETED")) return "Duplicate scan. Operation has already passed.";
+  if (msgUpper.includes("DUPLICATE_SCAN") || msgUpper.includes("ALREADY_COMPLETED")) return rawMessage || "Already passed. Scan next operation.";
   if (msgUpper.includes("SCAN_RESULT_NG")) return "This part is marked NG. Send it to rejection flow.";
   if (reason) return reason.replaceAll("_", " ");
   return rawMessage.replace(/\s+/g, " ").trim() || "Process blocked. Contact supervisor.";
@@ -734,6 +735,10 @@ const OperatorView = () => {
   const machineClock = formatElapsed(liveState?.current?.createdAt || liveState?.lastEvent?.createdAt, clockTick);
 
   const currentContext = liveState?.current || stationStats?.current || liveState?.lastEvent || stationStats?.lastEvent || null;
+  const statsWindow = stationStats?.filters || {};
+  const statsWindowLabel = statsWindow?.from || statsWindow?.to
+    ? `${fmtTime(statsWindow.from)} - ${fmtTime(statsWindow.to)}`
+    : "";
   const hasLiveState = Boolean(liveState);
   const plcHealth = hasLiveState ? liveState?.plcHealth || null : stationStats?.plcHealth || null;
   const scannerHealth = hasLiveState ? liveState?.scannerHealth || null : stationStats?.scannerHealth || null;
@@ -2106,6 +2111,7 @@ const OperatorView = () => {
                   <InfoRow label={t("operatorView.status", "Status")} value={currentContext?.plcStatus || "WAITING"} />
                   <InfoRow label={t("operatorView.lastPart", "Last Part")} value={currentContext?.partId} mono />
                   <InfoRow label={t("operatorView.updated", "Updated")} value={fmtTime(currentContext?.createdAt)} />
+                  <InfoRow label={t("operatorView.statsWindow", "Stats Window")} value={statsWindowLabel} />
                 </div>
               </div>
             </Card>
