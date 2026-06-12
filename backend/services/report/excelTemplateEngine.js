@@ -6,6 +6,8 @@
 
 const ExcelJS = require("exceljs");
 const { formatIndustrialTimestamp, resolveIndustrialResult } = require("./reportFormatter");
+const { Op } = require("sequelize");
+const PartCodeMapping = require("../../models/PartCodeMapping");
 const DEFAULT_PLC_CYCLE_COLUMNS = [
   "machine_name","shot_date","shot_time","shot_number","cycle_time",
   "die_close_core_in_time","pouring_time","shot_fwd_time","curing_time","die_open_core_out_time",
@@ -19,16 +21,63 @@ const DEFAULT_PLC_CYCLE_COLUMNS = [
 ];
 const LEAK_TEST_OPERATION = "OP150";
 const LEAK_TEST_COLUMNS = [
-  { key: "Body_Leak_Value", header: "Body Leak Value", width: 18 },
-  { key: "Gall_1", header: "Gall_1", width: 14 },
-  { key: "Gall_2", header: "Gall_2", width: 14 },
-  { key: "Cycle_Time", header: "Cycle Time", width: 14 },
+  { key: "Body_Leak_Value", header: "Body Leak Value", unit: "mbar", width: 18 },
+  { key: "Gall_1", header: "Gall_1", unit: "mbar", width: 14 },
+  { key: "Gall_2", header: "Gall_2", unit: "mbar", width: 14 },
+  { key: "Cycle_Time", header: "Cycle Time", unit: "s", width: 14 },
   { key: "Running_Mode", header: "Running Mode", width: 16 },
-  { key: "Manual", header: "Manual", width: 12 },
-  { key: "Dry", header: "Dry", width: 12 },
-  { key: "Wey", header: "Wey", width: 12 },
-  { key: "Both", header: "Both", width: 12 },
+  { key: "Dry_Wey_Both", header: "Dry/Wey", width: 14 },
 ];
+const PLC_COLUMN_UNITS = {
+  cycle_time: "s",
+  die_close_core_in_time: "s",
+  pouring_time: "s",
+  shot_fwd_time: "s",
+  curing_time: "s",
+  die_open_core_out_time: "s",
+  ejector_time: "s",
+  extract_time: "s",
+  spray_time: "s",
+  intensification_time: "s",
+  time_for_stroke: "s",
+  v1_speed: "m/s",
+  v2_speed: "m/s",
+  v3_speed: "m/s",
+  v4_speed: "m/s",
+  metal_pressure: "bar",
+  jet_cooling_pressure: "bar",
+  vacuum_pressure: "mmHg",
+  vacuum_pressure_mmhg: "mmHg",
+  shot_acc_pressure: "bar",
+  intensification_acc_pressure: "bar",
+  furnace_metal_temp: "°C",
+  fixed_die_temp_f1: "°C",
+  fixed_die_temp_f2: "°C",
+  moving_die_temp_m1: "°C",
+  moving_die_temp_m2: "°C",
+  slide_temp_s1: "°C",
+  cooling_water_mov: "°C",
+  cooling_water_sta: "°C",
+  clamp_tonnage_he_low_pct: "%",
+  clamp_tonnage_op_up_pct: "%",
+  clamp_tonnage_op_low_pct: "%",
+  clamp_tonnage_he_up_pct: "%",
+  clamp_force_pct: "%",
+  clamp_tonnage_he_low_mn: "MN",
+  clamp_tonnage: "T",
+  biscuit_thickness: "mm",
+  accel_point: "mm",
+  deaccel_point: "mm",
+  stroke: "mm",
+  fix_1_flow: "L/min",
+  fix_2_flow: "L/min",
+  fix_3_flow: "L/min",
+  mov_1_flow: "L/min",
+  mov_2_flow: "L/min",
+  mov_3_flow: "L/min",
+  average_die_clamp_tonnage_count: "count",
+};
+const withUnit = (label, unit) => unit ? `${label} (${unit})` : label;
 
 function stationResultRank(value) {
   const normalized = String(value || "").trim().toUpperCase();
@@ -48,13 +97,46 @@ function getLeakTestStatus(reading) {
 }
 function getLeakTestValue(reading, key) {
   if (!reading) return "-";
+  if (key === "Dry_Wey_Both") {
+    const isTruthy = (value) => value === true || String(value ?? "").trim().toUpperCase() === "TRUE" || String(value ?? "").trim() === "1";
+    if (isTruthy(reading.Both)) return "Both";
+    if (isTruthy(reading.Dry)) return "Dry";
+    if (isTruthy(reading.Wey) || isTruthy(reading.Way)) return "Wey";
+    return "-";
+  }
   if (key === "Machine") return reading.Machine || reading.machineName || reading.matchedMachineName || "-";
   if (key === "Cycle_End_Time") {
     const raw = reading.Cycle_End_Time || reading.cycleEndTime || "";
     return raw ? formatIndustrialTimestamp(raw) : "-";
   }
   const value = reading[key];
+  if (key === "Running_Mode") {
+    const normalizedMode = String(value ?? "").trim();
+    if (!normalizedMode) return "-";
+    const upper = normalizedMode.toUpperCase();
+    if (upper === "MANUAL") return "Manual";
+    if (upper === "AUTO" || upper === "AUTOMATIC") return "Auto";
+    return normalizedMode;
+  }
+  if (typeof value === "boolean") return value ? key : "-";
+  const normalized = String(value ?? "").trim();
+  if (["TRUE", "FALSE"].includes(normalized.toUpperCase())) {
+    return normalized.toUpperCase() === "TRUE" ? key : "-";
+  }
   return value === undefined || value === null || value === "" ? "-" : value;
+}
+
+function getCustomerQrFromRow(row = {}) {
+  return String(
+    row.customerQrCode ||
+    row.customerCode ||
+    row.customer_qr ||
+    row.customerQRCode ||
+    row.customerQR ||
+    row.mappedCustomerQr ||
+    row.mappedCustomerQrCode ||
+    ""
+  ).trim();
 }
 
 function nowStamp() {
@@ -203,6 +285,7 @@ async function generateIndustrialExcel(res, {
       grouped.set(partSerial, {
         partSerial,
         machineName: row.machineName || "-",
+        customerQrCode: getCustomerQrFromRow(row) || "-",
         createdAt: row.createdAt || row.created_at || "-",
         cycleStart: row.cycleStartTime || "-",
         cycleEnd: row.cycleEndTime || "-",
@@ -220,6 +303,10 @@ async function generateIndustrialExcel(res, {
       });
     }
     const bucket = grouped.get(partSerial);
+    const rowCustomerQr = getCustomerQrFromRow(row);
+    if ((!bucket.customerQrCode || bucket.customerQrCode === "-") && rowCustomerQr) {
+      bucket.customerQrCode = rowCustomerQr;
+    }
     const machineName = String(row.machineName || row.machine_name || row?.Machine?.machine_name || "").trim();
     const op = String(row.operation_no || row.operationNo || row.stationNo || "").trim();
     const stationKey = machineName && op ? `${machineName}__${op}` : "";
@@ -253,18 +340,50 @@ async function generateIndustrialExcel(res, {
   });
 
   const matrixRows = [...grouped.values()];
+  const missingCustomerQrPartIds = matrixRows
+    .filter((row) => !row.customerQrCode || row.customerQrCode === "-")
+    .map((row) => String(row.partSerial || "").trim())
+    .filter(Boolean);
+  if (missingCustomerQrPartIds.length > 0) {
+    const mappings = await PartCodeMapping.findAll({
+      where: {
+        [Op.or]: [
+          { old_part_id: { [Op.in]: [...new Set(missingCustomerQrPartIds)] } },
+          { customer_qr: { [Op.in]: [...new Set(missingCustomerQrPartIds)] } },
+        ],
+        is_active: true,
+      },
+      attributes: ["old_part_id", "customer_qr"],
+      raw: true,
+    });
+    const qrByPart = mappings.reduce((acc, row) => {
+      const partId = String(row.old_part_id || "").trim().toUpperCase();
+      const customerQr = String(row.customer_qr || "").trim();
+      if (partId && customerQr && !acc[partId]) acc[partId] = customerQr;
+      if (customerQr && !acc[customerQr.toUpperCase()]) acc[customerQr.toUpperCase()] = customerQr;
+      return acc;
+    }, {});
+    matrixRows.forEach((row) => {
+      const mappedQr = qrByPart[String(row.partSerial || "").trim().toUpperCase()];
+      if (mappedQr && (!row.customerQrCode || row.customerQrCode === "-")) {
+        row.customerQrCode = mappedQr;
+      }
+    });
+  }
 
   const tableHeaderRow = 14;
   const baseColumns = [
     { header: "SR NO", width: 8 },
-    { header: "Part Serial No", width: 28 },
-    { header: "Date & Time", width: 22 },
-    { header: "Part Name", width: 22 },
+    { header: "Shot Number", width: 14 },
+    { header: "Part Serial No.", width: 28 },
     { header: "Customer QR Code", width: 20 },
+    { header: "Part Name", width: 22 },
+    { header: "Machine Name", width: 22 },
+    { header: "Scanned Date & Time", width: 22 },
   ];
   const stationColumns = stationPairsFinal.map((s) => ({ header: s.label, width: 24 }));
   const finalColumn = [{ header: "Final Status", width: 16 }];
-  const plcKeys = DEFAULT_PLC_CYCLE_COLUMNS;
+  const plcKeys = ["shot_datetime", ...DEFAULT_PLC_CYCLE_COLUMNS.filter((key) => !["machine_name", "shot_number", "shot_date", "shot_time"].includes(key))];
   const formatPlcHeader = (key) => {
     const raw = String(key || "").trim().toLowerCase();
     const friendly = {
@@ -272,6 +391,7 @@ async function generateIndustrialExcel(res, {
       shot_date: "Shot Date",
       shot_time: "Shot Time",
       shot_number: "Shot Number",
+      shot_datetime: "Shot Date & Time",
       shot_status: "Shot Status",
       cycle_time: "Cycle Time",
     };
@@ -285,11 +405,17 @@ async function generateIndustrialExcel(res, {
       .join(" ");
   };
   const plcColumns = plcKeys.map((key) => ({
-    header: formatPlcHeader(key),
+    header: withUnit(formatPlcHeader(key), PLC_COLUMN_UNITS[key]),
     key,
     width: Math.min(Math.max(String(key).length + 6, 14), 28),
   }));
-  const tailColumns = [...LEAK_TEST_COLUMNS, { header: "Reason / Remark", width: 34 }];
+  const tailColumns = [
+    ...LEAK_TEST_COLUMNS.map((column) => ({
+      ...column,
+      header: withUnit(column.header, column.unit),
+    })),
+    { header: "Reason / Remark", width: 34 },
+  ];
   const columns = [...baseColumns, ...stationColumns, ...finalColumn, ...plcColumns, ...tailColumns];
 
   columns.forEach((col, i) => {
@@ -318,15 +444,30 @@ async function generateIndustrialExcel(res, {
         ? "PASSED"
         : "IN_PROGRESS";
     const plc = row.plcReading || {};
+    const shotNumber = plc.shot_number || row.shotNumber || row.shot_number || "-";
     const values = [
       i + 1,
+      shotNumber,
       row.partSerial,
-      row.cycleStart,
+      getCustomerQrFromRow(row) || row.customerQrCode || "-",
       (row.plcReading && row.plcReading.part_name) || "-",
-      row.customerQrCode || row.customer_qr || "-",
+      (row.plcReading && row.plcReading.machine_name) || row.machineName || "-",
+      row.cycleStart,
       ...stationResults,
       overall,
       ...plcColumns.map((c) => {
+        if (c.key === "shot_datetime") {
+          const y = plc.shot_year;
+          const m = plc.shot_month;
+          const d = plc.shot_day;
+          const hh = plc.shot_hour;
+          const mm = plc.shot_minute;
+          const ss = plc.shot_second;
+          if (y !== undefined && m !== undefined && d !== undefined && hh !== undefined && mm !== undefined && ss !== undefined) {
+            return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")} ${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+          }
+          return `${plc.shot_date || "-"} ${plc.shot_time || ""}`.trim();
+        }
         if (c.key === "shot_status") {
           const code = Number(plc.shot_status);
           return ({ 1: "OK", 3: "WARM UP SHOT", 5: "OFF SHOT" }[code] || (plc.shot_status ?? "-"));

@@ -22,16 +22,63 @@ const DEFAULT_PLC_CYCLE_COLUMNS = [
 const LEAK_TEST_OPERATION = "OP150";
 const LEAK_TEST_SHARED_KEY = "__LEAK_TEST_OP150__";
 const LEAK_TEST_COLUMNS = [
-  { key: "Body_Leak_Value", label: "Body Leak Value" },
-  { key: "Gall_1", label: "Gall_1" },
-  { key: "Gall_2", label: "Gall_2" },
-  { key: "Cycle_Time", label: "Cycle Time" },
+  { key: "Body_Leak_Value", label: "Body Leak Value", unit: "mbar" },
+  { key: "Gall_1", label: "Gall_1", unit: "mbar" },
+  { key: "Gall_2", label: "Gall_2", unit: "mbar" },
+  { key: "Cycle_Time", label: "Cycle Time", unit: "s" },
   { key: "Running_Mode", label: "Running Mode" },
-  { key: "Manual", label: "Manual" },
-  { key: "Dry", label: "Dry" },
-  { key: "Wey", label: "Wey" },
-  { key: "Both", label: "Both" },
+  { key: "Dry_Wey_Both", label: "Dry/Wey" },
 ];
+const PLC_COLUMN_UNITS = {
+  cycle_time: "s",
+  die_close_core_in_time: "s",
+  pouring_time: "s",
+  shot_fwd_time: "s",
+  curing_time: "s",
+  die_open_core_out_time: "s",
+  ejector_time: "s",
+  extract_time: "s",
+  spray_time: "s",
+  intensification_time: "s",
+  time_for_stroke: "s",
+  v1_speed: "m/s",
+  v2_speed: "m/s",
+  v3_speed: "m/s",
+  v4_speed: "m/s",
+  metal_pressure: "bar",
+  jet_cooling_pressure: "bar",
+  vacuum_pressure: "mmHg",
+  vacuum_pressure_mmhg: "mmHg",
+  shot_acc_pressure: "bar",
+  intensification_acc_pressure: "bar",
+  furnace_metal_temp: "°C",
+  fixed_die_temp_f1: "°C",
+  fixed_die_temp_f2: "°C",
+  moving_die_temp_m1: "°C",
+  moving_die_temp_m2: "°C",
+  slide_temp_s1: "°C",
+  cooling_water_mov: "°C",
+  cooling_water_sta: "°C",
+  clamp_tonnage_he_low_pct: "%",
+  clamp_tonnage_op_up_pct: "%",
+  clamp_tonnage_op_low_pct: "%",
+  clamp_tonnage_he_up_pct: "%",
+  clamp_force_pct: "%",
+  clamp_tonnage_he_low_mn: "MN",
+  clamp_tonnage: "T",
+  biscuit_thickness: "mm",
+  accel_point: "mm",
+  deaccel_point: "mm",
+  stroke: "mm",
+  fix_1_flow: "L/min",
+  fix_2_flow: "L/min",
+  fix_3_flow: "L/min",
+  mov_1_flow: "L/min",
+  mov_2_flow: "L/min",
+  mov_3_flow: "L/min",
+  average_die_clamp_tonnage_count: "count",
+};
+const withUnit = (label, unit) => unit ? `${label} (${unit})` : label;
 const getLeakTestStatus = (reading) => {
   const result = String(reading?.Result || reading?.result || "").trim().toUpperCase();
   if (result === "OK") return "OK";
@@ -41,6 +88,13 @@ const getLeakTestStatus = (reading) => {
 };
 const getLeakTestValue = (reading, key) => {
   if (!reading) return "-";
+  if (key === "Dry_Wey_Both") {
+    const isTruthy = (value) => value === true || String(value ?? "").trim().toUpperCase() === "TRUE" || String(value ?? "").trim() === "1";
+    if (isTruthy(reading.Both)) return "Both";
+    if (isTruthy(reading.Dry)) return "Dry";
+    if (isTruthy(reading.Wey) || isTruthy(reading.Way)) return "Wey";
+    return "-";
+  }
   if (key === "Machine") {
     return reading.Machine || reading.machineName || reading.matchedMachineName || "-";
   }
@@ -50,7 +104,21 @@ const getLeakTestValue = (reading, key) => {
     const parsed = new Date(raw);
     return Number.isNaN(parsed.getTime()) ? String(raw) : parsed.toLocaleString("en-IN");
   }
-  return reading[key] ?? "-";
+  const value = reading[key];
+  if (key === "Running_Mode") {
+    const normalizedMode = String(value ?? "").trim();
+    if (!normalizedMode) return "-";
+    const upper = normalizedMode.toUpperCase();
+    if (upper === "MANUAL") return "Manual";
+    if (upper === "AUTO" || upper === "AUTOMATIC") return "Auto";
+    return normalizedMode;
+  }
+  if (typeof value === "boolean") return value ? key : "-";
+  const normalized = String(value ?? "").trim();
+  if (["TRUE", "FALSE"].includes(normalized.toUpperCase())) {
+    return normalized.toUpperCase() === "TRUE" ? key : "-";
+  }
+  return value ?? "-";
 };
 
 const normResult = (v, reason = "", row = null) => {
@@ -322,7 +390,10 @@ const ReportsPage = () => {
     const plcKeys = DEFAULT_PLC_CYCLE_COLUMNS.filter((key) => !["machine_name", "shot_number", "shot_date", "shot_time"].includes(key));
     const plcColumns = (() => {
       const used = new Map();
-      const baseColumns = [{ key: "shot_datetime", label: "Shot Date & Time" }, ...plcKeys.map((key) => ({ key, label: formatPlcColumnLabel(key) }))];
+      const baseColumns = [
+        { key: "shot_datetime", label: "Shot Date & Time" },
+        ...plcKeys.map((key) => ({ key, label: withUnit(formatPlcColumnLabel(key), PLC_COLUMN_UNITS[key]) }))
+      ];
       return baseColumns.map(({ key, label: initialLabel }) => {
         const base = initialLabel;
         const count = used.get(base) || 0;
@@ -354,7 +425,7 @@ const ReportsPage = () => {
       })),
       { key: "overallStatus", label: "Final Status" },
       ...plcColumns.map((c) => ({ key: `plc_${c.key}`, label: c.label })),
-      ...LEAK_TEST_COLUMNS.map((c) => ({ key: `leak_${c.key}`, label: c.label })),
+      ...LEAK_TEST_COLUMNS.map((c) => ({ key: `leak_${c.key}`, label: withUnit(c.label, c.unit) })),
       { key: "ngReason", label: "Reason / Remark" },
     ];
 

@@ -213,6 +213,14 @@ function getLeakResultMeta(reading) {
   if (result === "NG") return { variant: "ng", label: "Leak NG" };
   return { variant: "idle", label: "Leak -" };
 }
+function getStationDisplayLabel(station) {
+  const stationNo = String(station?.stationNo || station?.operationNo || "").trim();
+  const machineName = String(station?.machineName || station?.stationName || station?.matchedMachineName || "").trim();
+  const operationNo = String(station?.operationNo || stationNo || "").trim();
+  if (machineName && operationNo) return `${machineName} + ${operationNo}`;
+  if (machineName) return machineName;
+  return stationNo || "Station";
+}
 function getPartMeta(status) {
   const s=String(status||"").trim().toUpperCase();
   if (["COMPLETED", "PASSED", "COMPLETED_OK"].includes(s)) return {label:"Pass", variant:"ok"};
@@ -1409,7 +1417,7 @@ const ComponentJourney = () => {
                         </div>
                         <div>
                           <p style={{fontSize:13,fontWeight:800,color:C.txt("primary"),letterSpacing:"0.01em"}}>
-                            {station.stationNo}
+                            {getStationDisplayLabel(station)}
                           </p>
                           <p style={{fontSize:11,color:C.txt("muted"),marginTop:2,
                             fontFamily:"'DM Mono',monospace"}}>

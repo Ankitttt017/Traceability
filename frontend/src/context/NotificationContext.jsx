@@ -94,11 +94,14 @@ export const NotificationProvider = ({ children }) => {
     });
 
     socket.on("scan_event", (data) => {
-      if (data && String(data.status).toUpperCase() === "NG") {
+      const status = String(data?.status || data?.plcStatus || data?.operationStatus || "").toUpperCase();
+      const decision = String(data?.decision || data?.qrResult || "").toUpperCase();
+      const reason = String(data?.reason || "").toUpperCase();
+      if (data && (status.includes("NG") || decision === "BLOCK" || reason.includes("NG"))) {
         addNotification({
           type: "warning",
-          message: `NG Scan: ${data.partId || "Unknown"}`,
-          detail: `Station: ${data.stationNo || "Unknown"}`,
+          message: `Station Alert: ${data.partId || "Unknown"}`,
+          detail: `${data.machineName || data.stationNo || "Station"}${reason ? ` - ${reason.replace(/_/g, " ")}` : ""}`,
         });
       }
     });

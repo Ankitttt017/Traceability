@@ -93,8 +93,41 @@ async function resolveMappedPartId(inputCode) {
   };
 }
 
+async function resolvePartIdSearchValues(inputCode) {
+  const raw = String(inputCode || "").trim();
+  if (!raw) return [];
+  const mappings = await PartCodeMapping.findAll({
+    where: {
+      is_active: true,
+      [Op.or]: [
+        { customer_qr: { [Op.like]: `%${raw}%` } },
+        { old_part_id: { [Op.like]: `%${raw}%` } },
+      ],
+    },
+    attributes: ["old_part_id", "customer_qr"],
+    raw: true,
+  });
+  return uniqueStages([
+    raw,
+    ...mappings.map((row) => String(row.old_part_id || "").trim()),
+  ].filter(Boolean));
+}
+
+function buildPartIdSearchCondition(searchValues) {
+  const values = Array.isArray(searchValues) ? searchValues.map((value) => String(value || "").trim()).filter(Boolean) : [];
+  if (!values.length) return null;
+  return { [Op.or]: values.map((value) => ({ [Op.like]: `%${value}%` })) };
+}
+
 function getMachineOperationStage(machine) {
-  return normalizeStation(machine?.operation_no);
+  return normalizeStation(getModelValue(machine, "operation_no"));
+}
+
+function getModelValue(model, key) {
+  if (!model || !key) return undefined;
+  if (typeof model.get === "function") return model.get(key);
+  if (Object.prototype.hasOwnProperty.call(model, key)) return model[key];
+  return model?.dataValues?.[key];
 }
 
 function parseMachineDataRegisterRanges(machine) {
@@ -736,6 +769,35 @@ const JOURNEY_NOISE_REASONS = new Set([
   "ALREADY_SCANNED",
 ]);
 
+const CUSTOMER_QR_WAITING_OPERATIONS = new Set(["LASER", "LASER_MARKING", "LASER MARKING", "OP_LASER", "OP160", "OP170"]);
+
+function requiresCustomerQrForCompletion(machine = {}) {
+  const tokens = [
+    getModelValue(machine, "operation_no"),
+    getModelValue(machine, "machine_name"),
+  ].map((value) => String(value || "").trim().toUpperCase());
+  return tokens.some((token) => CUSTOMER_QR_WAITING_OPERATIONS.has(token) || token.includes("LASER"));
+}
+
+async function shouldBlockMappedCustomerQrOnStartScan(stationNo) {
+  const station = normalizeStation(stationNo);
+  if (!station) return false;
+  const sequenceData = await getActiveMachineSequenceData();
+  const sequence = Array.isArray(sequenceData?.sequence) ? sequenceData.sequence : [];
+  const currentIndex = sequence.indexOf(station);
+  const customerQrStationIndex = sequence.findIndex((candidateStation) => {
+    const machines = (sequenceData?.machines || []).filter((machine) => getMachineOperationStage(machine) === candidateStation);
+    return machines.some((machine) => requiresCustomerQrForCompletion(machine));
+  });
+  if (customerQrStationIndex < 0) return true;
+  if (currentIndex < 0) return false;
+  return currentIndex <= customerQrStationIndex;
+}
+
+function wrongCustomerQrAtStartMessage(stationNo) {
+  return `Wrong QR scanned at ${normalizeStation(stationNo) || "this station"}. Scan Part Serial/Casting QR here. Customer QR is allowed only after Laser Marking.`;
+}
+
 function isJourneyNoiseLog(log) {
   if (!log) return false;
   const plcStatus = String(log.plc_status || "").trim().toUpperCase();
@@ -1099,13 +1161,14 @@ function getBlockedPopupMessage(scanResult = {}) {
   const message = scanResult?.message || "";
 
   if (reason === "PREVIOUS_STATION_NOT_COMPLETED") {
+    if (message) return message;
     if (scanResult?.expectedStation && scanResult?.lastCompletedStation) {
-      return `Sequence mismatch. Scan at ${scanResult.expectedStation} first. Last completed station: ${scanResult.lastCompletedStation}.`;
+      return `Wrong station. Scan ${scanResult.expectedStation} first. Last OK: ${scanResult.lastCompletedStation}.`;
     }
-    return `Station sequence skipped! Please complete operation at ${scanResult.expectedStation || "the previous station"} first.`;
+    return `Wrong station. Scan ${scanResult.expectedStation || "previous OP"} first.`;
   }
   if (reason === "DUPLICATE_SCAN" || reason === "DUPLICATE_SCAN_IN_FLIGHT" || reason === "ALREADY_COMPLETED") {
-    return `This part has already completed the ${scanResult.stationNo || "current"} operation. Duplicate scan detected.`;
+    return message || `Already passed at ${scanResult.stationNo || "this OP"}. Scan next operation.`;
   }
   // If it's a validation error, prefer the dynamic error message passed from the backend
   if (reason === "VALIDATION_ERROR" && message) {
@@ -2387,7 +2450,9 @@ exports.getIoSnapshot = async (req, res) => {
 
 exports.getPartJourney = async (req, res) => {
   try {
-    const { partId } = req.params;
+    const requestedPartId = String(req.params.partId || "").trim();
+    const resolvedCode = await resolveMappedPartId(requestedPartId);
+    const partId = resolvedCode.resolvedPartId || requestedPartId;
     const [part, logs, reworkHistory, auditLogs, sequenceData] = await Promise.all([
       Part.findOne({ where: { part_id: partId } }),
       OperationLog.findAll({
@@ -2409,7 +2474,7 @@ exports.getPartJourney = async (req, res) => {
     if (!part && logs.length === 0) {
       return res.json({
         part: {
-          part_id: partId,
+          part_id: requestedPartId,
           status: "NOT_FOUND",
           current_station: null,
           current_operation: null,
@@ -2442,11 +2507,24 @@ exports.getPartJourney = async (req, res) => {
         : [];
 
     const machineMap = machineRows.reduce((acc, machine) => {
-      acc[machine.id] = {
-        id: machine.id,
-        machineName: machine.machine_name,
+      const machineId = getModelValue(machine, "id");
+      acc[machineId] = {
+        id: machineId,
+        machineName: getModelValue(machine, "machine_name"),
         stationNo: getMachineOperationStage(machine),
-        sequenceNo: machine.sequence_no,
+        sequenceNo: getModelValue(machine, "sequence_no"),
+      };
+      return acc;
+    }, {});
+    const stationMachineMeta = (Array.isArray(sequenceData?.machines) ? sequenceData.machines : []).reduce((acc, machine) => {
+      const station = getMachineOperationStage(machine);
+      if (!station || acc[station]) return acc;
+      acc[station] = {
+        machineId: getModelValue(machine, "id"),
+        machineName: getModelValue(machine, "machine_name"),
+        stationNo: station,
+        sequenceNo: getModelValue(machine, "sequence_no"),
+        requiresCustomerQr: requiresCustomerQrForCompletion(machine),
       };
       return acc;
     }, {});
@@ -2520,6 +2598,7 @@ exports.getPartJourney = async (req, res) => {
           : sequenceData.sequence[currentIndex + 1] || null;
 
     const stationTimeline = knownStations.map((stationNo, idx) => {
+      const stationMeta = stationMachineMeta[stationNo] || null;
       const leakTestReading = stationNo === LEAKTEST_OPERATION
         ? getLeaktestReadingForPartStation(leaktestIndex, partId, stationNo)
         : null;
@@ -2551,6 +2630,11 @@ exports.getPartJourney = async (req, res) => {
       const representativeAttempt = productionAttempt || latestAttempt;
 
       let stageState = "PENDING";
+      const waitingForCustomerQr = Boolean(
+        stationMeta?.requiresCustomerQr &&
+        !customerMappingByStation[stationNo]?.customerQrCode
+      );
+
       if (leakTestReading) {
         stageState = getLeaktestStageState(leakTestReading);
       } else if (endedOkAttempt) {
@@ -2571,6 +2655,10 @@ exports.getPartJourney = async (req, res) => {
         stageState = "NEXT";
       }
 
+      if (waitingForCustomerQr && stageState === "PASSED") {
+        stageState = "IN_PROGRESS";
+      }
+
       // ── Cycle timing: QR scan time → operation end time
       // cycleStartTime = createdAt of the PENDING log (moment QR was scanned)
       const pendingAttempt = attempts.find(a => a.plcStatus === "PENDING" || a.plcStatus === "STARTED");
@@ -2582,6 +2670,10 @@ exports.getPartJourney = async (req, res) => {
 
       return {
         stationNo,
+        stationName: stationMeta?.machineName || representativeAttempt?.machine?.machineName || null,
+        machineName: stationMeta?.machineName || representativeAttempt?.machine?.machineName || leakTestReading?.matchedMachineName || null,
+        operationNo: stationMeta?.stationNo || representativeAttempt?.machine?.stationNo || stationNo,
+        machineId: stationMeta?.machineId || representativeAttempt?.machine?.id || null,
         sequenceIndex: idx + 1,
         stageState,
         isNextExpected: expectedNextStation === stationNo,
@@ -2596,7 +2688,6 @@ exports.getPartJourney = async (req, res) => {
         cycleDurationSec,
         attempts,
         leakTestReading,
-        machineName: leakTestReading?.matchedMachineName || null,
         customerQrCode: customerMappingByStation[stationNo]?.customerQrCode || null,
         customerQrMappedAt: customerMappingByStation[stationNo]?.customerQrMappedAt || null,
         customerQrMachineId: customerMappingByStation[stationNo]?.customerQrMachineId || null,
@@ -2650,13 +2741,15 @@ exports.getPartCatalog = async (req, res) => {
     const machineIdFilter = Number(req.query.machineId || 0) || null;
     const operatorIdFilter = Number(req.query.operatorId || 0) || null;
     const partIdFilter = String(req.query.partId || "").trim();
+    const searchPartValues = search ? await resolvePartIdSearchValues(search) : [];
+    const partIdSearchValues = partIdFilter ? await resolvePartIdSearchValues(partIdFilter) : [];
 
     const partWhere = {};
     if (search) {
-      partWhere.part_id = { [Op.like]: `%${search}%` };
+      partWhere.part_id = buildPartIdSearchCondition(searchPartValues) || { [Op.like]: `%${search}%` };
     }
     if (partIdFilter) {
-      partWhere.part_id = { [Op.like]: `%${partIdFilter}%` };
+      partWhere.part_id = buildPartIdSearchCondition(partIdSearchValues) || { [Op.like]: `%${partIdFilter}%` };
     }
     if (statusFilter && ["IN_PROGRESS", "COMPLETED", "NG", "INTERLOCKED", "REWORK"].includes(statusFilter)) {
       partWhere.status = statusFilter;
@@ -3177,6 +3270,33 @@ exports.processScan = async (req, res) => {
     customerQrCode = resolvedCode.customerQrCode;
     const isMappedCustomerQrScan = Boolean(customerQrCode) && customerQrCode === scannedQrRaw;
 
+    if (isMappedCustomerQrScan && await shouldBlockMappedCustomerQrOnStartScan(normalizedStation)) {
+      const message = wrongCustomerQrAtStartMessage(normalizedStation);
+      emitOperatorPopup("ERROR", {
+        partId: normalizedPartId,
+        customerQrCode,
+        stationNo: normalizedStation,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "BLOCKED",
+        plcStatus: "BLOCKED",
+        qrResult: "FAIL",
+        operationStatus: "BLOCKED",
+        reason: "CUSTOMER_QR_NOT_ALLOWED_AT_START_STATION",
+        message,
+      });
+      return res.status(409).json({
+        decision: "BLOCK",
+        reason: "CUSTOMER_QR_NOT_ALLOWED_AT_START_STATION",
+        qrStatus: "FAILED",
+        operationStatus: "BLOCKED",
+        message,
+        partId: normalizedPartId,
+        customerQrCode,
+        stationNo: normalizedStation,
+      });
+    }
+
     const stationFeatures = await getStationFeatureConfig(normalizedStation);
     const spcConfig = getMachineSpcConfig(machine);
     const rejectionBinConfirmed = stationFeatures.rejectionBin && hasRejectionBinConfirmation(req.body);
@@ -3321,7 +3441,7 @@ exports.processScan = async (req, res) => {
       partId: normalizedPartId,
       stationNo: normalizedStation,
       machineId: machine.id,
-      machineName: machine.machine_name,
+      machineName: getModelValue(machine, "machine_name"),
       qrStatus,
       operationStatus,
       status: response.decision === "ALLOW" ? "SCANNED" : "BLOCKED",
@@ -3538,6 +3658,33 @@ exports.verifyScanForOperator = async (req, res) => {
     const customerQrCode = resolvedCode.customerQrCode;
     const isMappedCustomerQrScan = Boolean(customerQrCode) && customerQrCode === scannedQrRaw;
 
+    if (isMappedCustomerQrScan && await shouldBlockMappedCustomerQrOnStartScan(stationNo)) {
+      const message = wrongCustomerQrAtStartMessage(stationNo);
+      emitOperatorPopup("ERROR", {
+        partId: normalizedPartId,
+        customerQrCode,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "BLOCKED",
+        plcStatus: "BLOCKED",
+        qrResult: "FAIL",
+        operationStatus: "BLOCKED",
+        reason: "CUSTOMER_QR_NOT_ALLOWED_AT_START_STATION",
+        message,
+      });
+      return res.status(409).json({
+        decision: "BLOCK",
+        reason: "CUSTOMER_QR_NOT_ALLOWED_AT_START_STATION",
+        qrStatus: "FAILED",
+        operationStatus: "BLOCKED",
+        message,
+        partId: normalizedPartId,
+        customerQrCode,
+        stationNo,
+      });
+    }
+
     const spcConfig = getMachineSpcConfig(machine);
     const rejectionBinConfirmed = stationFeatures.rejectionBin && hasRejectionBinConfirmation(req.body);
     const manualResultEnabled = stationFeatures.manualResult === true;
@@ -3669,7 +3816,7 @@ exports.verifyScanForOperator = async (req, res) => {
       partId: normalizedPartId,
       stationNo,
       machineId: machine.id,
-      machineName: machine.machine_name,
+      machineName: getModelValue(machine, "machine_name"),
       status: response.decision === "ALLOW" ? operationStatus : "BLOCKED",
       plcStatus: response.decision === "ALLOW" ? operationStatus : "BLOCKED",
       qrResult: qrStatus,
@@ -4095,7 +4242,7 @@ exports.resetPlcOnly = async (req, res) => {
 
 async function purgePartTraceabilityData(partId) {
   const normalizedPartId = String(partId || "").trim();
-  const [part, opRows, prodRows, reworkRows] = await Promise.all([
+  const [part, opRows, prodRows, reworkRows, mappingRows, leakRows] = await Promise.all([
     Part.findOne({ where: { part_id: normalizedPartId } }),
     OperationLog.findAll({
       where: { part_id: normalizedPartId },
@@ -4112,9 +4259,24 @@ async function purgePartTraceabilityData(partId) {
       attributes: ["id"],
       raw: true,
     }),
+    PartCodeMapping.findAll({
+      where: {
+        [Op.or]: [
+          { old_part_id: normalizedPartId },
+          { customer_qr: normalizedPartId },
+        ],
+      },
+      attributes: ["id"],
+      raw: true,
+    }),
+    LeakTestReading.findAll({
+      where: { part_id: normalizedPartId },
+      attributes: ["id"],
+      raw: true,
+    }),
   ]);
 
-  if (!part && opRows.length === 0 && prodRows.length === 0 && reworkRows.length === 0) {
+  if (!part && opRows.length === 0 && prodRows.length === 0 && reworkRows.length === 0 && mappingRows.length === 0 && leakRows.length === 0) {
     return null;
   }
 
@@ -4122,6 +4284,15 @@ async function purgePartTraceabilityData(partId) {
     OperationLog.destroy({ where: { part_id: normalizedPartId } }),
     ProductionLog.destroy({ where: { part_id: normalizedPartId } }),
     ReworkLog.destroy({ where: { part_id: normalizedPartId } }),
+    PartCodeMapping.destroy({
+      where: {
+        [Op.or]: [
+          { old_part_id: normalizedPartId },
+          { customer_qr: normalizedPartId },
+        ],
+      },
+    }),
+    LeakTestReading.destroy({ where: { part_id: normalizedPartId } }),
     Part.destroy({ where: { part_id: normalizedPartId } }),
   ]);
 
@@ -4134,6 +4305,8 @@ async function purgePartTraceabilityData(partId) {
     operationLogs: opRows.length,
     productionLogs: prodRows.length,
     reworkLogs: reworkRows.length,
+    customerQrMappings: mappingRows.length,
+    leakTestReadings: leakRows.length,
     machineLocksCleared: machineIds.length,
   };
 }
@@ -5187,6 +5360,8 @@ exports.getDashboardReport = async (req, res) => {
     const pageSize = Math.min(Math.max(Number(req.query.pageSize || 100), 1), 500);
 
     const requestedPartId = String(req.query.partId || "").trim();
+    const requestedPartIdValues = requestedPartId ? await resolvePartIdSearchValues(requestedPartId) : [];
+    const requestedPartIdCondition = buildPartIdSearchCondition(requestedPartIdValues);
     const machineWhere = {
       is_active: true,
       ...(lineNameFilter ? { line_name: lineNameFilter } : {}),
@@ -5208,7 +5383,7 @@ exports.getDashboardReport = async (req, res) => {
         where.machine_id = Number(req.query.machineId);
       }
       if (requestedPartId) {
-        where.part_id = { [Op.like]: `%${requestedPartId}%` };
+        where.part_id = requestedPartIdCondition || { [Op.like]: `%${requestedPartId}%` };
       }
       if (req.query.status) {
         where.status = String(req.query.status).toUpperCase();
@@ -5219,7 +5394,7 @@ exports.getDashboardReport = async (req, res) => {
       ...(includeDateRange ? { createdAt: { [Op.gte]: from, [Op.lte]: to } } : {}),
       ...(machineIdScope.length ? { machine_id: { [Op.in]: machineIdScope } } : {}),
       ...(req.query.machineId ? { machine_id: Number(req.query.machineId) } : {}),
-      ...(requestedPartId ? { part_id: { [Op.like]: `%${requestedPartId}%` } } : {}),
+      ...(requestedPartId ? { part_id: requestedPartIdCondition || { [Op.like]: `%${requestedPartId}%` } } : {}),
       ...(stationNoFilter ? { station_no: stationNoFilter } : {}),
       ...(operatorIdFilter ? { user_id: operatorIdFilter } : {}),
     });
@@ -6106,6 +6281,7 @@ exports.getDashboardReport = async (req, res) => {
 
 const DEFAULT_REPORT_COLUMNS = [
   { id: "partId", label: "Part Serial No", enabled: true },
+  { id: "customerQrCode", label: "Customer QR Code", enabled: true },
   { id: "createdAt", label: "Timestamp", enabled: true },
   { id: "shiftCode", label: "Shift", enabled: true },
   { id: "operationNo", label: "Operation No", enabled: true },
@@ -6251,7 +6427,9 @@ async function getDashboardExportRows(filters) {
     operationWhere.machine_id = Number(query.machineId);
   }
   if (query?.partId) {
-    operationWhere.part_id = { [Op.like]: `%${String(query.partId).trim()}%` };
+    const requestedPartId = String(query.partId).trim();
+    const requestedPartIdValues = await resolvePartIdSearchValues(requestedPartId);
+    operationWhere.part_id = buildPartIdSearchCondition(requestedPartIdValues) || { [Op.like]: `%${requestedPartId}%` };
   }
   if (operatorIdFilter) {
     operationWhere.user_id = operatorIdFilter;
@@ -6295,6 +6473,19 @@ async function getDashboardExportRows(filters) {
     acc[row.part_id] = row;
     return acc;
   }, {});
+  const partCodeRows = partIds.length
+    ? await PartCodeMapping.findAll({
+      where: { old_part_id: { [Op.in]: partIds }, is_active: true },
+      attributes: ["old_part_id", "customer_qr"],
+      raw: true,
+    })
+    : [];
+  const customerQrByPartId = partCodeRows.reduce((acc, row) => {
+    const partId = String(row.old_part_id || "").trim().toUpperCase();
+    const customerQr = String(row.customer_qr || "").trim();
+    if (partId && customerQr && !acc[partId]) acc[partId] = customerQr;
+    return acc;
+  }, {});
   const qrFormatNames = uniqueStages(partRows.map((row) => String(row.qr_format_name || "").trim()).filter(Boolean));
   const qrRuleRows = qrFormatNames.length
     ? await QrFormatRule.findAll({
@@ -6324,6 +6515,7 @@ async function getDashboardExportRows(filters) {
 
     return {
       partId: row.part_id || "",
+      customerQrCode: customerQrByPartId[String(row.part_id || "").trim().toUpperCase()] || "",
       modelCode,
       qrFormatName,
       machineName: machine.machine_name || "",
@@ -6464,6 +6656,7 @@ async function sendDashboardExcel(res, { rows, filters, reportConfig, sheetName,
 
   const columnMeta = {
     partId: { key: "partId", width: 22 },
+    customerQrCode: { key: "customerQrCode", width: 24 },
     modelCode: { key: "modelCode", width: 16 },
     qrFormatName: { key: "qrFormatName", width: 20 },
     machineName: { key: "machineName", width: 20 },

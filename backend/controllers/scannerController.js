@@ -330,13 +330,18 @@ exports.testScannerConnection = async (req, res) => {
     }
 
     if (mode === "USB_SERIAL") {
+      const health = getScannerHealthSnapshot({ scannerIp: scanner.scanner_ip }) || null;
+      const connected = Boolean(health?.connected);
       return res.json({
         scannerId: scanner.id,
         scannerMode: mode,
-        reachable: true,
-        status: "REACHABLE",
+        reachable: connected,
+        status: connected ? "REACHABLE" : "NO_RECENT_USB_ACTIVITY",
         checkedAt: new Date().toISOString(),
-        message: `USB/Serial mode configured. Runtime COM adapter should be verified on station system.`,
+        connection: health,
+        message: connected
+          ? "USB scanner activity was recently detected on this station."
+          : "No recent USB scanner activity. Scan once on the station system, then test again.",
       });
     }
 
@@ -350,8 +355,8 @@ exports.testScannerConnection = async (req, res) => {
         scannerMode: mode,
         scannerIp: scanner.scanner_ip,
         backendListenerPort: Number(process.env.TCP_SERVER_PORT || 0) || null,
-        reachable: true,
-        status: merged.connected ? "LISTENER_ACTIVE_RECEIVING" : "WAITING_FOR_PUSH_DATA",
+        reachable: Boolean(merged.connected && merged.lastDataAt),
+        status: merged.connected && merged.lastDataAt ? "RECEIVING_DATA" : "WAITING_FOR_PUSH_DATA",
         checkedAt: new Date().toISOString(),
         connection: merged,
         message: waitingForPush

@@ -6,6 +6,7 @@
 
 const { runIndustrialExport, fetchProductionData } = require("../services/report/reportExportService");
 const { calculateProductionMetrics } = require("../services/report/reportMetricsService");
+const Shift = require("../models/Shift");
 
 function summarizeDbError(error) {
   const code = error?.original?.code || error?.parent?.code || error?.code || "UNKNOWN";
@@ -35,12 +36,22 @@ const DEFAULT_REPORT_CONFIG = {
 exports.getReportData = async (req, res) => {
   try {
     const filters = req.query || {};
-    const rows = await fetchProductionData(filters);
+    const [rows, shifts] = await Promise.all([
+      fetchProductionData(filters),
+      Shift.findAll({ where: { is_active: true }, order: [["start_time", "ASC"]], raw: true }),
+    ]);
     const metrics = calculateProductionMetrics(rows);
     
     res.json({
       rows,
-      metrics
+      metrics,
+      availableShifts: shifts.map((shift) => ({
+        id: shift.id,
+        shiftName: shift.shift_name,
+        shiftCode: shift.shift_code,
+        startTime: shift.start_time,
+        endTime: shift.end_time,
+      })),
     });
   } catch (error) {
     const db = summarizeDbError(error);

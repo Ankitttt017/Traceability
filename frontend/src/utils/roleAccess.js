@@ -46,7 +46,7 @@ export const DEFAULT_ROLE_ACCESS_SETTINGS = {
   reports: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
   traceability: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
   io_monitor: { admin: "VIEW_CONTROL", engineer: "VIEW_CONTROL", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  part_journey: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
+  part_journey: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
   part_process_flow: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
   process_flow: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
   operator_view: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
