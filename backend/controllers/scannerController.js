@@ -6,6 +6,10 @@ const scannerService = require("../services/scannerConnectionService");
 const { getScannerHealthSnapshot, markScannerHeartbeat, clearScannerHealth } = require("../services/scannerHealthService");
 const { emitRealtime } = require("../services/realtimeService");
 const { normalizeScannerConfig, readPartIdFromScannerPlc } = require("../services/scannerPlcDataService");
+const {
+  ensureMachineQrScannerUniqueness,
+  ensureScannerIpCanBeShared,
+} = require("../services/machineSchemaService");
 const CONNECTION_GRACE_MS = Math.max(Number(process.env.SCANNER_CONNECTION_GRACE_MS || 15000), 3000);
 
 function toInt(value) {
@@ -222,7 +226,7 @@ function handleError(error, res) {
   if (error.name === "SequelizeUniqueConstraintError") {
     return res.status(409).json({
       error: "Scanner configuration already exists",
-      details: error.errors.map((entry) => entry.path),
+      details: error.errors.map((entry) => entry.path || entry.message),
     });
   }
   if (error instanceof Sequelize.ValidationError) {
@@ -232,6 +236,31 @@ function handleError(error, res) {
     });
   }
   return res.status(500).json({ error: error.message });
+}
+
+async function ensureSharedScannerSchema() {
+  await ensureScannerIpCanBeShared();
+  await ensureMachineQrScannerUniqueness();
+}
+
+async function createScannerWithSharedIp(payload) {
+  try {
+    return await Scanner.create(payload);
+  } catch (error) {
+    if (error.name !== "SequelizeUniqueConstraintError") throw error;
+    await ensureSharedScannerSchema();
+    return Scanner.create(payload);
+  }
+}
+
+async function updateScannerWithSharedIp(scanner, payload) {
+  try {
+    await scanner.update(payload);
+  } catch (error) {
+    if (error.name !== "SequelizeUniqueConstraintError") throw error;
+    await ensureSharedScannerSchema();
+    await scanner.update(payload);
+  }
 }
 
 exports.listScanners = async (_req, res) => {
@@ -487,7 +516,8 @@ exports.createScanner = async (req, res) => {
       return res.status(404).json({ error: "Mapped machine not found" });
     }
 
-    const created = await Scanner.create(payload);
+    await ensureSharedScannerSchema();
+    const created = await createScannerWithSharedIp(payload);
     await syncMachineScannerIp(created.mapped_machine_id, created.scanner_ip);
     emitRealtime("dashboard_refresh", { reason: "SCANNER_CREATED", scannerId: created.id, machineId: created.mapped_machine_id || null });
     res.status(201).json(await toResponse(created));
@@ -514,7 +544,8 @@ exports.updateScanner = async (req, res) => {
 
     const previousMachineId = scanner.mapped_machine_id;
     const previousScannerIp = scanner.scanner_ip;
-    await scanner.update(payload);
+    await ensureSharedScannerSchema();
+    await updateScannerWithSharedIp(scanner, payload);
     if (Number(previousMachineId || 0) !== Number(scanner.mapped_machine_id || 0)) {
       await clearMachineScannerIpIfMatched(previousMachineId, previousScannerIp);
     }

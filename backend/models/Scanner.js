@@ -9,7 +9,6 @@ const Scanner = sequelize.define("Scanner", {
   scanner_ip: {
     type: DataTypes.STRING,
     allowNull: false,
-    unique: true,
   },
   scanner_port: {
     type: DataTypes.INTEGER,

@@ -217,11 +217,11 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
   if (!partId) return;
   if (partId.length < 4) return;
 
-  const scanner = await Scanner.findOne({
+  const scanners = await Scanner.findAll({
     where: { scanner_ip: scannerIp, is_active: true },
-    order: [["updatedAt", "DESC"]],
+    order: [["mapped_machine_id", "ASC"], ["id", "ASC"]],
   });
-  if (!scanner) {
+  if (!scanners.length) {
     const msg = `No active scanner mapping found for IP ${scannerIp}.`;
     console.warn(`[TCP] ${msg} Payload ignored: ${partId}`);
     emitRealtime("operator_popup", {
@@ -242,6 +242,13 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
     return;
   }
 
+  console.log(`[TCP] Routing payload from ${scannerIp} to ${scanners.length} scanner mapping(s). Payload=${partId}`);
+  for (const scanner of scanners) {
+    await processScannerPayloadForMapping({ scanner, scannerIp, partId });
+  }
+}
+
+async function processScannerPayloadForMapping({ scanner, scannerIp, partId }) {
   const scannerRole = String(scanner.scanner_role || "GENERAL").trim().toUpperCase() || "GENERAL";
   markScannerHeartbeat({
     scannerId: scanner.id,
