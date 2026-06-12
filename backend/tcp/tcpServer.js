@@ -243,13 +243,123 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
   }
 
   console.log(`[TCP] Routing payload from ${scannerIp} to ${scanners.length} scanner mapping(s). Payload=${partId}`);
-  for (const scanner of scanners) {
-    await processScannerPayloadForMapping({ scanner, scannerIp, partId });
+  const customerQrTargets = await resolveSharedCustomerQrTargets({ scanners, partId });
+  const routingTargets = customerQrTargets.length > 0
+    ? customerQrTargets
+    : scanners.map((scanner) => ({ scanner, forceCustomerQr: false }));
+
+  for (const target of routingTargets) {
+    if (!target.forceCustomerQr) {
+      const delay = await shouldDelayCustomerQrStationStart({
+        scanner: target.scanner,
+        partId,
+        scannerIp,
+      });
+      if (delay.delayed) {
+        emitRealtime("operator_popup", {
+          type: "INFO",
+          partId,
+          stationNo: delay.stationNo,
+          machineId: delay.machineId,
+          machineName: delay.machineName,
+          scannerId: target.scanner.id,
+          scannerName: target.scanner.scanner_name,
+          scannerRole: String(target.scanner.scanner_role || "GENERAL").trim().toUpperCase() || "GENERAL",
+          scannerIp,
+          qrStatus: "PASSED",
+          operationStatus: "WAITING_PREVIOUS",
+          status: "WAITING",
+          plcStatus: "WAITING_PREVIOUS",
+          reason: "WAITING_PREVIOUS_STATION_OK",
+          message: `${delay.stationNo} Laser waiting. Submit ${delay.previousStation} OK first, then customer QR will map here.`,
+          timestamp: new Date().toISOString(),
+        });
+        continue;
+      }
+    }
+    await processScannerPayloadForMapping({
+      scanner: target.scanner,
+      scannerIp,
+      partId,
+      forceCustomerQr: target.forceCustomerQr,
+    });
   }
 }
 
-async function processScannerPayloadForMapping({ scanner, scannerIp, partId }) {
+async function resolveSharedCustomerQrTargets({ scanners, partId }) {
+  const targets = [];
+  const existingPart = await Part.findOne({
+    where: { part_id: partId },
+    attributes: ["part_id"],
+  });
+
+  if (existingPart) {
+    return targets;
+  }
+
+  for (const scanner of scanners) {
+    const machine = await Machine.findByPk(scanner.mapped_machine_id);
+    const stationNo = String(machine?.operation_no || "").trim().toUpperCase();
+    if (!machine || machine.is_active === false || !stationNo || !requiresCustomerQrForCompletion(machine)) {
+      continue;
+    }
+    const activePartId = await resolveActivePartIdForMachine(machine, stationNo);
+    if (!activePartId || activePartId === partId) {
+      continue;
+    }
+    targets.push({ scanner, forceCustomerQr: true });
+  }
+
+  return targets;
+}
+
+async function hasStationPassed(partId, stationNo) {
+  const station = normalizeStation(stationNo);
+  if (!partId || !station) return false;
+  const passed = await OperationLog.findOne({
+    where: {
+      part_id: partId,
+      station_no: station,
+      plc_status: "ENDED_OK",
+      result: "OK",
+    },
+    attributes: ["id"],
+    order: [["createdAt", "DESC"]],
+  });
+  return Boolean(passed);
+}
+
+async function shouldDelayCustomerQrStationStart({ scanner, partId }) {
+  const machine = await Machine.findByPk(scanner.mapped_machine_id);
+  const stationNo = normalizeStation(machine?.operation_no);
+  if (!machine || machine.is_active === false || !stationNo || !requiresCustomerQrForCompletion(machine)) {
+    return { delayed: false };
+  }
+
+  const sequence = await getActiveStationSequence();
+  const stationIndex = sequence.indexOf(stationNo);
+  const previousStation = stationIndex > 0 ? sequence[stationIndex - 1] : "";
+  if (!previousStation) {
+    return { delayed: false };
+  }
+
+  const previousPassed = await hasStationPassed(partId, previousStation);
+  if (previousPassed) {
+    return { delayed: false };
+  }
+
+  return {
+    delayed: true,
+    stationNo,
+    previousStation,
+    machineId: machine.id,
+    machineName: machine.machine_name,
+  };
+}
+
+async function processScannerPayloadForMapping({ scanner, scannerIp, partId, forceCustomerQr = false }) {
   const scannerRole = String(scanner.scanner_role || "GENERAL").trim().toUpperCase() || "GENERAL";
+  const effectiveScannerRole = forceCustomerQr ? "CUSTOMER_QR" : scannerRole;
   markScannerHeartbeat({
     scannerId: scanner.id,
     scannerIp,
@@ -302,10 +412,10 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId }) {
   }
 
   console.log(
-    `[TCP] Routing payload scanner=${scanner.id} name=${scanner.scanner_name} role=${scannerRole} machine=${machine.id} station=${stationNo} payload=${partId}`
+    `[TCP] Routing payload scanner=${scanner.id} name=${scanner.scanner_name} role=${effectiveScannerRole} machine=${machine.id} station=${stationNo} payload=${partId}`
   );
 
-  if (scannerRole === "CUSTOMER_QR") {
+  if (effectiveScannerRole === "CUSTOMER_QR") {
     const activePartId = await resolveActivePartIdForMachine(machine, stationNo);
     if (!activePartId) {
       emitRealtime("operator_popup", {
@@ -317,14 +427,14 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId }) {
         machineName: machine.machine_name,
         scannerId: scanner.id,
         scannerName: scanner.scanner_name,
-        scannerRole,
+        scannerRole: effectiveScannerRole,
         scannerIp,
         qrStatus: "FAILED",
         operationStatus: "BLOCKED",
         status: "BLOCKED",
         plcStatus: "BLOCKED",
         reason: "START_QR_REQUIRED",
-        message: "Scan the start QR first, then scan customer QR for mapping.",
+        message: `${stationNo} Laser: scan Part ID / Start QR first. After OP is in progress, scan Customer QR.`,
         timestamp: new Date().toISOString(),
       });
       return;
@@ -344,7 +454,7 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId }) {
         machineName: machine.machine_name,
         scannerId: scanner.id,
         scannerName: scanner.scanner_name,
-        scannerRole,
+        scannerRole: effectiveScannerRole,
         scannerIp,
         qrStatus: "FAILED",
         operationStatus: "BLOCKED",
@@ -380,7 +490,7 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId }) {
       machineName: machine.machine_name,
       scannerId: scanner.id,
       scannerName: scanner.scanner_name,
-      scannerRole,
+      scannerRole: effectiveScannerRole,
       scannerIp,
       decision: "ALLOW",
       reason: "CUSTOMER_QR_MAPPED",
@@ -402,7 +512,7 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId }) {
       machineName: machine.machine_name,
       scannerId: scanner.id,
       scannerName: scanner.scanner_name,
-      scannerRole,
+      scannerRole: effectiveScannerRole,
       scannerIp,
       qrStatus: "PASSED",
       operationStatus: finalized.operationStatus || "WAITING",

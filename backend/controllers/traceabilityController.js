@@ -1490,7 +1490,83 @@ async function markOperationEndedOk({ operationLogId, partId, stationNo, machine
     ng_reason: "PLC_END_OK",
   });
 
+  await autoStartNextCustomerQrStation({
+    partId,
+    completedStation: stationNo,
+    userId,
+  });
+
   return opLog;
+}
+
+async function autoStartNextCustomerQrStation({ partId, completedStation, userId }) {
+  const normalizedPartId = String(partId || "").trim();
+  const currentStation = normalizeStation(completedStation);
+  if (!normalizedPartId || !currentStation) return null;
+
+  const sequenceData = await getActiveMachineSequenceData();
+  const sequence = Array.isArray(sequenceData?.sequence) ? sequenceData.sequence : [];
+  const currentIndex = sequence.indexOf(currentStation);
+  const nextStation = currentIndex >= 0 ? sequence[currentIndex + 1] : "";
+  if (!nextStation) return null;
+
+  const nextMachines = (sequenceData?.machines || []).filter(
+    (machine) => getMachineOperationStage(machine) === nextStation
+  );
+  const nextMachine = nextMachines.find((machine) => requiresCustomerQrForCompletion(machine));
+  if (!nextMachine) return null;
+
+  const existingActive = await OperationLog.findOne({
+    where: {
+      part_id: normalizedPartId,
+      station_no: nextStation,
+      plc_status: { [Op.in]: ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING"] },
+    },
+    attributes: ["id"],
+    order: [["createdAt", "DESC"]],
+  });
+  if (existingActive) return { started: false, reason: "ALREADY_ACTIVE", stationNo: nextStation };
+
+  const existingPassed = await OperationLog.findOne({
+    where: {
+      part_id: normalizedPartId,
+      station_no: nextStation,
+      plc_status: "ENDED_OK",
+      result: "OK",
+    },
+    attributes: ["id"],
+    order: [["createdAt", "DESC"]],
+  });
+  if (existingPassed) return { started: false, reason: "ALREADY_PASSED", stationNo: nextStation };
+
+  const response = await saveScan(normalizedPartId, nextStation, "OK", nextMachine.id, userId || null, {
+    resultSource: "AUTO_START_AFTER_PREVIOUS_OK",
+    resultInput: `${currentStation}_OK`,
+  });
+
+  if (response?.decision === "ALLOW") {
+    emitOperatorPopup("INFO", {
+      partId: normalizedPartId,
+      stationNo: nextStation,
+      machineId: nextMachine.id,
+      machineName: nextMachine.machine_name,
+      status: "SCANNED",
+      operationStatus: "WAITING",
+      plcStatus: "WAITING_PLC",
+      qrStatus: "PASSED",
+      reason: "WAITING_CUSTOMER_QR",
+      message: `${nextStation} Laser started. Scan Customer QR to complete mapping.`,
+    });
+    emitRealtime("dashboard_refresh", {
+      reason: "AUTO_START_CUSTOMER_QR_STATION",
+      partId: normalizedPartId,
+      stationNo: nextStation,
+      machineId: nextMachine.id,
+    });
+    return { started: true, stationNo: nextStation, operationLogId: response.operationLogId || null };
+  }
+
+  return { started: false, stationNo: nextStation, reason: response?.reason || "BLOCKED" };
 }
 
 async function markOperationEndedNg({ operationLogId, partId, stationNo, machineId, userId, reason }) {
@@ -3188,10 +3264,10 @@ exports.processScan = async (req, res) => {
           plcStatus: "WAIT",
           qrResult: "FAIL",
           reason: "START_QR_REQUIRED",
-          message: "Scan the start QR first so the customer QR can be mapped to the active part.",
+          message: `${normalizedStation} Laser: scan Part ID / Start QR first. After OP is in progress, scan Customer QR.`,
         });
         return res.status(409).json({
-          error: "No active part found for customer QR mapping. Scan the start QR first.",
+          error: `${normalizedStation} Laser has no active part. Scan Part ID / Start QR first, then scan Customer QR.`,
         });
       }
 
@@ -3566,11 +3642,11 @@ exports.verifyScanForOperator = async (req, res) => {
         plcStatus: "WAIT",
         qrResult: "FAIL",
         reason: "START_QR_REQUIRED",
-        message: "Scan the start QR first, then scan customer QR for mapping.",
+        message: `${stationNo} Laser: scan Part ID / Start QR first. After OP is in progress, scan Customer QR.`,
         customerQrCode: scannedQrRaw,
       });
       return res.status(409).json({
-        error: "Scan the start QR first, then scan customer QR for mapping.",
+        error: `${stationNo} Laser has no active part. Scan Part ID / Start QR first, then scan Customer QR.`,
         reason: "START_QR_REQUIRED",
         stationNo,
         machine: {
@@ -4655,6 +4731,15 @@ exports.submitManualResult = async (req, res) => {
       ng_reason: normalizedStatus === "NG" ? reason || "MANUAL_REJECT" : null,
     });
 
+    let autoStartedNextStation = null;
+    if (normalizedStatus === "OK") {
+      autoStartedNextStation = await autoStartNextCustomerQrStation({
+        partId: normalizedPartId,
+        completedStation: targetStation,
+        userId: req.user?.id || null,
+      });
+    }
+
     emitOperatorPopup(normalizedStatus === "OK" ? "SUCCESS" : "WARNING", {
       partId: normalizedPartId,
       stationNo: targetStation,
@@ -4683,6 +4768,7 @@ exports.submitManualResult = async (req, res) => {
       message: `Manual quality result (${normalizedStatus}) submitted successfully.`,
       partId: normalizedPartId,
       stationNo: targetStation,
+      autoStartedNextStation,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
