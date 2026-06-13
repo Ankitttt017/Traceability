@@ -158,6 +158,16 @@ const NG_REASON_CATEGORIES = [
   { key: "MR", label: "MR - MR Defects" },
 ];
 
+function getEnabledNgCategories(features = {}) {
+  const rows = NG_REASON_CATEGORIES.filter((category) => {
+    if (category.key === "CR") return features.rejectionCategoryCR !== false;
+    if (category.key === "CRAM") return features.rejectionCategoryCRAM !== false;
+    if (category.key === "MR") return features.rejectionCategoryMR !== false;
+    return true;
+  });
+  return rows.length ? rows : NG_REASON_CATEGORIES;
+}
+
 function getNgReasonsByCategory(categoryKey = "") {
   const key = String(categoryKey || "").trim().toUpperCase();
   return [...(DEFECT_CATEGORIES[key]?.defects || [])];
@@ -521,12 +531,14 @@ const GlobalPopup = ({
   const [autoCloseTimeLeft, setAutoCloseTimeLeft] = useState(null); // remaining time in ms
   const [autoCloseDuration, setAutoCloseDuration] = useState(0);    // original duration in ms
   const [stickyErrorMode, setStickyErrorMode] = useState(false);
+  const [isClosingSmoothly, setIsClosingSmoothly] = useState(false);
 
   const [manualSelection, setManualSelection] = useState(null); // 'OK' or 'NG'
   const [manualReason, setManualReason] = useState("");
   const [manualReasonQuery, setManualReasonQuery] = useState("");
   const [manualReasonCategory, setManualReasonCategory] = useState("");
   const [showReasonDropdown, setShowReasonDropdown] = useState(false);
+  const [showNgReasonModal, setShowNgReasonModal] = useState(false);
   const [submittingManual, setSubmittingManual] = useState(false);
   const [manualSuccessMsg, setManualSuccessMsg] = useState("");
 
@@ -552,6 +564,16 @@ const GlobalPopup = ({
   const autoCloseContextRef = useRef("");
   const reasonDropdownRef = useRef(null);
   const validateRequestSeqRef = useRef(0);
+
+  const closeSmoothly = (delayMs = 220) => {
+    setIsClosingSmoothly(true);
+    window.setTimeout(() => {
+      setIsFullscreen(false);
+      setShowNgReasonModal(false);
+      setIsClosingSmoothly(false);
+      onClose?.();
+    }, delayMs);
+  };
 
   const validateQrCode = async (rawCode) => {
     const scannedCode = sanitizeScannerCode(rawCode);
@@ -660,6 +682,7 @@ const GlobalPopup = ({
     setManualReasonQuery("");
     setManualReasonCategory("");
     setShowReasonDropdown(false);
+    setShowNgReasonModal(false);
     setManualSuccessMsg("");
     setValidationError("");
     setValidationInfo("");
@@ -709,6 +732,7 @@ const GlobalPopup = ({
         setManualReasonCategory("");
         setManualSuccessMsg("");
         setManualQrCode("");
+        setShowNgReasonModal(false);
         setLocalQrValidated(false);
         localValidatedPartIdRef.current = "";
       }
@@ -776,6 +800,7 @@ const GlobalPopup = ({
         setManualReason("");
         setManualReasonQuery("");
         setManualReasonCategory("");
+        setShowNgReasonModal(false);
         setValidationError("");
         setValidationInfo("");
         setLocalScanDecision("");
@@ -791,8 +816,8 @@ const GlobalPopup = ({
         }
         setManualSuccessMsg("");
         setSubmittingManual(false);
-        onClose?.();
-      }, 1200);
+        closeSmoothly();
+      }, 500);
     } catch (error) {
       setResetError(error?.response?.data?.error || error?.message || "Submission failed.");
       setAwaitingNextScan(false);
@@ -800,8 +825,8 @@ const GlobalPopup = ({
       if (manualSubmitTimerRef.current) clearTimeout(manualSubmitTimerRef.current);
       manualSubmitTimerRef.current = setTimeout(() => {
         setResetError("");
-        onClose?.();
-      }, 9000);
+        closeSmoothly();
+      }, 900);
     }
   };
   useEffect(() => () => {
@@ -817,7 +842,19 @@ const GlobalPopup = ({
       autoCloseContextRef.current = "";
       return undefined;
     }
-    if (disableAutoClose) {
+
+    const popupType = String(popup?.type || "").trim().toUpperCase();
+    const popupQrState = resolveQrState(popup);
+    const popupOpState = resolveOperationState(popup);
+    const forceErrorAutoClose =
+      Boolean(validationError) ||
+      popupType === "ERROR" ||
+      popupQrState === "FAIL" ||
+      popupQrState === "BLOCKED" ||
+      popupOpState === "FAIL" ||
+      popupOpState === "COMM";
+
+    if (disableAutoClose && !forceErrorAutoClose) {
       setAutoCloseTimeLeft(null);
       setAutoCloseDuration(0);
       setStickyErrorMode(false);
@@ -835,9 +872,6 @@ const GlobalPopup = ({
       targetFeatures?.validatePreviousStation !== false;
     const isManual = targetFeatures?.manualResult === true;
 
-    const popupType = String(popup?.type || "").trim().toUpperCase();
-    const popupQrState = resolveQrState(popup);
-    const popupOpState = resolveOperationState(popup);
     const closeContextKey = [
       String(popup?._shownAtMs || popup?.createdAt || ""),
       String(socketPartId || localValidatedPartIdRef.current || "").trim().toUpperCase(),
@@ -850,7 +884,7 @@ const GlobalPopup = ({
 
     let duration = 0;
     const STANDARD_SUCCESS_CLOSE_MS = 4200;
-    const STANDARD_ERROR_CLOSE_MS = 9000;
+    const STANDARD_ERROR_CLOSE_MS = 3000;
 
     // Faster auto-close / auto-reset for QR-focused industrial flow
     if (isOnlyQrCheck) {
@@ -858,7 +892,7 @@ const GlobalPopup = ({
       if (qrState === "PASS" || qrState === "DUPLICATE") {
         duration = STANDARD_SUCCESS_CLOSE_MS;
       } else if (popup?.type === "ERROR" || qrState === "FAIL" || qrState === "BLOCKED") {
-        duration = Math.max(criticalAutoCloseMs || 0, STANDARD_ERROR_CLOSE_MS);
+        duration = STANDARD_ERROR_CLOSE_MS;
       } else {
         // Even when upstream state is partial/WAIT, close quickly to be ready for next industrial scan.
         duration = STANDARD_SUCCESS_CLOSE_MS;
@@ -867,7 +901,7 @@ const GlobalPopup = ({
       if (popupType === "SUCCESS" || popupQrState === "PASS") {
         duration = Math.max(autoCloseMs || 12000, 12000);
       } else if (popup?.type === "ERROR" || popupQrState === "FAIL" || popupQrState === "BLOCKED") {
-        duration = Math.max(criticalAutoCloseMs || 0, STANDARD_ERROR_CLOSE_MS);
+        duration = STANDARD_ERROR_CLOSE_MS;
       } else {
         duration = Math.max(autoCloseMs || 12000, 12000);
       }
@@ -897,7 +931,7 @@ const GlobalPopup = ({
         if (popupType === "SUCCESS" || operationState === "PASS") {
           duration = STANDARD_SUCCESS_CLOSE_MS; // Auto-close for PASS
         } else if (["FAIL", "COMM", "TIMEOUT"].includes(operationState) || popupType === "ERROR" || qrState === "FAIL") {
-          duration = Math.max(criticalAutoCloseMs || 0, STANDARD_ERROR_CLOSE_MS); // shorter for errors
+          duration = STANDARD_ERROR_CLOSE_MS; // shorter for errors
         } else {
           const isCritical = popupType === "ERROR" || qrState === "FAIL";
           const hasStateDetails = Boolean(partId || stationNo || qrState !== "WAIT" || operationState !== "IDLE");
@@ -905,7 +939,7 @@ const GlobalPopup = ({
             duration = STANDARD_SUCCESS_CLOSE_MS;
           } else {
             duration = isCritical
-              ? Math.max(criticalAutoCloseMs || 0, STANDARD_ERROR_CLOSE_MS)
+              ? STANDARD_ERROR_CLOSE_MS
               : Math.max(autoCloseMs || 0, STANDARD_SUCCESS_CLOSE_MS);
           }
         }
@@ -924,9 +958,6 @@ const GlobalPopup = ({
       return undefined;
     }
 
-    if (autoCloseContextRef.current === closeContextKey) {
-      return undefined;
-    }
     autoCloseContextRef.current = closeContextKey;
 
     const qrStateNow = popupQrState;
@@ -950,7 +981,7 @@ const GlobalPopup = ({
       if (remaining <= 0) {
         clearInterval(timer);
         autoCloseContextRef.current = "";
-        onClose?.();
+        closeSmoothly();
       }
     }, 50);
 
@@ -1220,6 +1251,15 @@ const GlobalPopup = ({
     return () => { isActive = false; };
   }, [partId, validationError, popup?.type, showJourney]);
 
+  const preReturnNgReasonCategories = getEnabledNgCategories(getStationFeatures(stationNo, stationSettings));
+  const preReturnNgReasonCategoryKeys = preReturnNgReasonCategories.map((category) => category.key).join("|");
+  useEffect(() => {
+    if (manualSelection !== "NG") return;
+    if (preReturnNgReasonCategories.length === 1 && manualReasonCategory !== preReturnNgReasonCategories[0].key) {
+      setManualReasonCategory(preReturnNgReasonCategories[0].key);
+    }
+  }, [manualSelection, manualReasonCategory, preReturnNgReasonCategoryKeys]);
+
   if (!popup) return null;
 
   // Simple mode
@@ -1311,6 +1351,7 @@ const GlobalPopup = ({
   });
   const features = getStationFeatures(targetStationNo, stationSettings);
   const isManualResultStation = features?.manualResult === true;
+  const enabledNgReasonCategories = getEnabledNgCategories(features);
 
   const nextPartHint = String(validationInfo || popup?.message || "").trim().toUpperCase();
   const isNextPartState =
@@ -1351,7 +1392,7 @@ const GlobalPopup = ({
       : enrichedStations.slice(0, 3))
     : [];
   const allNgReasonOptions = Array.from(
-    new Set(NG_REASON_CATEGORIES.flatMap((category) => getNgReasonsByCategory(category.key)))
+    new Set(enabledNgReasonCategories.flatMap((category) => getNgReasonsByCategory(category.key)))
   );
   const ngReasonOptions = manualReasonCategory
     ? getNgReasonsByCategory(manualReasonCategory)
@@ -1364,7 +1405,11 @@ const GlobalPopup = ({
   const isValidNgReason = !manualReason || ngReasonOptions.includes(manualReason);
   const previousOpState = String(previousStation?.operation || previousStation?.qualityCheck || previousStation?.status || "").trim().toUpperCase();
   const currentOpState = String(liveOperationState || currentStationCard?.operation || currentStationCard?.status || "").trim().toUpperCase();
-  const previousStationPassed = ["PASS", "PASSED", "COMPLETED", "ENDED_OK"].includes(previousOpState);
+  const previousBypassReason = String(previousStation?.bypassReason || previousStation?.bypass_reason || previousStation?.interlockReason || "").trim().toUpperCase();
+  const previousStationBypassed =
+    Boolean(previousStation?.isBypassed || previousStation?.is_bypassed || previousStation?.bypassed) ||
+    previousBypassReason.includes("BYPASS");
+  const previousStationPassed = previousStationBypassed || ["PASS", "PASSED", "COMPLETED", "ENDED_OK", "BYPASSED"].includes(previousOpState);
   const currentStationPassed = ["PASS", "PASSED", "COMPLETED", "ENDED_OK"].includes(currentOpState);
   const currentStationName = currentStationCard?.stationName || displayStations.find((s) => s.status === "IN_PROGRESS")?.stationName || stationNo || "System Node";
 
@@ -1476,10 +1521,11 @@ const GlobalPopup = ({
   };
 
   return (
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+    <>
+    <div className={`fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 transition-opacity duration-200 ${isClosingSmoothly ? "opacity-0" : "opacity-100"}`}>
       <div className={`w-full bg-bg-card shadow-2xl flex flex-col transition-all duration-200 ${isFullscreen
         ? "fixed inset-0 z-[1000] w-screen h-screen max-w-full max-h-screen rounded-none m-0 animate-none"
-        : "max-w-3xl rounded-xl max-h-[90vh] animate-in zoom-in duration-200"
+        : `max-w-3xl rounded-xl max-h-[90vh] ${isClosingSmoothly ? "scale-[0.98]" : "animate-in zoom-in duration-200"}`
         }`}>
         {/* Header - Compact */}
         <div className="px-5 py-3 flex-shrink-0 border-b border-border/50" style={{ background: "#1e293b" }}>
@@ -1496,7 +1542,7 @@ const GlobalPopup = ({
             <div className="flex items-center gap-2">
               {effectivePartId && (
                 <div className="px-3 py-2 rounded-lg border border-amber-500/20 max-w-[420px] min-w-[180px]" style={{ background: "#0f172a" }} title={effectivePartId}>
-                  <p className="font-mono text-xs font-black text-amber-400 break-all leading-tight">{effectivePartId}</p>
+                  <p className="font-mono text-m font-black text-amber-400 break-all leading-tight">{effectivePartId}</p>
                 </div>
               )}
               <button
@@ -1733,6 +1779,15 @@ const GlobalPopup = ({
                 <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-slate-700">{t("globalPopup.submitQualityVerification", "Manual Quality Inspection")}</h3>
               </div>
 
+              {effectivePartId && (
+                <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-3 text-center shadow-sm">
+                  <p className="text-[11px] font-black uppercase tracking-[0.2em] text-amber-700">Part ID</p>
+                  <p className="mt-1 break-all font-mono text-2xl font-black text-slate-950 sm:text-3xl">
+                    {effectivePartId}
+                  </p>
+                </div>
+              )}
+
               <div className="flex flex-col sm:flex-row gap-5">
                 <button
                   type="button"
@@ -1756,8 +1811,9 @@ const GlobalPopup = ({
                     setManualSelection("NG");
                     setManualReason("");
                     setManualReasonQuery("");
-                    setManualReasonCategory("");
+                    setManualReasonCategory(enabledNgReasonCategories.length === 1 ? enabledNgReasonCategories[0].key : "");
                     setShowReasonDropdown(false);
+                    setShowNgReasonModal(true);
                   }}
                   className={`flex-1 flex flex-col items-center justify-center p-5 rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${manualSelection === "NG"
                     ? "bg-rose-500 border-rose-300 text-white shadow-lg shadow-rose-500/25 scale-[1.02]"
@@ -1770,85 +1826,26 @@ const GlobalPopup = ({
               </div>
 
               {manualSelection === "NG" && (
-                <div className="space-y-2 animate-in slide-in-from-top-2 duration-150">
-                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wide">{t("faq.rejectionTab", "Rejection Categories")}</label>
-                  <div className="flex flex-wrap gap-2">
-                    {NG_REASON_CATEGORIES.map((category) => {
-                      const selected = manualReasonCategory === category.key;
-                      return (
-                        <button
-                          key={category.key}
-                          type="button"
-                          onClick={() => {
-                            setManualReasonCategory(category.key);
-                            setManualReason("");
-                            setManualReasonQuery("");
-                            setShowReasonDropdown(true);
-                          }}
-                          className={`px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wide border transition-colors ${
-                            selected
-                              ? "bg-rose-500 text-white border-rose-300"
-                              : "bg-white text-slate-700 border-slate-300 hover:border-rose-300"
-                          }`}
-                        >
-                          {category.label}
-                        </button>
-                      );
-                    })}
+                <div className="animate-in slide-in-from-top-2 duration-150 rounded-2xl border border-rose-200 bg-rose-50/80 p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-xs font-black uppercase tracking-[0.18em] text-rose-700">
+                        {t("globalPopup.rejectionReason", "Rejection Reason")}
+                      </p>
+                      <p className="mt-1 text-sm font-bold text-slate-800">
+                        {manualReason || t("globalPopup.noReasonSelected", "No defect reason selected")}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowNgReasonModal(true)}
+                      className="rounded-xl border border-rose-300 bg-white px-4 py-3 text-sm font-black uppercase tracking-widest text-rose-700 shadow-sm transition hover:bg-rose-100"
+                    >
+                      {manualReason ? t("globalPopup.changeReason", "Change Reason") : t("globalPopup.selectReason", "Select Reason")}
+                    </button>
                   </div>
-                  <div className="relative" ref={reasonDropdownRef}>
-                    <input
-                      type="text"
-                      value={manualReasonQuery}
-                      onChange={(e) => {
-                        setManualReasonQuery(e.target.value);
-                        setManualReason("");
-                        setShowReasonDropdown(true);
-                      }}
-                      placeholder={manualReasonCategory ? t("globalPopup.searchOrSelectReason", "Search or select rejection reason") : t("globalPopup.searchReasonOrSelectCategory", "Search reason or select category")}
-                      className="w-full bg-white border border-slate-300 rounded-xl py-3 px-4 text-sm text-slate-900 outline-none focus:border-rose-400 transition-colors font-semibold"
-                      onFocus={() => {
-                        setShowReasonDropdown(true);
-                      }}
-                      onClick={() => {
-                        setShowReasonDropdown(true);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Escape") {
-                          setShowReasonDropdown(false);
-                        }
-                      }}
-                    />
-                    {showReasonDropdown && (
-                      <div className="absolute z-30 mt-1 w-full max-h-52 overflow-y-auto rounded-xl border border-slate-300 bg-white shadow-xl">
-                        {filteredNgReasonOptions.length === 0 ? (
-                          <div className="px-3 py-2 text-xs font-semibold text-slate-500">
-                            {t("globalPopup.noReasonFound", "No reason found")}
-                          </div>
-                        ) : (
-                          filteredNgReasonOptions.map((reason) => (
-                            <button
-                              key={reason}
-                              type="button"
-                              onMouseDown={(e) => {
-                                e.preventDefault();
-                                setManualReason(reason);
-                                setManualReasonQuery(reason);
-                                setShowReasonDropdown(false);
-                              }}
-                              className={`w-full px-3 py-2 text-left text-sm font-semibold border-b border-slate-200 last:border-b-0 transition-colors ${
-                                manualReason === reason ? "bg-rose-100 text-rose-700" : "text-slate-700 hover:bg-slate-100"
-                              }`}
-                            >
-                              {reason}
-                            </button>
-                          ))
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  {!isValidNgReason && (
-                    <p className="text-[11px] font-semibold text-rose-500">
+                  {manualReason && !isValidNgReason && (
+                    <p className="mt-2 text-[11px] font-semibold text-rose-500">
                       {t("globalPopup.selectReasonFromList", "Select a reason from the dropdown list.")}
                     </p>
                   )}
@@ -1872,7 +1869,7 @@ const GlobalPopup = ({
               >
                 {submittingManual ? (
                   <span className="flex items-center justify-center gap-2">
-                    <RefreshCw size={18} className="animate-spin" />
+                    <RefreshCw size={16} className="animate-spin" />
                     {t("globalPopup.submittingResult", "Submitting Result...")}
                   </span>
                 ) : (
@@ -1883,18 +1880,18 @@ const GlobalPopup = ({
           )}
 
           {(validationError || validationInfo || popup.message) && (
-            <div className={`p-4 rounded-2xl border flex gap-3 items-start text-sm transition-colors duration-300 ${validationError ? "bg-danger/15 border-danger/30 text-danger" : !duplicateLike && (liveOperationState === "FAIL" || liveQrState === "FAIL" || popup.type === "ERROR" || popup.gate === "FORMAT" || popup.gate === "PLC_MATCH") ? "bg-danger/15 border-danger/30 text-danger" :
-              liveOperationState === "COMM" || popup.type === "WARNING" || popup.reason === "PREVIOUS_STATION_NOT_COMPLETED" ? "bg-warning/15 border-warning/30 text-warning" :
-                popup.type === "SUCCESS" || popup.type === "INFO" ? "bg-success/20 border-success/40 text-success" :
-                  "bg-white border-slate-200 text-text-muted"
+            <div className={`p-5 rounded-2xl border-2 flex gap-4 items-start text-base shadow-sm transition-colors duration-300 ${validationError ? "bg-rose-50 border-rose-300 text-rose-700" : !duplicateLike && (liveOperationState === "FAIL" || liveQrState === "FAIL" || popup.type === "ERROR" || popup.gate === "FORMAT" || popup.gate === "PLC_MATCH") ? "bg-rose-50 border-rose-300 text-rose-700" :
+              liveOperationState === "COMM" || popup.type === "WARNING" || popup.reason === "PREVIOUS_STATION_NOT_COMPLETED" ? "bg-amber-50 border-amber-300 text-amber-800" :
+                popup.type === "SUCCESS" || popup.type === "INFO" ? "bg-emerald-50 border-emerald-300 text-emerald-800" :
+                  "bg-white border-slate-300 text-slate-800"
               }`}>
               {(validationInfo || popup.type === "SUCCESS" || popup.type === "INFO" || duplicateLike) && !validationError ? (
-                <CheckCircle size={16} className="mt-0.5 flex-shrink-0" />
+                <CheckCircle size={22} className="mt-0.5 flex-shrink-0" />
               ) : (
-                <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" />
+                <AlertTriangle size={22} className="mt-0.5 flex-shrink-0" />
               )}
-              <div>
-                <p className="text-sm font-medium">{validationError || validationInfo || (localScanDecision ? "" : friendlyErrorMessage(popup.message, popup))}</p>
+              <div className="min-w-0">
+                <p className="text-base font-black leading-snug tracking-wide sm:text-lg">{validationError || validationInfo || (localScanDecision ? "" : friendlyErrorMessage(popup.message, popup))}</p>
                 {/* Gate status indicators */}
                 {popup.gate && (
                   <div className="flex gap-3 mt-2">
@@ -1955,6 +1952,139 @@ const GlobalPopup = ({
 
       </div>
     </div>
+    {showNgReasonModal && manualSelection === "NG" && (
+      <div className={`fixed inset-0 z-[1100] flex items-center justify-center bg-black/80 p-2 backdrop-blur-md transition-opacity duration-200 sm:p-4 ${isClosingSmoothly ? "opacity-0" : "opacity-100"}`}>
+        <div className={`flex h-auto max-h-[94vh] w-full max-w-[min(980px,96vw)] flex-col overflow-hidden rounded-2xl border border-slate-700 bg-white shadow-[0_30px_90px_rgba(0,0,0,0.6)] transition-transform duration-200 ${isClosingSmoothly ? "scale-[0.98]" : "scale-100"}`}>
+          <div className="flex items-center justify-between gap-3 border-b border-slate-700 px-4 py-3 sm:px-6" style={{ background: "#1e293b" }}>
+            <div className="min-w-0">
+              <h2 className="truncate text-lg font-black text-white sm:text-xl">
+                {t("globalPopup.selectRejectionReason", "Select rejection reason")}
+              </h2>
+              <p className="hidden">
+                {stationNo || "Station"} • {currentStationName}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowNgReasonModal(false)}
+                className="rounded-xl border border-slate-600 bg-slate-900 p-2 text-slate-200 transition hover:bg-slate-700"
+                aria-label="Close rejection reason popup"
+              >
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+
+          <div className="border-b border-rose-200 bg-rose-50 px-4 py-3 sm:px-6">
+            <div className="flex items-start gap-3 text-rose-700">
+              <AlertTriangle size={22} className="mt-0.5 flex-shrink-0 text-rose-600" />
+              <p className="text-base font-black sm:text-[17px]">
+                {t("globalPopup.partMarkedNgChooseReason", "Part marked NG — choose defect category and exact reason below.")}
+              </p>
+            </div>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto bg-slate-100 p-3 sm:p-4">
+            <div className="space-y-3">
+              {enabledNgReasonCategories.map((category) => {
+                const expanded = manualReasonCategory === category.key || enabledNgReasonCategories.length === 1;
+                const categoryReasons = getNgReasonsByCategory(category.key);
+                const selectedInCategory = categoryReasons.includes(manualReason);
+                return (
+                  <div
+                    key={category.key}
+                    className={`overflow-hidden rounded-2xl border transition ${
+                      expanded
+                        ? "border-amber-400 bg-white shadow-lg shadow-amber-500/10"
+                        : selectedInCategory
+                          ? "border-rose-400 bg-rose-50 shadow-md"
+                          : "border-slate-300 bg-white shadow-sm"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setManualReasonCategory(expanded && enabledNgReasonCategories.length > 1 ? "" : category.key);
+                        setManualReasonQuery("");
+                        setShowReasonDropdown(false);
+                      }}
+                      className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-lg font-black text-slate-950 sm:text-xl">{category.label}</p>
+                        <p className="mt-1 text-xs font-black text-slate-600 sm:text-sm">
+                          {categoryReasons.length} reasons {selectedInCategory ? `• Selected: ${manualReason}` : ""}
+                        </p>
+                      </div>
+                      <span className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border text-base font-black ${
+                        expanded ? "border-amber-500 bg-amber-400 text-slate-950" : "border-slate-400 bg-slate-100 text-slate-700"
+                      }`}>
+                        {expanded ? "−" : "+"}
+                      </span>
+                    </button>
+
+                    {expanded && (
+                      <div className="border-t border-slate-200 bg-slate-50 p-3 sm:p-4">
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                          {categoryReasons.map((reason) => {
+                            const selected = manualReason === reason;
+                            return (
+                              <button
+                                key={reason}
+                                type="button"
+                                onClick={() => {
+                                  setManualReasonCategory(category.key);
+                                  setManualReason(reason);
+                                  setManualReasonQuery(reason);
+                                  setValidationError("");
+                                }}
+                                className={`min-h-[48px] rounded-xl border-2 px-3 py-3 text-left text-[15px] font-black leading-snug transition active:scale-[0.99] sm:text-base ${
+                                  selected
+                                    ? "border-rose-500 bg-rose-600 text-white shadow-lg shadow-rose-500/25"
+                                    : "border-slate-300 bg-white text-slate-900 hover:border-amber-400 hover:bg-amber-50"
+                                }`}
+                              >
+                                {reason}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 border-t border-slate-200 bg-white p-3 sm:grid-cols-[0.65fr_1fr] sm:p-4">
+            <button
+              type="button"
+              onClick={() => setShowNgReasonModal(false)}
+              className="rounded-2xl border-2 border-slate-300 bg-white py-3 text-base font-black text-slate-800 transition hover:bg-slate-100"
+            >
+              {t("globalPopup.cancel", "Cancel")}
+            </button>
+            <button
+              type="button"
+              disabled={!manualReason}
+              onClick={() => setShowNgReasonModal(false)}
+              className={`rounded-2xl py-3 text-base font-black uppercase tracking-widest transition ${
+                manualReason
+                  ? "border-2 border-rose-500 bg-rose-600 text-white shadow-lg shadow-rose-500/25 hover:bg-rose-500"
+                  : "cursor-not-allowed border-2 border-slate-300 bg-slate-100 text-slate-500"
+              }`}
+            >
+              {manualReason
+                ? t("globalPopup.confirmReason", "Confirm Reason")
+                : t("globalPopup.selectReasonFirst", "Select Reason First")}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 };
 
