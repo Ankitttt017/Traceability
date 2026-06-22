@@ -663,9 +663,9 @@ async function fetchProductionData(filters = {}, options = {}) {
   const partCodeMappings = await PartCodeMapping.findAll({
     where: {
       old_part_id: { [Op.in]: partIds },
-      is_active: true,
     },
     attributes: ["old_part_id", "customer_qr"],
+    order: [["updatedAt", "DESC"]],
     raw: true,
   });
 
@@ -677,7 +677,8 @@ async function fetchProductionData(filters = {}, options = {}) {
     String(partMap[normalizeKey(partId)]?.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT;
   const partCodeMap = partCodeMappings.reduce((acc, row) => {
     if (!row?.old_part_id) return acc;
-    acc[normalizeKey(row.old_part_id)] = String(row.customer_qr || "").trim();
+    const key = normalizeKey(row.old_part_id);
+    if (!acc[key]) acc[key] = String(row.customer_qr || "").trim();
     return acc;
   }, {});
   const leakLookupMachines = await MachineModel.findAll({
@@ -893,5 +894,6 @@ async function fetchProductionData(filters = {}, options = {}) {
 
 module.exports = {
   runIndustrialExport,
-  fetchProductionData
+  fetchProductionData,
+  getPlcReadingColumns,
 };

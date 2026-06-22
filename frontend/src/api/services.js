@@ -633,9 +633,13 @@ function normalizeReportFilters(params = {}) {
 }
 
 export const reportApi = {
-  getData: async (params) => {
+  getData: async (params, config = {}) => {
     const cleanParams = normalizeReportFilters(params);
-    const { data } = await apiClient.get(ENDPOINTS.reports.data, { params: cleanParams });
+    const { data } = await apiClient.get(ENDPOINTS.reports.data, {
+      params: cleanParams,
+      timeout: 60000,
+      ...config,
+    });
     return data;
   },
   exportFull: async (params, reportConfig) => {

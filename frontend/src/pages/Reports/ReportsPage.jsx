@@ -208,10 +208,9 @@ const ReportsPage = () => {
   const [exportLoading, setExportLoading] = useState(false);
   const [machines, setMachines] = useState([]);
   const [availableShifts, setAvailableShifts] = useState([]);
-  const [data, setData] = useState({ rows: [], metrics: {}, availableShifts: [] });
+  const [data, setData] = useState({ rows: [], metrics: {}, availableShifts: [], plcColumns: [] });
   const [reportConfig, setReportConfig] = useState(() => loadReportConfig());
-  const fetchInFlightRef = useRef(false);
-  const fetchQueuedRef = useRef(false);
+  const reportAbortRef = useRef(null);
   
   const [filters, setFilters] = useState(() => {
     const r = (() => {
@@ -269,28 +268,26 @@ const ReportsPage = () => {
   }, [getMesDayRange]);
 
   const fetchData = useCallback(async () => {
-    if (fetchInFlightRef.current) {
-      fetchQueuedRef.current = true;
-      return;
-    }
-    fetchInFlightRef.current = true;
+    reportAbortRef.current?.abort();
+    const controller = new AbortController();
+    reportAbortRef.current = controller;
     setLoading(true);
     try {
-      const response = await reportApi.getData(filters);
+      const response = await reportApi.getData(filters, { signal: controller.signal });
       setData({ 
         rows: response.rows || [], 
         metrics: response.metrics || {},
-        availableShifts: response.availableShifts || []
+        availableShifts: response.availableShifts || [],
+        plcColumns: response.plcColumns || [],
       });
     } catch (e) {
+      if (e?.code === "ERR_CANCELED" || e?.name === "CanceledError") return;
       console.error(e);
       toast.error(t("reports.failedLoad", "Failed to load production analytics"));
     } finally {
-      setLoading(false);
-      fetchInFlightRef.current = false;
-      if (fetchQueuedRef.current) {
-        fetchQueuedRef.current = false;
-        fetchData();
+      if (reportAbortRef.current === controller) {
+        setLoading(false);
+        reportAbortRef.current = null;
       }
     }
   }, [filters]);
@@ -298,8 +295,17 @@ const ReportsPage = () => {
   useEffect(() => {
     machineApi.list().then(setMachines).catch(console.error);
     shiftApi.list().then(setAvailableShifts).catch(() => []);
-    fetchData();
     try { setReportConfig(loadReportConfig()); } catch (err) { void err; }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      fetchData();
+    }, 450);
+    return () => {
+      window.clearTimeout(timer);
+      reportAbortRef.current?.abort();
+    };
   }, [fetchData]);
 
   const handleExport = async (type = "full") => {
@@ -344,7 +350,7 @@ const ReportsPage = () => {
         if (String(op).trim().toUpperCase() === LEAK_TEST_OPERATION) {
           return { key: LEAK_TEST_SHARED_KEY, machineName: "Leak Test", op, label: "Leak Test OP150", sharedLeakOperation: true };
         }
-        return { key: `${machineName}__${op}`, machineName, op, label: `${machineName} + ${op}` };
+        return { key: op.toUpperCase(), machineName, op, label: `${machineName} + ${op.toUpperCase()}` };
       })
       .filter(Boolean);
     const machineStationMap = new Map(machineStationPairs.map((x) => [x.key, x]));
@@ -356,11 +362,13 @@ const ReportsPage = () => {
         if (String(op).trim().toUpperCase() === LEAK_TEST_OPERATION) {
           return { key: LEAK_TEST_SHARED_KEY, machineName: "Leak Test", op, label: "Leak Test OP150", sharedLeakOperation: true };
         }
-        return { key: `${machineName}__${op}`, machineName, op, label: `${machineName} + ${op}` };
+        return { key: op.toUpperCase(), machineName, op, label: `${machineName} + ${op.toUpperCase()}` };
       })
       .filter(Boolean);
     rowStationPairs.forEach((x) => {
-      if (!machineStationMap.has(x.key)) machineStationMap.set(x.key, x);
+      if (!machineStationMap.has(x.key)) {
+        machineStationMap.set(x.key, x);
+      }
     });
     const stationPairs = Array.from(machineStationMap.values()).sort((a, b) =>
       a.op.localeCompare(b.op, undefined, { numeric: true, sensitivity: "base" }) || a.machineName.localeCompare(b.machineName)
@@ -372,7 +380,12 @@ const ReportsPage = () => {
           .filter(Boolean)
       )
     );
-    const plcKeys = DEFAULT_PLC_CYCLE_COLUMNS.filter((key) => !["machine_name", "shot_number", "shot_date", "shot_time"].includes(key));
+    const discoveredPlcColumns = Array.isArray(data.plcColumns) && data.plcColumns.length
+      ? data.plcColumns
+      : DEFAULT_PLC_CYCLE_COLUMNS;
+    const plcKeys = discoveredPlcColumns
+      .filter((key) => DEFAULT_PLC_CYCLE_COLUMNS.includes(key))
+      .filter((key) => !["machine_name", "shot_number", "shot_date", "shot_time"].includes(key));
     const plcColumns = (() => {
       const used = new Map();
       const baseColumns = [
@@ -431,8 +444,7 @@ const ReportsPage = () => {
       }, null);
       entries.forEach((row) => {
         const stationOp = String(row.operationNo || row.stationNo || "").trim();
-        const stationMachine = String(row.machineName || "").trim();
-        const stationKey = stationMachine && stationOp ? `${stationMachine}__${stationOp}` : "";
+        const stationKey = stationOp ? stationOp.toUpperCase() : "";
         const rowLeakData = row.leakTestReading && typeof row.leakTestReading === "object" ? row.leakTestReading : null;
         if (!leakData && rowLeakData) {
           leakData = rowLeakData;
@@ -482,7 +494,9 @@ const ReportsPage = () => {
         plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
         partName: plcData.part_name || first.partName || first.modelName || first.componentName || "-",
-        customerCode: first.customerQrCode || first.customer_qr || "-",
+        customerCode: entries
+          .map((row) => row.customerQrCode || row.customerCode || row.customer_qr || "")
+          .find((value) => String(value || "").trim() && String(value).trim() !== "-") || "-",
         overallStatus: (() => {
           const vals = requiredOperations.map((operation) => normResult(operationResults[operation])).filter(Boolean);
           if (vals.some((v) => v === "NG")) return "NG";
@@ -538,7 +552,7 @@ const ReportsPage = () => {
     });
 
     return { columns: dynamicColumns, rows: dynamicRows };
-  }, [data.rows, filters.machineId, machines]);
+  }, [data.rows, data.plcColumns, filters.machineId, machines]);
 
   const reportSummaryMetrics = useMemo(() => {
     const rows = Array.isArray(reportTable.rows) ? reportTable.rows : [];

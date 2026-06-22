@@ -3047,7 +3047,11 @@ exports.getPartCatalog = async (req, res) => {
     }, {});
 
     const latestByPart = new Map();
+    const productionPartIds = new Set();
     for (const row of logRows) {
+      if (!isJourneyNoiseLog(row)) {
+        productionPartIds.add(String(row.part_id || "").trim());
+      }
       const machine = machineMap[row.machine_id] || null;
       if (lineNameFilter && machine && String(machine.line_name || "").trim() !== lineNameFilter) {
         continue;
@@ -3066,6 +3070,7 @@ exports.getPartCatalog = async (req, res) => {
     }
 
     const response = parts
+      .filter((part) => productionPartIds.has(String(part.part_id || "").trim()))
       .map((part) => {
         const latest = latestByPart.get(part.part_id);
         const machine = latest ? machineMap[latest.machine_id] || null : null;

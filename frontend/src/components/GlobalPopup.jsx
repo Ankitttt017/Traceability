@@ -459,7 +459,9 @@ function friendlyErrorMessage(rawMsg, popup = {}) {
     msgUpper.includes("NOT FOUND IN MOULDING") ||
     msgUpper.includes("PLCCYCLEREADINGS")
   ) {
-return `Part not found. No shot details available for the scanned QR.`;  if (reason === "INVALID_QR_FORMAT" || msgUpper.includes("INVALID_QR_FORMAT") || msgUpper.includes("QR FORMAT MISMATCH")) {
+    return `[PART NOT FOUND — SHOT DETAILS UNAVAILABLE] No matching PLC cycle record was found for ${partId || "the scanned QR"}. Verify the QR date/time and shot number, and confirm the shot exists in PlcCycleReadings.`;
+  }
+  if (reason === "INVALID_QR_FORMAT" || msgUpper.includes("INVALID_QR_FORMAT") || msgUpper.includes("QR FORMAT MISMATCH")) {
     return `[QR FORMAT MISMATCH] Invalid QR format. Scan correct component code.`;
   }
   if (reason === "PREVIOUS_STATION_NOT_COMPLETED" || msgUpper.includes("PREVIOUS_STATION_NOT_COMPLETED")) {
@@ -2548,8 +2550,6 @@ const GlobalPopup = ({
     )}
     </>
   );
-};
-
 };
 
 export default React.memo(GlobalPopup);
