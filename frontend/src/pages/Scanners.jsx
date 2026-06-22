@@ -7,7 +7,7 @@ import {
   Activity, Server, CheckCircle
 } from "lucide-react";
 import toast from "react-hot-toast";
-import { scannerApi, machineApi } from "../api/services";
+import { scannerApi, machineApi, traceabilityApi } from "../api/services";
 import { formatMachineLabel, sanitizeLineName } from "../utils/machineFields";
 import ConfirmModal from "../components/ConfirmModal";
 
@@ -65,6 +65,9 @@ const Scanners = () => {
   const [showForm, setShowForm] = useState(false);
   const [testingRead, setTestingRead] = useState(false);
   const [testReadResult, setTestReadResult] = useState(null);
+  const [simulationQr, setSimulationQr] = useState("");
+  const [simulationResult, setSimulationResult] = useState(null);
+  const [validatingSimulation, setValidatingSimulation] = useState(false);
 
   const loadData = useCallback(async (quiet = false) => {
     if (!quiet) setRefreshing(true);
@@ -82,7 +85,13 @@ const Scanners = () => {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  const resetForm = () => { setForm(EMPTY_FORM); setEditingId(null); setShowForm(false); };
+  const resetForm = () => {
+    setForm(EMPTY_FORM);
+    setEditingId(null);
+    setShowForm(false);
+    setSimulationQr("");
+    setSimulationResult(null);
+  };
 
   const handleEdit = (scanner) => {
     setEditingId(scanner.id);
@@ -110,6 +119,8 @@ const Scanners = () => {
       isSimulation: Boolean(scanner.isSimulation),
     });
     setTestReadResult(null);
+    setSimulationQr("");
+    setSimulationResult(null);
     setShowForm(true);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -177,6 +188,7 @@ const Scanners = () => {
     if (editingId) resetForm();
     setShowForm(true);
     setTestReadResult(null);
+    setSimulationResult(null);
   };
 
   const isPlcRegisterMode = String(form.scannerMode || "").toUpperCase() === "PLC_REGISTER";
@@ -215,6 +227,40 @@ const Scanners = () => {
       toast.error(error);
     } finally {
       setTestingRead(false);
+    }
+  };
+
+  const handleSimulationValidate = async () => {
+    const qrCode = String(simulationQr || "").trim();
+    if (!qrCode) {
+      toast.error("Enter scan/manual QR first");
+      return;
+    }
+    if (!form.mappedMachineId) {
+      toast.error("Select mapped machine first");
+      return;
+    }
+    setValidatingSimulation(true);
+    setSimulationResult(null);
+    try {
+      const result = await traceabilityApi.verify({
+        qrCode,
+        machineId: Number(form.mappedMachineId),
+        scannerIp: form.scannerIp || form.plcIp || "",
+        simulation: true,
+      });
+      setSimulationResult(result);
+      if (result?.decision === "ALLOW" || result?.status === "OK") {
+        toast.success(result?.message || "Simulation scan validated");
+      } else {
+        toast.error(result?.message || result?.error || "Simulation scan blocked");
+      }
+    } catch (err) {
+      const error = err.response?.data?.message || err.response?.data?.error || err.message || "Simulation validation failed";
+      setSimulationResult({ error });
+      toast.error(error);
+    } finally {
+      setValidatingSimulation(false);
     }
   };
 
@@ -479,8 +525,9 @@ const Scanners = () => {
               </div>
             )}
 
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex items-center gap-6">
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div className="flex items-center gap-6">
                 {/* Active toggle */}
                 <label className="flex items-center gap-3 cursor-pointer select-none">
                   <div className="relative">
@@ -494,13 +541,67 @@ const Scanners = () => {
                 {/* Simulation toggle */}
                 <label className="flex items-center gap-3 cursor-pointer select-none">
                   <div className="relative">
-                    <input type="checkbox" checked={form.isSimulation} onChange={e => setForm({ ...form, isSimulation: e.target.checked })} className="sr-only peer" />
+                    <input
+                      type="checkbox"
+                      checked={form.isSimulation}
+                      onChange={e => {
+                        const enabled = e.target.checked;
+                        setForm({ ...form, isSimulation: enabled });
+                        if (!enabled) {
+                          setSimulationQr("");
+                          setSimulationResult(null);
+                        }
+                      }}
+                      className="sr-only peer"
+                    />
                     <div className="w-8 h-4 bg-border rounded-full peer peer-checked:bg-primary transition-colors"></div>
                     <div className="absolute left-0.5 top-0.5 w-3 h-3 bg-white rounded-full transition-transform peer-checked:translate-x-4 shadow-sm"></div>
                   </div>
                   <span className="text-xs font-bold text-text-muted uppercase tracking-wider">Simulation Mode</span>
                 </label>
-              </div>
+                </div>
+            </div>
+
+              {form.isSimulation && (
+                <div className="mb-5 rounded-lg border border-primary/30 bg-primary/5 p-4">
+                  <div className="flex flex-col lg:flex-row lg:items-end gap-3">
+                    <div className="flex-1">
+                      <label className="text-[9px] font-black text-text-muted uppercase tracking-wider block mb-1.5">
+                        Scan / Manual Input Validate
+                      </label>
+                      <input
+                        value={simulationQr}
+                        onChange={e => {
+                          setSimulationQr(e.target.value);
+                          setSimulationResult(null);
+                        }}
+                        placeholder="Enter or scan QR for simulation validation"
+                        className={`${inputCls} font-mono`}
+                      />
+                      <p className="mt-1 text-[10px] text-text-muted">
+                        Visible only in Simulation Mode. Uses selected mapped machine and normal traceability validation.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleSimulationValidate}
+                      disabled={validatingSimulation || !simulationQr.trim() || !form.mappedMachineId}
+                      className="h-9 px-5 bg-primary text-on-strong font-bold rounded-lg text-[10px] uppercase tracking-wider hover:brightness-110 transition-all disabled:opacity-50"
+                    >
+                      {validatingSimulation ? "Validating..." : "Validate Scan"}
+                    </button>
+                  </div>
+                  {simulationResult && (
+                    <div className={`mt-3 rounded-lg border px-3 py-2 text-xs font-semibold ${
+                      simulationResult.error || simulationResult.decision === "BLOCK"
+                        ? "border-danger/30 bg-danger/5 text-danger"
+                        : "border-accent/30 bg-accent/5 text-accent"
+                    }`}>
+                      {simulationResult.error || simulationResult.message || simulationResult.reason || "Simulation validation completed"}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="flex items-center gap-3">
                 <button type="button" onClick={resetForm}

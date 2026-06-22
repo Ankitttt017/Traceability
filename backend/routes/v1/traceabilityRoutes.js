@@ -1,9 +1,45 @@
 const express = require("express");
 const traceabilityController = require("../../controllers/traceabilityController");
+const rejectionConfigController = require("../../controllers/rejectionConfigController");
 const { verifyToken } = require("../../middleware/authMiddleware");
 const { requireAnyModuleAccess, requireModuleAccess } = require("../../middleware/roleAccessMiddleware");
 
 const router = express.Router();
+
+router.get("/rejection-config/parts", verifyToken, requireModuleAccess("master_settings", "view"), rejectionConfigController.listParts);
+router.put("/rejection-config/parts", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updatePart);
+router.delete("/rejection-config/parts/:name", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deletePart);
+router.post("/rejection-config/delete-part", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deletePart);
+router.get(
+  "/rejection-config/operator-config",
+  verifyToken,
+  requireAnyModuleAccess([
+    { moduleKey: "operator_view", mode: "view" },
+    { moduleKey: "operator_view", mode: "operate" },
+    { moduleKey: "master_settings", mode: "view" },
+  ]),
+  rejectionConfigController.getOperatorConfig
+);
+router.post("/rejection-config/categories", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.createCategory);
+router.put("/rejection-config/categories", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateCategory);
+router.delete("/rejection-config/categories/:id", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteCategory);
+router.post("/rejection-config/delete-category", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteCategory);
+router.post("/rejection-config/reasons", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.addReasons);
+router.put("/rejection-config/reasons", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateReason);
+router.delete("/rejection-config/reasons/:id", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteReason);
+router.post("/rejection-config/delete-reason", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteReason);
+router.post("/rejection-config/views", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.createView);
+router.put("/rejection-config/views", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateView);
+router.delete("/rejection-config/views/:id", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteView);
+router.post("/rejection-config/delete-view", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteView);
+router.post("/rejection-config/zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.addZones);
+router.put("/rejection-config/zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateZone);
+router.delete("/rejection-config/zones/:id", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteZone);
+router.post("/rejection-config/delete-zone", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteZone);
+router.post("/rejection-config/zone-reasons", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.setZoneReasons);
+router.post("/rejection-config/ensure-defaults", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.ensureDefaults);
+router.post("/rejection-config/apply-reasons-all-zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.applyReasonsToAllZones);
+router.post("/rejection-config/view-image", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateViewImage);
 
 router.get("/traceability/operations", verifyToken, requireModuleAccess("traceability", "view"), traceabilityController.getOperationSequence);
 router.get("/traceability/process-flow", verifyToken, requireModuleAccess("process_flow", "view"), traceabilityController.getProcessFlow);

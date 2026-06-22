@@ -18,9 +18,9 @@ import {
 import {
   PieChart, Pie, Cell, Tooltip,
   LineChart, Line, XAxis, YAxis, CartesianGrid,
-  BarChart, Bar, Legend, AreaChart, Area,
+  BarChart, Bar, Legend, AreaChart, Area, ComposedChart,
 } from "recharts";
-import { dashboardApi, machineApi } from "../api/services";
+import { dashboardApi, machineApi, rejectionConfigApi } from "../api/services";
 import ChartTooltip from "../components/charts/ChartTooltip";
 import SafeChart from "../components/charts/SafeChart";
 import { CHART_COLORS } from "../constants/chartTheme";
@@ -115,7 +115,7 @@ function normalizeRejectionType(reason = "") {
     .toUpperCase()
     .replace(/[_\-]+/g, " ")
     .replace(/\s+/g, " ");
-  if (!r) return "MR - MR Defects";
+  if (!r) return "MR - Machining Rejection";
 
   // MR: scan/traceability/data flow or generic manual reject paths.
   if (
@@ -127,7 +127,7 @@ function normalizeRejectionType(reason = "") {
     r.includes("VALIDATION") ||
     r.includes("MANUAL REJECT")
   ) {
-    return "MR - MR Defects";
+    return "MR - Machining Rejection";
   }
 
   // CRAM: dimensional/geometry/chamfer/profile/surface-measurement style defects.
@@ -169,7 +169,21 @@ function normalizeRejectionType(reason = "") {
 
   // Keep plain "CR" token check at the end to avoid false positives in other words.
   if (/(^|\s)CR(\s|$)/.test(r)) return "CR - Casting Defects";
-  return "MR - MR Defects";
+  return "MR - Machining Rejection";
+}
+
+function rejectionCategoryCode(value = "") {
+  const normalized = normalizeRejectionType(value);
+  if (normalized.startsWith("CRAM")) return "CRAM";
+  if (normalized.startsWith("CR -")) return "CR";
+  return "MR";
+}
+
+function rejectionCategoryLabel(value = "") {
+  const code = rejectionCategoryCode(value);
+  if (code === "CR") return "CR - Casting Rejection";
+  if (code === "CRAM") return "CRAM - Cram Rejection";
+  return "MR - Machining Rejection";
 }
 
 function localDateTimeToIso(value) {
@@ -189,6 +203,19 @@ function uniqueStages(rows = []) {
     out.push(token);
   }
   return out;
+}
+
+function normalizeAnalysisToken(value = "") {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/^ZONE[\s_-]*/, "")
+    .replace(/\s+/g, " ");
+}
+
+function shortChartLabel(value = "", maxLength = 18) {
+  const text = String(value || "").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
 function normalizeDashboardStationResult(value, reason = "", row = null) {
@@ -423,6 +450,28 @@ const TooltipStyle = {
   allowEscapeViewBox:{ x: true, y: true },
 };
 
+const RejectionPieTooltip = ({ active, payload, total = 0 }) => {
+  if (!active || !payload?.length) return null;
+  const row = payload[0]?.payload || {};
+  const value = Number(row.value || 0);
+  const safeTotal = Number(total || 0);
+  const percentage = safeTotal > 0 ? ((value / safeTotal) * 100).toFixed(1) : "0.0";
+  return (
+    <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:10,padding:"10px 12px",boxShadow:SHADOW_MD,minWidth:170}}>
+      <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:6}}>
+        <span style={{width:9,height:9,borderRadius:"50%",background:row.color}} />
+        <span style={{fontSize:11,fontWeight:900,color:C.txt("pri")}}>{row.name}</span>
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",gap:18,fontSize:11,color:C.txt("sec")}}>
+        <span>Rejections</span><strong style={{color:C.txt("pri")}}>{value}</strong>
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",gap:18,fontSize:11,color:C.txt("sec"),marginTop:3}}>
+        <span>Share</span><strong style={{color:row.color}}>{percentage}%</strong>
+      </div>
+    </div>
+  );
+};
+
 const getPresetRange = (preset) => {
   const now = new Date();
   const end = new Date(now);
@@ -461,10 +510,59 @@ const Dashboard = () => {
   const [chartModeHourly, setChartModeHourly] = useState("line");
   const [chartModeShift, setChartModeShift] = useState("bar");
   const [chartModeRejectTrend, setChartModeRejectTrend] = useState("area");
+  const [rejectionConfigParts, setRejectionConfigParts] = useState([]);
+  const [heatMapPart, setHeatMapPart] = useState("");
+  const [heatMapConfig, setHeatMapConfig] = useState(null);
+  const [heatMapViewId, setHeatMapViewId] = useState("");
+  const [rejectionFilters, setRejectionFilters] = useState({ category:"", view:"", zone:"", reason:"" });
   const refreshInFlightRef = useRef(false);
   const refreshQueuedRef = useRef(false);
   const refreshTimerRef = useRef(null);
   const lastRefreshAtRef = useRef(0);
+
+  useEffect(() => {
+    if (activeTab !== "rejection") return;
+    let active = true;
+    rejectionConfigApi.parts().then((partsResult) => {
+      if (!active) return;
+      const parts = partsResult?.parts || [];
+      setRejectionConfigParts(parts);
+      setHeatMapPart((current) => current && parts.includes(current) ? current : (parts[0] || ""));
+    }).catch((error) => console.warn("Rejection parts load failed", error?.message || error));
+    return () => { active = false; };
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab !== "rejection" || !heatMapPart) {
+      setHeatMapConfig(null);
+      setHeatMapViewId("");
+      return;
+    }
+    let active = true;
+    rejectionConfigApi.operatorConfig({ partName: heatMapPart }).then((configResult) => {
+      if (!active) return;
+      setHeatMapConfig(configResult || null);
+      setHeatMapViewId((current) =>
+        (configResult?.views || []).some((view) => String(view.id) === String(current))
+          ? current
+          : String(configResult?.views?.[0]?.id || "")
+      );
+    }).catch((error) => {
+      if (!active) return;
+      setHeatMapConfig(null);
+      setHeatMapViewId("");
+      console.warn("Rejection heat map config load failed", error?.message || error);
+    });
+    return () => { active = false; };
+  }, [activeTab, heatMapPart]);
+
+  useEffect(() => {
+    if (!rejectionFilters.view || !heatMapConfig?.views?.length) return;
+    const matched = heatMapConfig.views.find((view) =>
+      String(view.name || "").toUpperCase() === String(rejectionFilters.view).toUpperCase()
+    );
+    if (matched) setHeatMapViewId(String(matched.id));
+  }, [rejectionFilters.view, heatMapConfig]);
 
   const query = useMemo(() => {
     const presetRange = getPresetRange(filters.datePreset);
@@ -624,6 +722,10 @@ const Dashboard = () => {
           latestCreatedAt: row?.createdAt || null,
           latestRawStatus: String(row?.status || row?.statusLabel || row?.result || row?.industrialResult || "").trim().toUpperCase(),
           latestReason: row?.interlockReason || row?.reason || "",
+          latestRejectionCategory: row?.rejectionCategory || "",
+          latestRejectionView: row?.rejectionView || "",
+          latestRejectionZone: row?.rejectionZone || "",
+          latestRejectionReason: row?.rejectionReason || "",
           customerQrCode: row?.customerQrCode || row?.customer_qr || null,
           partName: row?.partName || null,
           stationTimeline: [],
@@ -636,6 +738,10 @@ const Dashboard = () => {
         entry.latestCreatedAt = row?.createdAt || entry.latestCreatedAt;
         entry.latestRawStatus = String(row?.status || row?.statusLabel || row?.result || row?.industrialResult || "").trim().toUpperCase();
         entry.latestReason = row?.interlockReason || row?.reason || "";
+        entry.latestRejectionCategory = row?.rejectionCategory || entry.latestRejectionCategory || "";
+        entry.latestRejectionView = row?.rejectionView || entry.latestRejectionView || "";
+        entry.latestRejectionZone = row?.rejectionZone || entry.latestRejectionZone || "";
+        entry.latestRejectionReason = row?.rejectionReason || entry.latestRejectionReason || "";
       }
       if (!entry.createdAt || createdAtMs < (new Date(entry.createdAt || 0).getTime() || Number.MAX_SAFE_INTEGER)) {
         entry.createdAt = row?.createdAt || entry.createdAt;
@@ -649,6 +755,10 @@ const Dashboard = () => {
         normalizedStatus,
         result: row?.result || row?.status || row?.statusLabel || row?.industrialResult || "",
         reason: row?.interlockReason || row?.reason || "",
+        rejectionCategory: row?.rejectionCategory || "",
+        rejectionView: row?.rejectionView || "",
+        rejectionZone: row?.rejectionZone || "",
+        rejectionReason: row?.rejectionReason || "",
         createdAt: row?.createdAt || null,
       };
       const existingIndex = entry.stationTimeline.findIndex((item) => item.stationKey === stationKey);
@@ -660,7 +770,14 @@ const Dashboard = () => {
         const existingPriority = getDashboardStatusPriority(existing.normalizedStatus);
         const existingTs = new Date(existing.createdAt || 0).getTime() || 0;
         if (nextPriority > existingPriority || (nextPriority === existingPriority && createdAtMs >= existingTs)) {
-          entry.stationTimeline[existingIndex] = stage;
+          entry.stationTimeline[existingIndex] = {
+            ...stage,
+            rejectionCategory: stage.rejectionCategory || existing.rejectionCategory || "",
+            rejectionView: stage.rejectionView || existing.rejectionView || "",
+            rejectionZone: stage.rejectionZone || existing.rejectionZone || "",
+            rejectionReason: stage.rejectionReason || existing.rejectionReason || "",
+            reason: stage.reason || existing.reason || "",
+          };
         }
       }
     });
@@ -696,12 +813,20 @@ const Dashboard = () => {
         (latestReason && normalizedLatestReason !== "RECOVERY_PENDING_AFTER_BACKEND_RESTART")
       );
       const failureStage = entry.stationTimeline.find((stage) => stage.normalizedStatus === "NG" && String(stage.reason || "").trim());
+      const structuredStage = entry.stationTimeline.find((stage) =>
+        stage.normalizedStatus === "NG" &&
+        (stage.rejectionCategory || stage.rejectionView || stage.rejectionZone || stage.rejectionReason)
+      );
 
       return {
         ...entry,
         finalStatus,
         blocked,
         rejectionReason: failureStage?.reason || (normalizedLatestReason === "RECOVERY_PENDING_AFTER_BACKEND_RESTART" ? "" : latestReason),
+        rejectionCategory: structuredStage?.rejectionCategory || entry.latestRejectionCategory || "",
+        rejectionView: structuredStage?.rejectionView || entry.latestRejectionView || "",
+        rejectionZone: structuredStage?.rejectionZone || entry.latestRejectionZone || "",
+        rejectionReasonOnly: structuredStage?.rejectionReason || entry.latestRejectionReason || "",
       };
     });
   }, [machines, report.partsList]);
@@ -848,36 +973,104 @@ const Dashboard = () => {
   }, [report.shiftProduction, report.shiftWiseMetrics]);
 
   const hasFilters = Object.values(filters).some(Boolean);
-  const selectedFilterCount = useMemo(() => Object.values(filters).filter(Boolean).length, [filters]);
-  
   const rejectionAnalysisRows = useMemo(() => {
     return dashboardParts
       .filter((part) => part.finalStatus === "FAILED")
       .map((part) => ({
         partId: part.partId || "-",
         reason: String(part.rejectionReason || "").trim(),
+        category: String(part.rejectionCategory || "").trim(),
+        view: String(part.rejectionView || "").trim(),
+        zone: String(part.rejectionZone || "").trim(),
+        rejectionReasonOnly: String(part.rejectionReasonOnly || "").trim(),
         result: "NG",
         createdAt: part.latestCreatedAt || part.createdAt || null,
       }))
       .filter((part) => part.reason);
   }, [dashboardParts]);
 
+  const rejectionFilterOptions = useMemo(() => {
+    const matches = (row, ignoredKey) => Object.entries(rejectionFilters).every(([key, value]) => {
+      if (key === ignoredKey || !value) return true;
+      const rowValue = key === "reason" ? (row.rejectionReasonOnly || row.reason) : row[key];
+      return String(rowValue || "").toUpperCase() === String(value).toUpperCase();
+    });
+    const values = (key) => Array.from(new Set(
+      rejectionAnalysisRows
+        .filter((row) => matches(row, key))
+        .map((row) => String(key === "reason" ? (row.rejectionReasonOnly || row.reason) : row[key] || "").trim())
+        .filter(Boolean)
+    )).sort();
+    const merge = (recorded, configured) => Array.from(new Set([...recorded, ...configured].filter(Boolean))).sort();
+    const categoryOptions = Array.from(new Map(
+      [...values("category"), ...(heatMapConfig?.categories || []).map((row) => row.label || row.name)]
+        .filter(Boolean)
+        .map((value) => [rejectionCategoryCode(value), rejectionCategoryLabel(value)])
+    ).values());
+    return {
+      category: categoryOptions,
+      view: merge(values("view"), (heatMapConfig?.views || []).map((row) => row.name)),
+      zone: merge(values("zone"), (heatMapConfig?.views || []).flatMap((view) => (view.zones || []).map((zone) => zone.name || zone.code))),
+      reason: merge(values("reason"), (heatMapConfig?.categories || []).flatMap((category) => (category.reasons || []).map((reason) => reason.name || reason))),
+    };
+  }, [rejectionAnalysisRows, rejectionFilters, heatMapConfig]);
+
+  const filteredRejectionRows = useMemo(() => rejectionAnalysisRows.filter((row) => {
+    const reason = String(row.rejectionReasonOnly || row.reason || "");
+    const categoryFilter = rejectionCategoryCode(rejectionFilters.category);
+    const rowCategory = rejectionCategoryCode(`${row.category} ${row.rejectionReasonOnly || row.reason}`);
+    return (!rejectionFilters.category || rowCategory === categoryFilter)
+      && (!rejectionFilters.view || normalizeAnalysisToken(row.view) === normalizeAnalysisToken(rejectionFilters.view))
+      && (!rejectionFilters.zone || normalizeAnalysisToken(row.zone) === normalizeAnalysisToken(rejectionFilters.zone))
+      && (!rejectionFilters.reason || normalizeAnalysisToken(reason) === normalizeAnalysisToken(rejectionFilters.reason));
+  }), [rejectionAnalysisRows, rejectionFilters]);
+
+  const rejectionZoneWise = useMemo(() => {
+    const grouped = filteredRejectionRows.reduce((acc, row) => {
+      const key = [row.view || "View", row.zone || "Zone"].join(" / ");
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+    return Object.entries(grouped).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 8);
+  }, [filteredRejectionRows]);
+
+  const heatMapView = useMemo(
+    () => (heatMapConfig?.views || []).find((view) => String(view.id) === String(heatMapViewId)) || heatMapConfig?.views?.[0] || null,
+    [heatMapConfig, heatMapViewId]
+  );
+  const heatMapZoneCounts = useMemo(() => {
+    const counts = {};
+    filteredRejectionRows
+      .filter((row) => !heatMapView?.name || normalizeAnalysisToken(row.view) === normalizeAnalysisToken(heatMapView.name))
+      .forEach((row) => {
+        const key = normalizeAnalysisToken(row.zone);
+        if (key) counts[key] = (counts[key] || 0) + 1;
+      });
+    return counts;
+  }, [filteredRejectionRows, heatMapView]);
+  const heatMapMax = useMemo(
+    () => Math.max(1, ...Object.values(heatMapZoneCounts).map(Number)),
+    [heatMapZoneCounts]
+  );
+
   const rejectionPieData = useMemo(() => {
-    const grouped = rejectionAnalysisRows.reduce((acc, row) => {
-      const k = normalizeRejectionType(row.reason || row.interlock_reason || "");
+    const grouped = filteredRejectionRows.reduce((acc, row) => {
+      const k = normalizeRejectionType(`${row.category || ""} ${row.rejectionReasonOnly || row.reason || row.interlock_reason || ""}`);
       acc[k] = (acc[k] || 0) + 1;
       return acc;
     }, {});
-    return [
-      { name: "CR - Casting Defects", value: grouped["CR - Casting Defects"] || 0, color: C.ng() },
-      { name: "CRAM - Cram Defects", value: grouped["CRAM - Cram Defects"] || 0, color: C.amber() },
-      { name: "MR - MR Defects", value: grouped["MR - MR Defects"] || 0, color: C.steel() },
+    const rows = [
+      { name: "CR - Casting Rejection", value: grouped["CR - Casting Defects"] || 0, color: C.ng() },
+      { name: "CRAM - Cram Rejection", value: grouped["CRAM - Cram Defects"] || 0, color: C.amber() },
+      { name: "MR - Machining Rejection", value: grouped["MR - Machining Rejection"] || 0, color: C.steel() },
     ];
-  }, [rejectionAnalysisRows]);
+    const total = rows.reduce((sum, row) => sum + Number(row.value || 0), 0);
+    return rows.map((row) => ({ ...row, total }));
+  }, [filteredRejectionRows]);
 
   const rejectionTopReasons = useMemo(() => {
-    const grouped = rejectionAnalysisRows.reduce((acc, row) => {
-      const reason = String(row.reason || row.interlock_reason || "").trim();
+    const grouped = filteredRejectionRows.reduce((acc, row) => {
+      const reason = String(row.rejectionReasonOnly || row.reason || row.interlock_reason || "").trim();
       if (!reason) return acc;
       acc[reason] = (acc[reason] || 0) + 1;
       return acc;
@@ -886,14 +1079,35 @@ const Dashboard = () => {
       .map(([reason, count]) => ({ reason, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 6);
-  }, [rejectionAnalysisRows]);
+  }, [filteredRejectionRows]);
+
+  const rejectionParetoData = useMemo(() => {
+    const total = rejectionTopReasons.reduce((sum, row) => sum + Number(row.count || 0), 0);
+    let cumulative = 0;
+    return rejectionTopReasons.map((row) => {
+      cumulative += Number(row.count || 0);
+      return {
+        reason: row.reason,
+        count: row.count,
+        cumulative: total ? Math.round((cumulative / total) * 100) : 0,
+      };
+    });
+  }, [rejectionTopReasons]);
+
+  const rejectionKpis = useMemo(() => {
+    const total = filteredRejectionRows.length;
+    const uniqueParts = new Set(filteredRejectionRows.map((row) => row.partId).filter(Boolean)).size;
+    const topReason = rejectionTopReasons[0] || null;
+    const topZone = rejectionZoneWise[0] || null;
+    return { total, uniqueParts, topReason, topZone };
+  }, [filteredRejectionRows, rejectionTopReasons, rejectionZoneWise]);
 
   const rejectionTrend = useMemo(() => {
-    const rows = rejectionAnalysisRows
+    const rows = filteredRejectionRows
       .map((row) => {
         const ts = new Date(row.timestamp || row.createdAt || Date.now());
         const slot = `${String(ts.getHours()).padStart(2, "0")}:00`;
-        return { slot, category: normalizeRejectionType(row.reason || row.interlock_reason || "") };
+        return { slot, category: normalizeRejectionType(`${row.category || ""} ${row.rejectionReasonOnly || row.reason || row.interlock_reason || ""}`) };
       });
     const bucket = rows.reduce((acc, row) => {
       if (!acc[row.slot]) acc[row.slot] = { slot: row.slot, total: 0, cr: 0, cram: 0, mr: 0 };
@@ -904,7 +1118,7 @@ const Dashboard = () => {
       return acc;
     }, {});
     return Object.values(bucket).sort((a, b) => String(a.slot).localeCompare(String(b.slot)));
-  }, [rejectionAnalysisRows]);
+  }, [filteredRejectionRows]);
 
   const isMultiDayRange = useMemo(() => {
     if (filters.datePreset === "last7" || filters.datePreset === "last30") return true;
@@ -935,10 +1149,10 @@ const Dashboard = () => {
 
   const rejectionTrendData = useMemo(() => {
     if (!isMultiDayRange) return rejectionTrend;
-    const rows = rejectionAnalysisRows.map((row) => {
+    const rows = filteredRejectionRows.map((row) => {
       const ts = new Date(row.createdAt || Date.now());
       const key = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}-${String(ts.getDate()).padStart(2, "0")}`;
-      return { key, category: normalizeRejectionType(row.reason || row.interlock_reason || "") };
+      return { key, category: normalizeRejectionType(`${row.category || ""} ${row.rejectionReasonOnly || row.reason || row.interlock_reason || ""}`) };
     });
     const bucket = rows.reduce((acc, row) => {
       if (!acc[row.key]) acc[row.key] = { date: row.key, total: 0, cr: 0, cram: 0, mr: 0 };
@@ -949,7 +1163,7 @@ const Dashboard = () => {
       return acc;
     }, {});
     return Object.values(bucket).sort((a, b) => String(a.date).localeCompare(String(b.date)));
-  }, [isMultiDayRange, rejectionTrend, rejectionAnalysisRows]);
+  }, [isMultiDayRange, rejectionTrend, filteredRejectionRows]);
 
   const analysisMachineRows = useMemo(() => {
     const filteredCards = Array.isArray(report.machineCards) ? report.machineCards : [];
@@ -1384,7 +1598,7 @@ const Dashboard = () => {
                   </div>
                 }
               />
-              <SafeChart height={220}>
+              <SafeChart height={220} style={{overflow:"visible",position:"relative",zIndex:20}}>
                 {({ width, height }) => (
                   <>
                   {chartModeHourly === "line" && (
@@ -1444,7 +1658,7 @@ const Dashboard = () => {
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
               <SectionHead title={t("dashboard.productionByShift", "Production by Shift")} right={<ChartModeToggle mode={chartModeShift} onChange={setChartModeShift} />} />
-              <SafeChart height={200}>
+              <SafeChart height={200} style={{overflow:"visible",position:"relative",zIndex:2}}>
                 {({ width, height }) => (
                   <>
                   {chartModeShift === "bar" && (
@@ -1619,17 +1833,61 @@ const Dashboard = () => {
       {activeTab==="rejection" && (
         <div style={{display:"grid",gridTemplateColumns:"320px 1fr",gap:16}} className="db-grid-responsive">
           <style>{`@media(max-width:900px){.db-grid-responsive{grid-template-columns:1fr!important}}`}</style>
+          <div style={{gridColumn:"1 / -1",display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:10}}>
+              {[
+                {label:"Filtered Rejects",value:rejectionKpis.total,color:C.ng()},
+                {label:"Affected Parts",value:rejectionKpis.uniqueParts,color:C.steel()},
+                {label:"Top Reason",value:rejectionKpis.topReason?.reason||"-",sub:rejectionKpis.topReason?.count||0,color:C.navy()},
+                {label:"Hot Zone",value:rejectionKpis.topZone?.name||"-",sub:rejectionKpis.topZone?.count||0,color:C.ok()},
+              ].map((item)=>(
+                <div key={item.label} style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:10,padding:"12px 14px",boxShadow:SHADOW,minWidth:0}}>
+                  <p style={{fontSize:9,fontWeight:800,textTransform:"uppercase",letterSpacing:".07em",color:C.txt("muted"),margin:0}}>{item.label}</p>
+                  <p style={{fontSize:typeof item.value==="number"?24:13,fontWeight:900,color:item.color,marginTop:5,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={String(item.value)}>{item.value}</p>
+                  {item.sub!==undefined&&<p style={{fontSize:10,fontWeight:800,color:C.txt("sec"),marginTop:2}}>{item.sub} rejects</p>}
+                </div>
+              ))}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))",gap:8,background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:12,padding:12}}>
+              <select value={heatMapPart} onChange={(event)=>setHeatMapPart(event.target.value)}
+                style={{width:"100%",background:C.bg("input"),border:`1px solid ${C.bdr()}`,borderRadius:8,padding:"9px 10px",color:C.txt("pri"),fontSize:11,fontWeight:800}}>
+                <option value="" disabled>Select Configured Part</option>
+                {rejectionConfigParts.map((part)=><option key={part} value={part}>{part}</option>)}
+              </select>
+              {[
+                ["category","Category",rejectionFilterOptions.category],
+                ["view","View",rejectionFilterOptions.view],
+                ["zone","Zone",rejectionFilterOptions.zone],
+                ["reason","Reason",rejectionFilterOptions.reason],
+              ].map(([key,label,options])=>(
+                <select key={key} value={rejectionFilters[key]} onChange={(event)=>setRejectionFilters((prev)=>({...prev,[key]:event.target.value}))}
+                  style={{width:"100%",background:C.bg("input"),border:`1px solid ${C.bdr()}`,borderRadius:8,padding:"9px 10px",color:C.txt("pri"),fontSize:11,fontWeight:800}}>
+                  <option value="">All {label}s</option>
+                  {options.map((value)=><option key={value} value={value}>{value}</option>)}
+                </select>
+              ))}
+              <button onClick={()=>setRejectionFilters({category:"",view:"",zone:"",reason:""})}
+                style={{border:`1px solid ${C.bdr()}`,borderRadius:8,background:C.bg("surf"),color:C.txt("pri"),fontSize:11,fontWeight:800,cursor:"pointer"}}>
+                Clear Analysis Filters
+              </button>
+            </div>
+          </div>
           <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
             <SectionHead title={t("dashboard.rejectionDistribution", "Rejection Distribution")}/>
-            <div style={{display:"flex",justifyContent:"center",marginBottom:16}}>
-              <SafeChart height={200}>
+            <div style={{display:"flex",justifyContent:"center",marginBottom:12}}>
+              <SafeChart height={220} style={{overflow:"visible",position:"relative",zIndex:20}}>
                 {({ width, height }) => (
-                  <PieChart width={width} height={height}>
-                    <Pie data={rejectionPieData} dataKey="value" cx="50%" cy="50%" innerRadius={55} outerRadius={85} paddingAngle={3}
-                      labelLine={false}>
+                  <PieChart width={width} height={height} style={{overflow:"visible"}}>
+                    <Pie data={rejectionPieData} dataKey="value" cx="50%" cy="50%" outerRadius={96} paddingAngle={1}
+                      labelLine={false}
+                      label={false}>
                       {rejectionPieData.map((entry) => (<Cell key={entry.name} fill={entry.color} />))}
                     </Pie>
-                    <Tooltip {...TooltipStyle} />
+                    <Tooltip
+                      content={<RejectionPieTooltip total={rejectionPieData.reduce((sum,row)=>sum+Number(row.value||0),0)} />}
+                      wrapperStyle={{zIndex:99999,pointerEvents:"none"}}
+                      allowEscapeViewBox={{x:true,y:true}}
+                    />
                   </PieChart>
                 )}
               </SafeChart>
@@ -1650,10 +1908,10 @@ const Dashboard = () => {
             </div>
           </div>
 
-          <div style={{display:"grid",gridTemplateRows:"220px auto",gap:16}}>
+            <div style={{display:"grid",gridTemplateRows:"260px auto",gap:16}}>
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
               <SectionHead title={isMultiDayRange ? t("dashboard.rejectionTrendByDay", "Rejection Trend by Day") : t("dashboard.rejectionTrendByHour", "Rejection Trend by Hour")} right={<ChartModeToggle mode={chartModeRejectTrend} onChange={setChartModeRejectTrend} />} />
-              <SafeChart height={180}>
+              <SafeChart height={215} style={{overflow:"visible",position:"relative",zIndex:3}}>
               {({ width, height }) => (
                 <>
                 {chartModeRejectTrend === "area" && (
@@ -1661,10 +1919,11 @@ const Dashboard = () => {
                     <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                     <XAxis dataKey={isMultiDayRange ? "date" : "slot"} tickFormatter={(v)=>isMultiDayRange ? String(v).slice(5) : v} tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                     <YAxis tick={{fontSize:10,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                    <Tooltip {...TooltipStyle}/>
-                    <Area type="monotone" dataKey="cr" stackId="1" stroke={C.ng()} fill={C.ng(0.35)} />
-                    <Area type="monotone" dataKey="cram" stackId="1" stroke={C.amber()} fill={C.amber(0.35)} />
-                    <Area type="monotone" dataKey="mr" stackId="1" stroke={C.steel()} fill={C.steel(0.35)} />
+                    <Tooltip {...TooltipStyle} formatter={(value,name)=>[`${value} rejection${Number(value)===1?"":"s"}`,name]}/>
+                    <Legend />
+                    <Area name="CR" type="monotone" dataKey="cr" stackId="1" stroke={C.ng()} fill={C.ng(0.35)} />
+                    <Area name="CRAM" type="monotone" dataKey="cram" stackId="1" stroke={C.amber()} fill={C.amber(0.35)} />
+                    <Area name="MR" type="monotone" dataKey="mr" stackId="1" stroke={C.steel()} fill={C.steel(0.35)} />
                   </AreaChart>
                 )}
                 {chartModeRejectTrend === "line" && (
@@ -1672,10 +1931,11 @@ const Dashboard = () => {
                     <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                     <XAxis dataKey={isMultiDayRange ? "date" : "slot"} tickFormatter={(v)=>isMultiDayRange ? String(v).slice(5) : v} tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                     <YAxis tick={{fontSize:10,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                    <Tooltip {...TooltipStyle}/>
-                    <Line type="monotone" dataKey="cr" stroke={C.ng()} strokeWidth={2.2} />
-                    <Line type="monotone" dataKey="cram" stroke={C.amber()} strokeWidth={2.2} />
-                    <Line type="monotone" dataKey="mr" stroke={C.steel()} strokeWidth={2.2} />
+                    <Tooltip {...TooltipStyle} formatter={(value,name)=>[`${value} rejection${Number(value)===1?"":"s"}`,name]}/>
+                    <Legend />
+                    <Line name="CR" type="monotone" dataKey="cr" stroke={C.ng()} strokeWidth={3} dot={{r:3}} activeDot={{r:6}} />
+                    <Line name="CRAM" type="monotone" dataKey="cram" stroke={C.amber()} strokeWidth={3} dot={{r:3}} activeDot={{r:6}} />
+                    <Line name="MR" type="monotone" dataKey="mr" stroke={C.steel()} strokeWidth={3} dot={{r:3}} activeDot={{r:6}} />
                   </LineChart>
                 )}
                 {chartModeRejectTrend === "bar" && (
@@ -1683,10 +1943,11 @@ const Dashboard = () => {
                     <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
                     <XAxis dataKey={isMultiDayRange ? "date" : "slot"} tickFormatter={(v)=>isMultiDayRange ? String(v).slice(5) : v} tick={{fontSize:10,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
                     <YAxis tick={{fontSize:10,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                    <Tooltip {...TooltipStyle}/>
-                    <Bar dataKey="cr" fill={C.ng()} radius={[3,3,0,0]} />
-                    <Bar dataKey="cram" fill={C.amber()} radius={[3,3,0,0]} />
-                    <Bar dataKey="mr" fill={C.steel()} radius={[3,3,0,0]} />
+                    <Tooltip {...TooltipStyle} formatter={(value,name)=>[`${value} rejection${Number(value)===1?"":"s"}`,name]}/>
+                    <Legend />
+                    <Bar name="CR" dataKey="cr" fill={C.ng()} radius={[3,3,0,0]} />
+                    <Bar name="CRAM" dataKey="cram" fill={C.amber()} radius={[3,3,0,0]} />
+                    <Bar name="MR" dataKey="mr" fill={C.steel()} radius={[3,3,0,0]} />
                   </BarChart>
                 )}
                 </>
@@ -1705,6 +1966,127 @@ const Dashboard = () => {
                 ))}
               </div>
             </div>
+          </div>
+          <div style={{gridColumn:"1 / -1",background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
+            <SectionHead
+              title="Zone Heat Map"
+              right={
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  <select value={heatMapViewId} onChange={(event)=>setHeatMapViewId(event.target.value)}
+                    style={{background:C.bg("input"),border:`1px solid ${C.bdr()}`,borderRadius:8,padding:"7px 10px",color:C.txt("pri"),fontSize:11,fontWeight:800}}>
+                    {(heatMapConfig?.views || []).map((view)=><option key={view.id} value={view.id}>{view.name}</option>)}
+                  </select>
+                </div>
+              }
+            />
+            {!heatMapView ? (
+              <p style={{fontSize:12,fontWeight:700,color:C.txt("sec")}}>No configured part view available.</p>
+            ) : (
+              <div style={{display:"grid",gridTemplateColumns:"minmax(280px,1fr) 190px",gap:18,alignItems:"center"}} className="db-grid-responsive">
+                <div style={{position:"relative",width:"100%",maxWidth:900,margin:"0 auto",aspectRatio:"900 / 520",overflow:"hidden",borderRadius:10,border:`1px solid ${C.bdr()}`,background:C.bg("surf")}}>
+                  {heatMapView.imageUrl ? <img src={heatMapView.imageUrl} alt={heatMapView.name} style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"fill",display:"block"}} /> : (
+                    <div style={{position:"absolute",inset:0,display:"grid",placeItems:"center",color:C.txt("sec"),fontSize:12,fontWeight:800}}>No part image configured for this view</div>
+                  )}
+                  <svg viewBox="0 0 900 520" preserveAspectRatio="none" aria-hidden="true"
+                    style={{position:"absolute",inset:0,width:"100%",height:"100%",zIndex:1,pointerEvents:"none",mixBlendMode:"screen"}}>
+                    <defs>
+                      <filter id={`heat-blur-${heatMapView.id}`} x="-40%" y="-40%" width="180%" height="180%">
+                        <feGaussianBlur stdDeviation="34" />
+                      </filter>
+                      <clipPath id={`part-clip-${heatMapView.id}`}>
+                        <path d="M140 125 C200 85 320 80 420 100 C520 120 625 90 745 115 C790 125 830 165 840 220 L860 350 C868 410 815 455 750 465 L230 485 C155 485 108 430 115 365 L128 215 C132 175 108 150 140 125Z" />
+                      </clipPath>
+                    </defs>
+                    <g clipPath={`url(#part-clip-${heatMapView.id})`} filter={`url(#heat-blur-${heatMapView.id})`} opacity=".9">
+                      {(heatMapView.zones || []).map((zone)=>{
+                        const key=normalizeAnalysisToken(zone.code||zone.name);
+                        const count=Number(heatMapZoneCounts[key]||0);
+                        if (count <= 0) return null;
+                        const intensity=count/heatMapMax;
+                        const color=intensity>.66?"#ef4444":intensity>.33?"#f97316":"#facc15";
+                        const cx=(Number(zone.xPercent||0)+Number(zone.widthPercent||0)/2)*9;
+                        const cy=(Number(zone.yPercent||0)+Number(zone.heightPercent||0)/2)*5.2;
+                        const rx=Math.max(95,Number(zone.widthPercent||10)*9*.9);
+                        const ry=Math.max(75,Number(zone.heightPercent||10)*5.2*1.1);
+                        return <ellipse key={`heat-${zone.id}`} cx={cx} cy={cy} rx={rx} ry={ry} fill={color} fillOpacity={.75+.2*intensity} />;
+                      })}
+                    </g>
+                  </svg>
+                  {(heatMapView.zones || []).map((zone) => (
+                    <div
+                      key={`division-${zone.id}`}
+                      aria-hidden="true"
+                      style={{
+                        position:"absolute",
+                        left:`${Math.max(0, Number(zone.xPercent || 0))}%`,
+                        top:`${Math.max(0, Number(zone.yPercent || 0))}%`,
+                        width:`${Math.max(1, Math.min(100 - Number(zone.xPercent || 0), Number(zone.widthPercent || 10)))}%`,
+                        height:`${Math.max(1, Math.min(100 - Number(zone.yPercent || 0), Number(zone.heightPercent || 10)))}%`,
+                        border:"2px dashed rgba(220,38,38,.95)",
+                        boxSizing:"border-box",
+                        pointerEvents:"none",
+                        zIndex:2,
+                      }}
+                    />
+                  ))}
+                  {(heatMapView.zones || []).map((zone)=>{
+                    const shortKey = normalizeAnalysisToken(zone.code || zone.name);
+                    const count = Number(heatMapZoneCounts[shortKey] || 0);
+                    const intensity = count / heatMapMax;
+                    const borderColor = count === 0 ? "rgba(100,116,139,.65)"
+                      : intensity > .66 ? "rgba(185,28,28,.95)"
+                      : intensity > .33 ? "rgba(234,88,12,.95)"
+                      : "rgba(202,138,4,.95)";
+                    const centerX = Math.max(2, Math.min(98, Number(zone.xPercent || 0) + Number(zone.widthPercent || 0) / 2));
+                    const centerY = Math.max(2, Math.min(98, Number(zone.yPercent || 0) + Number(zone.heightPercent || 0) / 2));
+                    return (
+                      <div key={zone.id} title={`${zone.name || zone.code}: ${count} rejection${count===1?"":"s"}`}
+                        style={{position:"absolute",left:`${centerX}%`,top:`${centerY}%`,transform:"translate(-50%,-50%)",display:"flex",alignItems:"center",justifyContent:"center",transition:"all .2s ease",zIndex:3}}>
+                        <span style={{minWidth:46,height:34,padding:"0 9px",borderRadius:10,background:"rgba(255,244,150,.95)",border:`2px solid ${borderColor}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:900,color:"#0f172a",boxShadow:"0 3px 12px rgba(15,23,42,.28)"}}>
+                          {zone.code || zone.name} · {count}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,padding:"9px 10px",borderRadius:8,background:C.bg("surf"),border:`1px solid ${C.bdr()}`}}>
+                    <span style={{fontSize:10,fontWeight:900,color:C.txt("sec"),textTransform:"uppercase",letterSpacing:".06em"}}>Heat Intensity</span>
+                    <div style={{display:"flex",alignItems:"center",gap:5}}>
+                      {["#facc15","#f97316","#ef4444"].map((color)=><span key={color} style={{width:18,height:8,borderRadius:99,background:color}} />)}
+                    </div>
+                  </div>
+                  {(heatMapView.zones || []).map((zone)=>{
+                    const key=normalizeAnalysisToken(zone.code||zone.name);
+                    const count=Number(heatMapZoneCounts[key]||0);
+                    return <div key={zone.id} style={{display:"flex",justifyContent:"space-between",padding:"9px 10px",borderRadius:8,background:C.bg("surf"),border:`1px solid ${C.bdr()}`}}>
+                      <span style={{fontSize:11,fontWeight:800,color:C.txt("pri")}}>{zone.name||zone.code}</span>
+                      <span style={{fontSize:12,fontWeight:900,color:count?C.ng():C.txt("sec")}}>{count}</span>
+                    </div>;
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+          <div style={{gridColumn:"1 / -1",background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW}}>
+            <SectionHead title="Rejection Pareto Analysis"/>
+            {rejectionParetoData.length === 0 ? (
+              <p style={{fontSize:12,fontWeight:700,color:C.txt("sec")}}>No rejection reasons for the selected filters.</p>
+            ) : (
+              <SafeChart height={260} style={{overflow:"visible",position:"relative",zIndex:2}}>
+                {({width,height})=>(
+                  <ComposedChart width={width} height={height} data={rejectionParetoData} margin={{top:10,right:8,left:-10,bottom:45}}>
+                    <CartesianGrid stroke={C.bdr(.12)} strokeDasharray="3 4" vertical={false}/>
+                    <XAxis dataKey="reason" tickFormatter={(value)=>shortChartLabel(value)} interval={0} angle={-20} textAnchor="end" height={58} tick={{fontSize:10,fill:C.txt("sec")}}/>
+                    <YAxis yAxisId="count" tick={{fontSize:10,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
+                    <YAxis yAxisId="pct" orientation="right" domain={[0,100]} tickFormatter={(value)=>`${value}%`} tick={{fontSize:10,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
+                    <Tooltip {...TooltipStyle}/>
+                    <Bar yAxisId="count" dataKey="count" fill={C.ng(.82)} radius={[4,4,0,0]} barSize={34}/>
+                    <Line yAxisId="pct" type="monotone" dataKey="cumulative" stroke={C.navy()} strokeWidth={3} dot={{r:3,fill:C.navy()}}/>
+                  </ComposedChart>
+                )}
+              </SafeChart>
+            )}
           </div>
         </div>
       )}

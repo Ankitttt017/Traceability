@@ -38,6 +38,26 @@ const OperationLog = sequelize.define("OperationLog", {
     allowNull: true,
   },
   interlock_reason: DataTypes.STRING,
+  rejection_category: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  rejection_view: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  rejection_zone: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  rejection_reason: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  rejection_remark: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
   is_bypassed: {
     type: DataTypes.BOOLEAN,
     defaultValue: false,

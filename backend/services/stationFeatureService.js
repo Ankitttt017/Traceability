@@ -16,6 +16,7 @@ const DEFAULT_FEATURES = {
   validatePreviousStation: true,
   validateDuplicateBarcode: true,
   validateCustomerCode: false,
+  allowCustomerQrOnlyStart: false,
   customerCodePattern: "",
   finalPacking: false,
 };
@@ -77,6 +78,7 @@ async function getStationFeatureConfig(stationNo) {
     validatePreviousStation: config.validatePreviousStation !== false,
     validateDuplicateBarcode: config.validateDuplicateBarcode !== false,
     validateCustomerCode: config.validateCustomerCode === true,
+    allowCustomerQrOnlyStart: config.allowCustomerQrOnlyStart === true,
     customerCodePattern: String(config.customerCodePattern || ""),
     finalPacking: row.final_packing_enabled === true,
   };

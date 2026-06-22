@@ -72,6 +72,10 @@ const IO_PLC_DISCONNECT_FAILURE_THRESHOLD = Math.max(
 const ioSnapshotCache = new Map();
 const ioSnapshotInFlight = new Map();
 const ioPlcConnectionStability = new Map();
+const CUSTOMER_QR_ACTIVE_WINDOW_MS = Math.max(
+  Number(process.env.CUSTOMER_QR_ACTIVE_WINDOW_MS || 10 * 60 * 1000),
+  30 * 1000
+);
 
 function normalizeStation(value) {
   return String(value || "")
@@ -93,22 +97,82 @@ async function resolveMappedPartId(inputCode) {
   };
 }
 
+async function isKnownPartOrMappedCustomerQr(code) {
+  const raw = String(code || "").trim();
+  if (!raw) return true;
+  const [part, mapping] = await Promise.all([
+    Part.findOne({ where: { part_id: raw }, attributes: ["part_id"] }),
+    PartCodeMapping.findOne({
+      where: { customer_qr: raw, is_active: true },
+      attributes: ["id"],
+      order: [["updatedAt", "DESC"]],
+    }),
+  ]);
+  return Boolean(part || mapping);
+}
+
+async function canStartCustomerQrOnlyPart({ code, stationNo, machine, stationFeatures = null }) {
+  const raw = String(code || "").trim();
+  const station = normalizeStation(stationNo);
+  if (!raw || !station || !machine || !requiresCustomerQrForCompletion(machine)) return false;
+  const features = stationFeatures || await getStationFeatureConfig(station).catch(() => null);
+  if (features?.allowCustomerQrOnlyStart !== true) return false;
+  return !(await isKnownPartOrMappedCustomerQr(raw));
+}
+
+async function markCustomerQrOnlyMapping({ code, machine, stationNo }) {
+  const raw = String(code || "").trim();
+  if (!raw) return;
+  const part = await Part.findOne({ where: { part_id: raw } });
+  if (part && part.qr_format_name !== "CUSTOMER_QR_ONLY") {
+    part.qr_format_name = "CUSTOMER_QR_ONLY";
+    await part.save();
+  }
+  await PartCodeMapping.upsert({
+    old_part_id: raw,
+    customer_qr: raw,
+    machine_id: machine?.id || null,
+    station_no: normalizeStation(stationNo) || null,
+    is_active: true,
+  });
+}
+
+async function saveCustomerQrOnlyStart({ code, stationNo, machine, userId = null }) {
+  const station = normalizeStation(stationNo);
+  const response = await saveScan(code, station, "OK", machine.id, userId, {
+    resultSource: "CUSTOMER_QR_ONLY_START",
+    resultInput: "OK",
+    skipQrFormatValidation: true,
+    skipShotValidation: true,
+    skipCustomerCodeValidation: true,
+  });
+  if (response?.decision === "ALLOW") {
+    await markCustomerQrOnlyMapping({ code, machine, stationNo: station });
+  }
+  return response;
+}
+
 async function resolvePartIdSearchValues(inputCode) {
   const raw = String(inputCode || "").trim();
   if (!raw) return [];
+  const numericShot = /^\d{1,6}$/.test(raw) ? String(Number(raw)) : "";
+  const shotVariants = numericShot
+    ? [numericShot, numericShot.padStart(4, "0"), numericShot.padStart(5, "0"), numericShot.padStart(6, "0")]
+    : [];
   const mappings = await PartCodeMapping.findAll({
     where: {
-      is_active: true,
       [Op.or]: [
         { customer_qr: { [Op.like]: `%${raw}%` } },
         { old_part_id: { [Op.like]: `%${raw}%` } },
       ],
     },
     attributes: ["old_part_id", "customer_qr"],
+    order: [["updatedAt", "DESC"]],
     raw: true,
   });
   return uniqueStages([
     raw,
+    ...shotVariants,
     ...mappings.map((row) => String(row.old_part_id || "").trim()),
   ].filter(Boolean));
 }
@@ -686,21 +750,45 @@ async function resolveActivePartIdForMachine(machine, stationNo) {
   const machineRunningPartId = String(machine.running_part_id || "").trim();
   const machineRunningStation = normalizeStation(machine.running_station_no);
   const targetStation = normalizeStation(stationNo);
+  const activeStatuses = ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING"];
+  const freshCutoff = new Date(Date.now() - CUSTOMER_QR_ACTIVE_WINDOW_MS);
 
   if (machineRunningPartId && (!targetStation || !machineRunningStation || machineRunningStation === targetStation)) {
-    return machineRunningPartId;
+    const matchingActiveLog = await OperationLog.findOne({
+      where: {
+        part_id: machineRunningPartId,
+        machine_id: machine.id,
+        ...(targetStation ? { station_no: targetStation } : {}),
+        plc_status: { [Op.in]: activeStatuses },
+        updatedAt: { [Op.gte]: freshCutoff },
+      },
+      attributes: ["id", "part_id"],
+      order: [["updatedAt", "DESC"]],
+    });
+    if (matchingActiveLog) {
+      return machineRunningPartId;
+    }
   }
 
-  const activeLog = await OperationLog.findOne({
+  const activeLogs = await OperationLog.findAll({
     where: {
       machine_id: machine.id,
       ...(targetStation ? { station_no: targetStation } : {}),
-      plc_status: { [Op.in]: ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING"] },
+      plc_status: { [Op.in]: activeStatuses },
+      updatedAt: { [Op.gte]: freshCutoff },
     },
-    order: [["createdAt", "DESC"]],
+    attributes: ["id", "part_id", "updatedAt"],
+    order: [["updatedAt", "DESC"]],
+    limit: 5,
   });
 
-  return String(activeLog?.part_id || "").trim();
+  const uniquePartIds = [...new Set(
+    activeLogs
+      .map((log) => String(log.part_id || "").trim())
+      .filter(Boolean)
+  )];
+
+  return uniquePartIds.length === 1 ? uniquePartIds[0] : "";
 }
 
 async function getActiveStationSequence() {
@@ -796,6 +884,43 @@ async function shouldBlockMappedCustomerQrOnStartScan(stationNo) {
 
 function wrongCustomerQrAtStartMessage(stationNo) {
   return `Wrong QR scanned at ${normalizeStation(stationNo) || "this station"}. Scan Part Serial/Casting QR here. Customer QR is allowed only after Laser Marking.`;
+}
+
+async function isAfterCustomerQrMappingStation(stationNo) {
+  const station = normalizeStation(stationNo);
+  if (!station) return false;
+  const sequenceData = await getActiveMachineSequenceData();
+  const sequence = Array.isArray(sequenceData?.sequence) ? sequenceData.sequence : [];
+  const currentIndex = sequence.indexOf(station);
+  const customerQrStationIndex = sequence.findIndex((candidateStation) => {
+    const machines = (sequenceData?.machines || []).filter((machine) => getMachineOperationStage(machine) === candidateStation);
+    return machines.some((machine) => requiresCustomerQrForCompletion(machine));
+  });
+  return currentIndex >= 0 && customerQrStationIndex >= 0 && currentIndex > customerQrStationIndex;
+}
+
+async function shouldBlockUnknownQrAfterLaser({ code, stationNo }) {
+  const raw = String(code || "").trim();
+  if (!raw) return false;
+  const [part, mapping] = await Promise.all([
+    Part.findOne({ where: { part_id: raw }, attributes: ["part_id"] }),
+    PartCodeMapping.findOne({
+      where: { customer_qr: raw, is_active: true },
+      attributes: ["id"],
+      order: [["updatedAt", "DESC"]],
+    }),
+  ]);
+  if (part || mapping) return false;
+  return isAfterCustomerQrMappingStation(stationNo);
+}
+
+async function unknownQrAfterLaserMessage(stationNo) {
+  const sequence = await getActiveStationSequence().catch(() => []);
+  const firstStation = normalizeStation(sequence?.[0]);
+  const currentStation = normalizeStation(stationNo) || "This station";
+  return firstStation
+    ? `${currentStation}: Part not found. Scan this part at first station ${firstStation} first.`
+    : `${currentStation}: Part not found. Scan this part at first station first.`;
 }
 
 function isJourneyNoiseLog(log) {
@@ -3255,6 +3380,54 @@ exports.processScan = async (req, res) => {
 
       const activePartId = await resolveActivePartIdForMachine(machine, normalizedStation);
       if (!activePartId) {
+        if (await canStartCustomerQrOnlyPart({
+          code: scannedQrRaw,
+          stationNo: normalizedStation,
+          machine,
+          stationFeatures,
+        })) {
+          const response = await saveCustomerQrOnlyStart({
+            code: scannedQrRaw,
+            stationNo: normalizedStation,
+            machine,
+            userId: req.user?.id,
+          });
+          const allowed = response?.decision === "ALLOW";
+          emitOperatorPopup(allowed ? "INFO" : "ERROR", {
+            partId: scannedQrRaw,
+            customerQrCode: scannedQrRaw,
+            stationNo: normalizedStation,
+            machineId: machine.id,
+            machineName: machine.machine_name,
+            status: allowed ? "SCANNED" : "BLOCKED",
+            plcStatus: allowed ? "WAITING_PLC" : "BLOCKED",
+            qrResult: allowed ? "PASS" : "FAIL",
+            operationStatus: response?.operationStatus || (allowed ? "WAITING" : "BLOCKED"),
+            reason: allowed ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || "CUSTOMER_QR_ONLY_BLOCKED"),
+            message: allowed
+              ? "Customer QR-only part started. Continue normal process."
+              : (response?.message || "Customer QR-only start blocked."),
+          });
+          return res.status(allowed ? 200 : 409).json({
+            ...response,
+            status: allowed ? "OK" : "BLOCKED",
+            decision: response?.decision || "BLOCK",
+            reason: allowed ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || "CUSTOMER_QR_ONLY_BLOCKED"),
+            message: allowed
+              ? "Customer QR-only part started. Continue normal process."
+              : (response?.message || "Customer QR-only start blocked."),
+            mapped: allowed,
+            customerQrOnly: true,
+            partId: scannedQrRaw,
+            customerQrCode: scannedQrRaw,
+            scannerRead,
+            machine: {
+              id: machine.id,
+              machineName: machine.machine_name,
+              stationNo: normalizedStation,
+            },
+          });
+        }
         emitOperatorPopup("ERROR", {
           partId: "",
           stationNo: normalizedStation,
@@ -3264,10 +3437,10 @@ exports.processScan = async (req, res) => {
           plcStatus: "WAIT",
           qrResult: "FAIL",
           reason: "START_QR_REQUIRED",
-          message: `${normalizedStation} Laser: scan Part ID / Start QR first. After OP is in progress, scan Customer QR.`,
+          message: `${normalizedStation}: no confirmed active part. Re-scan Part ID / Start QR, then scan Customer QR.`,
         });
         return res.status(409).json({
-          error: `${normalizedStation} Laser has no active part. Scan Part ID / Start QR first, then scan Customer QR.`,
+          error: `${normalizedStation}: no confirmed active part. Re-scan Part ID / Start QR, then scan Customer QR.`,
         });
       }
 
@@ -3341,10 +3514,53 @@ exports.processScan = async (req, res) => {
       return res.status(roleGuard.status).json({ error: roleGuard.error });
     }
 
+    const stationFeatures = await getStationFeatureConfig(normalizedStation);
     const resolvedCode = await resolveMappedPartId(normalizedPartId);
     normalizedPartId = resolvedCode.resolvedPartId;
     customerQrCode = resolvedCode.customerQrCode;
     const isMappedCustomerQrScan = Boolean(customerQrCode) && customerQrCode === scannedQrRaw;
+    const isCustomerQrOnlyStart =
+      !isMappedCustomerQrScan &&
+      await canStartCustomerQrOnlyPart({
+        code: scannedQrRaw,
+        stationNo: normalizedStation,
+        machine,
+        stationFeatures,
+      });
+    if (isCustomerQrOnlyStart) {
+      normalizedPartId = scannedQrRaw;
+      customerQrCode = scannedQrRaw;
+    }
+
+    if (!isMappedCustomerQrScan && !isCustomerQrOnlyStart && await shouldBlockUnknownQrAfterLaser({
+      code: scannedQrRaw,
+      stationNo: normalizedStation,
+    })) {
+      const message = await unknownQrAfterLaserMessage(normalizedStation);
+      emitOperatorPopup("ERROR", {
+        partId: scannedQrRaw,
+        customerQrCode: scannedQrRaw,
+        stationNo: normalizedStation,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "BLOCKED",
+        plcStatus: "BLOCKED",
+        qrResult: "FAIL",
+        operationStatus: "BLOCKED",
+        reason: "CUSTOMER_QR_NOT_MAPPED",
+        message,
+      });
+      return res.status(409).json({
+        decision: "BLOCK",
+        reason: "CUSTOMER_QR_NOT_MAPPED",
+        qrStatus: "FAILED",
+        operationStatus: "BLOCKED",
+        message,
+        partId: scannedQrRaw,
+        customerQrCode: scannedQrRaw,
+        stationNo: normalizedStation,
+      });
+    }
 
     if (isMappedCustomerQrScan && await shouldBlockMappedCustomerQrOnStartScan(normalizedStation)) {
       const message = wrongCustomerQrAtStartMessage(normalizedStation);
@@ -3373,7 +3589,6 @@ exports.processScan = async (req, res) => {
       });
     }
 
-    const stationFeatures = await getStationFeatureConfig(normalizedStation);
     const spcConfig = getMachineSpcConfig(machine);
     const rejectionBinConfirmed = stationFeatures.rejectionBin && hasRejectionBinConfirmation(req.body);
     const manualResultEnabled = stationFeatures.manualResult === true;
@@ -3452,7 +3667,7 @@ exports.processScan = async (req, res) => {
     const bypassState = machineBypassEnabled ? getMachineBypass(machine.id) : null;
     const response = await saveScan(normalizedPartId, normalizedStation, finalResult, machine.id, req.user?.id, {
       ...(ngReason ? { ngReason } : {}),
-      resultSource,
+      resultSource: isCustomerQrOnlyStart ? "CUSTOMER_QR_ONLY_START" : resultSource,
       resultInput: spcConfig.mode === "PLC_REGISTER"
         ? normalizeQualityToken(plcQualityResult?.token || plcQualityResult?.rawValue || finalResult)
         : hasSpcResultInput
@@ -3463,13 +3678,16 @@ exports.processScan = async (req, res) => {
       qualityPayload,
       customerCodePattern: stationFeatures.customerCodePattern || "",
       shotValidationPartId: normalizedPartId,
-      skipQrFormatValidation: isMappedCustomerQrScan || !qrValidationEnabled || !validateQrFormat,
-      skipShotValidation: isMappedCustomerQrScan || !validateShotNumber,
-      skipCustomerCodeValidation: isMappedCustomerQrScan || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
+      skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateQrFormat,
+      skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !validateShotNumber,
+      skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
       skipInterlockValidation: skipAllBypassValidations,
       skipDuplicateValidation: false,
       skipSequenceValidation: !validatePreviousStation || skipAllBypassValidations,
     });
+    if (response?.decision === "ALLOW" && isCustomerQrOnlyStart) {
+      await markCustomerQrOnlyMapping({ code: normalizedPartId, machine, stationNo: normalizedStation });
+    }
     if (response?.decision === "ALLOW" && response?.operationLogId) {
       await safeRecordTimeline({
         operationId: response.operationLogId,
@@ -3633,6 +3851,53 @@ exports.verifyScanForOperator = async (req, res) => {
       (!isKnownPartId || isExistingMappedCustomerQr);
 
     if (looksLikeCustomerQr && !activePartIdForMachine) {
+      if (await canStartCustomerQrOnlyPart({
+        code: scannedQrRaw,
+        stationNo,
+        machine,
+        stationFeatures,
+      })) {
+        const response = await saveCustomerQrOnlyStart({
+          code: scannedQrRaw,
+          stationNo,
+          machine,
+          userId: req.user?.id,
+        });
+        const allowed = response?.decision === "ALLOW";
+        emitOperatorPopup(allowed ? "INFO" : "ERROR", {
+          partId: scannedQrRaw,
+          customerQrCode: scannedQrRaw,
+          stationNo,
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          status: allowed ? "SCANNED" : "BLOCKED",
+          plcStatus: allowed ? "WAITING_PLC" : "BLOCKED",
+          qrResult: allowed ? "PASS" : "FAIL",
+          operationStatus: response?.operationStatus || (allowed ? "WAITING" : "BLOCKED"),
+          reason: allowed ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || "CUSTOMER_QR_ONLY_BLOCKED"),
+          message: allowed
+            ? "Customer QR-only part started. Continue normal process."
+            : (response?.message || "Customer QR-only start blocked."),
+        });
+        return res.status(allowed ? 200 : 409).json({
+          ...response,
+          status: allowed ? "OK" : "BLOCKED",
+          decision: response?.decision || "BLOCK",
+          reason: allowed ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || "CUSTOMER_QR_ONLY_BLOCKED"),
+          message: allowed
+            ? "Customer QR-only part started. Continue normal process."
+            : (response?.message || "Customer QR-only start blocked."),
+          mapped: allowed,
+          customerQrOnly: true,
+          partId: scannedQrRaw,
+          customerQrCode: scannedQrRaw,
+          machine: {
+            id: machine.id,
+            machineName: machine.machine_name,
+            stationNo,
+          },
+        });
+      }
       emitOperatorPopup("ERROR", {
         partId: "",
         stationNo,
@@ -3642,11 +3907,11 @@ exports.verifyScanForOperator = async (req, res) => {
         plcStatus: "WAIT",
         qrResult: "FAIL",
         reason: "START_QR_REQUIRED",
-        message: `${stationNo} Laser: scan Part ID / Start QR first. After OP is in progress, scan Customer QR.`,
+        message: `${stationNo}: no confirmed active part. Re-scan Part ID / Start QR, then scan Customer QR.`,
         customerQrCode: scannedQrRaw,
       });
       return res.status(409).json({
-        error: `${stationNo} Laser has no active part. Scan Part ID / Start QR first, then scan Customer QR.`,
+        error: `${stationNo}: no confirmed active part. Re-scan Part ID / Start QR, then scan Customer QR.`,
         reason: "START_QR_REQUIRED",
         stationNo,
         machine: {
@@ -3731,13 +3996,56 @@ exports.verifyScanForOperator = async (req, res) => {
 
     const resolvedCode = await resolveMappedPartId(inputCode);
     const normalizedPartId = resolvedCode.resolvedPartId;
-    const customerQrCode = resolvedCode.customerQrCode;
+    let finalPartId = normalizedPartId;
+    let customerQrCode = resolvedCode.customerQrCode;
     const isMappedCustomerQrScan = Boolean(customerQrCode) && customerQrCode === scannedQrRaw;
+    const isCustomerQrOnlyStart =
+      !isMappedCustomerQrScan &&
+      await canStartCustomerQrOnlyPart({
+        code: scannedQrRaw,
+        stationNo,
+        machine,
+        stationFeatures,
+      });
+    if (isCustomerQrOnlyStart) {
+      finalPartId = scannedQrRaw;
+      customerQrCode = scannedQrRaw;
+    }
+
+    if (!isMappedCustomerQrScan && !isCustomerQrOnlyStart && await shouldBlockUnknownQrAfterLaser({
+      code: scannedQrRaw,
+      stationNo,
+    })) {
+      const message = await unknownQrAfterLaserMessage(stationNo);
+      emitOperatorPopup("ERROR", {
+        partId: scannedQrRaw,
+        customerQrCode: scannedQrRaw,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        status: "BLOCKED",
+        plcStatus: "BLOCKED",
+        qrResult: "FAIL",
+        operationStatus: "BLOCKED",
+        reason: "CUSTOMER_QR_NOT_MAPPED",
+        message,
+      });
+      return res.status(409).json({
+        decision: "BLOCK",
+        reason: "CUSTOMER_QR_NOT_MAPPED",
+        qrStatus: "FAILED",
+        operationStatus: "BLOCKED",
+        message,
+        partId: scannedQrRaw,
+        customerQrCode: scannedQrRaw,
+        stationNo,
+      });
+    }
 
     if (isMappedCustomerQrScan && await shouldBlockMappedCustomerQrOnStartScan(stationNo)) {
       const message = wrongCustomerQrAtStartMessage(stationNo);
       emitOperatorPopup("ERROR", {
-        partId: normalizedPartId,
+        partId: finalPartId,
         customerQrCode,
         stationNo,
         machineId: machine.id,
@@ -3755,7 +4063,7 @@ exports.verifyScanForOperator = async (req, res) => {
         qrStatus: "FAILED",
         operationStatus: "BLOCKED",
         message,
-        partId: normalizedPartId,
+        partId: finalPartId,
         customerQrCode,
         stationNo,
       });
@@ -3771,7 +4079,7 @@ exports.verifyScanForOperator = async (req, res) => {
     if (spcConfig.enabled && spcConfig.mode === "PLC_REGISTER") {
       plcQualityResult = await readQualityCheckResultFromPlc(machine, spcConfig).catch((error) => {
         console.warn(
-          `[QUALITY_CHECK] PLC register read failed machineId=${machine.id} partId=${normalizedPartId} station=${stationNo} error=${error.message}`
+          `[QUALITY_CHECK] PLC register read failed machineId=${machine.id} partId=${finalPartId} station=${stationNo} error=${error.message}`
         );
         return null;
       });
@@ -3824,9 +4132,9 @@ exports.verifyScanForOperator = async (req, res) => {
     const validateDuplicateBarcode = stationFeatures.validateDuplicateBarcode !== false;
     const validateCustomerCode = stationFeatures.validateCustomerCode === true;
     const bypassState = machineBypassEnabled ? getMachineBypass(machine.id) : null;
-    const response = await saveScan(normalizedPartId, stationNo, finalResult, machine.id, req.user?.id, {
+    const response = await saveScan(finalPartId, stationNo, finalResult, machine.id, req.user?.id, {
       ...(ngReason ? { ngReason } : {}),
-      resultSource,
+      resultSource: isCustomerQrOnlyStart ? "CUSTOMER_QR_ONLY_START" : resultSource,
       resultInput: spcConfig.mode === "PLC_REGISTER"
         ? normalizeQualityToken(plcQualityResult?.token || plcQualityResult?.rawValue || finalResult)
         : hasSpcResultInput
@@ -3836,10 +4144,10 @@ exports.verifyScanForOperator = async (req, res) => {
             : finalResult,
       qualityPayload,
       customerCodePattern: stationFeatures.customerCodePattern || "",
-      shotValidationPartId: normalizedPartId,
-      skipQrFormatValidation: isMappedCustomerQrScan || !qrValidationEnabled || !validateQrFormat,
-      skipShotValidation: isMappedCustomerQrScan || !validateShotNumber,
-      skipCustomerCodeValidation: isMappedCustomerQrScan || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
+      shotValidationPartId: finalPartId,
+      skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateQrFormat,
+      skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !validateShotNumber,
+      skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
       skipInterlockValidation: skipAllBypassValidations,
       skipDuplicateValidation: false,
       skipSequenceValidation: !validatePreviousStation || skipAllBypassValidations,
@@ -3847,7 +4155,7 @@ exports.verifyScanForOperator = async (req, res) => {
     if (response?.decision === "ALLOW" && response?.operationLogId) {
       await safeRecordTimeline({
         operationId: response.operationLogId,
-        partId: normalizedPartId,
+        partId: finalPartId,
         machineId: machine.id,
         stationNo,
         eventType: TIMELINE_EVENTS.SCANNED,
@@ -3858,7 +4166,7 @@ exports.verifyScanForOperator = async (req, res) => {
       });
       await safeRecordTimeline({
         operationId: response.operationLogId,
-        partId: normalizedPartId,
+        partId: finalPartId,
         machineId: machine.id,
         stationNo,
         eventType: TIMELINE_EVENTS.VALIDATED,
@@ -3878,7 +4186,7 @@ exports.verifyScanForOperator = async (req, res) => {
       response,
       machine,
       stationNo,
-      partId: normalizedPartId,
+      partId: finalPartId,
       userId: req.user?.id,
       requiredPlcPartCount,
     });
@@ -3889,7 +4197,7 @@ exports.verifyScanForOperator = async (req, res) => {
       response.decision === "ALLOW" && operationStatus === "ENDED_OK" ? "SUCCESS" : mapScanDecisionToPopupType(response);
     const popupMessage = response.decision === "ALLOW" ? (response.message || "Scan processed") : getBlockedPopupMessage(response);
     emitOperatorPopup(popupType, {
-      partId: normalizedPartId,
+      partId: finalPartId,
       stationNo,
       machineId: machine.id,
       machineName: getModelValue(machine, "machine_name"),
@@ -3906,7 +4214,7 @@ exports.verifyScanForOperator = async (req, res) => {
     response.qrStatus = qrStatus;
     response.operationStatus = operationStatus;
     response.plcPartCountRequired = requiredPlcPartCount;
-    response.resultSource = resultSource;
+    response.resultSource = isCustomerQrOnlyStart ? "CUSTOMER_QR_ONLY_START" : resultSource;
     response.manualResultEnabled = manualResultEnabled;
     response.isSpcStation = spcConfig.enabled;
     response.machineBypassEnabled = machineBypassEnabled;
@@ -3927,13 +4235,15 @@ exports.verifyScanForOperator = async (req, res) => {
       validatePreviousStation,
       validateDuplicateBarcode,
       validateCustomerCode,
+      allowCustomerQrOnlyStart: stationFeatures.allowCustomerQrOnlyStart === true,
     };
 
     res.json({
       status: response.decision === "ALLOW" ? "OK" : "NG",
       ...response,
-      partId: normalizedPartId,
-      customerQrCode: resolvedCode.customerQrCode,
+      partId: finalPartId,
+      customerQrCode,
+      customerQrOnly: isCustomerQrOnlyStart,
       machine: {
         id: machine.id,
         machineName: machine.machine_name,
@@ -4646,7 +4956,19 @@ exports.bypassOperation = async (req, res) => {
 
 exports.submitManualResult = async (req, res) => {
   try {
-    const { partId, stationNo, status, reason } = req.body;
+    const {
+      partId,
+      stationNo,
+      status,
+      reason,
+      category,
+      categoryName,
+      view,
+      viewName,
+      zone,
+      zoneName,
+      remark,
+    } = req.body;
     if (!partId) {
       return res.status(400).json({ error: "partId is required" });
     }
@@ -4660,6 +4982,18 @@ exports.submitManualResult = async (req, res) => {
     const targetStation = normalizeStation(stationNo);
     const normalizedPartId = String(partId).trim();
     const normalizedStatus = String(status).toUpperCase();
+    const rejectionCategory = String(categoryName || category || "").trim();
+    const rejectionView = String(viewName || view || "").trim();
+    const rejectionZone = String(zoneName || zone || "").trim();
+    const rejectionReason = String(reason || "").trim();
+    const rejectionRemark = String(remark || "").trim();
+    const storedNgReason = [
+      rejectionCategory ? `Category: ${rejectionCategory}` : "",
+      rejectionView ? `View: ${rejectionView}` : "",
+      rejectionZone ? `Zone: ${rejectionZone}` : "",
+      rejectionReason ? `Reason: ${rejectionReason}` : "",
+      rejectionRemark ? `Remark: ${rejectionRemark}` : "",
+    ].filter(Boolean).join(" | ") || rejectionReason || "MANUAL_REJECT";
 
     const machine = await Machine.findOne({
       where: { operation_no: targetStation },
@@ -4691,8 +5025,13 @@ exports.submitManualResult = async (req, res) => {
       plc_end_at: new Date(),
       result: normalizedStatus,
       result_source: "MANUAL",
-      result_input: reason || null,
-      interlock_reason: normalizedStatus === "NG" ? reason || "MANUAL_REJECT" : null,
+      result_input: normalizedStatus === "NG" ? storedNgReason : null,
+      interlock_reason: normalizedStatus === "NG" ? storedNgReason : null,
+      rejection_category: normalizedStatus === "NG" ? rejectionCategory || null : null,
+      rejection_view: normalizedStatus === "NG" ? rejectionView || null : null,
+      rejection_zone: normalizedStatus === "NG" ? rejectionZone || null : null,
+      rejection_reason: normalizedStatus === "NG" ? rejectionReason || null : null,
+      rejection_remark: normalizedStatus === "NG" ? rejectionRemark || null : null,
       machine_id: machine.id,
     });
 
@@ -4704,7 +5043,7 @@ exports.submitManualResult = async (req, res) => {
         current_operation: targetStation,
         status: "IN_PROGRESS",
         is_interlocked: normalizedStatus === "NG",
-        interlock_reason: normalizedStatus === "NG" ? reason || "MANUAL_REJECT" : null,
+        interlock_reason: normalizedStatus === "NG" ? storedNgReason : null,
       });
     } else {
       const sequence = await getActiveStationSequence();
@@ -4718,7 +5057,7 @@ exports.submitManualResult = async (req, res) => {
       } else {
         part.status = "NG";
         part.is_interlocked = true;
-        part.interlock_reason = reason || "MANUAL_REJECT";
+        part.interlock_reason = storedNgReason;
       }
       await part.save();
     }
@@ -4728,7 +5067,7 @@ exports.submitManualResult = async (req, res) => {
       machine_id: machine.id,
       user_id: req.user?.id || null,
       status: normalizedStatus,
-      ng_reason: normalizedStatus === "NG" ? reason || "MANUAL_REJECT" : null,
+      ng_reason: normalizedStatus === "NG" ? storedNgReason : null,
     });
 
     let autoStartedNextStation = null;
@@ -4751,7 +5090,7 @@ exports.submitManualResult = async (req, res) => {
       qrStatus: "PASSED",
       message: normalizedStatus === "OK"
         ? "Manual quality check passed"
-        : `Manual quality check completed with NG: ${reason || "Rejection"}`,
+        : `Manual quality check completed with NG: ${storedNgReason || "Rejection"}`,
     });
     if (normalizedStatus === "OK") {
       await emitPackingReadyPopup({
@@ -4769,6 +5108,13 @@ exports.submitManualResult = async (req, res) => {
       partId: normalizedPartId,
       stationNo: targetStation,
       autoStartedNextStation,
+      rejection: normalizedStatus === "NG" ? {
+        category: rejectionCategory,
+        view: rejectionView,
+        zone: rejectionZone,
+        reason: rejectionReason,
+        remark: rejectionRemark,
+      } : null,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -6593,6 +6939,13 @@ async function getDashboardExportRows(filters) {
     const status = deriveOperationStatus(row);
     const result = normalizeResultToken(row.result);
     const plcStatus = normalizeResultToken(row.plc_status);
+    const structuredRejectionReason = [
+      row.rejection_category ? `Category: ${row.rejection_category}` : "",
+      row.rejection_view ? `View: ${row.rejection_view}` : "",
+      row.rejection_zone ? `Zone: ${row.rejection_zone}` : "",
+      row.rejection_reason ? `Reason: ${row.rejection_reason}` : "",
+      row.rejection_remark ? `Remark: ${row.rejection_remark}` : "",
+    ].filter(Boolean).join(" | ");
     const start = row.plc_start_time || row.plc_start_at || null;
     const end = row.plc_end_time || row.plc_end_at || null;
     const cycleTime = start && end
@@ -6612,7 +6965,12 @@ async function getDashboardExportRows(filters) {
       status,
       result,
       plcStatus,
-      reason: row.interlock_reason || "",
+      reason: structuredRejectionReason || row.interlock_reason || "",
+      rejectionCategory: row.rejection_category || "",
+      rejectionView: row.rejection_view || "",
+      rejectionZone: row.rejection_zone || "",
+      rejectionReason: row.rejection_reason || "",
+      rejectionRemark: row.rejection_remark || "",
       operatorId: row.user_id || "",
       cycleTime: cycleTime === null ? "" : cycleTime,
       createdAt: formatReportTimestamp(row.createdAt),

@@ -441,22 +441,29 @@ const DecisionDisplay = ({ label, variant, sub1, sub2, accent, compact = false }
 };
 
 // Responsive Gauge Component
-const ResponsiveGauge = ({ progressPct, qualityPct, producedCount, expectedCount, compact }) => {
+const ResponsiveGauge = ({ progressPct, qualityPct, producedCount, expectedCount, hasTarget, compact }) => {
   const { t } = useLanguage();
   const size = compact ? 120 : 160;
   const strokeWidth = compact ? 10 : 12;
   const radius = (size - strokeWidth) / 2;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference * (1 - progressPct / 100);
+  const ringColor = producedCount <= 0
+    ? C.steel()
+    : qualityPct >= 85
+      ? C.ok()
+      : qualityPct >= 60
+        ? C.amber()
+        : C.ng();
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: compact ? "4px 0 8px" : "8px 0 16px" }}>
       <div style={{ position: "relative", width: size, height: size }}>
         <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
           <circle cx={size / 2} cy={size / 2} r={radius} fill="none"
-            stroke={C.bdr(0.3)} strokeWidth={strokeWidth} />
+            stroke={C.steel(0.2)} strokeWidth={strokeWidth} />
           <circle cx={size / 2} cy={size / 2} r={radius} fill="none"
-            stroke={qualityPct >= 85 ? C.ok() : qualityPct >= 60 ? C.amber() : C.ng()}
+            stroke={ringColor}
             strokeWidth={strokeWidth} strokeLinecap="round"
             strokeDasharray={circumference}
             strokeDashoffset={offset}
@@ -486,7 +493,7 @@ const ResponsiveGauge = ({ progressPct, qualityPct, producedCount, expectedCount
           fontSize: compact ? 9 : 11, color: C.txt("muted"), marginBottom: 4
         }}>
           <span>Produced: {producedCount}</span>
-          <span>Expected: {expectedCount}</span>
+          <span>{hasTarget ? `Target: ${expectedCount}` : "Target: Not Set"}</span>
         </div>
         <div style={{
           height: compact ? 6 : 8, borderRadius: 99,
@@ -707,11 +714,16 @@ const OperatorView = () => {
   const targetCount = Number(
     qualitySummary.targetProduction ??
     qualitySummary.targetQty ??
+    liveState?.summary?.targetProduction ??
+    liveState?.summary?.targetQty ??
+    liveState?.machine?.targetProduction ??
+    liveState?.machine?.targetQty ??
     stationStats?.machine?.targetProduction ??
     stationStats?.machine?.targetQty ??
     0
   );
-  const expectedCount = Math.max(targetCount, producedCount, 1);
+  const hasProductionTarget = targetCount > 0;
+  const expectedCount = hasProductionTarget ? targetCount : 0;
   const progressPct = targetCount > 0
     ? Math.min(100, Number(((producedCount / targetCount) * 100).toFixed(1)))
     : 0;
@@ -1157,6 +1169,9 @@ const OperatorView = () => {
       stationNo: nextStationNo,
       machineId: payload.machineId || payload.machine_id || prev?.machineId || prev?.machine_id || "",
       machineName: payload.machineName || prev?.machineName || "",
+      partName: payload.partName || payload.part_name || prev?.partName || prev?.part_name || "",
+      modelCode: payload.modelCode || payload.model_code || prev?.modelCode || prev?.model_code || "",
+      qrFormatName: payload.qrFormatName || payload.qr_format_name || prev?.qrFormatName || prev?.qr_format_name || "",
       qrStatus: isBlockedDecision ? "FAILED" : "PASSED",
       operationStatus: isBlockedDecision ? "BLOCKED" : passOperationStatus,
       timestamp: payload.timestamp || new Date().toISOString(),
@@ -1231,6 +1246,9 @@ const OperatorView = () => {
         ...(resolvePopupStationNo(payload) && { stationNo: resolvePopupStationNo(payload) }),
         ...((payload.machineId || payload.machine_id) && { machineId: payload.machineId || payload.machine_id }),
         ...(payload.machineName && { machineName: payload.machineName }),
+        ...((payload.partName || payload.part_name) && { partName: payload.partName || payload.part_name }),
+        ...((payload.modelCode || payload.model_code) && { modelCode: payload.modelCode || payload.model_code }),
+        ...((payload.qrFormatName || payload.qr_format_name) && { qrFormatName: payload.qrFormatName || payload.qr_format_name }),
         ...(payload.timestamp && { timestamp: payload.timestamp }),
         _shownAtMs: isIdentityChanged ? Date.now() : (prev?._shownAtMs || Date.now()),
       };
@@ -2063,6 +2081,7 @@ const OperatorView = () => {
                 qualityPct={qualityPct}
                 producedCount={producedCount}
                 expectedCount={expectedCount}
+                hasTarget={hasProductionTarget}
                 compact={isCompact}
               />
 

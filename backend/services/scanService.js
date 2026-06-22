@@ -367,7 +367,11 @@ async function checkPlcCycleReading(barcode) {
   }
 
   if (!shotNumber) {
-    return { success: false, reason: "NO_SHOT_NUMBER", message: "Could not extract shot number from barcode." };
+    return {
+      success: false,
+      reason: "NO_SHOT_NUMBER",
+      message: "Shot details are invalid. Could not extract the shot number from the scanned QR.",
+    };
   }
 
   // Strict compact-format matching: DDMMHHMM + shot
@@ -410,7 +414,7 @@ async function checkPlcCycleReading(barcode) {
       return {
         success: false,
         reason: "PART_NOT_FOUND",
-        message: `Part not found in PlcCycleReadings for rule-derived date/time (${compactParts.day}/${compactParts.month} ${compactParts.hour}:${compactParts.minute}, shot ${shotNumber}).`,
+        message: `Part not found — shot details unavailable in PlcCycleReadings for ${compactParts.day}/${compactParts.month} ${compactParts.hour}:${compactParts.minute}, shot ${shotNumber}.`,
       };
     } catch (error) {
       console.warn("[PLC_CYCLE_AUDIT] compact format query failed:", error.message);
@@ -491,7 +495,11 @@ async function checkPlcCycleReading(barcode) {
     // ignore
   }
 
-  return { success: false, reason: "PART_NOT_FOUND", message: `Part not found in database for shot number ${shotNumber}.` };
+  return {
+    success: false,
+    reason: "PART_NOT_FOUND",
+    message: `Part not found — shot details are unavailable in PlcCycleReadings for shot number ${shotNumber}.`,
+  };
 }
 
 async function hasRealCompletedOperationBefore(partId, currentStation, sequence) {

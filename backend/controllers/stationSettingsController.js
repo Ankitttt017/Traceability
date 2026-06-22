@@ -43,6 +43,7 @@ function normalizeInputMap(rawSettings = {}) {
       validatePreviousStation: rawValue.validatePreviousStation !== false,
       validateDuplicateBarcode: rawValue.validateDuplicateBarcode !== false,
       validateCustomerCode: rawValue.validateCustomerCode === true,
+      allowCustomerQrOnlyStart: rawValue.allowCustomerQrOnlyStart === true,
       customerCodePattern: String(rawValue.customerCodePattern || ""),
       finalPacking: rawValue.finalPacking === true,
     };
@@ -88,6 +89,7 @@ function rowsToMap(rows = []) {
       validatePreviousStation: config.validatePreviousStation !== false,
       validateDuplicateBarcode: config.validateDuplicateBarcode !== false,
       validateCustomerCode: config.validateCustomerCode === true,
+      allowCustomerQrOnlyStart: config.allowCustomerQrOnlyStart === true,
       customerCodePattern: String(config.customerCodePattern || ""),
       finalPacking: row.final_packing_enabled === true,
     };

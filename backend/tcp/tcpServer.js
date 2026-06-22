@@ -11,6 +11,10 @@ const { saveScan } = require("../services/scanService");
 const { getStationFeatureConfig } = require("../services/stationFeatureService");
 const { emitRealtime } = require("../services/realtimeService");
 const { Op } = require("sequelize");
+const CUSTOMER_QR_ACTIVE_WINDOW_MS = Math.max(
+  Number(process.env.CUSTOMER_QR_ACTIVE_WINDOW_MS || 10 * 60 * 1000),
+  30 * 1000
+);
 
 function sanitizeScannerPayload(value) {
   return String(value || "").replace(/[\u0000-\u001F\u007F]/g, "").trim();
@@ -82,6 +86,43 @@ async function shouldBlockMappedCustomerQrOnStartScan(stationNo) {
 
 function wrongCustomerQrAtStartMessage(stationNo) {
   return `Wrong QR scanned at ${normalizeStation(stationNo) || "this station"}. Scan Part Serial/Casting QR here. Customer QR is allowed only after Laser Marking.`;
+}
+
+async function isAfterCustomerQrMappingStation(stationNo) {
+  const station = normalizeStation(stationNo);
+  if (!station) return false;
+  const sequenceData = await getActiveMachineSequenceData();
+  const sequence = Array.isArray(sequenceData?.sequence) ? sequenceData.sequence : [];
+  const currentIndex = sequence.indexOf(station);
+  const customerQrStationIndex = sequence.findIndex((candidateStation) => {
+    const machines = (sequenceData?.machines || []).filter((machine) => normalizeStation(machine.operation_no) === candidateStation);
+    return machines.some((machine) => requiresCustomerQrForCompletion(machine));
+  });
+  return currentIndex >= 0 && customerQrStationIndex >= 0 && currentIndex > customerQrStationIndex;
+}
+
+async function shouldBlockUnknownQrAfterLaser({ code, stationNo }) {
+  const raw = String(code || "").trim();
+  if (!raw) return false;
+  const [part, mapping] = await Promise.all([
+    Part.findOne({ where: { part_id: raw }, attributes: ["part_id"] }),
+    PartCodeMapping.findOne({
+      where: { customer_qr: raw, is_active: true },
+      attributes: ["id"],
+      order: [["updatedAt", "DESC"]],
+    }),
+  ]);
+  if (part || mapping) return false;
+  return isAfterCustomerQrMappingStation(stationNo);
+}
+
+async function unknownQrAfterLaserMessage(stationNo) {
+  const sequence = await getActiveStationSequence().catch(() => []);
+  const firstStation = normalizeStation(sequence?.[0]);
+  const currentStation = normalizeStation(stationNo) || "This station";
+  return firstStation
+    ? `${currentStation}: Part not found. Scan this part at first station ${firstStation} first.`
+    : `${currentStation}: Part not found. Scan this part at first station first.`;
 }
 
 async function markOperationEndedOk({ operationLogId, partId, stationNo, machineId }) {
@@ -182,18 +223,41 @@ async function resolveActivePartIdForMachine(machine, stationNo) {
   const machineRunningPartId = String(machine.running_part_id || "").trim();
   const machineRunningStation = String(machine.running_station_no || "").trim().toUpperCase();
   const targetStation = String(stationNo || "").trim().toUpperCase();
+  const activeStatuses = ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING"];
+  const freshCutoff = new Date(Date.now() - CUSTOMER_QR_ACTIVE_WINDOW_MS);
   if (machineRunningPartId && (!targetStation || !machineRunningStation || machineRunningStation === targetStation)) {
-    return machineRunningPartId;
+    const matchingActiveLog = await OperationLog.findOne({
+      where: {
+        part_id: machineRunningPartId,
+        machine_id: machine.id,
+        ...(targetStation ? { station_no: targetStation } : {}),
+        plc_status: { [Op.in]: activeStatuses },
+        updatedAt: { [Op.gte]: freshCutoff },
+      },
+      attributes: ["id", "part_id"],
+      order: [["updatedAt", "DESC"]],
+    });
+    if (matchingActiveLog) {
+      return machineRunningPartId;
+    }
   }
-  const activeLog = await OperationLog.findOne({
+  const activeLogs = await OperationLog.findAll({
     where: {
       machine_id: machine.id,
       ...(targetStation ? { station_no: targetStation } : {}),
-      plc_status: { [Op.in]: ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING"] },
+      plc_status: { [Op.in]: activeStatuses },
+      updatedAt: { [Op.gte]: freshCutoff },
     },
-    order: [["createdAt", "DESC"]],
+    attributes: ["id", "part_id", "updatedAt"],
+    order: [["updatedAt", "DESC"]],
+    limit: 5,
   });
-  return String(activeLog?.part_id || "").trim();
+  const uniquePartIds = [...new Set(
+    activeLogs
+      .map((log) => String(log.part_id || "").trim())
+      .filter(Boolean)
+  )];
+  return uniquePartIds.length === 1 ? uniquePartIds[0] : "";
 }
 
 async function resolveMappedPartId(inputCode) {
@@ -210,6 +274,46 @@ async function resolveMappedPartId(inputCode) {
     resolvedPartId: String(row.old_part_id || raw).trim(),
     customerQrCode: String(row.customer_qr || raw).trim(),
   };
+}
+
+async function isKnownPartOrMappedCustomerQr(code) {
+  const raw = String(code || "").trim();
+  if (!raw) return true;
+  const [part, mapping] = await Promise.all([
+    Part.findOne({ where: { part_id: raw }, attributes: ["part_id"] }),
+    PartCodeMapping.findOne({
+      where: { customer_qr: raw, is_active: true },
+      attributes: ["id"],
+      order: [["updatedAt", "DESC"]],
+    }),
+  ]);
+  return Boolean(part || mapping);
+}
+
+async function canStartCustomerQrOnlyPart({ code, stationNo, machine }) {
+  const raw = String(code || "").trim();
+  const station = normalizeStation(stationNo);
+  if (!raw || !station || !machine || !requiresCustomerQrForCompletion(machine)) return false;
+  const features = await getStationFeatureConfig(station).catch(() => null);
+  if (features?.allowCustomerQrOnlyStart !== true) return false;
+  return !(await isKnownPartOrMappedCustomerQr(raw));
+}
+
+async function markCustomerQrOnlyMapping({ code, machine, stationNo }) {
+  const raw = String(code || "").trim();
+  if (!raw) return;
+  const part = await Part.findOne({ where: { part_id: raw } });
+  if (part && part.qr_format_name !== "CUSTOMER_QR_ONLY") {
+    part.qr_format_name = "CUSTOMER_QR_ONLY";
+    await part.save();
+  }
+  await PartCodeMapping.upsert({
+    old_part_id: raw,
+    customer_qr: raw,
+    machine_id: machine?.id || null,
+    station_no: normalizeStation(stationNo) || null,
+    is_active: true,
+  });
 }
 
 async function processIncomingScannerPayload({ scannerIp, payload }) {
@@ -418,6 +522,17 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
   if (effectiveScannerRole === "CUSTOMER_QR") {
     const activePartId = await resolveActivePartIdForMachine(machine, stationNo);
     if (!activePartId) {
+      if (await canStartCustomerQrOnlyPart({ code: partId, stationNo, machine })) {
+        await processCustomerQrOnlyStart({
+          scanner,
+          scannerIp,
+          partId,
+          stationNo,
+          machine,
+          scannerRole: effectiveScannerRole,
+        });
+        return;
+      }
       emitRealtime("operator_popup", {
         type: "ERROR",
         partId: "",
@@ -434,7 +549,7 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
         status: "BLOCKED",
         plcStatus: "BLOCKED",
         reason: "START_QR_REQUIRED",
-        message: `${stationNo} Laser: scan Part ID / Start QR first. After OP is in progress, scan Customer QR.`,
+        message: `${stationNo}: no confirmed active part. Re-scan Part ID / Start QR, then scan Customer QR.`,
         timestamp: new Date().toISOString(),
       });
       return;
@@ -531,6 +646,55 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
   const normalizedPartId = resolvedCode.resolvedPartId;
   const isMappedCustomerQrScan =
     Boolean(resolvedCode.customerQrCode) && resolvedCode.customerQrCode === partId;
+  const isCustomerQrOnlyStart =
+    !isMappedCustomerQrScan &&
+    await canStartCustomerQrOnlyPart({ code: partId, stationNo, machine });
+
+  if (!isMappedCustomerQrScan && !isCustomerQrOnlyStart && await shouldBlockUnknownQrAfterLaser({
+    code: partId,
+    stationNo,
+  })) {
+    const message = await unknownQrAfterLaserMessage(stationNo);
+    emitRealtime("scan_event", {
+      sourceEvent: "scan_event",
+      partId,
+      customerQrCode: partId,
+      stationNo,
+      machineId: machine.id,
+      machineName: machine.machine_name,
+      scannerId: scanner.id,
+      scannerName: scanner.scanner_name,
+      scannerRole,
+      scannerIp,
+      decision: "BLOCK",
+      reason: "CUSTOMER_QR_NOT_MAPPED",
+      status: "BLOCKED",
+      qrStatus: "FAILED",
+      operationStatus: "BLOCKED",
+      message,
+      timestamp: new Date().toISOString(),
+    });
+    emitRealtime("operator_popup", {
+      type: "ERROR",
+      partId,
+      customerQrCode: partId,
+      stationNo,
+      machineId: machine.id,
+      machineName: machine.machine_name,
+      scannerId: scanner.id,
+      scannerName: scanner.scanner_name,
+      scannerRole,
+      scannerIp,
+      qrStatus: "FAILED",
+      operationStatus: "BLOCKED",
+      status: "BLOCKED",
+      plcStatus: "BLOCKED",
+      reason: "CUSTOMER_QR_NOT_MAPPED",
+      message,
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
 
   if (isMappedCustomerQrScan && await shouldBlockMappedCustomerQrOnStartScan(stationNo)) {
     const message = wrongCustomerQrAtStartMessage(stationNo);
@@ -575,18 +739,22 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
     return;
   }
 
-  const response = await saveScan(normalizedPartId, stationNo, "OK", machine.id, null, {
-    resultSource: "TCP_PUSH_SCANNER",
+  const scanPartId = isCustomerQrOnlyStart ? partId : normalizedPartId;
+  const response = await saveScan(scanPartId, stationNo, "OK", machine.id, null, {
+    resultSource: isCustomerQrOnlyStart ? "CUSTOMER_QR_ONLY_START" : "TCP_PUSH_SCANNER",
     resultInput: "OK",
-    skipQrFormatValidation: isMappedCustomerQrScan,
-    skipShotValidation: isMappedCustomerQrScan,
-    skipCustomerCodeValidation: isMappedCustomerQrScan,
+    skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart,
+    skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart,
+    skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart,
   });
+  if (response?.decision === "ALLOW" && isCustomerQrOnlyStart) {
+    await markCustomerQrOnlyMapping({ code: scanPartId, machine, stationNo });
+  }
 
   emitRealtime("scan_event", {
     sourceEvent: "scan_event",
-    partId: normalizedPartId,
-    customerQrCode: resolvedCode.customerQrCode || null,
+    partId: scanPartId,
+    customerQrCode: isCustomerQrOnlyStart ? scanPartId : (resolvedCode.customerQrCode || null),
     stationNo,
     machineId: machine.id,
     machineName: machine.machine_name,
@@ -595,11 +763,13 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
     scannerRole,
     scannerIp,
     decision: response?.decision || "BLOCK",
-    reason: response?.reason || null,
+    reason: isCustomerQrOnlyStart && response?.decision === "ALLOW" ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || null),
     status: response?.decision === "ALLOW" ? "SCANNED" : "BLOCKED",
     qrStatus: response?.qrStatus || (response?.decision === "ALLOW" ? "PASSED" : "FAILED"),
     operationStatus: response?.operationStatus || (response?.decision === "ALLOW" ? "WAITING" : "BLOCKED"),
-    message: response?.message || "",
+    message: isCustomerQrOnlyStart && response?.decision === "ALLOW"
+      ? "Customer QR-only part started. Continue normal process."
+      : (response?.message || ""),
     timestamp: new Date().toISOString(),
   });
 
@@ -608,8 +778,8 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
   );
   emitRealtime("operator_popup", {
     type: response?.decision === "ALLOW" ? "INFO" : "ERROR",
-    partId: normalizedPartId,
-    customerQrCode: resolvedCode.customerQrCode || null,
+    partId: scanPartId,
+    customerQrCode: isCustomerQrOnlyStart ? scanPartId : (resolvedCode.customerQrCode || null),
     stationNo,
     machineId: machine.id,
     machineName: machine.machine_name,
@@ -621,8 +791,65 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
     operationStatus: response?.operationStatus || (response?.decision === "ALLOW" ? "WAITING" : "BLOCKED"),
     status: response?.decision === "ALLOW" ? "SCANNED" : "BLOCKED",
     plcStatus: response?.decision === "ALLOW" ? "WAITING_PLC" : "BLOCKED",
-    reason: response?.reason || null,
-    message: response?.message || "",
+    reason: isCustomerQrOnlyStart && response?.decision === "ALLOW" ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || null),
+    message: isCustomerQrOnlyStart && response?.decision === "ALLOW"
+      ? "Customer QR-only part started. Continue normal process."
+      : (response?.message || ""),
+    timestamp: new Date().toISOString(),
+  });
+}
+
+async function processCustomerQrOnlyStart({ scanner, scannerIp, partId, stationNo, machine, scannerRole }) {
+  const response = await saveScan(partId, stationNo, "OK", machine.id, null, {
+    resultSource: "CUSTOMER_QR_ONLY_START",
+    resultInput: "OK",
+    skipQrFormatValidation: true,
+    skipShotValidation: true,
+    skipCustomerCodeValidation: true,
+  });
+  if (response?.decision === "ALLOW") {
+    await markCustomerQrOnlyMapping({ code: partId, machine, stationNo });
+  }
+  const allowed = response?.decision === "ALLOW";
+  const message = allowed
+    ? "Customer QR-only part started. Continue normal process."
+    : (response?.message || "Customer QR-only start blocked.");
+  emitRealtime("scan_event", {
+    sourceEvent: "scan_event",
+    partId,
+    customerQrCode: partId,
+    stationNo,
+    machineId: machine.id,
+    machineName: machine.machine_name,
+    scannerId: scanner.id,
+    scannerName: scanner.scanner_name,
+    scannerRole,
+    scannerIp,
+    decision: response?.decision || "BLOCK",
+    reason: allowed ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || null),
+    status: allowed ? "SCANNED" : "BLOCKED",
+    qrStatus: response?.qrStatus || (allowed ? "PASSED" : "FAILED"),
+    operationStatus: response?.operationStatus || (allowed ? "WAITING" : "BLOCKED"),
+    message,
+    timestamp: new Date().toISOString(),
+  });
+  emitRealtime("operator_popup", {
+    type: allowed ? "INFO" : "ERROR",
+    partId,
+    customerQrCode: partId,
+    stationNo,
+    machineId: machine.id,
+    machineName: machine.machine_name,
+    scannerId: scanner.id,
+    scannerName: scanner.scanner_name,
+    scannerRole,
+    scannerIp,
+    qrStatus: response?.qrStatus || (allowed ? "PASSED" : "FAILED"),
+    operationStatus: response?.operationStatus || (allowed ? "WAITING" : "BLOCKED"),
+    status: allowed ? "SCANNED" : "BLOCKED",
+    plcStatus: allowed ? "WAITING_PLC" : "BLOCKED",
+    reason: allowed ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || null),
+    message,
     timestamp: new Date().toISOString(),
   });
 }

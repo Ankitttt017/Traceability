@@ -23,6 +23,7 @@ import {
   Zap,
   BarChart3,
   Sheet,
+  AlertTriangle,
 } from "lucide-react";
 
 import { APP_ROUTES } from "../constants/routes";
@@ -181,6 +182,12 @@ const Sidebar = ({ onClose }) => {
         path: APP_ROUTES.stationControls,
         icon: Settings2,
         moduleKey: "station_control",
+      },
+      {
+        name: t("pages.rejectionConfig", "Rejection Config"),
+        path: APP_ROUTES.rejectionConfiguration,
+        icon: AlertTriangle,
+        moduleKey: "master_settings",
       },
       {
         name: t("pages.reportConfig", "Report Config"),

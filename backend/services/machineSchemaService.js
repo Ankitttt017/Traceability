@@ -514,6 +514,35 @@ async function ensureUserRoleSchema() {
   `);
 }
 
+async function ensureRejectionSchema() {
+  const isMssql = typeof sequelize.getDialect === "function" && sequelize.getDialect() === "mssql";
+  if (!isMssql) return;
+
+  const [logTable] = await sequelize.query("SELECT OBJECT_ID(N'dbo.OperationLogs', N'U') AS table_id;");
+  if (logTable?.[0]?.table_id) {
+    const columns = [
+      { name: "rejection_category", type: "NVARCHAR(120)" },
+      { name: "rejection_view", type: "NVARCHAR(120)" },
+      { name: "rejection_zone", type: "NVARCHAR(120)" },
+      { name: "rejection_reason", type: "NVARCHAR(255)" },
+      { name: "rejection_remark", type: "NVARCHAR(500)" },
+    ];
+    for (const col of columns) {
+      await sequelize.query(`
+        IF NOT EXISTS (
+          SELECT 1
+          FROM sys.columns
+          WHERE object_id = OBJECT_ID(N'dbo.OperationLogs')
+            AND name = N'${col.name}'
+        )
+        BEGIN
+          ALTER TABLE [dbo].[OperationLogs] ADD [${col.name}] ${col.type} NULL;
+        END
+      `);
+    }
+  }
+}
+
 module.exports = {
   ensureMachineQrScannerUniqueness,
   ensurePerformanceColumnsExist,
@@ -523,5 +552,6 @@ module.exports = {
   ensurePlcLinkColumnsExist,
   ensureRoleAccessSchema,
   ensureUserRoleSchema,
+  ensureRejectionSchema,
   FILTERED_QR_SCANNER_INDEX,
 };

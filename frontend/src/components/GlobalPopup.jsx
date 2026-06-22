@@ -12,7 +12,7 @@ import {
   Minimize2,
 } from "lucide-react";
 import { getStationFeatures, getStationFeatureSettings } from "../utils/stationSettings";
-import { stationSettingsApi, traceabilityApi } from "../api/services";
+import { rejectionConfigApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import { normalizeScanResponse } from "../utils/scanResponse";
 import { useLanguage } from "../context/LanguageContext";
 
@@ -158,14 +158,56 @@ const NG_REASON_CATEGORIES = [
   { key: "MR", label: "MR - MR Defects" },
 ];
 
+const ACTIVE_REJECTION_PART_NAME = "OIL PAN K-12";
+
+const getNgZoneGridShape = (zoneCount = 0) => {
+  if (zoneCount <= 3) {
+    return { columns: Math.max(1, zoneCount), rows: 1 };
+  }
+  const columns = Math.max(1, Math.ceil(Math.sqrt(zoneCount || 1)));
+  const rows = Math.max(1, Math.ceil((zoneCount || 1) / columns));
+  return { columns, rows };
+};
+
+const NG_ZONE_LABEL_STYLES = [
+  "border-cyan-500 bg-cyan-100 text-slate-950",
+  "border-violet-500 bg-violet-100 text-slate-950",
+  "border-emerald-500 bg-emerald-100 text-slate-950",
+  "border-rose-500 bg-rose-100 text-slate-950",
+  "border-sky-500 bg-sky-100 text-slate-950",
+  "border-lime-600 bg-lime-100 text-slate-950",
+];
+
+const NG_ZONE_OVERLAY_STYLES = [
+  "border-cyan-500/80 bg-cyan-400/15 hover:bg-cyan-400/25",
+  "border-violet-500/80 bg-violet-400/15 hover:bg-violet-400/25",
+  "border-emerald-500/80 bg-emerald-400/15 hover:bg-emerald-400/25",
+  "border-rose-500/80 bg-rose-400/15 hover:bg-rose-400/25",
+  "border-sky-500/80 bg-sky-400/15 hover:bg-sky-400/25",
+  "border-lime-600/80 bg-lime-400/15 hover:bg-lime-400/25",
+];
+
 function getEnabledNgCategories(features = {}) {
-  const rows = NG_REASON_CATEGORIES.filter((category) => {
+  return NG_REASON_CATEGORIES.filter((category) => {
     if (category.key === "CR") return features.rejectionCategoryCR !== false;
     if (category.key === "CRAM") return features.rejectionCategoryCRAM !== false;
     if (category.key === "MR") return features.rejectionCategoryMR !== false;
     return true;
   });
-  return rows.length ? rows : NG_REASON_CATEGORIES;
+}
+
+function isNgCategoryEnabled(category = {}, features = {}) {
+  const code = String(category.key || category.code || "").trim().toUpperCase();
+  if (code === "CR") return features.rejectionCategoryCR !== false;
+  if (code === "CRAM") return features.rejectionCategoryCRAM !== false;
+  if (code === "MR") return features.rejectionCategoryMR !== false;
+  return true;
+}
+
+function getNgCategoryDisplayName(category = {}) {
+  return String(category.name || category.label || category.code || category.key || "")
+    .replace(/^\s*([A-Z0-9_]+)\s*-\s*\1\s*$/i, "$1")
+    .trim();
 }
 
 function getNgReasonsByCategory(categoryKey = "") {
@@ -228,6 +270,32 @@ function resolveRejectionState(popup = {}) {
     .toUpperCase();
   if (["PASS", "FAIL", "PENDING"].includes(explicit)) return explicit;
   return "PENDING";
+}
+
+function getJourneyStationDisplayState(station = {}, features = {}) {
+  const attempts = Array.isArray(station.attempts) ? station.attempts : [];
+  const bypassed =
+    Boolean(station.isBypassed || station.is_bypassed || station.bypassed) ||
+    attempts.some((attempt) => attempt?.isBypassed === true);
+  if (bypassed) return "PASS";
+
+  const stageState = String(station.stageState || station.status || station.latestStatus || "").trim().toUpperCase();
+  const qrState = String(station.qrVerification || station.qrStatus || "").trim().toUpperCase();
+  const operationState = String(station.operation || station.qualityCheck || "").trim().toUpperCase();
+  const passLike = ["PASS", "PASSED", "COMPLETED", "COMPLETED_OK", "ENDED_OK"];
+  const failLike = ["FAIL", "FAILED", "NG", "COMPLETED_NG", "ENDED_NG", "COMM", "COMM_ERROR", "PLC_COMM_ERROR", "TIMEOUT", "PLC_TIMEOUT"];
+
+  if (failLike.includes(operationState) || failLike.includes(stageState) || ["FAIL", "FAILED", "NG", "BLOCK", "REJECT", "INVALID"].includes(qrState)) {
+    return "FAIL";
+  }
+  if (passLike.includes(operationState) || passLike.includes(stageState)) return "PASS";
+
+  // Match Component Journey: automatic stations are complete once QR passed
+  // and there is no recorded failure. Manual-result stations still require an operation result.
+  if (features.manualResult !== true && ["PASS", "PASSED", "ALLOW", "OK", "ACCEPT", "VALID"].includes(qrState)) {
+    return "PASS";
+  }
+  return operationState || stageState || "WAIT";
 }
 
 // --- Compact StatusBadge ------------------------------------------------------
@@ -381,10 +449,17 @@ function friendlyErrorMessage(rawMsg, popup = {}) {
   const station = popup?.stationNo || popup?.station_no || "";
   const reason = String(popup?.reason || popup?.qrReason || "").trim().toUpperCase();
 
-  if (reason === "PART_NOT_FOUND" || msgUpper.includes("PART NOT FOUND") || msgUpper.includes("NOT FOUND IN MOULDING")) {
-    return `[PART NOT FOUND] Part ${partId || "QR"} not found in moulding records. Verify scanned QR and bridge source data.`;
+  if (reason === "NO_SHOT_NUMBER" || msgUpper.includes("NO_SHOT_NUMBER") || msgUpper.includes("COULD NOT EXTRACT SHOT")) {
+    return `[SHOT DETAILS INVALID] Shot number could not be extracted from ${partId || "the scanned QR"}. Verify the QR format and scan again.`;
   }
-  if (reason === "INVALID_QR_FORMAT" || msgUpper.includes("INVALID_QR_FORMAT") || msgUpper.includes("QR FORMAT MISMATCH")) {
+  if (
+    reason === "PART_NOT_FOUND" ||
+    reason === "PLC_RECORD_NOT_FOUND" ||
+    msgUpper.includes("PART NOT FOUND") ||
+    msgUpper.includes("NOT FOUND IN MOULDING") ||
+    msgUpper.includes("PLCCYCLEREADINGS")
+  ) {
+return `Part not found. No shot details available for the scanned QR.`;  if (reason === "INVALID_QR_FORMAT" || msgUpper.includes("INVALID_QR_FORMAT") || msgUpper.includes("QR FORMAT MISMATCH")) {
     return `[QR FORMAT MISMATCH] Invalid QR format. Scan correct component code.`;
   }
   if (reason === "PREVIOUS_STATION_NOT_COMPLETED" || msgUpper.includes("PREVIOUS_STATION_NOT_COMPLETED")) {
@@ -537,6 +612,11 @@ const GlobalPopup = ({
   const [manualReason, setManualReason] = useState("");
   const [manualReasonQuery, setManualReasonQuery] = useState("");
   const [manualReasonCategory, setManualReasonCategory] = useState("");
+  const [manualRejectionView, setManualRejectionView] = useState(null);
+  const [manualRejectionZone, setManualRejectionZone] = useState(null);
+  const [manualRejectionRemark, setManualRejectionRemark] = useState("");
+  const [dynamicRejectionConfig, setDynamicRejectionConfig] = useState(null);
+  const [loadingRejectionConfig, setLoadingRejectionConfig] = useState(false);
   const [showReasonDropdown, setShowReasonDropdown] = useState(false);
   const [showNgReasonModal, setShowNgReasonModal] = useState(false);
   const [submittingManual, setSubmittingManual] = useState(false);
@@ -635,6 +715,9 @@ const GlobalPopup = ({
       setManualSelection(null);
       setManualReason("");
       setManualReasonQuery("");
+      setManualRejectionView(null);
+      setManualRejectionZone(null);
+      setManualRejectionRemark("");
       setManualQrCode("");
       setScanLocked(false);
     } catch (err) {
@@ -681,6 +764,9 @@ const GlobalPopup = ({
     setManualReason("");
     setManualReasonQuery("");
     setManualReasonCategory("");
+    setManualRejectionView(null);
+    setManualRejectionZone(null);
+    setManualRejectionRemark("");
     setShowReasonDropdown(false);
     setShowNgReasonModal(false);
     setManualSuccessMsg("");
@@ -712,6 +798,25 @@ const GlobalPopup = ({
 
   // Prefer locally validated QR immediately so strip/panel update without waiting socket partId
   const effectivePartId = localValidatedPartIdRef.current || partId || lastScannedCode;
+  const customerQrCode = String(popup?.customerQrCode || popup?.customer_qr || "").trim();
+  const displayedScanCode = lastScannedCode || customerQrCode || effectivePartId;
+
+  useEffect(() => {
+    let isActive = true;
+    setLoadingRejectionConfig(true);
+    rejectionConfigApi.operatorConfig({ partName: ACTIVE_REJECTION_PART_NAME })
+      .then((config) => {
+        if (isActive) setDynamicRejectionConfig(config);
+      })
+      .catch((error) => {
+        console.warn("[GlobalPopup] Rejection config load failed:", error?.message || error);
+        if (isActive) setDynamicRejectionConfig(null);
+      })
+      .finally(() => {
+        if (isActive) setLoadingRejectionConfig(false);
+      });
+    return () => { isActive = false; };
+  }, []);
 
   // When a brand-new socket part arrives on same station, reset popup UI state to initial
   // so previous error/success does not stick to next scanned part.
@@ -730,6 +835,9 @@ const GlobalPopup = ({
         setManualReason("");
         setManualReasonQuery("");
         setManualReasonCategory("");
+        setManualRejectionView(null);
+        setManualRejectionZone(null);
+        setManualRejectionRemark("");
         setManualSuccessMsg("");
         setManualQrCode("");
         setShowNgReasonModal(false);
@@ -751,6 +859,9 @@ const GlobalPopup = ({
     setManualReason("");
     setManualReasonQuery("");
     setManualReasonCategory("");
+    setManualRejectionView(null);
+    setManualRejectionZone(null);
+    setManualRejectionRemark("");
     setManualSuccessMsg("");
     setManualQrCode("");
     setLocalQrValidated(false);
@@ -768,6 +879,18 @@ const GlobalPopup = ({
     }
     if (needsNgReason && !normalizedReason) {
       setValidationError("Please select NG reason before submit.");
+      return;
+    }
+    if (needsNgReason && configuredCategories.length && !selectedDynamicCategory) {
+      setValidationError("Please select rejection category.");
+      return;
+    }
+    if (needsNgReason && configuredCategories.length && !manualRejectionView) {
+      setValidationError("Please select rejection view.");
+      return;
+    }
+    if (needsNgReason && configuredCategories.length && !manualRejectionZone) {
+      setValidationError("Please select rejection zone.");
       return;
     }
     if (needsNgReason && !ngReasonOptions.includes(normalizedReason)) {
@@ -789,6 +912,10 @@ const GlobalPopup = ({
         stationNo: submitStationNo,
         status: manualSelection === "OK" ? "OK" : "NG",
         reason: manualSelection === "NG" ? normalizedReason : undefined,
+        category: manualSelection === "NG" ? (getNgCategoryDisplayName(selectedDynamicCategory) || manualReasonCategory) : undefined,
+        view: manualSelection === "NG" ? (manualRejectionView?.name || "") : undefined,
+        zone: manualSelection === "NG" ? (manualRejectionZone?.name || manualRejectionZone?.code || "") : undefined,
+        remark: manualSelection === "NG" ? manualRejectionRemark : undefined,
       });
       setManualSuccessMsg(res?.message || `Part ${manualSelection === "OK" ? "accepted" : "rejected"} - ready for next scan.`);
       if (manualSubmitTimerRef.current) clearTimeout(manualSubmitTimerRef.current);
@@ -800,6 +927,9 @@ const GlobalPopup = ({
         setManualReason("");
         setManualReasonQuery("");
         setManualReasonCategory("");
+        setManualRejectionView(null);
+        setManualRejectionZone(null);
+        setManualRejectionRemark("");
         setShowNgReasonModal(false);
         setValidationError("");
         setValidationInfo("");
@@ -884,7 +1014,7 @@ const GlobalPopup = ({
 
     let duration = 0;
     const STANDARD_SUCCESS_CLOSE_MS = 4200;
-    const STANDARD_ERROR_CLOSE_MS = 3000;
+    const STANDARD_ERROR_CLOSE_MS = 6000;
 
     // Faster auto-close / auto-reset for QR-focused industrial flow
     if (isOnlyQrCheck) {
@@ -1351,7 +1481,14 @@ const GlobalPopup = ({
   });
   const features = getStationFeatures(targetStationNo, stationSettings);
   const isManualResultStation = features?.manualResult === true;
-  const enabledNgReasonCategories = getEnabledNgCategories(features);
+  const fallbackNgReasonCategories = getEnabledNgCategories(features);
+  const configuredCategories = Array.isArray(dynamicRejectionConfig?.categories) && dynamicRejectionConfig.categories.length
+    ? dynamicRejectionConfig.categories
+    : [];
+  const dynamicCategories = configuredCategories.filter((category) => isNgCategoryEnabled(category, features));
+  const dynamicViews = Array.isArray(dynamicRejectionConfig?.views) ? dynamicRejectionConfig.views : [];
+  const dynamicMappings = Array.isArray(dynamicRejectionConfig?.mappings) ? dynamicRejectionConfig.mappings : [];
+  const enabledNgReasonCategories = configuredCategories.length ? dynamicCategories : fallbackNgReasonCategories;
 
   const nextPartHint = String(validationInfo || popup?.message || "").trim().toUpperCase();
   const isNextPartState =
@@ -1391,25 +1528,74 @@ const GlobalPopup = ({
       ? enrichedStations.slice(Math.max(0, resolvedCurrentIndex - 1), Math.min(enrichedStations.length, resolvedCurrentIndex + 2))
       : enrichedStations.slice(0, 3))
     : [];
-  const allNgReasonOptions = Array.from(
-    new Set(enabledNgReasonCategories.flatMap((category) => getNgReasonsByCategory(category.key)))
+  const selectedDynamicCategory = dynamicCategories.find((category) =>
+    String(category.key || category.code || category.id) === String(manualReasonCategory)
   );
-  const ngReasonOptions = manualReasonCategory
-    ? getNgReasonsByCategory(manualReasonCategory)
-    : allNgReasonOptions;
+  const selectedDynamicView = manualRejectionView;
+  const selectedDynamicZone = manualRejectionZone;
+  const popupZones = selectedDynamicView?.zones || [];
+  const popupZoneShape = getNgZoneGridShape(popupZones.length);
+  const popupVerticalDividers = Array.from(
+    { length: Math.max(0, popupZoneShape.columns - 1) },
+    (_, index) => Number(popupZones[index + 1]?.xPercent ?? ((index + 1) * 100 / popupZoneShape.columns))
+  );
+  const popupHorizontalDividers = Array.from(
+    { length: Math.max(0, popupZoneShape.rows - 1) },
+    (_, index) => Number(popupZones[(index + 1) * popupZoneShape.columns]?.yPercent ?? ((index + 1) * 100 / popupZoneShape.rows))
+  );
+  const dynamicReasonIdsForSelection = selectedDynamicCategory && selectedDynamicView && selectedDynamicZone
+    ? new Set(dynamicMappings
+      .filter((row) =>
+        Number(row.categoryId) === Number(selectedDynamicCategory.id) &&
+        Number(row.viewId) === Number(selectedDynamicView.id) &&
+        Number(row.zoneId) === Number(selectedDynamicZone.id)
+      )
+      .map((row) => Number(row.reasonId)))
+    : null;
+  const allNgReasonOptions = Array.from(
+    new Set(enabledNgReasonCategories.flatMap((category) => {
+      if (dynamicCategories.length) return (category.reasons || []).map((reason) => reason.name || reason);
+      return getNgReasonsByCategory(category.key);
+    }))
+  );
+  const ngReasonOptions = (() => {
+    if (dynamicCategories.length) {
+      if (!selectedDynamicCategory) return allNgReasonOptions;
+      const categoryReasons = (selectedDynamicCategory.reasons || []).filter((reason) => {
+        if (!dynamicReasonIdsForSelection) return true;
+        return dynamicReasonIdsForSelection.has(Number(reason.id));
+      });
+      return categoryReasons.map((reason) => reason.name || reason);
+    }
+    return manualReasonCategory ? getNgReasonsByCategory(manualReasonCategory) : allNgReasonOptions;
+  })();
   const filteredNgReasonOptions = (() => {
     const q = String(manualReasonQuery || "").trim().toLowerCase();
     if (!q) return ngReasonOptions;
     return ngReasonOptions.filter((reason) => String(reason).toLowerCase().includes(q));
   })();
   const isValidNgReason = !manualReason || ngReasonOptions.includes(manualReason);
-  const previousOpState = String(previousStation?.operation || previousStation?.qualityCheck || previousStation?.status || "").trim().toUpperCase();
+  const ngWizardStep = !manualRejectionView
+    ? 1
+    : !manualRejectionZone
+      ? 2
+      : !selectedDynamicCategory && configuredCategories.length
+        ? 3
+        : 4;
+  const previousStationFeatures = getStationFeatures(previousStation?.stationNo, stationSettings);
+  const previousOpState = getJourneyStationDisplayState(previousStation || {}, previousStationFeatures);
   const currentOpState = String(liveOperationState || currentStationCard?.operation || currentStationCard?.status || "").trim().toUpperCase();
   const previousBypassReason = String(previousStation?.bypassReason || previousStation?.bypass_reason || previousStation?.interlockReason || "").trim().toUpperCase();
   const previousStationBypassed =
     Boolean(previousStation?.isBypassed || previousStation?.is_bypassed || previousStation?.bypassed) ||
     previousBypassReason.includes("BYPASS");
-  const previousStationPassed = previousStationBypassed || ["PASS", "PASSED", "COMPLETED", "ENDED_OK", "BYPASSED"].includes(previousOpState);
+  const previousStationPassed = previousStationBypassed || previousOpState === "PASS";
+  const previousQrDisplayState = previousStationPassed && !["FAIL", "FAILED", "NG", "BLOCK", "REJECT", "INVALID"].includes(String(previousStation?.qrVerification || "").trim().toUpperCase())
+    ? "PASS"
+    : (previousStation?.qrVerification || "WAIT");
+  const previousOperationDisplayState = previousStationPassed
+    ? "PASS"
+    : (previousStation?.operation || previousOpState || "WAIT");
   const currentStationPassed = ["PASS", "PASSED", "COMPLETED", "ENDED_OK"].includes(currentOpState);
   const currentStationName = currentStationCard?.stationName || displayStations.find((s) => s.status === "IN_PROGRESS")?.stationName || stationNo || "System Node";
 
@@ -1540,9 +1726,10 @@ const GlobalPopup = ({
               </div>
             </div>
             <div className="flex items-center gap-2">
-              {effectivePartId && (
-                <div className="px-3 py-2 rounded-lg border border-amber-500/20 max-w-[420px] min-w-[180px]" style={{ background: "#0f172a" }} title={effectivePartId}>
-                  <p className="font-mono text-m font-black text-amber-400 break-all leading-tight">{effectivePartId}</p>
+              {displayedScanCode && (
+                <div className="px-3 py-2 rounded-lg border border-amber-500/20 max-w-[420px] min-w-[180px]" style={{ background: "#0f172a" }} title={displayedScanCode}>
+                  <p className="text-[8px] font-bold uppercase tracking-wider text-slate-400">Scanned QR</p>
+                  <p className="font-mono text-m font-black text-amber-400 break-all leading-tight">{displayedScanCode}</p>
                 </div>
               )}
               <button
@@ -1610,14 +1797,14 @@ const GlobalPopup = ({
 
         {/* Timeline Body - Single source of truth */}
         <div className="flex-1 overflow-y-auto px-5 py-3 bg-bg-card font-medium">
-          {effectivePartId && !isNextPartState && (
+          {displayedScanCode && !isNextPartState && (
             <div className={`mb-2 px-3 py-2 rounded-lg border shadow-sm flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 ${qrStripTheme.container}`}>
               <span className={`text-[15px] font-bold uppercase tracking-wider whitespace-nowrap ${qrStripTheme.label}`}>
                 Scanned QR
               </span>
               <div className="flex-1 min-w-0 text-center overflow-hidden">
                 <span className={`font-bold text-m tracking-wide text-black break-all sm:truncate ${qrStripTheme.value}`}>
-                  {effectivePartId}
+                  {displayedScanCode}
                 </span>
               </div>
               <span className={`inline-flex items-center justify-center px-2 py-1 rounded-md text-[15px] font-bold border whitespace-nowrap ${qrStripTheme.badge}`}>
@@ -1670,10 +1857,10 @@ const GlobalPopup = ({
                       </span>
                     </div>
                     <InfoRow label="QR">
-                      <StatusBadge status={previousStation.qrVerification || "WAIT"} />
+                      <StatusBadge status={previousQrDisplayState} />
                     </InfoRow>
                     <InfoRow label="Operation">
-                      <StatusBadge status={previousStation.operation || "WAIT"} />
+                      <StatusBadge status={previousOperationDisplayState} />
                     </InfoRow>
                   </div>
                 ) : (
@@ -1779,12 +1966,15 @@ const GlobalPopup = ({
                 <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-slate-700">{t("globalPopup.submitQualityVerification", "Manual Quality Inspection")}</h3>
               </div>
 
-              {effectivePartId && (
+              {displayedScanCode && (
                 <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-3 text-center shadow-sm">
-                  <p className="text-[11px] font-black uppercase tracking-[0.2em] text-amber-700">Part ID</p>
+                  <p className="text-[11px] font-black uppercase tracking-[0.2em] text-amber-700">Scanned Customer QR</p>
                   <p className="mt-1 break-all font-mono text-2xl font-black text-slate-950 sm:text-3xl">
-                    {effectivePartId}
+                    {displayedScanCode}
                   </p>
+                  {effectivePartId && effectivePartId !== displayedScanCode && (
+                    <p className="mt-2 text-[10px] font-bold text-slate-500">Internal Part ID: <span className="font-mono">{effectivePartId}</span></p>
+                  )}
                 </div>
               )}
 
@@ -1811,6 +2001,9 @@ const GlobalPopup = ({
                     setManualSelection("NG");
                     setManualReason("");
                     setManualReasonQuery("");
+                    setManualRejectionView(null);
+                    setManualRejectionZone(null);
+                    setManualRejectionRemark("");
                     setManualReasonCategory(enabledNgReasonCategories.length === 1 ? enabledNgReasonCategories[0].key : "");
                     setShowReasonDropdown(false);
                     setShowNgReasonModal(true);
@@ -1833,7 +2026,14 @@ const GlobalPopup = ({
                         {t("globalPopup.rejectionReason", "Rejection Reason")}
                       </p>
                       <p className="mt-1 text-sm font-bold text-slate-800">
-                        {manualReason || t("globalPopup.noReasonSelected", "No defect reason selected")}
+                        {manualReason
+                          ? [
+                            getNgCategoryDisplayName(selectedDynamicCategory),
+                            manualRejectionView?.name || "",
+                            manualRejectionZone?.name || manualRejectionZone?.code || "",
+                            manualReason,
+                          ].filter(Boolean).join(" / ")
+                          : t("globalPopup.noReasonSelected", "No defect reason selected")}
                       </p>
                     </div>
                     <button
@@ -1954,7 +2154,7 @@ const GlobalPopup = ({
     </div>
     {showNgReasonModal && manualSelection === "NG" && (
       <div className={`fixed inset-0 z-[1100] flex items-center justify-center bg-black/80 p-2 backdrop-blur-md transition-opacity duration-200 sm:p-4 ${isClosingSmoothly ? "opacity-0" : "opacity-100"}`}>
-        <div className={`flex h-auto max-h-[94vh] w-full max-w-[min(980px,96vw)] flex-col overflow-hidden rounded-2xl border border-slate-700 bg-white shadow-[0_30px_90px_rgba(0,0,0,0.6)] transition-transform duration-200 ${isClosingSmoothly ? "scale-[0.98]" : "scale-100"}`}>
+        <div className={`flex h-[calc(100dvh-1rem)] max-h-[900px] w-full max-w-[min(1180px,98vw)] flex-col overflow-hidden rounded-xl border border-border bg-bg-card text-text-main shadow-[0_30px_90px_rgba(0,0,0,0.6)] transition-transform duration-200 sm:h-auto sm:max-h-[96dvh] sm:rounded-2xl ${isClosingSmoothly ? "scale-[0.98]" : "scale-100"}`}>
           <div className="flex items-center justify-between gap-3 border-b border-slate-700 px-4 py-3 sm:px-6" style={{ background: "#1e293b" }}>
             <div className="min-w-0">
               <h2 className="truncate text-lg font-black text-white sm:text-xl">
@@ -1976,8 +2176,8 @@ const GlobalPopup = ({
             </div>
           </div>
 
-          <div className="border-b border-rose-200 bg-rose-50 px-4 py-3 sm:px-6">
-            <div className="flex items-start gap-3 text-rose-700">
+          <div className="border-b border-danger/30 bg-danger/10 px-4 py-3 sm:px-6">
+            <div className="flex items-start gap-3 text-danger">
               <AlertTriangle size={22} className="mt-0.5 flex-shrink-0 text-rose-600" />
               <p className="text-base font-black sm:text-[17px]">
                 {t("globalPopup.partMarkedNgChooseReason", "Part marked NG — choose defect category and exact reason below.")}
@@ -1985,56 +2185,300 @@ const GlobalPopup = ({
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto bg-slate-100 p-3 sm:p-4">
+          <div className="min-h-0 flex-1 overflow-y-auto bg-bg-elevated p-3 sm:p-5">
+            <div className="mx-auto max-w-5xl space-y-4">
+              <div className="sticky top-0 z-40 grid grid-cols-4 gap-1 rounded-xl bg-bg-elevated/95 pb-2 backdrop-blur sm:gap-2">
+                {["View", "Zone", "Category", "Reason"].map((label, index) => {
+                  const step = index + 1;
+                  return <div key={label} className={`rounded-lg border px-1 py-2 text-center text-[9px] font-black uppercase sm:px-2 sm:text-xs ${
+                    ngWizardStep === step ? "border-primary bg-primary text-white" : ngWizardStep > step ? "border-green-600 bg-green-500 text-white" : "border-border bg-bg-card text-text-muted"
+                  }`}>{step}. {label}</div>;
+                })}
+              </div>
+              {ngWizardStep === 1 && (
+                <div>
+                  <h3 className="mb-3 text-lg font-black text-text-main sm:text-xl">Select Part View</h3>
+                  {loadingRejectionConfig ? (
+                    <div className="flex min-h-40 items-center justify-center rounded-xl border border-border bg-bg-card">
+                      <RefreshCw size={22} className="mr-3 animate-spin text-primary" />
+                      <span className="text-sm font-black text-text-muted">Loading saved rejection views...</span>
+                    </div>
+                  ) : dynamicViews.length === 0 ? (
+                    <div className="rounded-xl border border-amber-400/50 bg-amber-500/10 p-4 text-sm font-bold text-amber-700">
+                      No saved rejection views were found for this component.
+                    </div>
+                  ) : <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
+                    {dynamicViews.map((view) => (
+                      <button key={view.id} type="button" onClick={() => {
+                        setManualRejectionView(view);
+                        setManualRejectionZone(null);
+                        setManualReasonCategory("");
+                        setManualReason("");
+                        setManualReasonQuery("");
+                      }} className="overflow-hidden rounded-xl border-2 border-border bg-bg-card transition hover:border-primary active:scale-[0.99]">
+                        <div className="aspect-video bg-bg-dark">{view.imageUrl ? <img src={view.imageUrl} alt={view.name} className="h-full w-full object-contain" /> : <div className="flex h-full items-center justify-center text-xs font-black text-text-muted">No Image</div>}</div>
+                        <div className="border-t border-border px-3 py-2 text-center text-sm font-black text-text-main">{view.name}</div>
+                      </button>
+                    ))}
+                  </div>}
+                </div>
+              )}
+
+              {ngWizardStep === 2 && manualRejectionView && (
+                <div>
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <h3 className="text-lg font-black text-text-main sm:text-xl">Select Zone - {manualRejectionView.name}</h3>
+                    <button type="button" onClick={() => setManualRejectionView(null)} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
+                  </div>
+                  <div className="mx-auto w-full max-w-4xl">
+                    <div className="relative mx-auto aspect-[900/520] max-h-[52dvh] w-full overflow-hidden rounded-xl border-2 border-border bg-bg-dark shadow-lg sm:max-h-[56dvh]">
+                      {manualRejectionView.imageUrl && <img src={manualRejectionView.imageUrl} alt={manualRejectionView.name} className="absolute inset-0 h-full w-full object-contain" />}
+                      {popupVerticalDividers.map((position, index) => (
+                        <span key={`wizard-v-${index}`} className="pointer-events-none absolute inset-y-0 z-20 border-l-[3px] border-dotted border-red-600 sm:border-l-4" style={{ left:`${position}%` }} />
+                      ))}
+                      {popupHorizontalDividers.map((position, index) => (
+                        <span key={`wizard-h-${index}`} className="pointer-events-none absolute inset-x-0 z-20 border-t-[3px] border-dotted border-red-600 sm:border-t-4" style={{ top:`${position}%` }} />
+                      ))}
+                      {popupZones.map((zone, zoneIndex) => (
+                        <button key={zone.id} type="button" onClick={() => {
+                          setManualRejectionZone(zone);
+                          setManualReasonCategory("");
+                          setManualReason("");
+                          setManualReasonQuery("");
+                        }} className={`absolute z-30 flex items-center justify-center border-2 transition hover:z-40 active:scale-[0.99] ${NG_ZONE_OVERLAY_STYLES[zoneIndex % NG_ZONE_OVERLAY_STYLES.length]}`} style={{ left:`${Number(zone.xPercent ?? 0)}%`, top:`${Number(zone.yPercent ?? 0)}%`, width:`${Number(zone.widthPercent ?? 10)}%`, height:`${Number(zone.heightPercent ?? 10)}%` }}>
+                          <span className={`flex min-h-8 min-w-8 items-center justify-center rounded-md border-2 px-2 text-sm font-black shadow-lg sm:min-h-12 sm:min-w-12 sm:rounded-lg sm:px-3 sm:text-lg ${NG_ZONE_LABEL_STYLES[zoneIndex % NG_ZONE_LABEL_STYLES.length]}`}>{zone.code || zone.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <p className="mt-2 text-center text-[11px] font-bold text-text-muted sm:text-xs">Tap the highlighted area directly on the part image.</p>
+                  </div>
+                </div>
+              )}
+
+              {ngWizardStep === 3 && (
+                <div>
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <h3 className="text-lg font-black text-text-main sm:text-xl">Select Rejection Category</h3>
+                    <button type="button" onClick={() => setManualRejectionZone(null)} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
+                  </div>
+                  {enabledNgReasonCategories.length === 0 ? (
+                    <div className="rounded-xl border border-amber-400/50 bg-amber-500/10 p-4 text-sm font-bold text-amber-700">
+                      No rejection category is enabled for this station. Enable CR, CRAM, or MR in Station Control.
+                    </div>
+                  ) : <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {enabledNgReasonCategories.map((category) => {
+                      const categoryKey = String(category.key || category.code || category.id);
+                      const count = dynamicCategories.length ? (category.reasons || []).length : getNgReasonsByCategory(category.key).length;
+                      return <button key={categoryKey} type="button" onClick={() => {
+                        setManualReasonCategory(categoryKey);
+                        setManualReason("");
+                        setManualReasonQuery("");
+                      }} className="min-h-24 rounded-xl border-2 border-border bg-bg-card p-4 text-left transition hover:border-primary active:scale-[0.99]">
+                        <p className="text-lg font-black text-text-main">{getNgCategoryDisplayName(category)}</p>
+                        <p className="mt-2 text-xs font-bold text-text-muted">{count} rejection reasons</p>
+                      </button>;
+                    })}
+                  </div>}
+                </div>
+              )}
+
+              {ngWizardStep === 4 && (
+                <div>
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="text-lg font-black text-text-main sm:text-xl">Select Rejection Reason</h3>
+                      <p className="mt-1 truncate text-xs font-bold text-text-muted">{manualRejectionView?.name} / {manualRejectionZone?.name || manualRejectionZone?.code} / {getNgCategoryDisplayName(selectedDynamicCategory) || manualReasonCategory}</p>
+                    </div>
+                    <button type="button" onClick={() => { setManualReasonCategory(""); setManualReason(""); }} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {filteredNgReasonOptions.map((reason) => <button key={reason} type="button" onClick={() => {
+                      setManualReason(reason);
+                      setManualReasonQuery(reason);
+                      setValidationError("");
+                    }} className={`min-h-14 rounded-xl border-2 px-4 py-3 text-left text-sm font-black transition sm:text-base ${manualReason === reason ? "border-green-700 bg-green-500 text-white shadow-lg" : "border-border bg-bg-card text-text-main hover:border-primary"}`}>{reason}</button>)}
+                  </div>
+                  <textarea value={manualRejectionRemark} onChange={(event) => setManualRejectionRemark(event.target.value)} rows={2} className="mt-4 w-full rounded-xl border border-border bg-bg-card px-3 py-2 text-sm font-semibold text-text-main outline-none focus:border-primary" placeholder="Optional remark" />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="hidden">
             <div className="space-y-3">
               {enabledNgReasonCategories.map((category) => {
-                const expanded = manualReasonCategory === category.key || enabledNgReasonCategories.length === 1;
-                const categoryReasons = getNgReasonsByCategory(category.key);
+                const categoryKey = String(category.key || category.code || category.id);
+                const expanded = manualReasonCategory === categoryKey || enabledNgReasonCategories.length === 1;
+                const categoryReasons = dynamicCategories.length
+                  ? (category.reasons || []).map((reason) => reason.name || reason)
+                  : getNgReasonsByCategory(category.key);
                 const selectedInCategory = categoryReasons.includes(manualReason);
                 return (
                   <div
-                    key={category.key}
+                    key={categoryKey}
                     className={`overflow-hidden rounded-2xl border transition ${
                       expanded
-                        ? "border-amber-400 bg-white shadow-lg shadow-amber-500/10"
+                        ? "border-primary bg-bg-card shadow-lg shadow-primary/10"
                         : selectedInCategory
                           ? "border-rose-400 bg-rose-50 shadow-md"
-                          : "border-slate-300 bg-white shadow-sm"
+                          : "border-border bg-bg-card shadow-sm"
                     }`}
                   >
                     <button
                       type="button"
                       onClick={() => {
-                        setManualReasonCategory(expanded && enabledNgReasonCategories.length > 1 ? "" : category.key);
+                        setManualReasonCategory(expanded && enabledNgReasonCategories.length > 1 ? "" : categoryKey);
                         setManualReasonQuery("");
+                        setManualReason("");
+                        setManualRejectionView(null);
+                        setManualRejectionZone(null);
                         setShowReasonDropdown(false);
                       }}
                       className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
                     >
                       <div className="min-w-0">
-                        <p className="text-lg font-black text-slate-950 sm:text-xl">{category.label}</p>
-                        <p className="mt-1 text-xs font-black text-slate-600 sm:text-sm">
+                        <p className="text-base font-black text-text-main sm:text-xl">{getNgCategoryDisplayName(category)}</p>
+                        <p className="mt-1 text-xs font-black text-text-muted sm:text-sm">
                           {categoryReasons.length} reasons {selectedInCategory ? `• Selected: ${manualReason}` : ""}
                         </p>
                       </div>
                       <span className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border text-base font-black ${
-                        expanded ? "border-amber-500 bg-amber-400 text-slate-950" : "border-slate-400 bg-slate-100 text-slate-700"
+                        expanded ? "border-primary bg-primary text-white" : "border-border bg-bg-elevated text-text-main"
                       }`}>
                         {expanded ? "−" : "+"}
                       </span>
                     </button>
 
                     {expanded && (
-                      <div className="border-t border-slate-200 bg-slate-50 p-3 sm:p-4">
-                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                          {categoryReasons.map((reason) => {
+                      <div className="space-y-4 border-t border-border bg-bg-elevated p-2 sm:p-4">
+                        {dynamicCategories.length > 0 && (
+                          <>
+                            <div>
+                              <p className="mb-2 text-[11px] font-black uppercase tracking-[0.16em] text-slate-600">Select View</p>
+                              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+                                {dynamicViews.map((view) => {
+                                  const selected = Number(manualRejectionView?.id) === Number(view.id);
+                                  return (
+                                    <button
+                                      key={view.id}
+                                      type="button"
+                                      onClick={() => {
+                                        setManualRejectionView(view);
+                                        setManualRejectionZone(null);
+                                        setManualReason("");
+                                        setManualReasonQuery("");
+                                      }}
+                                      className={`min-h-[54px] rounded-xl border-2 px-3 py-2 text-center text-xs font-black uppercase transition ${
+                                        selected
+                                          ? "border-blue-600 bg-blue-600 text-white shadow-lg shadow-blue-500/20"
+                                          : "border-slate-300 bg-white text-slate-800 hover:border-blue-400"
+                                      }`}
+                                    >
+                                      {view.name}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            {manualRejectionView && (
+                              <div>
+                                <p className="mb-2 text-[11px] font-black uppercase tracking-[0.16em] text-slate-600">Select Zone</p>
+                                <div className="grid gap-3 xl:grid-cols-[minmax(320px,1fr)_220px]">
+                                  <div className="relative aspect-video min-h-[220px] overflow-hidden rounded-xl border-2 border-border bg-bg-dark sm:min-h-[300px]">
+                                    {manualRejectionView.imageUrl ? (
+                                      <img src={manualRejectionView.imageUrl} alt={manualRejectionView.name} className="h-full w-full object-contain" />
+                                    ) : (
+                                      <div className="flex aspect-[4/3] items-center justify-center bg-slate-300 text-sm font-black uppercase tracking-wider text-slate-700">
+                                        {manualRejectionView.name}
+                                      </div>
+                                    )}
+                                    {popupVerticalDividers.map((position, index) => (
+                                      <span key={`popup-v-${index}`} className="pointer-events-none absolute inset-y-0 z-20 border-l-4 border-dotted border-red-600" style={{ left: `${position}%` }} />
+                                    ))}
+                                    {popupHorizontalDividers.map((position, index) => (
+                                      <span key={`popup-h-${index}`} className="pointer-events-none absolute inset-x-0 z-20 border-t-4 border-dotted border-red-600" style={{ top: `${position}%` }} />
+                                    ))}
+                                    {popupZones.map((zone, zoneIndex) => {
+                                      const selected = Number(manualRejectionZone?.id) === Number(zone.id);
+                                      return (
+                                        <button
+                                          key={zone.id}
+                                          type="button"
+                                          onClick={() => {
+                                            setManualRejectionZone(zone);
+                                            setManualReason("");
+                                            setManualReasonQuery("");
+                                          }}
+                                          className={`absolute flex items-center justify-center text-lg font-black transition ${
+                                            selected
+                                              ? "z-10 bg-green-500/25 text-green-950"
+                                              : "text-blue-950"
+                                          }`}
+                                          style={{
+                                            left: `${zone.xPercent}%`,
+                                            top: `${zone.yPercent}%`,
+                                            width: `${Math.max(8, zone.widthPercent)}%`,
+                                            height: `${Math.max(8, zone.heightPercent)}%`,
+                                          }}
+                                        >
+                                          <span className={`flex h-10 min-w-10 items-center justify-center rounded-md border-2 px-2 text-base font-black shadow-md ${
+                                            selected
+                                              ? "border-green-700 bg-green-500 text-white"
+                                              : NG_ZONE_LABEL_STYLES[zoneIndex % NG_ZONE_LABEL_STYLES.length]
+                                          }`}>
+                                            {zone.code || zone.name}
+                                          </span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                  <div className="rounded-xl border border-border bg-bg-card p-3">
+                                    <p className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-600">Zones</p>
+                                    <div className="mt-2 grid grid-cols-2 gap-2">
+                                      {(manualRejectionView.zones || []).map((zone) => {
+                                        const selected = Number(manualRejectionZone?.id) === Number(zone.id);
+                                        return (
+                                          <button
+                                            key={zone.id}
+                                            type="button"
+                                            onClick={() => {
+                                              setManualRejectionZone(zone);
+                                              setManualReason("");
+                                              setManualReasonQuery("");
+                                            }}
+                                            className={`rounded-lg border px-3 py-2 text-sm font-black ${
+                                              selected ? "border-green-600 bg-green-500 text-white" : "border-slate-300 bg-slate-50 text-slate-900"
+                                            }`}
+                                          >
+                                            {zone.name || zone.code}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        )}
+
+                        <div>
+                          <p className="mb-2 text-[11px] font-black uppercase tracking-[0.16em] text-slate-600">Select Rejection Reason</p>
+                          {dynamicCategories.length > 0 && (!manualRejectionView || !manualRejectionZone) ? (
+                            <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800">
+                              Select view and zone to show zone-wise rejection reasons.
+                            </div>
+                          ) : (
+                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                              {ngReasonOptions.map((reason) => {
                             const selected = manualReason === reason;
                             return (
                               <button
                                 key={reason}
                                 type="button"
                                 onClick={() => {
-                                  setManualReasonCategory(category.key);
+                                  setManualReasonCategory(categoryKey);
                                   setManualReason(reason);
                                   setManualReasonQuery(reason);
                                   setValidationError("");
@@ -2049,7 +2493,22 @@ const GlobalPopup = ({
                               </button>
                             );
                           })}
+                            </div>
+                          )}
                         </div>
+
+                        {dynamicCategories.length > 0 && (
+                          <div>
+                            <p className="mb-2 text-[11px] font-black uppercase tracking-[0.16em] text-slate-600">Remark</p>
+                            <textarea
+                              value={manualRejectionRemark}
+                              onChange={(event) => setManualRejectionRemark(event.target.value)}
+                              rows={2}
+                              className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-rose-400"
+                              placeholder="Optional remark"
+                            />
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2058,27 +2517,30 @@ const GlobalPopup = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 border-t border-slate-200 bg-white p-3 sm:grid-cols-[0.65fr_1fr] sm:p-4">
+          <div className="grid grid-cols-1 gap-3 border-t border-border bg-bg-card p-3 sm:grid-cols-[0.65fr_1fr] sm:p-4">
             <button
               type="button"
               onClick={() => setShowNgReasonModal(false)}
-              className="rounded-2xl border-2 border-slate-300 bg-white py-3 text-base font-black text-slate-800 transition hover:bg-slate-100"
+              className="rounded-xl border-2 border-border bg-bg-elevated py-3 text-base font-black text-text-main transition hover:border-primary"
             >
               {t("globalPopup.cancel", "Cancel")}
             </button>
             <button
               type="button"
-              disabled={!manualReason}
+              disabled={!manualReason || (dynamicCategories.length > 0 && (!manualRejectionView || !manualRejectionZone))}
               onClick={() => setShowNgReasonModal(false)}
-              className={`rounded-2xl py-3 text-base font-black uppercase tracking-widest transition ${
-                manualReason
-                  ? "border-2 border-rose-500 bg-rose-600 text-white shadow-lg shadow-rose-500/25 hover:bg-rose-500"
-                  : "cursor-not-allowed border-2 border-slate-300 bg-slate-100 text-slate-500"
+              className={`rounded-xl py-3 text-base font-black uppercase tracking-widest transition ${
+                manualReason && (dynamicCategories.length === 0 || (manualRejectionView && manualRejectionZone))
+                  ? "border-2 border-green-700 bg-green-600 text-white shadow-lg shadow-green-600/20 hover:bg-green-500"
+                  : "cursor-not-allowed border-2 border-border bg-bg-elevated text-text-muted"
               }`}
             >
-              {manualReason
+              {manualReason && (dynamicCategories.length === 0 || (manualRejectionView && manualRejectionZone))
                 ? t("globalPopup.confirmReason", "Confirm Reason")
-                : t("globalPopup.selectReasonFirst", "Select Reason First")}
+                : ngWizardStep === 1 ? "Select a View"
+                  : ngWizardStep === 2 ? "Select a Zone"
+                    : ngWizardStep === 3 ? "Select a Category"
+                      : t("globalPopup.selectReasonFirst", "Select Reason First")}
             </button>
           </div>
         </div>
@@ -2086,6 +2548,8 @@ const GlobalPopup = ({
     )}
     </>
   );
+};
+
 };
 
 export default React.memo(GlobalPopup);

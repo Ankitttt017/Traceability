@@ -24,6 +24,29 @@ const {
   getLeaktestStageState,
 } = require("../leaktestLookupService");
 const PLC_READING_TABLE = "PlcCycleReadings";
+const CUSTOMER_QR_ONLY_FORMAT = "CUSTOMER_QR_ONLY";
+
+async function resolveReportPartSearchValues(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return [];
+  const mappings = await PartCodeMapping.findAll({
+    where: {
+      [Op.or]: [
+        { customer_qr: { [Op.like]: `%${raw}%` } },
+        { old_part_id: { [Op.like]: `%${raw}%` } },
+      ],
+    },
+    attributes: ["old_part_id"],
+    order: [["updatedAt", "DESC"]],
+    raw: true,
+  });
+  const numericShot = /^\d{1,6}$/.test(raw) ? String(Number(raw)) : "";
+  return [...new Set([
+    raw,
+    ...(numericShot ? [numericShot, numericShot.padStart(4, "0"), numericShot.padStart(5, "0"), numericShot.padStart(6, "0")] : []),
+    ...mappings.map((row) => String(row.old_part_id || "").trim()),
+  ].filter(Boolean))];
+}
 
 const PLC_PART_ID_CANDIDATE_COLUMNS = [
   "shot_uid",
@@ -193,9 +216,7 @@ function parseCompactQrPartId(partId) {
 function deriveShotCandidates(log) {
   const direct = String(log.shot_number || log.shotNumber || "").trim();
   const fromPartPattern = extractShotFromPartId(log.part_id);
-  const fromPartRaw = String(log.part_id || "").trim();
-  const digitGroups = fromPartRaw.match(/\d+/g) || [];
-  const candidates = [direct, fromPartPattern, fromPartRaw, ...digitGroups]
+  const candidates = [direct, fromPartPattern]
     .map((v) => String(v || "").trim())
     .filter(Boolean);
   return [...new Set(candidates)];
@@ -364,6 +385,7 @@ async function fetchLatestPlcReadingByMachineShotContext({ shotCandidates = [], 
   const normalizedMachine = String(machineName || "").trim();
   const logDate = logCreatedAt ? new Date(logCreatedAt) : null;
   const hasLogDate = Boolean(logDate) && !Number.isNaN(logDate.getTime());
+  if (!normalizedMachine || !hasLogDate) return null;
 
   for (const shot of normalizedShots) {
     try {
@@ -375,9 +397,10 @@ async function fetchLatestPlcReadingByMachineShotContext({ shotCandidates = [], 
             TRY_CONVERT(INT, shot_number) = TRY_CONVERT(INT, :shot)
             OR LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) = :shot
           )
-          ${normalizedMachine ? "AND LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255)))) = :machineName" : ""}
+          AND LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255)))) = :machineName
+          AND ABS(DATEDIFF(MINUTE, recorded_at, :logCreatedAt)) <= 15
           ORDER BY
-            ${hasLogDate ? "ABS(DATEDIFF(SECOND, recorded_at, :logCreatedAt)) ASC," : ""}
+            ABS(DATEDIFF(SECOND, recorded_at, :logCreatedAt)) ASC,
             recorded_at DESC
         `,
         {
@@ -533,7 +556,10 @@ async function fetchProductionData(filters = {}, options = {}) {
     if (operationNo) nextWhere.operation_no = operationNo;
     if (operatorId) nextWhere.user_id = operatorId;
     if (barcode) {
-      nextWhere.part_id = { [Op.like]: `%${String(barcode).trim()}%` };
+      const searchValues = await resolveReportPartSearchValues(barcode);
+      nextWhere.part_id = {
+        [Op.or]: searchValues.map((value) => ({ [Op.like]: `%${value}%` })),
+      };
     }
     if (station) {
       const stationToken = String(station).trim().toUpperCase();
@@ -647,6 +673,8 @@ async function fetchProductionData(filters = {}, options = {}) {
     acc[normalizeKey(p.part_id)] = p;
     return acc;
   }, {});
+  const isCustomerQrOnlyPart = (partId) =>
+    String(partMap[normalizeKey(partId)]?.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT;
   const partCodeMap = partCodeMappings.reduce((acc, row) => {
     if (!row?.old_part_id) return acc;
     acc[normalizeKey(row.old_part_id)] = String(row.customer_qr || "").trim();
@@ -710,22 +738,16 @@ async function fetchProductionData(filters = {}, options = {}) {
   let plcByPartId = new Map();
   let plcByUid = new Map();
   let plcByCompactQr = new Map();
-  let plcByShot = new Map();
   if (includePlcReadings) {
     // Attach PLC cycle readings from DB table (PlcCycleReadings):
     // 1) Prefer part-id style columns (if available in current schema)
     // 2) Fallback to shot_number style columns
     plcColumns = await getPlcReadingColumns();
     const partLookupColumn = pickFirstAvailableColumn(plcColumns, PLC_PART_ID_CANDIDATE_COLUMNS);
-    const shotLookupColumn = pickFirstAvailableColumn(plcColumns, PLC_SHOT_CANDIDATE_COLUMNS);
     const partIdsForPlcLookup = [...new Set(
       deduplicatedLogs
         .map((log) => String(log.part_id || "").trim())
-        .filter(Boolean)
-    )];
-    const shotNumbers = [...new Set(
-      deduplicatedLogs
-        .flatMap((log) => deriveShotCandidates(log))
+        .filter((partId) => !isCustomerQrOnlyPart(partId))
         .filter(Boolean)
     )];
     plcByPartId = partLookupColumn
@@ -735,11 +757,6 @@ async function fetchProductionData(filters = {}, options = {}) {
       ? await fetchLatestPlcReadingsByColumn("shot_uid", partIdsForPlcLookup)
       : new Map();
     plcByCompactQr = await fetchLatestPlcReadingsByCompactQr(partIdsForPlcLookup);
-    plcByShot = shotLookupColumn
-      ? (String(shotLookupColumn).toLowerCase() === "shot_number"
-        ? await fetchLatestPlcReadingsByShotTokens(shotNumbers)
-        : await fetchLatestPlcReadingsByColumn(shotLookupColumn, shotNumbers))
-      : new Map();
   }
 
   // Enrich & Standardize
@@ -779,24 +796,33 @@ async function fetchProductionData(filters = {}, options = {}) {
           ? "OK"
           : industrialResultRaw;
     const category = recoveryCompletedByCustomerQr ? "PRODUCTION" : categoryRaw;
-    const displayReason = (recoveryCompletedByCustomerQr || stationNo === LEAKTEST_OPERATION) ? "" : (log.interlock_reason || "");
+    const structuredRejectionReason = [
+      log.rejection_category ? `Category: ${log.rejection_category}` : "",
+      log.rejection_view ? `View: ${log.rejection_view}` : "",
+      log.rejection_zone ? `Zone: ${log.rejection_zone}` : "",
+      log.rejection_reason ? `Reason: ${log.rejection_reason}` : "",
+      log.rejection_remark ? `Remark: ${log.rejection_remark}` : "",
+    ].filter(Boolean).join(" | ");
+    const displayReason = (recoveryCompletedByCustomerQr || stationNo === LEAKTEST_OPERATION)
+      ? ""
+      : (structuredRejectionReason || log.interlock_reason || "");
 
     const partLookupKey = normalizeKey(partIdValue);
     const compactQrKey = parseCompactQrPartId(partIdValue)?.key || "";
-    const shotCandidates = deriveShotCandidates(log).map((s) => normalizeShotToken(s) || normalizeKey(s));
-    const plcReadingFromDbRaw = includePlcReadings
+    const customerQrOnlyPart = isCustomerQrOnlyPart(partIdValue);
+    const shotCandidates = customerQrOnlyPart ? [] : deriveShotCandidates(log).map((s) => normalizeShotToken(s) || normalizeKey(s));
+    const plcReadingFromDbRaw = includePlcReadings && !customerQrOnlyPart
       ? (
         (compactQrKey && plcByCompactQr.get(compactQrKey)) ||
         plcByUid.get(partLookupKey) ||
         plcByPartId.get(partLookupKey) ||
-        shotCandidates.map((k) => plcByShot.get(k)).find(Boolean) ||
         null
       )
       : null;
     const plcReadingFromDb = plcReadingFromDbRaw
       ? enrichPlcReadingDisplay(plcReadingFromDbRaw)
       : (
-        includePlcReadings
+        includePlcReadings && !customerQrOnlyPart
           ? await fetchLatestPlcReadingByMachineShotContext({
               shotCandidates: deriveShotCandidates(log),
               machineName: log.Machine?.machine_name || "",
@@ -832,6 +858,11 @@ async function fetchProductionData(filters = {}, options = {}) {
       statusLabel: industrialResult,
       bypassStatus: Boolean(log.is_bypassed),
       reason: displayReason,
+      rejectionCategory: log.rejection_category || "",
+      rejectionView: log.rejection_view || "",
+      rejectionZone: log.rejection_zone || "",
+      rejectionReason: log.rejection_reason || "",
+      rejectionRemark: log.rejection_remark || "",
       plcReading: plcReadingFromDb,
       leakTestReading,
     };

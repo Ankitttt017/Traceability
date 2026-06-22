@@ -946,25 +946,7 @@ const Packing=()=>{
             </div>
           </Card>
 
-          {/* Quick Actions Card */}
-          <Card title={t("packing.quickActions", "Quick Actions")} subtitle={t("packing.utilities", "Utilities")} icon={Zap} accent={C.steel()}>
-            <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              <button onClick={handlePrint} disabled={!displaySess}
-                style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
-                  padding:"8px 12px",borderRadius:9,fontSize:11,fontWeight:700,
-                  background:displaySess?C.bg("surf"):C.idle(0.05),border:`1px solid ${C.bdr()}`,
-                  cursor:displaySess?"pointer":"not-allowed",color:C.txt(displaySess?"pri":"muted")}}>
-                <Printer size={14}/> {t("packing.printBoxLabel", "Print Box Label")}
-              </button>
-              <button onClick={()=>displaySess&&setShowQRModal(true)} disabled={!displaySess}
-                style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,
-                  padding:"8px 12px",borderRadius:9,fontSize:11,fontWeight:700,
-                  background:displaySess?C.bg("surf"):C.idle(0.05),border:`1px solid ${C.bdr()}`,
-                  cursor:displaySess?"pointer":"not-allowed",color:C.txt(displaySess?"pri":"muted")}}>
-                <Eye size={14}/> {t("packing.viewQrCode", "View QR Code")}
-              </button>
-            </div>
-          </Card>
+       
         </div>
       </div>
 

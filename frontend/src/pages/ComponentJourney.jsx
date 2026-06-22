@@ -1050,13 +1050,13 @@ const ComponentJourney = () => {
           <div style={{marginBottom:14}}>
             <p style={{fontSize:10,fontWeight:800,textTransform:"uppercase",
               letterSpacing:"0.08em",color:C.txt("muted"),marginBottom:6}}>
-              Search Part / Serial No.
+              Search Customer QR / Part ID / Shot Number
             </p>
             <div style={{position:"relative"}}>
               <Search size={14} color={C.txt("muted")} style={{position:"absolute",left:12,
                 top:"50%",transform:"translateY(-50%)"}}/>
               <input value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
-                placeholder="Scan barcode or type part serial number…"
+                placeholder="Scan Customer QR or enter Part ID / Shot Number…"
                 style={{width:"100%",height:40,paddingLeft:36,paddingRight:12,
                   background:C.bg("input"),border:`1px solid ${C.border()}`,
                   borderRadius:10,fontSize:13,color:C.txt("primary"),

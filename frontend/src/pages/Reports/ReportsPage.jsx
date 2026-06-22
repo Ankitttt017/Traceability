@@ -336,21 +336,6 @@ const ReportsPage = () => {
 
   const reportTable = useMemo(() => {
     const sourceRows = data.rows || [];
-    const plcByShot = new Map();
-    sourceRows.forEach((r) => {
-      const merged = {
-        ...(r.plcReading || {}),
-        ...(r.plc_reading || {}),
-        ...(r.plcReadings || {}),
-        ...(r.plcCycleReadings || {}),
-        ...(r.plc_cycle_readings || {}),
-        ...(r.leakTestReading || {}),
-      };
-      const shot = String(
-        merged.shot_number || r.shot_number || r.shotNumber || extractShotFromPartId(r.partId || r.part_id || "")
-      ).trim();
-      if (shot && Object.keys(merged).length) plcByShot.set(shot, merged);
-    });
     const machineStationPairs = (machines || [])
       .map((m) => {
         const machineName = String(m.machineName || m.machine_name || "").trim();
@@ -490,13 +475,9 @@ const ReportsPage = () => {
           : (leakStatus || "-");
         operationResults[LEAK_TEST_OPERATION] = pickPreferredOperationResult(operationResults[LEAK_TEST_OPERATION], leakStatus);
       }
-      if (!Object.keys(plcData).length) {
-        const shot = String(first.shot_number || first.shotNumber || extractShotFromPartId(partKey) || "").trim();
-        if (shot && plcByShot.has(shot)) Object.assign(plcData, plcByShot.get(shot));
-      }
       const shaped = {
         srNo: idx + 1,
-        plc_shot_number: plcData.shot_number ?? first.shot_number ?? first.shotNumber ?? extractShotFromPartId(partKey) ?? "-",
+        plc_shot_number: plcData.shot_number ?? first.shot_number ?? first.shotNumber ?? "-",
         barcode: partKey || "â€”",
         plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
@@ -678,7 +659,7 @@ const ReportsPage = () => {
         <input
           value={filters.barcode || ""}
           onChange={(e) => setFilters((prev) => ({ ...prev, barcode: e.target.value }))}
-          placeholder={t("reports.partId", "Part ID")}
+          placeholder="Customer QR / Part ID / Shot Number"
           className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
         />
         <select

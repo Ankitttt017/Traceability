@@ -3,6 +3,7 @@ export const APP_ROUTES = {
   root: "/",
   dashboard: "/dashboard",
   masterSettings: "/master-settings",
+  rejectionConfiguration: "/rejection-configuration",
   stationControls: "/station-controls",
   masterReports: "/master-reports",
   production: "/production",
