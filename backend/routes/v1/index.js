@@ -14,6 +14,7 @@ const partRoutes = require("./partRoutes"); // UPGRADE COMPLETE — Part Journey
 const alarmRoutes = require("./alarmRoutes");
 const industrialRoutes = require("./industrialRoutes");
 const reportRoutes = require("./reportRoutes");
+const rejectionConfigRoutes = require("./rejectionConfigRoutes");
 
 const router = express.Router();
 
@@ -29,6 +30,7 @@ router.use("/plc-config", plcConfigRoutes);
 router.use("/parts", partRoutes); // GET /api/parts/:partId/journey
 router.use("/alarms", alarmRoutes);
 router.use("/reports", reportRoutes);
+router.use("/rejection-config", rejectionConfigRoutes);
 router.use(industrialRoutes);
 router.use(traceabilityRoutes);
 router.use(dashboardRoutes);

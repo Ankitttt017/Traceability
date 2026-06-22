@@ -26,6 +26,7 @@ import PlcConfiguration from "./pages/PlcConfiguration";
 import IoMonitor from "./pages/IoMonitor";
 import ReportConfiguration from "./pages/ReportConfiguration";
 import ReportsPage from "./pages/Reports/ReportsPage";
+import RejectionConfiguration from "./pages/RejectionConfiguration";
 import { getUserRole, isAuthenticated } from "./utils/authStorage";
 import { APP_ROUTES } from "./constants/routes";
 import { canAccessModule, getRoleAccessSettings } from "./utils/roleAccess";
@@ -77,6 +78,7 @@ const MODULE_REDIRECT_ORDER = [
   { moduleKey: "part_process_flow", path: APP_ROUTES.partProcessFlow },
   { moduleKey: "process_flow", path: APP_ROUTES.processFlow },
   { moduleKey: "master_settings", path: APP_ROUTES.masterSettings },
+  { moduleKey: "master_settings", path: APP_ROUTES.rejectionConfiguration },
   { moduleKey: "station_control", path: APP_ROUTES.stationControls },
   { moduleKey: "report_config", path: APP_ROUTES.masterReports },
   { moduleKey: "machines", path: APP_ROUTES.machines },
@@ -202,6 +204,14 @@ function App() {
               element={
                 <ModuleRoute moduleKey="master_settings">
                   <MasterSettingsDashboard />
+                </ModuleRoute>
+              }
+            />
+            <Route
+              path={APP_ROUTES.rejectionConfiguration.slice(1)}
+              element={
+                <ModuleRoute moduleKey="master_settings">
+                  <RejectionConfiguration />
                 </ModuleRoute>
               }
             />

@@ -205,6 +205,89 @@ export const roleAccessApi = {
   },
 };
 
+export const rejectionConfigApi = {
+  parts: async () => {
+    const { data } = await apiClient.get(ENDPOINTS.rejectionConfig.parts);
+    return data;
+  },
+  updatePart: async (payload = {}) => {
+    const { data } = await apiClient.put(ENDPOINTS.rejectionConfig.parts, payload);
+    return data;
+  },
+  deletePart: async (partName, payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.deletePart, { ...payload, partName });
+    return data;
+  },
+  operatorConfig: async (params = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.rejectionConfig.operatorConfig, { params });
+    return data;
+  },
+  createCategory: async (payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.categories, payload);
+    return data;
+  },
+  updateCategory: async (payload = {}) => {
+    const { data } = await apiClient.put(ENDPOINTS.rejectionConfig.categories, payload);
+    return data;
+  },
+  deleteCategory: async (categoryId, payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.deleteCategory, { ...payload, categoryId });
+    return data;
+  },
+  addReasons: async (payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.reasons, payload);
+    return data;
+  },
+  updateReason: async (payload = {}) => {
+    const { data } = await apiClient.put(ENDPOINTS.rejectionConfig.reasons, payload);
+    return data;
+  },
+  deleteReason: async (reasonId, payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.deleteReason, { ...payload, reasonId });
+    return data;
+  },
+  createView: async (payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.views, payload);
+    return data;
+  },
+  updateView: async (payload = {}) => {
+    const { data } = await apiClient.put(ENDPOINTS.rejectionConfig.views, payload);
+    return data;
+  },
+  deleteView: async (viewId, payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.deleteView, { ...payload, viewId });
+    return data;
+  },
+  addZones: async (payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.zones, payload);
+    return data;
+  },
+  updateZone: async (payload = {}) => {
+    const { data } = await apiClient.put(ENDPOINTS.rejectionConfig.zones, payload);
+    return data;
+  },
+  deleteZone: async (zoneId, payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.deleteZone, { ...payload, zoneId });
+    return data;
+  },
+  setZoneReasons: async (payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.zoneReasons, payload);
+    return data;
+  },
+  ensureDefaults: async (payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.ensureDefaults, payload);
+    return data;
+  },
+  applyReasonsAllZones: async (payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.applyReasonsAllZones, payload);
+    return data;
+  },
+  updateViewImage: async (payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.viewImage, payload);
+    return data;
+  },
+};
+
 export const traceabilityApi = {
   operations: async () => {
     const { data } = await apiClient.get(ENDPOINTS.traceability.operations);

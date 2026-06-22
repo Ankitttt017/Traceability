@@ -34,6 +34,7 @@ const { errorHandler } = require("./middleware/errorHandler");
 
 const authRoutes = require("./routes/authRoutes");
 const v1Routes = require("./routes/v1");
+const rejectionConfigRoutes = require("./routes/v1/rejectionConfigRoutes");
 const Machine = require("./models/Machine");
 const Scanner = require("./models/Scanner");
 const User = require("./models/User");
@@ -51,6 +52,11 @@ require("./models/RoleAccessSetting");
 require("./models/PlcRegisterRange");
 require("./models/ScannerConnection");
 require("./models/PartCodeMapping");
+require("./models/RejectionCategory");
+require("./models/RejectionReason");
+require("./models/RejectionView");
+require("./models/RejectionZone");
+require("./models/RejectionZoneReason");
 const { getPartRoom, setSocketServer } = require("./services/realtimeService");
 const { resetAllMachineLocks } = require("./services/machineLockService");
 const scannerService = require("./services/scannerConnectionService");
@@ -64,6 +70,7 @@ const {
   ensurePlcLinkColumnsExist,
   ensureRoleAccessSchema,
   ensureUserRoleSchema,
+  ensureRejectionSchema,
 } = require("./services/machineSchemaService");
 const { runStartupRecovery } = require("./services/startupRecoveryService");
 const {
@@ -112,12 +119,15 @@ app.use((req, res, next) => {
   }
   return next();
 });
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 const { getAuditLog } = require("./controllers/auditController");
 // Mount routes
 app.use("/api/auth", authRoutes);
 app.use("/api/v1/auth", authRoutes);
+app.use("/api/v1/rejection-config", rejectionConfigRoutes);
+app.use("/api/rejection-config", rejectionConfigRoutes);
 app.use("/api/v1", v1Routes);
 app.use("/api", v1Routes);
 // Upgrade 5 — Audit Log route (Admin only, JWT auth required via v1Routes middleware)
@@ -442,6 +452,7 @@ async function startServer() {
       await runStartupDbTask("ensurePlcLinkColumnsExist", () => ensurePlcLinkColumnsExist());
       await runStartupDbTask("ensureRoleAccessSchema", () => ensureRoleAccessSchema());
       await runStartupDbTask("ensureUserRoleSchema", () => ensureUserRoleSchema());
+      await runStartupDbTask("ensureRejectionSchema", () => ensureRejectionSchema());
       await runStartupDbTask("ensureMachineQrScannerUniqueness", () => ensureMachineQrScannerUniqueness());
       await runStartupDbTask("resetAllMachineLocks", () => resetAllMachineLocks());
       await runStartupDbTask("resetAllScannerConnectionStates", () => scannerService.resetAllScannerConnectionStates());
