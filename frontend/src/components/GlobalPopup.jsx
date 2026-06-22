@@ -459,7 +459,7 @@ function friendlyErrorMessage(rawMsg, popup = {}) {
     msgUpper.includes("NOT FOUND IN MOULDING") ||
     msgUpper.includes("PLCCYCLEREADINGS")
   ) {
-    return `[PART NOT FOUND — SHOT DETAILS UNAVAILABLE] No matching PLC cycle record was found for ${partId || "the scanned QR"}. Verify the QR date/time and shot number, and confirm the shot exists in PlcCycleReadings.`;
+    return "Part not found. Shot details are not available.";
   }
   if (reason === "INVALID_QR_FORMAT" || msgUpper.includes("INVALID_QR_FORMAT") || msgUpper.includes("QR FORMAT MISMATCH")) {
     return `[QR FORMAT MISMATCH] Invalid QR format. Scan correct component code.`;
@@ -1016,7 +1016,7 @@ const GlobalPopup = ({
 
     let duration = 0;
     const STANDARD_SUCCESS_CLOSE_MS = 4200;
-    const STANDARD_ERROR_CLOSE_MS = 6000;
+    const STANDARD_ERROR_CLOSE_MS = 8000;
 
     // Faster auto-close / auto-reset for QR-focused industrial flow
     if (isOnlyQrCheck) {
