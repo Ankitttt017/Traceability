@@ -49,6 +49,7 @@ jobs:
         run: |
           C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd delete rico-iot-backend
           if %ERRORLEVEL% NEQ 0 echo rico-iot-backend was not already running
+          exit /B 0
 
       - name: Deploy Backend Files
         run: |
