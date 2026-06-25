@@ -47,7 +47,7 @@ jobs:
 
       - name: Stop Backend Before Updating Dependencies
         run: |
-          C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd delete rico-iot-backend
+          call C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd delete rico-iot-backend
           if %ERRORLEVEL% NEQ 0 echo rico-iot-backend was not already running
           exit /B 0
 
@@ -63,8 +63,8 @@ jobs:
 
       - name: Restart Backend
         run: |
-          cd /d "%DEPLOY_ROOT%" && C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd start ecosystem.config.cjs --update-env
-          C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd save
+          cd /d "%DEPLOY_ROOT%" && call C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd start ecosystem.config.cjs --update-env
+          call C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd save
 
       - name: Reload Nginx
         run: cd C:\nginx && nginx.exe -s reload
