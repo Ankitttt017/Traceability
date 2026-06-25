@@ -1,0 +1,57 @@
+name: Deploy Traceability
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-traceability
+  cancel-in-progress: true
+
+env:
+  DEPLOY_HOST: 192.168.100.136
+  DEPLOY_PORT: 22
+  APP_DIR: /home/automation/apps/traceability
+  PM2_APP: traceability-backend
+
+jobs:
+  deploy:
+    name: Deploy to Linux server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.TRACEABILITY_SSH_KEY }}" > ~/.ssh/traceability_key
+          chmod 600 ~/.ssh/traceability_key
+          ssh-keyscan -p "${{ env.DEPLOY_PORT }}" "${{ env.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy over SSH
+        run: |
+          ssh -i ~/.ssh/traceability_key -p "${{ env.DEPLOY_PORT }}" "${{ secrets.TRACEABILITY_SSH_USER }}@${{ env.DEPLOY_HOST }}" <<'EOF'
+          set -e
+
+          cd /home/automation/apps/traceability
+
+          git fetch origin main
+          git reset --hard origin/main
+
+          cd backend
+          npm ci
+
+          cd ../frontend
+          npm ci
+          npm run build
+
+          cd ../backend
+          node -e "require('dotenv').config(); const fs=require('fs'); const path=require('path'); const sequelize=require('./config/db'); fs.readdirSync('./models').filter(f=>f.endsWith('.js')).forEach(f=>require(path.join(process.cwd(),'models',f))); sequelize.authenticate().then(()=>sequelize.sync({alter:false,force:false})).then(()=>{console.log('DB tables checked/created'); process.exit(0);}).catch(e=>{console.error(e); process.exit(1);});"
+
+          pm2 restart traceability-backend --update-env
+          pm2 save
+          EOF

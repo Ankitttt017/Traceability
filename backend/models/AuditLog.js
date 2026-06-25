@@ -2,6 +2,20 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/db");
 
+function parseJsonText(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch (_error) {
+    return value;
+  }
+}
+
+function stringifyJsonText(value) {
+  if (value === null || value === undefined || typeof value === "string") return value;
+  return JSON.stringify(value);
+}
+
 const AuditLog = sequelize.define(
   "AuditLog",
   {
@@ -30,8 +44,28 @@ const AuditLog = sequelize.define(
     },
     targetEntity: { type: DataTypes.STRING(100), allowNull: true, comment: "e.g. Machine, Scanner, User" },
     targetId: { type: DataTypes.STRING(100), allowNull: true, comment: "ID of the affected record" },
-    oldValue: { type: DataTypes.JSON, allowNull: true, comment: "Previous state (before change)" },
-    newValue: { type: DataTypes.JSON, allowNull: true, comment: "New state (after change)" },
+    oldValue: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      comment: "Previous state (before change)",
+      get() {
+        return parseJsonText(this.getDataValue("oldValue"));
+      },
+      set(value) {
+        this.setDataValue("oldValue", stringifyJsonText(value));
+      },
+    },
+    newValue: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      comment: "New state (after change)",
+      get() {
+        return parseJsonText(this.getDataValue("newValue"));
+      },
+      set(value) {
+        this.setDataValue("newValue", stringifyJsonText(value));
+      },
+    },
     ipAddress: { type: DataTypes.STRING(45), allowNull: true, comment: "Client IP address from request" },
     detail: { type: DataTypes.TEXT, allowNull: true, comment: "Human-readable description of the action" },
   },
