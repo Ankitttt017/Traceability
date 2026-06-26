@@ -1,11 +1,14 @@
-const LEGACY_HOSTS = ["192.168.100.137"];
-const CANONICAL_HOST = import.meta.env.VITE_CANONICAL_HOST || "192.168.100.137";
+const LEGACY_HOSTS = (import.meta.env.VITE_LEGACY_HOSTS || "")
+  .split(",")
+  .map((host) => host.trim())
+  .filter(Boolean);
+const CANONICAL_HOST = import.meta.env.VITE_CANONICAL_HOST || "";
 
 export function getCanonicalOrigin() {
   if (typeof window === "undefined") return "http://localhost:9090";
 
   const { protocol, hostname, port, origin } = window.location;
-  if (!LEGACY_HOSTS.includes(hostname)) return origin;
+  if (!CANONICAL_HOST || !LEGACY_HOSTS.includes(hostname)) return origin;
 
   return `${protocol}//${CANONICAL_HOST}${port ? `:${port}` : ""}`;
 }
@@ -14,7 +17,7 @@ export function redirectLegacyHost() {
   if (typeof window === "undefined") return;
 
   const { hostname, pathname, search, hash } = window.location;
-  if (!LEGACY_HOSTS.includes(hostname)) return;
+  if (!CANONICAL_HOST || !LEGACY_HOSTS.includes(hostname)) return;
 
   window.location.replace(`${getCanonicalOrigin()}${pathname}${search}${hash}`);
 }
