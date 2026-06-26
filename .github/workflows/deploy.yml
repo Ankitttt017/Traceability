@@ -1,24 +1,21 @@
-name: Rico IoT - Auto Deploy
+name: Traceability - Auto Deploy
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
-      - master
 
 jobs:
   deploy:
-    name: Build and Deploy
-    runs-on: [self-hosted, Windows, X64]
-    defaults:
-      run:
-        shell: cmd
+    name: Build and Deploy Traceability
+    runs-on: [self-hosted, Linux, X64]
+
     env:
-      PORT: 3000
-      VITE_API_BASE_URL: http://192.168.100.137:9090/api/v1
-      VITE_SOCKET_URL: http://192.168.100.137:9090
-      DEPLOY_ROOT: C:\Users\IOT1\Desktop\PROJECTS\Traceability
+      VITE_API_BASE_URL: http://192.168.100.136:9090/api/v1
+      VITE_SOCKET_URL: http://192.168.100.136:9090
+      DEPLOY_ROOT: /home/automation/apps/traceability
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -32,39 +29,28 @@ jobs:
         run: npm run build
 
       - name: Deploy Frontend To Nginx Root
-        run: |
-          if not exist "%DEPLOY_ROOT%\frontend" mkdir "%DEPLOY_ROOT%\frontend"
-          robocopy frontend\dist "%DEPLOY_ROOT%\frontend\dist" /MIR
-          if %ERRORLEVEL% LEQ 7 exit /B 0
-          exit /B %ERRORLEVEL%
+        run: rsync -av --delete frontend/dist/ "$DEPLOY_ROOT/frontend/dist/"
 
       - name: Verify Frontend Deployment
-        run: |
-          if not exist "%DEPLOY_ROOT%\frontend\dist\index.html" (
-            echo Frontend index.html was not deployed to %DEPLOY_ROOT%\frontend\dist
-            exit /B 1
-          )
-
-      - name: Stop Backend Before Updating Dependencies
-        run: |
-          call C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd delete rico-iot-backend
-          if %ERRORLEVEL% NEQ 0 echo rico-iot-backend was not already running
-          exit /B 0
+        run: test -f "$DEPLOY_ROOT/frontend/dist/index.html"
 
       - name: Deploy Backend Files
         run: |
-          if not exist "%DEPLOY_ROOT%\backend" mkdir "%DEPLOY_ROOT%\backend"
-          robocopy backend "%DEPLOY_ROOT%\backend" /MIR /XD node_modules /XF .env *.log
-          if %ERRORLEVEL% GTR 7 exit /B %ERRORLEVEL%
-          copy /Y ecosystem.config.cjs "%DEPLOY_ROOT%\ecosystem.config.cjs"
+          rsync -av --delete backend/ "$DEPLOY_ROOT/backend/" \
+            --exclude node_modules \
+            --exclude .env \
+            --exclude "*.log"
 
       - name: Install Backend Dependencies
-        run: cd /d "%DEPLOY_ROOT%\backend" && npm ci
+        working-directory: /home/automation/apps/traceability/backend
+        run: npm ci
 
       - name: Restart Backend
         run: |
-          cd /d "%DEPLOY_ROOT%" && call C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd start ecosystem.config.cjs --update-env
-          call C:\Users\IOT1\AppData\Roaming\npm\pm2.cmd save
+          pm2 restart traceability-backend --update-env
+          pm2 save
 
       - name: Reload Nginx
-        run: cd C:\nginx && nginx.exe -s reload
+        run: |
+          sudo nginx -t
+          sudo systemctl reload nginx
