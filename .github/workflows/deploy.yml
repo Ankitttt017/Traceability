@@ -50,7 +50,5 @@ jobs:
           pm2 restart traceability-backend --update-env
           pm2 save
 
-      - name: Reload Nginx
-        run: |
-          sudo nginx -t
-          sudo systemctl reload nginx
+      - name: Check PM2 Status
+        run: pm2 status
