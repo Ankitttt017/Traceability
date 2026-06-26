@@ -4,6 +4,9 @@ import './index.css'
 import App from './App.jsx'
 import ThemeProvider from "./context/ThemeProvider";
 import { registerSW } from 'virtual:pwa-register';
+import { redirectLegacyHost } from "./constants/network";
+
+redirectLegacyHost();
 
 if (import.meta.env.PROD) {
   registerSW({ immediate: true });

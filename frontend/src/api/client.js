@@ -1,6 +1,7 @@
 import axios from "axios";
 import toast from "react-hot-toast";
 import { clearAuthSession } from "../utils/authStorage";
+import { getCanonicalOrigin } from "../constants/network";
 
 /*
 |--------------------------------------------------------------------------
@@ -11,7 +12,7 @@ import { clearAuthSession } from "../utils/authStorage";
 */
 
 const DEFAULT_SERVER_URL =
-  typeof window !== "undefined" ? window.location.origin : "http://localhost:9090";
+  typeof window !== "undefined" ? getCanonicalOrigin() : "http://localhost:9090";
 
 // Production-safe default:
 // 1) Use VITE_API_BASE_URL when provided.

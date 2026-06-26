@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: "rico-iot-backend",
+    name: "traceability-backend",
       cwd: "./backend",
       script: "server.js",
       env: {
