@@ -270,6 +270,18 @@ export const rejectionConfigApi = {
     const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.deleteZone, { ...payload, zoneId });
     return data;
   },
+  addSubZones: async (payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.subZones, payload);
+    return data;
+  },
+  updateSubZone: async (payload = {}) => {
+    const { data } = await apiClient.put(ENDPOINTS.rejectionConfig.subZones, payload);
+    return data;
+  },
+  deleteSubZone: async (subZoneId, payload = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.deleteSubZone, { ...payload, subZoneId });
+    return data;
+  },
   setZoneReasons: async (payload = {}) => {
     const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.zoneReasons, payload);
     return data;

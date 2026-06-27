@@ -221,6 +221,21 @@ async function ensureTraceabilityColumnsExist() {
       }
     }
   }
+
+  const [mappingTable] = await sequelize.query("SELECT OBJECT_ID(N'dbo.RejectionZoneReasons', N'U') AS table_id;");
+  if (mappingTable?.[0]?.table_id) {
+    await sequelize.query(`
+      IF NOT EXISTS (
+        SELECT 1
+        FROM sys.columns
+        WHERE object_id = OBJECT_ID(N'dbo.RejectionZoneReasons')
+          AND name = N'sub_zone_id'
+      )
+      BEGIN
+        ALTER TABLE [dbo].[RejectionZoneReasons] ADD [sub_zone_id] INT NULL;
+      END
+    `);
+  }
 }
 
 async function ensureScannerColumnsExist() {
@@ -416,6 +431,52 @@ async function ensureRoleAccessSchema() {
   `);
 
   await sequelize.query(`
+    DECLARE @constraintName sysname;
+    DECLARE @sql nvarchar(max);
+
+    DECLARE other_access_constraints CURSOR LOCAL FAST_FORWARD FOR
+      SELECT cc.name
+      FROM sys.check_constraints cc
+      INNER JOIN sys.sql_expression_dependencies dep
+        ON dep.referencing_id = cc.object_id
+      INNER JOIN sys.columns col
+        ON col.object_id = cc.parent_object_id
+        AND col.column_id = dep.referenced_minor_id
+      WHERE cc.parent_object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
+        AND col.name = N'other_access';
+
+    OPEN other_access_constraints;
+    FETCH NEXT FROM other_access_constraints INTO @constraintName;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+      SET @sql = N'ALTER TABLE [dbo].[RoleAccessSettings] DROP CONSTRAINT ' + QUOTENAME(@constraintName);
+      EXEC sp_executesql @sql;
+      FETCH NEXT FROM other_access_constraints INTO @constraintName;
+    END;
+    CLOSE other_access_constraints;
+    DEALLOCATE other_access_constraints;
+
+    SELECT @constraintName = dc.name
+    FROM sys.default_constraints dc
+    INNER JOIN sys.columns col
+      ON col.object_id = dc.parent_object_id
+      AND col.column_id = dc.parent_column_id
+    WHERE dc.parent_object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
+      AND col.name = N'other_access';
+
+    IF @constraintName IS NOT NULL
+    BEGIN
+      SET @sql = N'ALTER TABLE [dbo].[RoleAccessSettings] DROP CONSTRAINT ' + QUOTENAME(@constraintName);
+      EXEC sp_executesql @sql;
+    END;
+  `);
+
+  await sequelize.query(`
+    ALTER TABLE [dbo].[RoleAccessSettings]
+    ALTER COLUMN [other_access] NVARCHAR(20) NOT NULL;
+  `);
+
+  await sequelize.query(`
     IF NOT EXISTS (
       SELECT 1
       FROM sys.default_constraints
@@ -430,12 +491,7 @@ async function ensureRoleAccessSchema() {
   `);
 
   await sequelize.query(`
-    ALTER TABLE [dbo].[RoleAccessSettings]
-    ALTER COLUMN [other_access] NVARCHAR(20) NOT NULL;
-  `);
-
-  await sequelize.query(`
-    IF EXISTS (
+    IF NOT EXISTS (
       SELECT 1
       FROM sys.check_constraints
       WHERE parent_object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
@@ -443,14 +499,9 @@ async function ensureRoleAccessSchema() {
     )
     BEGIN
       ALTER TABLE [dbo].[RoleAccessSettings]
-      DROP CONSTRAINT [CK_RoleAccessSettings_other_access_allowed];
+      ADD CONSTRAINT [CK_RoleAccessSettings_other_access_allowed]
+      CHECK ([other_access] IN ('HIDDEN', 'VIEW', 'VIEW_EDIT', 'VIEW_CONTROL'));
     END
-  `);
-
-  await sequelize.query(`
-    ALTER TABLE [dbo].[RoleAccessSettings]
-    ADD CONSTRAINT [CK_RoleAccessSettings_other_access_allowed]
-    CHECK ([other_access] IN ('HIDDEN', 'VIEW', 'VIEW_EDIT', 'VIEW_CONTROL'));
   `);
 }
 

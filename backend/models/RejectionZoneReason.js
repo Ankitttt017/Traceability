@@ -6,6 +6,7 @@ const RejectionZoneReason = sequelize.define("RejectionZoneReason", {
   category_id: { type: DataTypes.INTEGER, allowNull: false },
   view_id: { type: DataTypes.INTEGER, allowNull: false },
   zone_id: { type: DataTypes.INTEGER, allowNull: false },
+  sub_zone_id: { type: DataTypes.INTEGER, allowNull: true },
   reason_id: { type: DataTypes.INTEGER, allowNull: false },
   is_active: { type: DataTypes.BOOLEAN, defaultValue: true },
 });

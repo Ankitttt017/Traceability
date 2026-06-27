@@ -83,6 +83,7 @@ const TABS = [
   { id: "parts",      icon: Layers,    label: "Part Master" },
   { id: "views",      icon: Eye,       label: "View Setup" },
   { id: "zones",      icon: Grid3X3,   label: "Zone Designer" },
+  { id: "subzones",   icon: Grid3X3,   label: "Sub Zones" },
   { id: "assign",     icon: CheckCircle,label: "Assign Reasons" },
   { id: "categories", icon: Tag,       label: "Rejection Categories" },
   { id: "reasons",    icon: List,      label: "Rejection Reasons" },
@@ -735,6 +736,195 @@ const ZoneDesignerTab = ({
   );
 };
 
+const SubZoneDesignerTab = ({
+  views,
+  selectedViewId,
+  setSelectedViewId,
+  selectedZoneId,
+  setSelectedZoneId,
+  selectedSubZoneId,
+  setSelectedSubZoneId,
+  selectedView,
+  selectedZone,
+  onAddSubZones,
+  onEditSubZone,
+  onDeleteSubZone,
+  onChangeSubZoneLayout,
+  onAutoDivideSubZones,
+  onSaveSubZoneLayout,
+  saving,
+}) => {
+  const zones = selectedView?.zones || [];
+  const subZones = selectedZone?.subZones || [];
+  const zoneBounds = {
+    x: Number(selectedZone?.xPercent || 0),
+    y: Number(selectedZone?.yPercent || 0),
+    w: Math.max(1, Number(selectedZone?.widthPercent || 10)),
+    h: Math.max(1, Number(selectedZone?.heightPercent || 10)),
+  };
+
+  const startSubZoneDrag = (event, subZone) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedSubZoneId(subZone.id);
+    const container = event.currentTarget.closest("[data-sub-zone-canvas]");
+    if (!container) return;
+    const offsetX = event.clientX - event.currentTarget.getBoundingClientRect().left;
+    const offsetY = event.clientY - event.currentTarget.getBoundingClientRect().top;
+    const move = (moveEvent) => {
+      const rect = container.getBoundingClientRect();
+      const canvasX = ((moveEvent.clientX - rect.left - offsetX) / rect.width) * 100;
+      const canvasY = ((moveEvent.clientY - rect.top - offsetY) / rect.height) * 100;
+      const xPercent = ((canvasX - zoneBounds.x) / zoneBounds.w) * 100;
+      const yPercent = ((canvasY - zoneBounds.y) / zoneBounds.h) * 100;
+      const width = Number(subZone.widthPercent || 10);
+      const height = Number(subZone.heightPercent || 10);
+      onChangeSubZoneLayout(subZones.map((row) => Number(row.id) !== Number(subZone.id) ? row : {
+        ...row,
+        xPercent: Math.max(0, Math.min(100 - width, Number(xPercent.toFixed(1)))),
+        yPercent: Math.max(0, Math.min(100 - height, Number(yPercent.toFixed(1)))),
+      }));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  };
+
+  const startSubZoneResize = (event, subZone) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedSubZoneId(subZone.id);
+    const container = event.currentTarget.closest("[data-sub-zone-canvas]");
+    if (!container) return;
+    const move = (moveEvent) => {
+      const rect = container.getBoundingClientRect();
+      const canvasPointerX = ((moveEvent.clientX - rect.left) / rect.width) * 100;
+      const canvasPointerY = ((moveEvent.clientY - rect.top) / rect.height) * 100;
+      const pointerX = ((canvasPointerX - zoneBounds.x) / zoneBounds.w) * 100;
+      const pointerY = ((canvasPointerY - zoneBounds.y) / zoneBounds.h) * 100;
+      onChangeSubZoneLayout(subZones.map((row) => Number(row.id) !== Number(subZone.id) ? row : {
+        ...row,
+        widthPercent: Math.max(5, Math.min(100 - Number(subZone.xPercent || 0), Number((pointerX - Number(subZone.xPercent || 0)).toFixed(1)))),
+        heightPercent: Math.max(5, Math.min(100 - Number(subZone.yPercent || 0), Number((pointerY - Number(subZone.yPercent || 0)).toFixed(1)))),
+      }));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  };
+
+  return (
+    <div className="industrial-card overflow-hidden p-0">
+      <SectionHeader title="Sub Zone Designer" />
+      <div className="grid lg:grid-cols-[260px_1fr]">
+        <div className="border-b border-border bg-bg-dark/30 p-3 lg:border-b-0 lg:border-r">
+          <p className="mb-2 text-[10px] font-black uppercase tracking-wider text-text-muted">View</p>
+          <div className="mb-4 space-y-1">
+            {views.map((view) => (
+              <button key={view.id} onClick={() => setSelectedViewId(view.id)} className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-bold ${Number(selectedViewId) === Number(view.id) ? "bg-primary text-white" : "text-text-main hover:bg-bg-elevated"}`}>
+                <span>{view.name}</span>
+                <span className="text-[10px] font-black">{view.zones?.length || 0}</span>
+              </button>
+            ))}
+          </div>
+          <p className="mb-2 text-[10px] font-black uppercase tracking-wider text-text-muted">Zone</p>
+          <div className="space-y-1">
+            {zones.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border p-3 text-xs font-bold text-text-muted">Add zones first.</p>
+            ) : zones.map((zone) => (
+              <button key={zone.id} onClick={() => setSelectedZoneId(zone.id)} className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-bold ${Number(selectedZoneId) === Number(zone.id) ? "bg-primary text-white" : "text-text-main hover:bg-bg-elevated"}`}>
+                <span>{zone.name || zone.code}</span>
+                <span className="text-[10px] font-black">{zone.subZones?.length || 0}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="p-4">
+          {!selectedView || !selectedZone ? (
+            <EmptyState text="Select a view and zone to create sub-zones." />
+          ) : (
+            <>
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-black text-text-main">{selectedView.name} / {selectedZone.name || selectedZone.code}</h3>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button onClick={onSaveSubZoneLayout} disabled={saving || !subZones.length} className="inline-flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-xs font-black text-white disabled:opacity-40">
+                    <Save size={13} /> Save Layout
+                  </button>
+                  <button onClick={onAutoDivideSubZones} disabled={saving || !subZones.length} className="inline-flex items-center gap-1 rounded-lg border border-border bg-bg-elevated px-3 py-1.5 text-xs font-black text-text-main disabled:opacity-40">
+                    <Grid3X3 size={13} /> Auto Divide
+                  </button>
+                  <button onClick={onAddSubZones} className="inline-flex items-center gap-1 rounded-lg border border-primary bg-primary/10 px-3 py-1.5 text-xs font-black text-primary">
+                    <Plus size={13} /> Add Sub Zone
+                  </button>
+                </div>
+              </div>
+
+              <div data-sub-zone-canvas className="relative mb-4 aspect-[900/520] w-full overflow-hidden rounded-lg border border-border bg-bg-elevated">
+                {selectedView.imageUrl ? (
+                  <img src={selectedView.imageUrl} alt={selectedView.name} className="h-full w-full object-contain" />
+                ) : (
+                  <div className="flex h-full items-center justify-center text-xs font-black uppercase text-text-muted">No Image</div>
+                )}
+                <div className="absolute border-2 border-yellow-400 bg-yellow-300/10" style={{ left: `${zoneBounds.x}%`, top: `${zoneBounds.y}%`, width: `${zoneBounds.w}%`, height: `${zoneBounds.h}%` }} />
+                {subZones.map((subZone, index) => (
+                  <button
+                    key={subZone.id}
+                    type="button"
+                    onPointerDown={(event) => startSubZoneDrag(event, subZone)}
+                    onClick={() => setSelectedSubZoneId(subZone.id)}
+                    className={`absolute flex cursor-move touch-none items-center justify-center text-xs font-black ${Number(selectedSubZoneId) === Number(subZone.id) ? "z-20 bg-cyan-500/25" : "z-10 bg-blue-500/10"}`}
+                    style={{
+                      left: `${zoneBounds.x + (zoneBounds.w * Number(subZone.xPercent || 0) / 100)}%`,
+                      top: `${zoneBounds.y + (zoneBounds.h * Number(subZone.yPercent || 0) / 100)}%`,
+                      width: `${zoneBounds.w * Number(subZone.widthPercent || 10) / 100}%`,
+                      height: `${zoneBounds.h * Number(subZone.heightPercent || 10) / 100}%`,
+                    }}
+                  >
+                    <span className={`rounded border-2 px-2 py-1 shadow ${Number(selectedSubZoneId) === Number(subZone.id) ? "border-cyan-700 bg-cyan-500 text-white" : ZONE_LABEL_STYLES[index % ZONE_LABEL_STYLES.length]}`}>
+                      {subZone.code || subZone.name}
+                    </span>
+                    <span title="Resize sub-zone" onPointerDown={(event) => startSubZoneResize(event, subZone)} className="absolute bottom-1 right-1 h-3 w-3 cursor-nwse-resize border-l-2 border-t-2 border-white bg-cyan-600" />
+                  </button>
+                ))}
+              </div>
+
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border text-left text-[10px] font-black uppercase tracking-wider text-text-muted">
+                    <th className="pb-2 pr-4">Sub Zone</th>
+                    <th className="pb-2 pr-4">Name</th>
+                    <th className="pb-2 pr-4">Area</th>
+                    <th className="pb-2">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {subZones.length === 0 ? (
+                    <tr><td colSpan={4} className="pt-4"><EmptyState text="No sub-zones. Add small defect areas inside this zone." /></td></tr>
+                  ) : subZones.map((subZone) => (
+                    <tr key={subZone.id} className="border-b border-border/50">
+                      <td className="py-2 pr-4"><span className="rounded border border-primary/40 bg-primary/10 px-2 py-0.5 text-xs font-black text-primary">{subZone.code}</span></td>
+                      <td className="py-2 pr-4 font-bold text-text-main">{subZone.name}</td>
+                      <td className="py-2 pr-4 text-xs font-bold text-text-muted">x: {subZone.xPercent}% y: {subZone.yPercent}% w: {subZone.widthPercent}% h: {subZone.heightPercent}%</td>
+                      <td className="py-2"><div className="flex gap-1"><IconButton icon={Pencil} title="Edit sub-zone" onClick={() => onEditSubZone(subZone)} /><IconButton icon={Trash2} title="Delete sub-zone" danger onClick={() => onDeleteSubZone(subZone)} /></div></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── REJECTION CATEGORY TAB ──────────────────────────────────────────────────
 const CategoryTab = ({ categories, selectedCategoryId, setSelectedCategoryId, onAddCategory, onEditCategory, onDeleteCategory }) => (
   <div className="industrial-card overflow-hidden p-0">
@@ -904,9 +1094,12 @@ const AssignmentTab = ({
   setSelectedViewId,
   selectedZoneId,
   setSelectedZoneId,
+  selectedSubZoneId,
+  setSelectedSubZoneId,
   selectedCategory,
   selectedView,
   selectedZone,
+  selectedSubZone,
   selectedReasonIds,
   toggleReason,
   onSaveZoneReasons,
@@ -1018,6 +1211,7 @@ const AssignmentTab = ({
         <SelectField label="Category" value={selectedCategoryId} onChange={setSelectedCategoryId} options={categories.map((row) => ({ value: row.id, label: categoryDisplayName(row) }))} />
         <SelectField label="View" value={selectedViewId} onChange={setSelectedViewId} options={views.map((row) => ({ value: row.id, label: row.name }))} />
         <SelectField label="Zone" value={selectedZoneId} onChange={setSelectedZoneId} options={(selectedView?.zones || []).map((row) => ({ value: row.id, label: row.name || row.code }))} />
+        <SelectField label="Sub Zone" value={selectedSubZoneId} onChange={setSelectedSubZoneId} options={(selectedZone?.subZones || []).map((row) => ({ value: row.id, label: row.name || row.code }))} />
 
         <div className="rounded-lg border border-border bg-bg-elevated p-3">
           <p className="mb-2 text-[10px] font-black uppercase tracking-wider text-text-muted">Allowed Reasons</p>
@@ -1034,7 +1228,7 @@ const AssignmentTab = ({
             </div>
           )}
           <button onClick={onSaveZoneReasons} disabled={saving || !selectedCategoryId || !selectedViewId || !selectedZoneId} className="mt-3 w-full rounded-lg bg-primary px-3 py-2 text-xs font-black uppercase text-white disabled:opacity-50">
-            Save For Selected Zone
+            Save For {selectedSubZone ? "Selected Sub Zone" : "Selected Zone"}
           </button>
         </div>
       </div>
@@ -1153,6 +1347,7 @@ const RejectionConfiguration = () => {
   const [selectedCategoryId, setSelectedCategoryId] = useState("");
   const [selectedViewId, setSelectedViewId] = useState("");
   const [selectedZoneId, setSelectedZoneId] = useState("");
+  const [selectedSubZoneId, setSelectedSubZoneId] = useState("");
   const [selectedReasonIds, setSelectedReasonIds] = useState([]);
   const [imageDrafts, setImageDrafts] = useState({});
   const [loading, setLoading] = useState(false);
@@ -1167,6 +1362,7 @@ const RejectionConfiguration = () => {
   const [reasonText, setReasonText] = useState("");
   const [viewForm, setViewForm] = useState({ name: "", imageUrl: "", zones: "A\nB\nC\nD" });
   const [zoneText, setZoneText] = useState("");
+  const [subZoneText, setSubZoneText] = useState("");
 
   const categories = Array.isArray(config?.categories) ? config.categories : [];
   const views = Array.isArray(config?.views) ? config.views : [];
@@ -1183,6 +1379,10 @@ const RejectionConfiguration = () => {
     () => (selectedView?.zones || []).find((r) => Number(r.id) === Number(selectedZoneId)) || null,
     [selectedView, selectedZoneId]
   );
+  const selectedSubZone = useMemo(
+    () => (selectedZone?.subZones || []).find((r) => Number(r.id) === Number(selectedSubZoneId)) || null,
+    [selectedZone, selectedSubZoneId]
+  );
   const mappedReasonIds = useMemo(() => {
     const mappings = Array.isArray(config?.mappings) ? config.mappings : [];
     if (!selectedCategoryId || !selectedViewId || !selectedZoneId) return [];
@@ -1190,12 +1390,18 @@ const RejectionConfiguration = () => {
       .filter((row) =>
         Number(row.categoryId) === Number(selectedCategoryId) &&
         Number(row.viewId) === Number(selectedViewId) &&
-        Number(row.zoneId) === Number(selectedZoneId)
+        Number(row.zoneId) === Number(selectedZoneId) &&
+        Number(row.subZoneId || 0) === Number(selectedSubZoneId || 0)
       )
       .map((row) => Number(row.reasonId));
-  }, [config, selectedCategoryId, selectedViewId, selectedZoneId]);
+  }, [config, selectedCategoryId, selectedViewId, selectedZoneId, selectedSubZoneId]);
 
   const notify = (text, type = "info") => setMessage({ text, type });
+  const requirePartName = () => {
+    if (partName) return true;
+    notify("Add or select a part first.", "error");
+    return false;
+  };
 
   const setLoadedConfig = (data, { preserveSelection = true } = {}) => {
     const normalizedViews = (data?.views || []).map((view) => ({ ...view, imageUrl: view.imageUrl || DUMMY_PART_IMAGE }));
@@ -1214,6 +1420,7 @@ const RejectionConfiguration = () => {
     setSelectedCategoryId(cat?.id || "");
     setSelectedViewId(view?.id || "");
     setSelectedZoneId(zone?.id || "");
+    setSelectedSubZoneId(zone?.subZones?.[0]?.id || "");
     setSelectedReasonIds((cat?.reasons || []).map((r) => Number(r.id)));
   };
 
@@ -1260,7 +1467,7 @@ const RejectionConfiguration = () => {
   useEffect(() => {
     if (!selectedCategory) { setSelectedReasonIds([]); return; }
     setSelectedReasonIds(mappedReasonIds.length ? mappedReasonIds : (selectedCategory.reasons || []).map((r) => Number(r.id)));
-  }, [selectedCategoryId, selectedViewId, selectedZoneId, mappedReasonIds.join("|")]);
+  }, [selectedCategoryId, selectedViewId, selectedZoneId, selectedSubZoneId, mappedReasonIds.join("|")]);
 
   useEffect(() => {
     const firstZone = selectedView?.zones?.[0] || null;
@@ -1269,11 +1476,27 @@ const RejectionConfiguration = () => {
     }
   }, [selectedViewId, selectedView]);
 
+  useEffect(() => {
+    const firstSubZone = selectedZone?.subZones?.[0] || null;
+    if (!selectedSubZoneId || !(selectedZone?.subZones || []).some((subZone) => Number(subZone.id) === Number(selectedSubZoneId))) {
+      setSelectedSubZoneId(firstSubZone?.id || "");
+    }
+  }, [selectedZoneId, selectedZone]);
+
   // actions
   const submitNewPart = async () => {
+    const clean = normalizePart(newPartName);
+    if (!clean) {
+      notify("Enter a part name first.", "error");
+      return;
+    }
+    setPartName(clean);
+    setLoadedConfig({ partName: clean, categories: [], views: [], mappings: [] }, { preserveSelection: false });
+    setPartOptions((prev) => [clean, ...prev].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i));
+    setActiveTab("parts");
     setModal("");
     setNewPartName("");
-    notify("Automatic configuration feeding is disabled. Configure only existing saved parts.", "error");
+    notify(`Part ${clean} is ready. Add only the rejection details you need.`);
   };
 
   const openEditPart = (part) => {
@@ -1284,9 +1507,10 @@ const RejectionConfiguration = () => {
 
   const updatePartRecord = async () => {
     if (!editTarget) return;
+    const clean = normalizePart(newPartName);
+    if (!clean) return notify("Enter a part name first.", "error");
     setSaving(true);
     try {
-      const clean = normalizePart(newPartName);
       const data = await rejectionConfigApi.updatePart({ oldPartName: editTarget, newPartName: clean });
       setPartName(clean);
       setLoadedConfig(data);
@@ -1316,6 +1540,7 @@ const RejectionConfiguration = () => {
       else {
         setPartName("");
         setLoadedConfig({ partName: "", categories: [], views: [], mappings: [] });
+        setPartOptions([]);
       }
       notify("Part deleted.");
     } catch (err) {
@@ -1326,6 +1551,7 @@ const RejectionConfiguration = () => {
   };
 
   const createCategory = async () => {
+    if (!requirePartName()) return;
     setSaving(true);
     try {
       const data = await rejectionConfigApi.createCategory({
@@ -1346,6 +1572,7 @@ const RejectionConfiguration = () => {
   };
 
   const addReasons = async () => {
+    if (!requirePartName()) return;
     if (!selectedCategoryId) return notify("Select a category first.", "error");
     setSaving(true);
     try {
@@ -1366,6 +1593,7 @@ const RejectionConfiguration = () => {
   };
 
   const createView = async () => {
+    if (!requirePartName()) return;
     setSaving(true);
     try {
       const zoneNames = splitLines(viewForm.zones);
@@ -1392,6 +1620,7 @@ const RejectionConfiguration = () => {
   };
 
   const addZones = async () => {
+    if (!requirePartName()) return;
     if (!selectedViewId) return notify("Select a view first.", "error");
     setSaving(true);
     try {
@@ -1433,7 +1662,101 @@ const RejectionConfiguration = () => {
     }
   };
 
+  const addSubZones = async () => {
+    if (!requirePartName()) return;
+    if (!selectedZoneId) return notify("Select a zone first.", "error");
+    setSaving(true);
+    try {
+      const existingCount = selectedZone?.subZones?.length || 0;
+      const data = await rejectionConfigApi.addSubZones({
+        partName,
+        zoneId: selectedZoneId,
+        subZones: splitLines(subZoneText).map((subZone, index) => ({
+          code: subZone,
+          name: `Sub Zone ${subZone}`,
+          xPercent: 8 + ((existingCount + index) % 4) * 22,
+          yPercent: 12 + Math.floor((existingCount + index) / 4) * 22,
+          widthPercent: 18,
+          heightPercent: 18,
+        })),
+      });
+      setLoadedConfig(data, { preserveSelection: true });
+      setSubZoneText("");
+      setModal("");
+      notify("Sub-zones added.");
+    } catch (err) {
+      notify(err?.response?.data?.error || err?.message || "Unable to add sub-zones.", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const changeSelectedSubZoneLayout = (nextSubZones) => {
+    if (!selectedViewId || !selectedZoneId) return;
+    setConfig((prev) => ({
+      ...prev,
+      views: (prev?.views || []).map((view) => Number(view.id) !== Number(selectedViewId)
+        ? view
+        : {
+          ...view,
+          zones: (view.zones || []).map((zone) => Number(zone.id) !== Number(selectedZoneId)
+            ? zone
+            : { ...zone, subZones: nextSubZones }),
+        }),
+    }));
+  };
+
+  const saveSelectedSubZoneLayout = async () => {
+    if (!requirePartName()) return;
+    if (!selectedZone?.subZones?.length) return notify("Select a zone with sub-zones first.", "error");
+    setSaving(true);
+    try {
+      await Promise.all(selectedZone.subZones.map((subZone) => rejectionConfigApi.updateSubZone({
+        partName,
+        subZoneId: subZone.id,
+        code: subZone.code,
+        name: subZone.name,
+        xPercent: subZone.xPercent,
+        yPercent: subZone.yPercent,
+        widthPercent: subZone.widthPercent,
+        heightPercent: subZone.heightPercent,
+      })));
+      setLoadedConfig(await rejectionConfigApi.operatorConfig({ partName }), { preserveSelection: true });
+      notify("Sub-zone layout saved.");
+    } catch (err) {
+      notify(err?.response?.data?.error || err?.message || "Unable to save sub-zone layout.", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const autoDivideSelectedSubZones = async () => {
+    if (!requirePartName()) return;
+    if (!selectedZone?.subZones?.length) return notify("Add sub-zones before auto dividing.", "error");
+    const gridSubZones = buildZoneGrid(selectedZone.subZones);
+    setSaving(true);
+    try {
+      await Promise.all(gridSubZones.map((subZone) => rejectionConfigApi.updateSubZone({
+        partName,
+        subZoneId: subZone.id,
+        code: subZone.code,
+        name: subZone.name,
+        xPercent: subZone.xPercent,
+        yPercent: subZone.yPercent,
+        widthPercent: subZone.widthPercent,
+        heightPercent: subZone.heightPercent,
+      })));
+      setLoadedConfig(await rejectionConfigApi.operatorConfig({ partName }), { preserveSelection: true });
+      notify(`Zone divided into ${gridSubZones.length} sub-zone cells.`);
+    } catch (err) {
+      notify(err?.response?.data?.error || err?.message || "Unable to auto divide sub-zones.", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const applyToAllZones = async () => {
+    if (!requirePartName()) return;
     if (!selectedCategoryId || selectedReasonIds.length === 0) {
       return notify("Select a category and at least one reason first.", "error");
     }
@@ -1454,6 +1777,7 @@ const RejectionConfiguration = () => {
   };
 
   const saveViewImage = async (viewId) => {
+    if (!requirePartName()) return;
     setSaving(true);
     try {
       const data = await rejectionConfigApi.updateViewImage({ partName, viewId, imageUrl: imageDrafts[viewId] || "" });
@@ -1482,6 +1806,7 @@ const RejectionConfiguration = () => {
   };
 
   const saveZoneReasons = async () => {
+    if (!requirePartName()) return;
     if (!selectedCategoryId || !selectedViewId || !selectedZoneId) {
       return notify("Select category, view and zone first.", "error");
     }
@@ -1492,6 +1817,7 @@ const RejectionConfiguration = () => {
         categoryId: selectedCategoryId,
         viewId: selectedViewId,
         zoneId: selectedZoneId,
+        subZoneId: selectedSubZoneId || null,
         reasonIds: selectedReasonIds,
       });
       setLoadedConfig(data);
@@ -1518,6 +1844,7 @@ const RejectionConfiguration = () => {
   };
 
   const saveZonePosition = async () => {
+    if (!requirePartName()) return;
     if (!selectedZone) return notify("Select a zone first.", "error");
     setSaving(true);
     try {
@@ -1565,6 +1892,7 @@ const RejectionConfiguration = () => {
   };
 
   const saveSelectedViewLayout = async () => {
+    if (!requirePartName()) return;
     if (!selectedView?.zones?.length) return notify("Select a view with zones first.", "error");
     setSaving(true);
     try {
@@ -1588,6 +1916,7 @@ const RejectionConfiguration = () => {
   };
 
   const autoDivideSelectedView = async () => {
+    if (!requirePartName()) return;
     if (!selectedView?.zones?.length) return notify("Add zones before auto dividing the image.", "error");
     const gridZones = buildZoneGrid(selectedView.zones);
     setSaving(true);
@@ -1618,6 +1947,7 @@ const RejectionConfiguration = () => {
   };
 
   const updateCategoryRecord = async () => {
+    if (!requirePartName()) return;
     if (!editTarget?.id) return;
     setSaving(true);
     try {
@@ -1634,10 +1964,12 @@ const RejectionConfiguration = () => {
   };
 
   const deleteCategoryRecord = async (category) => {
+    if (!requirePartName()) return;
     setSaving(true);
     try {
       const data = await rejectionConfigApi.deleteCategory(category.id, { partName });
       setLoadedConfig(data);
+      await loadParts();
       notify("Category deleted.");
     } catch (err) {
       notify(err?.response?.data?.error || err?.message || "Unable to delete category.", "error");
@@ -1653,6 +1985,7 @@ const RejectionConfiguration = () => {
   };
 
   const updateReasonRecord = async () => {
+    if (!requirePartName()) return;
     if (!editTarget?.id) return;
     setSaving(true);
     try {
@@ -1669,6 +2002,7 @@ const RejectionConfiguration = () => {
   };
 
   const deleteReasonRecord = async (reason) => {
+    if (!requirePartName()) return;
     setSaving(true);
     try {
       const data = await rejectionConfigApi.deleteReason(reason.id, { partName });
@@ -1688,6 +2022,7 @@ const RejectionConfiguration = () => {
   };
 
   const updateViewRecord = async () => {
+    if (!requirePartName()) return;
     if (!editTarget?.id) return;
     setSaving(true);
     try {
@@ -1709,10 +2044,12 @@ const RejectionConfiguration = () => {
   };
 
   const deleteViewRecord = async (view) => {
+    if (!requirePartName()) return;
     setSaving(true);
     try {
       const data = await rejectionConfigApi.deleteView(view.id, { partName });
       setLoadedConfig(data);
+      await loadParts();
       notify("View deleted.");
     } catch (err) {
       notify(err?.response?.data?.error || err?.message || "Unable to delete view.", "error");
@@ -1729,6 +2066,7 @@ const RejectionConfiguration = () => {
   };
 
   const updateZoneRecord = async () => {
+    if (!requirePartName()) return;
     if (!editTarget?.id) return;
     setSaving(true);
     try {
@@ -1749,6 +2087,7 @@ const RejectionConfiguration = () => {
   };
 
   const deleteZoneRecord = async (zone) => {
+    if (!requirePartName()) return;
     setSaving(true);
     try {
       const data = await rejectionConfigApi.deleteZone(zone.id, { partName });
@@ -1756,6 +2095,48 @@ const RejectionConfiguration = () => {
       notify("Zone deleted.");
     } catch (err) {
       notify(err?.response?.data?.error || err?.message || "Unable to delete zone.", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openEditSubZone = (subZone) => {
+    setSelectedSubZoneId(subZone.id);
+    setEditTarget(subZone);
+    setSubZoneText(subZone?.name || "");
+    setModal("editSubZone");
+  };
+
+  const updateSubZoneRecord = async () => {
+    if (!requirePartName()) return;
+    if (!editTarget?.id) return;
+    setSaving(true);
+    try {
+      const data = await rejectionConfigApi.updateSubZone({
+        partName,
+        subZoneId: editTarget.id,
+        name: subZoneText,
+      });
+      setLoadedConfig(data, { preserveSelection: true });
+      setModal("");
+      setEditTarget(null);
+      notify("Sub-zone updated.");
+    } catch (err) {
+      notify(err?.response?.data?.error || err?.message || "Unable to update sub-zone.", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteSubZoneRecord = async (subZone) => {
+    if (!requirePartName()) return;
+    setSaving(true);
+    try {
+      const data = await rejectionConfigApi.deleteSubZone(subZone.id, { partName });
+      setLoadedConfig(data, { preserveSelection: true });
+      notify("Sub-zone deleted.");
+    } catch (err) {
+      notify(err?.response?.data?.error || err?.message || "Unable to delete sub-zone.", "error");
     } finally {
       setSaving(false);
     }
@@ -1770,6 +2151,7 @@ const RejectionConfiguration = () => {
     if (target.type === "reason") return deleteReasonRecord(target.item);
     if (target.type === "view") return deleteViewRecord(target.item);
     if (target.type === "zone") return deleteZoneRecord(target.item);
+    if (target.type === "subZone") return deleteSubZoneRecord(target.item);
   };
 
   const toggleReason = (reasonId) => {
@@ -1861,6 +2243,10 @@ const RejectionConfiguration = () => {
           partOptions={[partName, ...partOptions].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i)}
           partName={partName}
           onSelectPart={(p) => loadConfig(false, p)}
+          onAddPart={() => {
+            setNewPartName("");
+            setModal("part");
+          }}
           onEditPart={openEditPart}
           onDeletePart={(part) => requestDelete("part", part, part, `Delete part "${part}" and all rejection configuration?`)}
         />
@@ -1899,6 +2285,27 @@ const RejectionConfiguration = () => {
         />
       )}
 
+      {activeTab === "subzones" && (
+        <SubZoneDesignerTab
+          views={views}
+          selectedViewId={selectedViewId}
+          setSelectedViewId={setSelectedViewId}
+          selectedZoneId={selectedZoneId}
+          setSelectedZoneId={setSelectedZoneId}
+          selectedSubZoneId={selectedSubZoneId}
+          setSelectedSubZoneId={setSelectedSubZoneId}
+          selectedView={selectedView}
+          selectedZone={selectedZone}
+          onAddSubZones={() => setModal("subZone")}
+          onEditSubZone={openEditSubZone}
+          onDeleteSubZone={(subZone) => requestDelete("subZone", subZone, subZone?.name || subZone?.code, `Delete sub-zone "${subZone?.name || subZone?.code}"?`)}
+          onChangeSubZoneLayout={changeSelectedSubZoneLayout}
+          onAutoDivideSubZones={autoDivideSelectedSubZones}
+          onSaveSubZoneLayout={saveSelectedSubZoneLayout}
+          saving={saving}
+        />
+      )}
+
       {activeTab === "assign" && (
         <AssignmentTab
           categories={categories}
@@ -1909,9 +2316,12 @@ const RejectionConfiguration = () => {
           setSelectedViewId={setSelectedViewId}
           selectedZoneId={selectedZoneId}
           setSelectedZoneId={setSelectedZoneId}
+          selectedSubZoneId={selectedSubZoneId}
+          setSelectedSubZoneId={setSelectedSubZoneId}
           selectedCategory={selectedCategory}
           selectedView={selectedView}
           selectedZone={selectedZone}
+          selectedSubZone={selectedSubZone}
           selectedReasonIds={selectedReasonIds}
           toggleReason={toggleReason}
           onSaveZoneReasons={saveZoneReasons}
@@ -1955,10 +2365,10 @@ const RejectionConfiguration = () => {
       {modal === "part" && (
         <Modal title="Add New Part" onClose={() => setModal("")}>
           <Field label="Part Name" value={newPartName} onChange={setNewPartName} placeholder="OIL PAN K12" />
-          <p className="mt-2 text-[11px] font-bold text-text-muted">Part name will be uppercased. Default categories, views and zones will be seeded automatically.</p>
+          <p className="mt-2 text-[11px] font-bold text-text-muted">Part name will be uppercased. Rejection details will stay empty until you add them.</p>
           <div className="mt-5 flex justify-end gap-2">
             <ActionButton onClick={() => setModal("")} label="Cancel" />
-            <ActionButton primary onClick={submitNewPart} label="Add Part" icon={Plus} />
+            <ActionButton primary onClick={submitNewPart} label="Add Part" icon={Plus} disabled={saving} />
           </div>
         </Modal>
       )}
@@ -2064,12 +2474,32 @@ const RejectionConfiguration = () => {
         </Modal>
       )}
 
+      {modal === "subZone" && (
+        <Modal title={`Add Sub Zones — ${selectedZone?.name || "Zone"}`} onClose={() => setModal("")}>
+          <MultiLineField label="Sub Zone Names (one per line)" value={subZoneText} onChange={setSubZoneText} placeholder={"E-1\nE-2\nE-3"} />
+          <div className="mt-5 flex justify-end gap-2">
+            <ActionButton onClick={() => setModal("")} label="Cancel" />
+            <ActionButton primary onClick={addSubZones} label="Add Sub Zones" icon={Plus} disabled={saving} />
+          </div>
+        </Modal>
+      )}
+
       {modal === "editZone" && (
         <Modal title="Edit Zone" onClose={() => setModal("")}>
           <Field label="Zone Name" value={zoneText} onChange={setZoneText} placeholder="Zone A" />
           <div className="mt-5 flex justify-end gap-2">
             <ActionButton onClick={() => setModal("")} label="Cancel" />
             <ActionButton primary onClick={updateZoneRecord} label="Update Zone" icon={Save} disabled={saving} />
+          </div>
+        </Modal>
+      )}
+
+      {modal === "editSubZone" && (
+        <Modal title="Edit Sub Zone" onClose={() => setModal("")}>
+          <Field label="Sub Zone Name" value={subZoneText} onChange={setSubZoneText} placeholder="Sub Zone E-1" />
+          <div className="mt-5 flex justify-end gap-2">
+            <ActionButton onClick={() => setModal("")} label="Cancel" />
+            <ActionButton primary onClick={updateSubZoneRecord} label="Update Sub Zone" icon={Save} disabled={saving} />
           </div>
         </Modal>
       )}

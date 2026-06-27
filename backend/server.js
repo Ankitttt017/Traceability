@@ -56,6 +56,7 @@ require("./models/RejectionCategory");
 require("./models/RejectionReason");
 require("./models/RejectionView");
 require("./models/RejectionZone");
+require("./models/RejectionSubZone");
 require("./models/RejectionZoneReason");
 const { getPartRoom, setSocketServer } = require("./services/realtimeService");
 const { resetAllMachineLocks } = require("./services/machineLockService");

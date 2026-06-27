@@ -157,6 +157,34 @@ router.post(
 );
 
 router.post(
+  "/sub-zones",
+  verifyToken,
+  requireModuleAccess("master_settings", "edit"),
+  rejectionConfigController.addSubZones
+);
+
+router.put(
+  "/sub-zones",
+  verifyToken,
+  requireModuleAccess("master_settings", "edit"),
+  rejectionConfigController.updateSubZone
+);
+
+router.delete(
+  "/sub-zones/:id",
+  verifyToken,
+  requireModuleAccess("master_settings", "edit"),
+  rejectionConfigController.deleteSubZone
+);
+
+router.post(
+  "/delete-sub-zone",
+  verifyToken,
+  requireModuleAccess("master_settings", "edit"),
+  rejectionConfigController.deleteSubZone
+);
+
+router.post(
   "/zone-reasons",
   verifyToken,
   requireModuleAccess("master_settings", "edit"),

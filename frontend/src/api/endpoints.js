@@ -35,6 +35,7 @@ export const ENDPOINTS = {
     reasons: "/rejection-config/reasons",
     views: "/rejection-config/views",
     zones: "/rejection-config/zones",
+    subZones: "/rejection-config/sub-zones",
     zoneReasons: "/rejection-config/zone-reasons",
     ensureDefaults: "/rejection-config/ensure-defaults",
     applyReasonsAllZones: "/rejection-config/apply-reasons-all-zones",
@@ -44,6 +45,7 @@ export const ENDPOINTS = {
     deleteReason: "/rejection-config/delete-reason",
     deleteView: "/rejection-config/delete-view",
     deleteZone: "/rejection-config/delete-zone",
+    deleteSubZone: "/rejection-config/delete-sub-zone",
   },
   traceability: {
     operations: "/traceability/operations",
