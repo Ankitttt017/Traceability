@@ -18,6 +18,9 @@ const {
   addZones,
   updateZone,
   deleteZone,
+  addSubZones,
+  updateSubZone,
+  deleteSubZone,
   setZoneReasons,
 } = require("../services/rejectionConfigService");
 const RejectionView = require("../models/RejectionView");
@@ -155,7 +158,7 @@ exports.addReasons = async (req, res) => {
     const partName = normalizePartName(req.body?.partName || "DEFAULT");
     const categoryId = Number(req.body?.categoryId);
     if (!categoryId) return res.status(400).json({ error: "categoryId is required" });
-    await addReasons({ categoryId, reasons: req.body?.reasons });
+    await addReasons({ partName, categoryId, reasons: req.body?.reasons });
     res.json(await getOperatorConfig(partName));
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -231,7 +234,7 @@ exports.addZones = async (req, res) => {
     const partName = normalizePartName(req.body?.partName || "DEFAULT");
     const viewId = Number(req.body?.viewId);
     if (!viewId) return res.status(400).json({ error: "viewId is required" });
-    await addZones({ viewId, zones: req.body?.zones });
+    await addZones({ partName, viewId, zones: req.body?.zones });
     res.json(await getOperatorConfig(partName));
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -243,7 +246,7 @@ exports.updateZone = async (req, res) => {
     const partName = normalizePartName(req.body?.partName || "DEFAULT");
     const zoneId = Number(req.body?.zoneId);
     if (!zoneId) return res.status(400).json({ error: "zoneId is required" });
-    await updateZone({ zoneId, patch: req.body || {} });
+    await updateZone({ partName, zoneId, patch: req.body || {} });
     res.json(await getOperatorConfig(partName));
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -262,6 +265,42 @@ exports.deleteZone = async (req, res) => {
   }
 };
 
+exports.addSubZones = async (req, res) => {
+  try {
+    const partName = normalizePartName(req.body?.partName || "DEFAULT");
+    const zoneId = Number(req.body?.zoneId);
+    if (!zoneId) return res.status(400).json({ error: "zoneId is required" });
+    await addSubZones({ partName, zoneId, subZones: req.body?.subZones });
+    res.json(await getOperatorConfig(partName));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+exports.updateSubZone = async (req, res) => {
+  try {
+    const partName = normalizePartName(req.body?.partName || "DEFAULT");
+    const subZoneId = Number(req.body?.subZoneId);
+    if (!subZoneId) return res.status(400).json({ error: "subZoneId is required" });
+    await updateSubZone({ partName, subZoneId, patch: req.body || {} });
+    res.json(await getOperatorConfig(partName));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+exports.deleteSubZone = async (req, res) => {
+  try {
+    const partName = normalizePartName(req.body?.partName || req.query?.partName || "DEFAULT");
+    const subZoneId = Number(req.params?.id || req.body?.subZoneId);
+    if (!subZoneId) return res.status(400).json({ error: "subZoneId is required" });
+    await deleteSubZone({ partName, subZoneId });
+    res.json(await getOperatorConfig(partName));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
 exports.setZoneReasons = async (req, res) => {
   try {
     const partName = normalizePartName(req.body?.partName || "DEFAULT");
@@ -270,6 +309,7 @@ exports.setZoneReasons = async (req, res) => {
       categoryId: req.body?.categoryId,
       viewId: req.body?.viewId,
       zoneId: req.body?.zoneId,
+      subZoneId: req.body?.subZoneId,
       reasonIds: req.body?.reasonIds,
     });
     res.json(await getOperatorConfig(partName));

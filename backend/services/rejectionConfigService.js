@@ -3,6 +3,7 @@ const RejectionCategory = require("../models/RejectionCategory");
 const RejectionReason = require("../models/RejectionReason");
 const RejectionView = require("../models/RejectionView");
 const RejectionZone = require("../models/RejectionZone");
+const RejectionSubZone = require("../models/RejectionSubZone");
 const RejectionZoneReason = require("../models/RejectionZoneReason");
 const {
   DEFAULT_REJECTION_CATEGORIES,
@@ -156,6 +157,14 @@ async function getOperatorConfig(partName = "DEFAULT") {
       raw: true,
     }),
   ]);
+  const zoneIds = zones.map((row) => row.id);
+  const subZones = zoneIds.length
+    ? await RejectionSubZone.findAll({
+      where: { zone_id: { [Op.in]: zoneIds }, is_active: true },
+      order: [["sort_order", "ASC"], ["id", "ASC"]],
+      raw: true,
+    })
+    : [];
 
   return {
     partName: normalizedPart,
@@ -184,12 +193,24 @@ async function getOperatorConfig(partName = "DEFAULT") {
           yPercent: Number(zone.y_percent || 0),
           widthPercent: Number(zone.width_percent || 10),
           heightPercent: Number(zone.height_percent || 10),
+          subZones: subZones
+            .filter((subZone) => Number(subZone.zone_id) === Number(zone.id))
+            .map((subZone) => ({
+              id: subZone.id,
+              code: subZone.code,
+              name: subZone.name,
+              xPercent: Number(subZone.x_percent || 0),
+              yPercent: Number(subZone.y_percent || 0),
+              widthPercent: Number(subZone.width_percent || 10),
+              heightPercent: Number(subZone.height_percent || 10),
+            })),
         })),
     })),
     mappings: mappings.map((row) => ({
       categoryId: row.category_id,
       viewId: row.view_id,
       zoneId: row.zone_id,
+      subZoneId: row.sub_zone_id || null,
       reasonId: row.reason_id,
     })),
   };
@@ -261,8 +282,11 @@ async function deletePart({ partName }) {
   const viewIds = views.map((view) => view.id);
   const categories = await RejectionCategory.findAll({ where: { part_name: normalizedPart }, raw: true });
   const categoryIds = categories.map((category) => category.id);
+  const zones = viewIds.length ? await RejectionZone.findAll({ where: { view_id: { [Op.in]: viewIds } }, raw: true }) : [];
+  const zoneIds = zones.map((zone) => zone.id);
   await RejectionZoneReason.destroy({ where: { part_name: normalizedPart } });
   if (categoryIds.length) await RejectionReason.destroy({ where: { category_id: { [Op.in]: categoryIds } } });
+  if (zoneIds.length) await RejectionSubZone.destroy({ where: { zone_id: { [Op.in]: zoneIds } } });
   if (viewIds.length) await RejectionZone.destroy({ where: { view_id: { [Op.in]: viewIds } } });
   await RejectionCategory.destroy({ where: { part_name: normalizedPart } });
   await RejectionView.destroy({ where: { part_name: normalizedPart } });
@@ -290,7 +314,7 @@ async function addCategoryWithReasons({ partName = "DEFAULT", code, name, reason
     category.is_active = true;
     await category.save();
   }
-  await addReasons({ categoryId: category.id, reasons });
+  await addReasons({ partName: normalizedPart, categoryId: category.id, reasons });
   return category;
 }
 
@@ -318,10 +342,14 @@ async function deleteCategory({ partName = "DEFAULT", categoryId }) {
   await category.destroy();
 }
 
-async function addReasons({ categoryId, reasons = [] }) {
+async function addReasons({ partName = "DEFAULT", categoryId, reasons = [] }) {
+  const normalizedPart = normalizePartName(partName);
   const category = await RejectionCategory.findByPk(categoryId);
-  if (!category) throw new Error("Category not found.");
+  if (!category || normalizePartName(category.part_name) !== normalizedPart) {
+    throw new Error("Category not found for selected part.");
+  }
   const cleanReasons = [...new Set((reasons || []).map((reason) => String(reason || "").trim()).filter(Boolean))];
+  if (!cleanReasons.length) throw new Error("At least one reason is required.");
   const existing = await RejectionReason.findAll({ where: { category_id: category.id }, raw: true });
   const existingNames = new Set(existing.map((row) => String(row.name || "").trim().toUpperCase()));
   let sortOrder = existing.length + 1;
@@ -384,7 +412,7 @@ async function addViewWithZones({ partName = "DEFAULT", code, name, imageUrl = "
     view.is_active = true;
     await view.save();
   }
-  await addZones({ viewId: view.id, zones });
+  await addZones({ partName: normalizedPart, viewId: view.id, zones });
   return view;
 }
 
@@ -406,13 +434,19 @@ async function deleteView({ partName = "DEFAULT", viewId }) {
   const view = await RejectionView.findOne({ where: { id: Number(viewId), part_name: normalizedPart } });
   if (!view) throw new Error("View not found.");
   await RejectionZoneReason.destroy({ where: { part_name: normalizedPart, view_id: view.id } });
+  const zones = await RejectionZone.findAll({ where: { view_id: view.id }, raw: true });
+  const zoneIds = zones.map((zone) => zone.id);
+  if (zoneIds.length) await RejectionSubZone.destroy({ where: { zone_id: { [Op.in]: zoneIds } } });
   await RejectionZone.destroy({ where: { view_id: view.id } });
   await view.destroy();
 }
 
-async function addZones({ viewId, zones = [] }) {
+async function addZones({ partName = "DEFAULT", viewId, zones = [] }) {
+  const normalizedPart = normalizePartName(partName);
   const view = await RejectionView.findByPk(viewId);
-  if (!view) throw new Error("View not found.");
+  if (!view || normalizePartName(view.part_name) !== normalizedPart) {
+    throw new Error("View not found for selected part.");
+  }
   const cleanZones = (zones || [])
     .map((zone) => typeof zone === "string" ? { code: zone, name: `Zone ${zone}` } : zone)
     .map((zone) => ({
@@ -424,6 +458,7 @@ async function addZones({ viewId, zones = [] }) {
       height_percent: Number(zone?.height_percent ?? zone?.heightPercent ?? 10),
     }))
     .filter((zone) => zone.code && zone.name);
+  if (!cleanZones.length) throw new Error("At least one zone is required.");
   const existing = await RejectionZone.findAll({ where: { view_id: view.id }, raw: true });
   const existingCodes = new Set(existing.map((row) => String(row.code || "").trim().toUpperCase()));
   let sortOrder = existing.length + 1;
@@ -444,9 +479,13 @@ async function addZones({ viewId, zones = [] }) {
   }
 }
 
-async function updateZone({ zoneId, patch = {} }) {
+async function updateZone({ partName = "DEFAULT", zoneId, patch = {} }) {
+  const normalizedPart = normalizePartName(partName);
   const zone = await RejectionZone.findByPk(zoneId);
-  if (!zone) throw new Error("Zone not found.");
+  const view = zone ? await RejectionView.findByPk(zone.view_id) : null;
+  if (!zone || normalizePartName(view?.part_name) !== normalizedPart) {
+    throw new Error("Zone not found for selected part.");
+  }
   const fields = [
     ["code", "code"],
     ["name", "name"],
@@ -478,14 +517,121 @@ async function deleteZone({ partName = "DEFAULT", zoneId }) {
     throw new Error("Zone not found.");
   }
   await RejectionZoneReason.destroy({ where: { part_name: normalizedPart, zone_id: zone.id } });
+  await RejectionSubZone.destroy({ where: { zone_id: zone.id } });
   await zone.destroy();
 }
 
-async function setZoneReasons({ partName = "DEFAULT", categoryId, viewId, zoneId, reasonIds = [] }) {
+async function addSubZones({ partName = "DEFAULT", zoneId, subZones = [] }) {
+  const normalizedPart = normalizePartName(partName);
+  const zone = await RejectionZone.findByPk(Number(zoneId));
+  const view = zone ? await RejectionView.findByPk(zone.view_id) : null;
+  if (!zone || normalizePartName(view?.part_name) !== normalizedPart) {
+    throw new Error("Zone not found for selected part.");
+  }
+  const cleanSubZones = (subZones || [])
+    .map((subZone) => typeof subZone === "string" ? { code: subZone, name: `Sub Zone ${subZone}` } : subZone)
+    .map((subZone) => ({
+      code: String(subZone?.code || subZone?.name || "").trim().toUpperCase(),
+      name: String(subZone?.name || subZone?.code || "").trim(),
+      x_percent: Number(subZone?.x_percent ?? subZone?.xPercent ?? 10),
+      y_percent: Number(subZone?.y_percent ?? subZone?.yPercent ?? 10),
+      width_percent: Number(subZone?.width_percent ?? subZone?.widthPercent ?? 10),
+      height_percent: Number(subZone?.height_percent ?? subZone?.heightPercent ?? 10),
+    }))
+    .filter((subZone) => subZone.code && subZone.name);
+  if (!cleanSubZones.length) throw new Error("At least one sub-zone is required.");
+  const existing = await RejectionSubZone.findAll({ where: { zone_id: zone.id }, raw: true });
+  const existingCodes = new Set(existing.map((row) => String(row.code || "").trim().toUpperCase()));
+  let sortOrder = existing.length + 1;
+  for (const subZone of cleanSubZones) {
+    if (existingCodes.has(subZone.code)) continue;
+    await RejectionSubZone.create({
+      zone_id: zone.id,
+      code: subZone.code,
+      name: subZone.name,
+      x_percent: Number.isFinite(subZone.x_percent) ? subZone.x_percent : 10,
+      y_percent: Number.isFinite(subZone.y_percent) ? subZone.y_percent : 10,
+      width_percent: Number.isFinite(subZone.width_percent) ? subZone.width_percent : 10,
+      height_percent: Number.isFinite(subZone.height_percent) ? subZone.height_percent : 10,
+      sort_order: sortOrder,
+      is_active: true,
+    });
+    sortOrder += 1;
+  }
+}
+
+async function updateSubZone({ partName = "DEFAULT", subZoneId, patch = {} }) {
+  const normalizedPart = normalizePartName(partName);
+  const subZone = await RejectionSubZone.findByPk(Number(subZoneId));
+  const zone = subZone ? await RejectionZone.findByPk(subZone.zone_id) : null;
+  const view = zone ? await RejectionView.findByPk(zone.view_id) : null;
+  if (!subZone || normalizePartName(view?.part_name) !== normalizedPart) {
+    throw new Error("Sub-zone not found for selected part.");
+  }
+  const fields = [
+    ["code", "code"],
+    ["name", "name"],
+    ["x_percent", "xPercent"],
+    ["y_percent", "yPercent"],
+    ["width_percent", "widthPercent"],
+    ["height_percent", "heightPercent"],
+  ];
+  for (const [dbKey, apiKey] of fields) {
+    if (patch[apiKey] === undefined && patch[dbKey] === undefined) continue;
+    const value = patch[apiKey] ?? patch[dbKey];
+    if (dbKey.endsWith("_percent")) {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) subZone[dbKey] = Math.max(0, Math.min(100, numeric));
+    } else {
+      const text = String(value || "").trim();
+      if (text) subZone[dbKey] = dbKey === "code" ? text.toUpperCase() : text;
+    }
+  }
+  await subZone.save();
+  return subZone;
+}
+
+async function deleteSubZone({ partName = "DEFAULT", subZoneId }) {
+  const normalizedPart = normalizePartName(partName);
+  const subZone = await RejectionSubZone.findByPk(Number(subZoneId));
+  const zone = subZone ? await RejectionZone.findByPk(subZone.zone_id) : null;
+  const view = zone ? await RejectionView.findByPk(zone.view_id) : null;
+  if (!subZone || normalizePartName(view?.part_name) !== normalizedPart) {
+    throw new Error("Sub-zone not found for selected part.");
+  }
+  await RejectionZoneReason.destroy({ where: { part_name: normalizedPart, sub_zone_id: subZone.id } });
+  await subZone.destroy();
+}
+
+async function setZoneReasons({ partName = "DEFAULT", categoryId, viewId, zoneId, subZoneId = null, reasonIds = [] }) {
   const normalizedPart = normalizePartName(partName);
   const cleanReasonIds = [...new Set((reasonIds || []).map((id) => Number(id)).filter(Boolean))];
   if (!categoryId || !viewId || !zoneId) {
     throw new Error("Category, view and zone are required.");
+  }
+  const [category, view, zone, subZone] = await Promise.all([
+    RejectionCategory.findOne({ where: { id: Number(categoryId), part_name: normalizedPart } }),
+    RejectionView.findOne({ where: { id: Number(viewId), part_name: normalizedPart } }),
+    RejectionZone.findByPk(Number(zoneId)),
+    subZoneId ? RejectionSubZone.findByPk(Number(subZoneId)) : null,
+  ]);
+  if (!category || !view || !zone || Number(zone.view_id) !== Number(view.id)) {
+    throw new Error("Selected category, view and zone must belong to the selected part.");
+  }
+  if (subZoneId && (!subZone || Number(subZone.zone_id) !== Number(zone.id))) {
+    throw new Error("Selected sub-zone must belong to the selected zone.");
+  }
+  if (cleanReasonIds.length) {
+    const validReasons = await RejectionReason.count({
+      where: {
+        id: { [Op.in]: cleanReasonIds },
+        category_id: category.id,
+        is_active: true,
+      },
+    });
+    if (validReasons !== cleanReasonIds.length) {
+      throw new Error("One or more selected reasons do not belong to the selected category.");
+    }
   }
   await RejectionZoneReason.destroy({
     where: {
@@ -493,6 +639,7 @@ async function setZoneReasons({ partName = "DEFAULT", categoryId, viewId, zoneId
       category_id: Number(categoryId),
       view_id: Number(viewId),
       zone_id: Number(zoneId),
+      sub_zone_id: subZoneId ? Number(subZoneId) : null,
     },
   });
   for (const reasonId of cleanReasonIds) {
@@ -501,6 +648,7 @@ async function setZoneReasons({ partName = "DEFAULT", categoryId, viewId, zoneId
       category_id: Number(categoryId),
       view_id: Number(viewId),
       zone_id: Number(zoneId),
+      sub_zone_id: subZoneId ? Number(subZoneId) : null,
       reason_id: reasonId,
       is_active: true,
     });
@@ -528,5 +676,8 @@ module.exports = {
   addZones,
   updateZone,
   deleteZone,
+  addSubZones,
+  updateSubZone,
+  deleteSubZone,
   setZoneReasons,
 };

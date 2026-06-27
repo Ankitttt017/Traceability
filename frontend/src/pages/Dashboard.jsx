@@ -514,6 +514,7 @@ const Dashboard = () => {
   const [heatMapPart, setHeatMapPart] = useState("");
   const [heatMapConfig, setHeatMapConfig] = useState(null);
   const [heatMapViewId, setHeatMapViewId] = useState("");
+  const [heatMapSelection, setHeatMapSelection] = useState(null);
   const [rejectionFilters, setRejectionFilters] = useState({ category:"", view:"", zone:"", reason:"" });
   const refreshInFlightRef = useRef(false);
   const refreshQueuedRef = useRef(false);
@@ -1048,6 +1049,15 @@ const Dashboard = () => {
       });
     return counts;
   }, [filteredRejectionRows, heatMapView]);
+  const heatMapSubZoneCounts = useMemo(() => {
+    const counts = {};
+    (heatMapConfig?.mappings || []).forEach((mapping) => {
+      if (!mapping.subZoneId) return;
+      const key = String(mapping.subZoneId);
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    return counts;
+  }, [heatMapConfig]);
   const heatMapMax = useMemo(
     () => Math.max(1, ...Object.values(heatMapZoneCounts).map(Number)),
     [heatMapZoneCounts]
@@ -2048,8 +2058,52 @@ const Dashboard = () => {
                       </div>
                     );
                   })}
+                  {(heatMapView.zones || []).flatMap((zone) => (zone.subZones || []).map((subZone) => {
+                    const zoneX = Number(zone.xPercent || 0);
+                    const zoneY = Number(zone.yPercent || 0);
+                    const zoneW = Number(zone.widthPercent || 10);
+                    const zoneH = Number(zone.heightPercent || 10);
+                    const left = zoneX + (zoneW * Number(subZone.xPercent || 0) / 100);
+                    const top = zoneY + (zoneH * Number(subZone.yPercent || 0) / 100);
+                    const width = Math.max(1, zoneW * Number(subZone.widthPercent || 10) / 100);
+                    const height = Math.max(1, zoneH * Number(subZone.heightPercent || 10) / 100);
+                    const count = Number(heatMapSubZoneCounts[String(subZone.id)] || 0);
+                    const selected = heatMapSelection?.type === "subZone" && Number(heatMapSelection.id) === Number(subZone.id);
+                    return (
+                      <button
+                        key={`sub-zone-${subZone.id}`}
+                        type="button"
+                        title={`${zone.name || zone.code} / ${subZone.name || subZone.code}: ${count} mapped reason${count === 1 ? "" : "s"}`}
+                        onClick={() => setHeatMapSelection({ type: "subZone", id: subZone.id, zone: zone.name || zone.code, name: subZone.name || subZone.code, count })}
+                        style={{
+                          position: "absolute",
+                          left: `${left}%`,
+                          top: `${top}%`,
+                          width: `${width}%`,
+                          height: `${height}%`,
+                          border: selected ? "2px solid #0891b2" : "1px solid rgba(14,165,233,.85)",
+                          background: count ? "rgba(14,165,233,.24)" : "rgba(255,255,255,.08)",
+                          color: "#0f172a",
+                          zIndex: selected ? 7 : 4,
+                          cursor: "pointer",
+                          boxShadow: selected ? "0 0 0 3px rgba(14,165,233,.25)" : "none",
+                        }}
+                      >
+                        <span style={{position:"absolute",left:"50%",top:"50%",transform:"translate(-50%,-50%)",borderRadius:7,background:"rgba(255,255,255,.92)",border:"1px solid rgba(14,165,233,.8)",padding:"2px 5px",fontSize:9,fontWeight:900,whiteSpace:"nowrap"}}>
+                          {subZone.code || subZone.name}
+                        </span>
+                      </button>
+                    );
+                  }))}
                 </div>
                 <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  {heatMapSelection && (
+                    <div style={{padding:"10px",borderRadius:8,background:"rgba(14,165,233,.08)",border:"1px solid rgba(14,165,233,.35)"}}>
+                      <p style={{margin:0,fontSize:10,fontWeight:900,textTransform:"uppercase",color:C.txt("sec")}}>Selected Sub Zone</p>
+                      <p style={{margin:"4px 0 0",fontSize:12,fontWeight:900,color:C.txt("pri")}}>{heatMapSelection.zone} / {heatMapSelection.name}</p>
+                      <p style={{margin:"2px 0 0",fontSize:11,fontWeight:800,color:C.txt("sec")}}>{heatMapSelection.count} mapped reasons</p>
+                    </div>
+                  )}
                   <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,padding:"9px 10px",borderRadius:8,background:C.bg("surf"),border:`1px solid ${C.bdr()}`}}>
                     <span style={{fontSize:10,fontWeight:900,color:C.txt("sec"),textTransform:"uppercase",letterSpacing:".06em"}}>Heat Intensity</span>
                     <div style={{display:"flex",alignItems:"center",gap:5}}>

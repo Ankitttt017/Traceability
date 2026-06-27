@@ -616,6 +616,7 @@ const GlobalPopup = ({
   const [manualReasonCategory, setManualReasonCategory] = useState("");
   const [manualRejectionView, setManualRejectionView] = useState(null);
   const [manualRejectionZone, setManualRejectionZone] = useState(null);
+  const [manualRejectionSubZone, setManualRejectionSubZone] = useState(null);
   const [manualRejectionRemark, setManualRejectionRemark] = useState("");
   const [dynamicRejectionConfig, setDynamicRejectionConfig] = useState(null);
   const [loadingRejectionConfig, setLoadingRejectionConfig] = useState(false);
@@ -719,6 +720,7 @@ const GlobalPopup = ({
       setManualReasonQuery("");
       setManualRejectionView(null);
       setManualRejectionZone(null);
+      setManualRejectionSubZone(null);
       setManualRejectionRemark("");
       setManualQrCode("");
       setScanLocked(false);
@@ -768,6 +770,7 @@ const GlobalPopup = ({
     setManualReasonCategory("");
     setManualRejectionView(null);
     setManualRejectionZone(null);
+      setManualRejectionSubZone(null);
     setManualRejectionRemark("");
     setShowReasonDropdown(false);
     setShowNgReasonModal(false);
@@ -839,6 +842,7 @@ const GlobalPopup = ({
         setManualReasonCategory("");
         setManualRejectionView(null);
         setManualRejectionZone(null);
+      setManualRejectionSubZone(null);
         setManualRejectionRemark("");
         setManualSuccessMsg("");
         setManualQrCode("");
@@ -863,6 +867,7 @@ const GlobalPopup = ({
     setManualReasonCategory("");
     setManualRejectionView(null);
     setManualRejectionZone(null);
+      setManualRejectionSubZone(null);
     setManualRejectionRemark("");
     setManualSuccessMsg("");
     setManualQrCode("");
@@ -895,6 +900,10 @@ const GlobalPopup = ({
       setValidationError("Please select rejection zone.");
       return;
     }
+    if (needsNgReason && configuredCategories.length && needsSubZoneSelection && !manualRejectionSubZone) {
+      setValidationError("Please select rejection sub-zone.");
+      return;
+    }
     if (needsNgReason && !ngReasonOptions.includes(normalizedReason)) {
       setValidationError("Please select NG reason from the list.");
       return;
@@ -916,7 +925,11 @@ const GlobalPopup = ({
         reason: manualSelection === "NG" ? normalizedReason : undefined,
         category: manualSelection === "NG" ? (getNgCategoryDisplayName(selectedDynamicCategory) || manualReasonCategory) : undefined,
         view: manualSelection === "NG" ? (manualRejectionView?.name || "") : undefined,
-        zone: manualSelection === "NG" ? (manualRejectionZone?.name || manualRejectionZone?.code || "") : undefined,
+        zone: manualSelection === "NG" ? [
+          manualRejectionZone?.name || manualRejectionZone?.code || "",
+          manualRejectionSubZone?.name || manualRejectionSubZone?.code || "",
+        ].filter(Boolean).join(" / ") : undefined,
+        subZone: manualSelection === "NG" ? (manualRejectionSubZone?.name || manualRejectionSubZone?.code || "") : undefined,
         remark: manualSelection === "NG" ? manualRejectionRemark : undefined,
       });
       setManualSuccessMsg(res?.message || `Part ${manualSelection === "OK" ? "accepted" : "rejected"} - ready for next scan.`);
@@ -931,6 +944,7 @@ const GlobalPopup = ({
         setManualReasonCategory("");
         setManualRejectionView(null);
         setManualRejectionZone(null);
+      setManualRejectionSubZone(null);
         setManualRejectionRemark("");
         setShowNgReasonModal(false);
         setValidationError("");
@@ -1535,7 +1549,10 @@ const GlobalPopup = ({
   );
   const selectedDynamicView = manualRejectionView;
   const selectedDynamicZone = manualRejectionZone;
+  const selectedDynamicSubZone = manualRejectionSubZone;
   const popupZones = selectedDynamicView?.zones || [];
+  const popupSubZones = selectedDynamicZone?.subZones || [];
+  const needsSubZoneSelection = popupSubZones.length > 0;
   const popupZoneShape = getNgZoneGridShape(popupZones.length);
   const popupVerticalDividers = Array.from(
     { length: Math.max(0, popupZoneShape.columns - 1) },
@@ -1550,7 +1567,8 @@ const GlobalPopup = ({
       .filter((row) =>
         Number(row.categoryId) === Number(selectedDynamicCategory.id) &&
         Number(row.viewId) === Number(selectedDynamicView.id) &&
-        Number(row.zoneId) === Number(selectedDynamicZone.id)
+        Number(row.zoneId) === Number(selectedDynamicZone.id) &&
+        Number(row.subZoneId || 0) === Number(selectedDynamicSubZone?.id || 0)
       )
       .map((row) => Number(row.reasonId)))
     : null;
@@ -1581,9 +1599,11 @@ const GlobalPopup = ({
     ? 1
     : !manualRejectionZone
       ? 2
-      : !selectedDynamicCategory && configuredCategories.length
+      : needsSubZoneSelection && !manualRejectionSubZone
         ? 3
-        : 4;
+      : !selectedDynamicCategory && configuredCategories.length
+        ? 4
+        : 5;
   const previousStationFeatures = getStationFeatures(previousStation?.stationNo, stationSettings);
   const previousOpState = getJourneyStationDisplayState(previousStation || {}, previousStationFeatures);
   const currentOpState = String(liveOperationState || currentStationCard?.operation || currentStationCard?.status || "").trim().toUpperCase();
@@ -2005,6 +2025,7 @@ const GlobalPopup = ({
                     setManualReasonQuery("");
                     setManualRejectionView(null);
                     setManualRejectionZone(null);
+      setManualRejectionSubZone(null);
                     setManualRejectionRemark("");
                     setManualReasonCategory(enabledNgReasonCategories.length === 1 ? enabledNgReasonCategories[0].key : "");
                     setShowReasonDropdown(false);
@@ -2190,7 +2211,7 @@ const GlobalPopup = ({
           <div className="min-h-0 flex-1 overflow-y-auto bg-bg-elevated p-3 sm:p-5">
             <div className="mx-auto max-w-5xl space-y-4">
               <div className="sticky top-0 z-40 grid grid-cols-4 gap-1 rounded-xl bg-bg-elevated/95 pb-2 backdrop-blur sm:gap-2">
-                {["View", "Zone", "Category", "Reason"].map((label, index) => {
+                {(needsSubZoneSelection ? ["View", "Zone", "Sub Zone", "Category", "Reason"] : ["View", "Zone", "Category", "Reason"]).map((label, index) => {
                   const step = index + 1;
                   return <div key={label} className={`rounded-lg border px-1 py-2 text-center text-[9px] font-black uppercase sm:px-2 sm:text-xs ${
                     ngWizardStep === step ? "border-primary bg-primary text-white" : ngWizardStep > step ? "border-green-600 bg-green-500 text-white" : "border-border bg-bg-card text-text-muted"
@@ -2214,6 +2235,7 @@ const GlobalPopup = ({
                       <button key={view.id} type="button" onClick={() => {
                         setManualRejectionView(view);
                         setManualRejectionZone(null);
+      setManualRejectionSubZone(null);
                         setManualReasonCategory("");
                         setManualReason("");
                         setManualReasonQuery("");
@@ -2244,6 +2266,7 @@ const GlobalPopup = ({
                       {popupZones.map((zone, zoneIndex) => (
                         <button key={zone.id} type="button" onClick={() => {
                           setManualRejectionZone(zone);
+                          setManualRejectionSubZone(null);
                           setManualReasonCategory("");
                           setManualReason("");
                           setManualReasonQuery("");
@@ -2257,11 +2280,43 @@ const GlobalPopup = ({
                 </div>
               )}
 
-              {ngWizardStep === 3 && (
+              {ngWizardStep === 3 && needsSubZoneSelection && manualRejectionView && manualRejectionZone && (
+                <div>
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <h3 className="text-lg font-black text-text-main sm:text-xl">Select Sub Zone - {manualRejectionZone.name || manualRejectionZone.code}</h3>
+                    <button type="button" onClick={() => { setManualRejectionZone(null); setManualRejectionSubZone(null); }} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
+                  </div>
+                  <div className="mx-auto w-full max-w-4xl">
+                    <div className="relative mx-auto aspect-[900/520] max-h-[52dvh] w-full overflow-hidden rounded-xl border-2 border-border bg-bg-dark shadow-lg sm:max-h-[56dvh]">
+                      {manualRejectionView.imageUrl && <img src={manualRejectionView.imageUrl} alt={manualRejectionView.name} className="absolute inset-0 h-full w-full object-contain" />}
+                      <div className="absolute z-20 border-2 border-yellow-400 bg-yellow-300/10" style={{ left:`${Number(manualRejectionZone.xPercent ?? 0)}%`, top:`${Number(manualRejectionZone.yPercent ?? 0)}%`, width:`${Number(manualRejectionZone.widthPercent ?? 10)}%`, height:`${Number(manualRejectionZone.heightPercent ?? 10)}%` }} />
+                      {popupSubZones.map((subZone, subZoneIndex) => {
+                        const left = Number(manualRejectionZone.xPercent || 0) + (Number(manualRejectionZone.widthPercent || 10) * Number(subZone.xPercent || 0) / 100);
+                        const top = Number(manualRejectionZone.yPercent || 0) + (Number(manualRejectionZone.heightPercent || 10) * Number(subZone.yPercent || 0) / 100);
+                        const width = Number(manualRejectionZone.widthPercent || 10) * Number(subZone.widthPercent || 10) / 100;
+                        const height = Number(manualRejectionZone.heightPercent || 10) * Number(subZone.heightPercent || 10) / 100;
+                        return (
+                          <button key={subZone.id} type="button" onClick={() => {
+                            setManualRejectionSubZone(subZone);
+                            setManualReasonCategory("");
+                            setManualReason("");
+                            setManualReasonQuery("");
+                          }} className={`absolute z-30 flex items-center justify-center border-2 transition hover:z-40 active:scale-[0.99] ${NG_ZONE_OVERLAY_STYLES[subZoneIndex % NG_ZONE_OVERLAY_STYLES.length]}`} style={{ left:`${left}%`, top:`${top}%`, width:`${Math.max(3, width)}%`, height:`${Math.max(3, height)}%` }}>
+                            <span className={`flex min-h-7 min-w-7 items-center justify-center rounded-md border-2 px-2 text-xs font-black shadow-lg sm:min-h-10 sm:min-w-10 sm:text-sm ${NG_ZONE_LABEL_STYLES[subZoneIndex % NG_ZONE_LABEL_STYLES.length]}`}>{subZone.code || subZone.name}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="mt-2 text-center text-[11px] font-bold text-text-muted sm:text-xs">Tap the exact small defect area.</p>
+                  </div>
+                </div>
+              )}
+
+              {ngWizardStep === (needsSubZoneSelection ? 4 : 3) && (
                 <div>
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <h3 className="text-lg font-black text-text-main sm:text-xl">Select Rejection Category</h3>
-                    <button type="button" onClick={() => setManualRejectionZone(null)} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
+                    <button type="button" onClick={() => needsSubZoneSelection ? setManualRejectionSubZone(null) : setManualRejectionZone(null)} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
                   </div>
                   {enabledNgReasonCategories.length === 0 ? (
                     <div className="rounded-xl border border-amber-400/50 bg-amber-500/10 p-4 text-sm font-bold text-amber-700">
@@ -2284,12 +2339,12 @@ const GlobalPopup = ({
                 </div>
               )}
 
-              {ngWizardStep === 4 && (
+              {ngWizardStep === (needsSubZoneSelection ? 5 : 4) && (
                 <div>
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <h3 className="text-lg font-black text-text-main sm:text-xl">Select Rejection Reason</h3>
-                      <p className="mt-1 truncate text-xs font-bold text-text-muted">{manualRejectionView?.name} / {manualRejectionZone?.name || manualRejectionZone?.code} / {getNgCategoryDisplayName(selectedDynamicCategory) || manualReasonCategory}</p>
+                      <p className="mt-1 truncate text-xs font-bold text-text-muted">{manualRejectionView?.name} / {manualRejectionZone?.name || manualRejectionZone?.code}{manualRejectionSubZone ? ` / ${manualRejectionSubZone.name || manualRejectionSubZone.code}` : ""} / {getNgCategoryDisplayName(selectedDynamicCategory) || manualReasonCategory}</p>
                     </div>
                     <button type="button" onClick={() => { setManualReasonCategory(""); setManualReason(""); }} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
                   </div>
@@ -2334,6 +2389,7 @@ const GlobalPopup = ({
                         setManualReason("");
                         setManualRejectionView(null);
                         setManualRejectionZone(null);
+      setManualRejectionSubZone(null);
                         setShowReasonDropdown(false);
                       }}
                       className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
@@ -2367,6 +2423,7 @@ const GlobalPopup = ({
                                       onClick={() => {
                                         setManualRejectionView(view);
                                         setManualRejectionZone(null);
+      setManualRejectionSubZone(null);
                                         setManualReason("");
                                         setManualReasonQuery("");
                                       }}
@@ -2409,6 +2466,7 @@ const GlobalPopup = ({
                                           type="button"
                                           onClick={() => {
                                             setManualRejectionZone(zone);
+                          setManualRejectionSubZone(null);
                                             setManualReason("");
                                             setManualReasonQuery("");
                                           }}
@@ -2446,6 +2504,7 @@ const GlobalPopup = ({
                                             type="button"
                                             onClick={() => {
                                               setManualRejectionZone(zone);
+                          setManualRejectionSubZone(null);
                                               setManualReason("");
                                               setManualReasonQuery("");
                                             }}

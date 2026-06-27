@@ -36,6 +36,10 @@ router.post("/rejection-config/zones", verifyToken, requireModuleAccess("master_
 router.put("/rejection-config/zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateZone);
 router.delete("/rejection-config/zones/:id", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteZone);
 router.post("/rejection-config/delete-zone", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteZone);
+router.post("/rejection-config/sub-zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.addSubZones);
+router.put("/rejection-config/sub-zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateSubZone);
+router.delete("/rejection-config/sub-zones/:id", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteSubZone);
+router.post("/rejection-config/delete-sub-zone", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteSubZone);
 router.post("/rejection-config/zone-reasons", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.setZoneReasons);
 router.post("/rejection-config/ensure-defaults", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.ensureDefaults);
 router.post("/rejection-config/apply-reasons-all-zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.applyReasonsToAllZones);
