@@ -1562,16 +1562,27 @@ const GlobalPopup = ({
     { length: Math.max(0, popupZoneShape.rows - 1) },
     (_, index) => Number(popupZones[(index + 1) * popupZoneShape.columns]?.yPercent ?? ((index + 1) * 100 / popupZoneShape.rows))
   );
-  const dynamicReasonIdsForSelection = selectedDynamicCategory && selectedDynamicView && selectedDynamicZone
-    ? new Set(dynamicMappings
-      .filter((row) =>
-        Number(row.categoryId) === Number(selectedDynamicCategory.id) &&
-        Number(row.viewId) === Number(selectedDynamicView.id) &&
-        Number(row.zoneId) === Number(selectedDynamicZone.id) &&
-        Number(row.subZoneId || 0) === Number(selectedDynamicSubZone?.id || 0)
-      )
-      .map((row) => Number(row.reasonId)))
-    : null;
+  const dynamicReasonIdsForSelection = (() => {
+    if (!selectedDynamicCategory || !selectedDynamicView || !selectedDynamicZone) return null;
+
+    const zoneMatches = dynamicMappings.filter((row) =>
+      Number(row.categoryId) === Number(selectedDynamicCategory.id) &&
+      Number(row.viewId) === Number(selectedDynamicView.id) &&
+      Number(row.zoneId) === Number(selectedDynamicZone.id)
+    );
+
+    if (!zoneMatches.length) return null;
+
+    const subZoneMatches = selectedDynamicSubZone
+      ? zoneMatches.filter((row) => Number(row.subZoneId || 0) === Number(selectedDynamicSubZone.id))
+      : zoneMatches.filter((row) => !row.subZoneId);
+    const zoneLevelMatches = zoneMatches.filter((row) => !row.subZoneId);
+    const selectedMatches = subZoneMatches.length ? subZoneMatches : zoneLevelMatches;
+
+    return selectedMatches.length
+      ? new Set(selectedMatches.map((row) => Number(row.reasonId)))
+      : null;
+  })();
   const allNgReasonOptions = Array.from(
     new Set(enabledNgReasonCategories.flatMap((category) => {
       if (dynamicCategories.length) return (category.reasons || []).map((reason) => reason.name || reason);
@@ -2027,7 +2038,7 @@ const GlobalPopup = ({
                     setManualRejectionZone(null);
       setManualRejectionSubZone(null);
                     setManualRejectionRemark("");
-                    setManualReasonCategory(enabledNgReasonCategories.length === 1 ? enabledNgReasonCategories[0].key : "");
+                    setManualReasonCategory(!dynamicCategories.length && enabledNgReasonCategories.length === 1 ? enabledNgReasonCategories[0].key : "");
                     setShowReasonDropdown(false);
                     setShowNgReasonModal(true);
                   }}
@@ -2348,13 +2359,17 @@ const GlobalPopup = ({
                     </div>
                     <button type="button" onClick={() => { setManualReasonCategory(""); setManualReason(""); }} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
                   </div>
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {filteredNgReasonOptions.length === 0 ? (
+                    <div className="rounded-xl border border-amber-400/50 bg-amber-500/10 p-4 text-sm font-bold text-amber-700">
+                      No rejection reason is mapped for this selection. Check Rejection Configuration mapping for this view, zone, sub-zone, and category.
+                    </div>
+                  ) : <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     {filteredNgReasonOptions.map((reason) => <button key={reason} type="button" onClick={() => {
                       setManualReason(reason);
                       setManualReasonQuery(reason);
                       setValidationError("");
                     }} className={`min-h-14 rounded-xl border-2 px-4 py-3 text-left text-sm font-black transition sm:text-base ${manualReason === reason ? "border-green-700 bg-green-500 text-white shadow-lg" : "border-border bg-bg-card text-text-main hover:border-primary"}`}>{reason}</button>)}
-                  </div>
+                  </div>}
                   <textarea value={manualRejectionRemark} onChange={(event) => setManualRejectionRemark(event.target.value)} rows={2} className="mt-4 w-full rounded-xl border border-border bg-bg-card px-3 py-2 text-sm font-semibold text-text-main outline-none focus:border-primary" placeholder="Optional remark" />
                 </div>
               )}
