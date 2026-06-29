@@ -69,7 +69,7 @@ const PLC_SHOT_CANDIDATE_COLUMNS = [
 ];
 
 const PLC_REPORT_COLUMNS = [
-  "machine_name", "part_name", "shot_date", "shot_time", "shot_number", "cycle_time",
+  "machine_name", "part_name", "shot_date", "shot_number", "cycle_time",
   "die_close_core_in_time", "pouring_time", "shot_fwd_time", "curing_time", "die_open_core_out_time",
   "ejector_time", "extract_time", "spray_time", "v1_speed", "v2_speed", "v3_speed", "v4_speed", "metal_pressure",
   "furnace_metal_temp", "cooling_water_mov", "cooling_water_sta", "accel_point", "deaccel_point", "intensification_time",
@@ -663,6 +663,7 @@ async function fetchProductionData(filters = {}, options = {}) {
   const partCodeMappings = await PartCodeMapping.findAll({
     where: {
       old_part_id: { [Op.in]: partIds },
+      is_active: true,
     },
     attributes: ["old_part_id", "customer_qr"],
     order: [["updatedAt", "DESC"]],
@@ -739,6 +740,7 @@ async function fetchProductionData(filters = {}, options = {}) {
   let plcByPartId = new Map();
   let plcByUid = new Map();
   let plcByCompactQr = new Map();
+  let plcByShot = new Map();
   if (includePlcReadings) {
     // Attach PLC cycle readings from DB table (PlcCycleReadings):
     // 1) Prefer part-id style columns (if available in current schema)
@@ -748,7 +750,6 @@ async function fetchProductionData(filters = {}, options = {}) {
     const partIdsForPlcLookup = [...new Set(
       deduplicatedLogs
         .map((log) => String(log.part_id || "").trim())
-        .filter((partId) => !isCustomerQrOnlyPart(partId))
         .filter(Boolean)
     )];
     plcByPartId = partLookupColumn
@@ -758,6 +759,11 @@ async function fetchProductionData(filters = {}, options = {}) {
       ? await fetchLatestPlcReadingsByColumn("shot_uid", partIdsForPlcLookup)
       : new Map();
     plcByCompactQr = await fetchLatestPlcReadingsByCompactQr(partIdsForPlcLookup);
+    plcByShot = plcColumns.has("shot_number")
+      ? await fetchLatestPlcReadingsByShotTokens(
+          deduplicatedLogs.flatMap((log) => deriveShotCandidates(log))
+        )
+      : new Map();
   }
 
   // Enrich & Standardize
@@ -811,10 +817,12 @@ async function fetchProductionData(filters = {}, options = {}) {
     const partLookupKey = normalizeKey(partIdValue);
     const compactQrKey = parseCompactQrPartId(partIdValue)?.key || "";
     const customerQrOnlyPart = isCustomerQrOnlyPart(partIdValue);
-    const shotCandidates = customerQrOnlyPart ? [] : deriveShotCandidates(log).map((s) => normalizeShotToken(s) || normalizeKey(s));
-    const plcReadingFromDbRaw = includePlcReadings && !customerQrOnlyPart
+    const shotCandidates = deriveShotCandidates(log).map((s) => normalizeShotToken(s) || normalizeKey(s));
+    const shouldLookupPlcReading = includePlcReadings && (!customerQrOnlyPart || compactQrKey || shotCandidates.length);
+    const plcReadingFromDbRaw = shouldLookupPlcReading
       ? (
         (compactQrKey && plcByCompactQr.get(compactQrKey)) ||
+        shotCandidates.map((shot) => plcByShot.get(normalizeShotToken(shot))).find(Boolean) ||
         plcByUid.get(partLookupKey) ||
         plcByPartId.get(partLookupKey) ||
         null
@@ -823,7 +831,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     const plcReadingFromDb = plcReadingFromDbRaw
       ? enrichPlcReadingDisplay(plcReadingFromDbRaw)
       : (
-        includePlcReadings && !customerQrOnlyPart
+        shouldLookupPlcReading
           ? await fetchLatestPlcReadingByMachineShotContext({
               shotCandidates: deriveShotCandidates(log),
               machineName: log.Machine?.machine_name || "",

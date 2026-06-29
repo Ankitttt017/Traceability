@@ -3154,13 +3154,14 @@ exports.getMachineStationStats = async (req, res) => {
             is_active: true,
           },
           attributes: ["old_part_id", "customer_qr"],
+          order: [["updatedAt", "DESC"]],
           raw: true,
         })
       : [];
     const customerQrByPartId = partCodeMappings.reduce((acc, row) => {
       const key = String(row.old_part_id || "").trim().toUpperCase();
       if (!key) return acc;
-      acc[key] = String(row.customer_qr || "").trim();
+      if (!acc[key]) acc[key] = String(row.customer_qr || "").trim();
       return acc;
     }, {});
     const getMappedCustomerQr = (row) => customerQrByPartId[String(row?.part_id || "").trim().toUpperCase()] || null;
@@ -5894,6 +5895,7 @@ exports.getDashboardReport = async (req, res) => {
           is_active: true,
         },
         attributes: ["old_part_id", "customer_qr"],
+        order: [["updatedAt", "DESC"]],
         raw: true,
       });
       dashboardPartCodeMappings.push(...chunkRows);
@@ -5901,7 +5903,7 @@ exports.getDashboardReport = async (req, res) => {
     const customerQrByPartId = dashboardPartCodeMappings.reduce((acc, row) => {
       const key = String(row.old_part_id || "").trim().toUpperCase();
       if (!key) return acc;
-      acc[key] = String(row.customer_qr || "").trim();
+      if (!acc[key]) acc[key] = String(row.customer_qr || "").trim();
       return acc;
     }, {});
     const getMappedCustomerQrForPart = (partIdValue) =>
@@ -6914,6 +6916,7 @@ async function getDashboardExportRows(filters) {
     ? await PartCodeMapping.findAll({
       where: { old_part_id: { [Op.in]: partIds }, is_active: true },
       attributes: ["old_part_id", "customer_qr"],
+      order: [["updatedAt", "DESC"]],
       raw: true,
     })
     : [];
