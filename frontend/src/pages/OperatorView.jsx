@@ -1278,6 +1278,19 @@ const OperatorView = () => {
       const nextStationNo = explicitStationNo
         ? resolvePopupStationNo(payload)
         : (resolvePopupStationNo(payload) || prev?.stationNo || "");
+      const explicitCustomerQrCode = Object.prototype.hasOwnProperty.call(payload, "customerQrCode") || Object.prototype.hasOwnProperty.call(payload, "customer_qr");
+      const rawCustomerQrCode = payload.customerQrCode !== undefined ? payload.customerQrCode : payload.customer_qr;
+      const nextCustomerQrCode = explicitCustomerQrCode
+        ? String(rawCustomerQrCode || "").trim()
+        : String(payload.customerQrCode || payload.customer_qr || prev?.customerQrCode || "").trim();
+      const explicitCustomerQrPending = Object.prototype.hasOwnProperty.call(payload, "customerQrPending") || Object.prototype.hasOwnProperty.call(payload, "customer_qr_pending");
+      const nextCustomerQrPending = explicitCustomerQrPending
+        ? Boolean(payload.customerQrPending || payload.customer_qr_pending)
+        : prev?.customerQrPending;
+      const explicitCustomerQrMapped = Object.prototype.hasOwnProperty.call(payload, "customerQrMapped") || Object.prototype.hasOwnProperty.call(payload, "customer_qr_mapped");
+      const nextCustomerQrMapped = explicitCustomerQrMapped
+        ? Boolean(payload.customerQrMapped || payload.customer_qr_mapped)
+        : prev?.customerQrMapped;
       const nextType = payload.type || prev?.type || "";
       const prevPartId = prev?.partId || prev?.part_id || "";
       const prevStationNo = prev?.stationNo || prev?.station_no || "";
@@ -1310,6 +1323,9 @@ const OperatorView = () => {
         ...(payload.lastCompletedStation && { lastCompletedStation: payload.lastCompletedStation }),
         ...(explicitPartId ? { partId: nextPartId } : (nextPartId ? { partId: nextPartId } : {})),
         ...(explicitStationNo ? { stationNo: nextStationNo } : (nextStationNo ? { stationNo: nextStationNo } : {})),
+        ...(explicitCustomerQrCode ? { customerQrCode: nextCustomerQrCode } : (nextCustomerQrCode ? { customerQrCode: nextCustomerQrCode } : {})),
+        ...(explicitCustomerQrPending ? { customerQrPending: nextCustomerQrPending } : (nextCustomerQrPending ? { customerQrPending: nextCustomerQrPending } : {})),
+        ...(explicitCustomerQrMapped ? { customerQrMapped: nextCustomerQrMapped } : (nextCustomerQrMapped ? { customerQrMapped: nextCustomerQrMapped } : {})),
         ...((payload.machineId || payload.machine_id) && { machineId: payload.machineId || payload.machine_id }),
         ...(payload.machineName && { machineName: payload.machineName }),
         ...((payload.partName || payload.part_name) && { partName: payload.partName || payload.part_name }),
