@@ -815,6 +815,96 @@ async function fetchProductionData(filters = {}, options = {}) {
     productionLogs = [...merged.values()];
   }
 
+  const fetchPartStatusFallbackRows = async () => {
+    const hasStationScope = Boolean(machineId || operationNo || station || plantId || lineId || lineName);
+    if (hasStationScope) return [];
+
+    const partWhere = {
+      updatedAt: {
+        [Op.gte]: safeFrom,
+        [Op.lte]: safeTo,
+      },
+    };
+    const searchToken = String(barcode || customerCode || "").trim();
+    if (searchToken) {
+      const values = await resolveReportPartSearchValues(searchToken);
+      partWhere.part_id = values.length
+        ? { [Op.in]: values }
+        : { [Op.like]: `%${searchToken}%` };
+    }
+    if (status) {
+      const normalizedStatus = String(status || "").trim().toUpperCase();
+      if (["OK", "PASSED", "COMPLETED"].includes(normalizedStatus)) {
+        partWhere.status = { [Op.in]: ["OK", "PASSED", "COMPLETED"] };
+      } else if (["NG", "FAILED", "REJECTED", "INTERLOCKED"].includes(normalizedStatus)) {
+        partWhere.status = { [Op.in]: ["NG", "FAILED", "REJECTED", "INTERLOCKED"] };
+      } else if (["IN_PROGRESS", "RUNNING", "PENDING"].includes(normalizedStatus)) {
+        partWhere.status = { [Op.in]: ["IN_PROGRESS", "RUNNING", "PENDING"] };
+      }
+    }
+
+    const parts = await Part.findAll({
+      where: partWhere,
+      attributes: ["part_id", "qr_format_name", "status", "createdAt", "updatedAt"],
+      order: [["updatedAt", "DESC"]],
+      raw: true,
+      limit: 5000,
+    });
+    if (!parts.length) return [];
+
+    const partIds = parts.map((part) => String(part.part_id || "").trim()).filter(Boolean);
+    const mappings = partIds.length
+      ? await PartCodeMapping.findAll({
+          where: { old_part_id: { [Op.in]: partIds }, is_active: true },
+          attributes: ["old_part_id", "customer_qr"],
+          order: [["updatedAt", "DESC"]],
+          raw: true,
+        })
+      : [];
+    const customerQrByPartId = mappings.reduce((acc, row) => {
+      const key = normalizeKey(row.old_part_id);
+      if (key && !acc[key]) acc[key] = String(row.customer_qr || "").trim();
+      return acc;
+    }, {});
+
+    return parts.map((part, index) => {
+      const partId = String(part.part_id || "").trim();
+      const partStatus = String(part.status || "IN_PROGRESS").trim().toUpperCase();
+      const mappedCustomerQr = customerQrByPartId[normalizeKey(partId)] || "-";
+      return {
+        srNo: index + 1,
+        partId,
+        part_id: partId,
+        firstScanCreatedAt: part.createdAt || part.updatedAt || null,
+        latestAnchorCreatedAt: part.updatedAt || part.createdAt || null,
+        anchorMachineName: "-",
+        anchorLineName: "-",
+        anchorShiftCode: shiftCode || "UNASSIGNED",
+        isAnchorMachineRow: true,
+        customerCode: mappedCustomerQr,
+        customerQrCode: mappedCustomerQr,
+        machineName: "-",
+        lineName: "-",
+        operationNo: "-",
+        stationNo: "-",
+        qrFormatName: part.qr_format_name || "-",
+        partStatus,
+        modelCode: "-",
+        shiftCode: shiftCode || "UNASSIGNED",
+        cycleStartTime: part.createdAt ? new Date(part.createdAt).toLocaleString() : "-",
+        cycleEndTime: part.updatedAt ? new Date(part.updatedAt).toLocaleString() : "-",
+        cycleTime: "0.00",
+        industrialResult: partStatus,
+        category: "PRODUCTION",
+        statusLabel: partStatus,
+        bypassStatus: false,
+        reason: "",
+        plcReading: null,
+        leakTestReading: null,
+      };
+    });
+  };
+
   const anchorPartIds = [...new Set(
     productionLogs
       .map((log) => String(log.part_id || "").trim())
@@ -822,7 +912,7 @@ async function fetchProductionData(filters = {}, options = {}) {
   )];
 
   if (!anchorPartIds.length) {
-    return [];
+    return fetchPartStatusFallbackRows();
   }
 
   const fullHistoryLogs = await runLogQuery({
