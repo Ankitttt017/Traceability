@@ -306,13 +306,18 @@ async function isKnownPartOrMappedCustomerQr(code) {
   const raw = String(code || "").trim();
   if (!raw) return true;
   const [part, mapping] = await Promise.all([
-    Part.findOne({ where: { part_id: raw }, attributes: ["part_id"] }),
+    Part.findOne({ where: { part_id: raw }, attributes: ["part_id", "qr_format_name"] }),
     PartCodeMapping.findOne({
       where: { customer_qr: raw, is_active: true },
-      attributes: ["id"],
+      attributes: ["id", "old_part_id", "customer_qr"],
       order: [["updatedAt", "DESC"]],
     }),
   ]);
+  const formatName = String(part?.qr_format_name || "").trim().toUpperCase();
+  const oldPartId = String(mapping?.old_part_id || "").trim();
+  const customerQr = String(mapping?.customer_qr || "").trim();
+  if (formatName === "CUSTOMER_QR_ONLY") return false;
+  if (oldPartId && customerQr && oldPartId === customerQr) return false;
   return Boolean(part || mapping);
 }
 
@@ -715,6 +720,28 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
       where: { customer_qr: partId, is_active: true },
       order: [["updatedAt", "DESC"]],
     });
+    if (existingMapping && String(existingMapping.old_part_id || "").trim() === activePartId) {
+      emitRealtime("operator_popup", {
+        type: "WARNING",
+        partId: activePartId,
+        customerQrCode: partId,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        scannerId: scanner.id,
+        scannerName: scanner.scanner_name,
+        scannerRole: effectiveScannerRole,
+        scannerIp,
+        qrStatus: "DUPLICATE",
+        operationStatus: "WAITING",
+        status: "DUPLICATE",
+        plcStatus: "WAITING_PLC",
+        reason: "CUSTOMER_QR_ALREADY_MAPPED_SAME_PART",
+        message: "Customer QR already mapped to this part. Continue to next station.",
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
     if (existingMapping && String(existingMapping.old_part_id || "").trim() !== activePartId) {
       emitRealtime("operator_popup", {
         type: "ERROR",

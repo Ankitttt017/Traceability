@@ -1099,11 +1099,16 @@ const OperatorView = () => {
   const isDuplicatePopupEvent = useCallback((payload = {}) => {
     // Allow first error immediately, but dedupe identical error bursts in short window
     // to avoid visual blinking/flooding from repeated backend emits.
+    const reason = String(payload.reason || payload.qrReason || "").trim().toUpperCase();
+    if (reason === "CUSTOMER_QR_ALREADY_MAPPED_SAME_PART") {
+      lastPopupEventRef.current = { key: "", at: 0 };
+      return false;
+    }
     const key = [String(payload.type || "").trim().toUpperCase(), normalizePartId(payload.partId || payload.part_id),
     String(payload.stationNo || payload.station_no || "").trim().toUpperCase(),
     normalizeDecisionState(payload.qrResult || payload.qr_result),
     String(payload.plcStatus || payload.plc_status || "").trim().toUpperCase(),
-    String(payload.reason || payload.qrReason || "").trim().toUpperCase(),
+    reason,
     String(payload.message || "").trim().toUpperCase()].join("|");
     if (!key.replaceAll("|", "")) return false;
     const now = Date.now();
