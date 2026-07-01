@@ -1131,6 +1131,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     const partLookupKey = normalizeKey(partIdValue);
     const compactQrKey = parseCompactQrPartId(partIdValue)?.key || "";
     const customerQrOnlyPart = isCustomerQrOnlyPart(partIdValue);
+    const displayPartId = customerQrOnlyPart ? "-" : (partIdValue || "-");
     const shotCandidates = deriveShotCandidates(log).map((s) => normalizeShotToken(s) || normalizeKey(s));
     const shouldLookupPlcReading = includePlcReadings && (!customerQrOnlyPart || compactQrKey || shotCandidates.length);
     const plcReadingFromDbRaw = shouldLookupPlcReading
@@ -1159,6 +1160,8 @@ async function fetchProductionData(filters = {}, options = {}) {
       ...log,
       srNo: index + 1,
       partId:      partIdValue || "-",
+      displayPartId,
+      isCustomerQrOnly: customerQrOnlyPart,
       firstScanCreatedAt: earliestScanByPart.get(partIdValue) || log.createdAt || null,
       latestAnchorCreatedAt: latestAnchorScanByPart.get(partIdValue) || log.createdAt || null,
       anchorMachineName: latestAnchorLogByPart.get(partIdValue)?.Machine?.machine_name || log.Machine?.machine_name || "-",

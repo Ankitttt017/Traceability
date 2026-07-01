@@ -245,6 +245,9 @@ async function resolveActivePartIdForMachine(machine, stationNo) {
   const machineRunningStation = String(machine.running_station_no || "").trim().toUpperCase();
   const targetStation = String(stationNo || "").trim().toUpperCase();
   const activeStatuses = ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING"];
+  const mappingCandidateStatuses = requiresCustomerQrForCompletion(machine)
+    ? [...activeStatuses, "ENDED_OK"]
+    : activeStatuses;
   const freshCutoff = new Date(Date.now() - CUSTOMER_QR_ACTIVE_WINDOW_MS);
   if (machineRunningPartId && (!targetStation || !machineRunningStation || machineRunningStation === targetStation)) {
     const matchingActiveLog = await OperationLog.findOne({
@@ -252,7 +255,8 @@ async function resolveActivePartIdForMachine(machine, stationNo) {
         part_id: machineRunningPartId,
         machine_id: machine.id,
         ...(targetStation ? { station_no: targetStation } : {}),
-        plc_status: { [Op.in]: activeStatuses },
+        plc_status: { [Op.in]: mappingCandidateStatuses },
+        result: "OK",
         updatedAt: { [Op.gte]: freshCutoff },
       },
       attributes: ["id", "part_id"],
@@ -266,7 +270,8 @@ async function resolveActivePartIdForMachine(machine, stationNo) {
     where: {
       machine_id: machine.id,
       ...(targetStation ? { station_no: targetStation } : {}),
-      plc_status: { [Op.in]: activeStatuses },
+      plc_status: { [Op.in]: mappingCandidateStatuses },
+      result: "OK",
       updatedAt: { [Op.gte]: freshCutoff },
     },
     attributes: ["id", "part_id", "updatedAt"],
@@ -904,6 +909,17 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
   });
   if (response?.decision === "ALLOW" && isCustomerQrOnlyStart) {
     await markCustomerQrOnlyMapping({ code: scanPartId, machine, stationNo });
+    const finalized = await finalizeCustomerQrMappingIfEligible({
+      partId: scanPartId,
+      stationNo,
+      machine,
+    });
+    if (finalized?.finalized) {
+      response.operationStatus = "ENDED_OK";
+      response.plcStatus = "ENDED_OK";
+      response.status = "ENDED_OK";
+      response.message = "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station.";
+    }
   }
 
   emitRealtime("scan_event", {
@@ -965,6 +981,17 @@ async function processCustomerQrOnlyStart({ scanner, scannerIp, partId, stationN
   });
   if (response?.decision === "ALLOW") {
     await markCustomerQrOnlyMapping({ code: partId, machine, stationNo });
+    const finalized = await finalizeCustomerQrMappingIfEligible({
+      partId,
+      stationNo,
+      machine,
+    });
+    if (finalized?.finalized) {
+      response.operationStatus = "ENDED_OK";
+      response.plcStatus = "ENDED_OK";
+      response.status = "ENDED_OK";
+      response.message = "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station.";
+    }
   }
   const allowed = response?.decision === "ALLOW";
   const message = allowed
@@ -1069,6 +1096,16 @@ function startTcpServer() {
     socket.on("data", (buffer) => {
       const chunk = buffer.toString("utf8");
       console.log(`[TCP] Raw chunk from ${remoteIp}: ${JSON.stringify(chunk)}`);
+
+      if (!/[\r\n\0]/.test(chunk)) {
+        const cleanChunk = sanitizeScannerPayload(chunk);
+        const cleanPending = sanitizeScannerPayload(pending);
+        if (cleanPending && cleanChunk && cleanChunk.length >= 4) {
+          consumeMessage(cleanPending);
+          pending = "";
+        }
+      }
+
       pending += chunk;
 
       const parts = pending.split(/\r?\n|\0/);
