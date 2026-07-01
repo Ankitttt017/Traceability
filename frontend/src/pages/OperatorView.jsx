@@ -1112,20 +1112,23 @@ const OperatorView = () => {
   }, []);
 
   const isPayloadForActiveMachine = useCallback((payload = {}) => {
-    if (!popupStationReady) return false;
     const payloadMachineId = String(payload.machineId || payload.machine_id || "").trim();
     const payloadStation = resolvePopupStationNo(payload);
     const stationCandidates = resolvePopupStationCandidates(payload);
     const activeMachineId = String(selectedMachineIdRef.current || "").trim();
     const activeStation = String(selectedStationRef.current || "").trim().toUpperCase();
+    const stationMatchesActive = Boolean(activeStation) && (
+      payloadStation === activeStation || stationCandidates.includes(activeStation)
+    );
 
     if (payloadMachineId) {
       if (payloadMachineId !== activeMachineId) return false;
-      if (!payloadStation) return true;
-      return payloadStation === activeStation || stationCandidates.includes(activeStation);
+      if (!payloadStation && stationCandidates.length === 0) return true;
+      return stationMatchesActive || !activeStation;
     }
+    if (!popupStationReady) return false;
     if (!payloadStation && stationCandidates.length === 0) return false;
-    return payloadStation === activeStation || stationCandidates.includes(activeStation);
+    return stationMatchesActive;
   }, [popupStationReady, resolvePopupStationNo, resolvePopupStationCandidates]);
 
   const shouldIgnoreStartupPopup = useCallback((payload = {}) => {
@@ -1448,7 +1451,11 @@ const OperatorView = () => {
         ? formatScanErrorMessage({ ...p, reason: p.reason || p.qrReason }, t)
         : p.message;
       mergePopupPayload({ ...p, ...(nm ? { message: nm } : {}) });
-      processQrSignal(p);
+      if (hasQrDecision(p)) {
+        const sig = toQrSignal(p, t);
+        setQrSignal(sig);
+        setQrFeed(prev => [sig, ...prev].slice(0, 6));
+      }
       scheduleLiveRefresh();
     });
     socket.on("dashboard_refresh", () => scheduleLiveRefresh());
