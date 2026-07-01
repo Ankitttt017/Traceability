@@ -3061,7 +3061,7 @@ exports.getPartJourney = async (req, res) => {
     const partPayload = part
       ? {
           ...part.get({ plain: true }),
-          displayPartId: isCustomerQrOnlyPart ? "-" : String(part.part_id || partId || "").trim(),
+          displayPartId: String(part.part_id || partId || "").trim(),
           isCustomerQrOnly: isCustomerQrOnlyPart,
           customerQrCode: mappedCustomerQrForPart,
         }
@@ -3069,7 +3069,7 @@ exports.getPartJourney = async (req, res) => {
           part_id: partId,
           status: "UNKNOWN",
           current_station: null,
-          displayPartId: isCustomerQrOnlyPart ? "-" : String(partId || "").trim(),
+          displayPartId: String(partId || "").trim(),
           isCustomerQrOnly: isCustomerQrOnlyPart,
           customerQrCode: mappedCustomerQrForPart,
         };
@@ -3242,7 +3242,7 @@ exports.getPartCatalog = async (req, res) => {
         const machine = latest ? machineMap[latest.machine_id] || null : null;
         return {
           partId: part.part_id,
-          displayPartId: String(part.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ? "-" : part.part_id,
+          displayPartId: part.part_id,
           isCustomerQrOnly: String(part.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT,
           status: part.status,
           currentStation: part.current_station,
@@ -3625,7 +3625,7 @@ exports.processScan = async (req, res) => {
           });
         }
         emitOperatorPopup("ERROR", {
-          partId: "",
+          partId: scannedQrRaw,
           stationNo: normalizedStation,
           machineId: machine.id,
           machineName: machine.machine_name,
@@ -7281,7 +7281,7 @@ async function getDashboardExportRows(filters) {
       : null;
 
     return {
-      partId: isCustomerQrOnlyRow ? "-" : (row.part_id || ""),
+      partId: row.part_id || customerQrCode || "",
       customerQrCode,
       modelCode,
       qrFormatName,

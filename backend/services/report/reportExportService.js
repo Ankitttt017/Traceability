@@ -1131,7 +1131,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     const partLookupKey = normalizeKey(partIdValue);
     const compactQrKey = parseCompactQrPartId(partIdValue)?.key || "";
     const customerQrOnlyPart = isCustomerQrOnlyPart(partIdValue);
-    const displayPartId = customerQrOnlyPart ? "-" : (partIdValue || "-");
+    const displayPartId = partIdValue || "-";
     const shotCandidates = deriveShotCandidates(log).map((s) => normalizeShotToken(s) || normalizeKey(s));
     const shouldLookupPlcReading = includePlcReadings && (!customerQrOnlyPart || compactQrKey || shotCandidates.length);
     const plcReadingFromDbRaw = shouldLookupPlcReading

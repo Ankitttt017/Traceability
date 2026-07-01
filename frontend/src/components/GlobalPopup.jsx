@@ -816,8 +816,8 @@ const GlobalPopup = ({
       customerQrCode.toUpperCase() !== String(partId || effectivePartId || "").trim().toUpperCase() ||
       popupReason === "CUSTOMER_QR_MAPPED"
     );
-  const displayInternalPartId = isCustomerQrOnlyScan ? "-" : (effectivePartId || "-");
   const displayedScanCode = hasMappedCustomerQr ? customerQrCode : (effectivePartId || lastScannedCode);
+  const displayInternalPartId = effectivePartId || customerQrCode || displayedScanCode || "-";
   const displayedScanLabel = hasMappedCustomerQr ? "Scanned Customer QR" : "Scanned Part ID";
 
   useEffect(() => {
@@ -1058,13 +1058,9 @@ const GlobalPopup = ({
         duration = STANDARD_SUCCESS_CLOSE_MS;
       }
     } else if (signalCustomerMappingStation) {
-      if (popupType === "SUCCESS" || popupQrState === "PASS") {
-        duration = Math.max(autoCloseMs || 12000, 12000);
-      } else if (popup?.type === "ERROR" || popupQrState === "FAIL" || popupQrState === "BLOCKED") {
-        duration = STANDARD_ERROR_CLOSE_MS;
-      } else {
-        duration = Math.max(autoCloseMs || 12000, 12000);
-      }
+      setAutoCloseTimeLeft(null);
+      setAutoCloseDuration(0);
+      return undefined;
     } else if (isManual) {
       // Manual-result station behavior:
       // Keep popup open until operator submits final OK/NG action.
@@ -2023,7 +2019,7 @@ const GlobalPopup = ({
                     <p className="mt-2 text-[10px] font-bold text-slate-500">Internal Part ID: <span className="font-mono">{displayInternalPartId}</span></p>
                   )}
                   {isCustomerQrOnlyScan && (
-                    <p className="mt-2 text-[10px] font-bold text-slate-500">Part ID: <span className="font-mono">-</span></p>
+                    <p className="mt-2 text-[10px] font-bold text-slate-500">Part ID: <span className="font-mono">{displayInternalPartId}</span></p>
                   )}
                   {!hasMappedCustomerQr && effectivePartId && !isCustomerQrOnlyScan && (
                     <p className="mt-2 text-[10px] font-bold text-slate-500">Customer QR: <span className="font-mono">Waiting</span></p>
