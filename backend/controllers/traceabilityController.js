@@ -102,13 +102,18 @@ async function isKnownPartOrMappedCustomerQr(code) {
   const raw = String(code || "").trim();
   if (!raw) return true;
   const [part, mapping] = await Promise.all([
-    Part.findOne({ where: { part_id: raw }, attributes: ["part_id"] }),
+    Part.findOne({ where: { part_id: raw }, attributes: ["part_id", "qr_format_name"] }),
     PartCodeMapping.findOne({
       where: { customer_qr: raw, is_active: true },
-      attributes: ["id"],
+      attributes: ["id", "old_part_id", "customer_qr"],
       order: [["updatedAt", "DESC"]],
     }),
   ]);
+  const formatName = String(part?.qr_format_name || "").trim().toUpperCase();
+  const oldPartId = String(mapping?.old_part_id || "").trim();
+  const customerQr = String(mapping?.customer_qr || "").trim();
+  if (formatName === CUSTOMER_QR_ONLY_FORMAT) return false;
+  if (oldPartId && customerQr && oldPartId === customerQr) return false;
   return Boolean(part || mapping);
 }
 
@@ -3641,6 +3646,39 @@ exports.processScan = async (req, res) => {
           is_active: true,
         },
       });
+      if (existingMapping && String(existingMapping.old_part_id || "").trim() === activePartId) {
+        emitOperatorPopup("WARNING", {
+          partId: activePartId,
+          customerQrCode: scannedQrRaw,
+          stationNo: normalizedStation,
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          status: "DUPLICATE",
+          plcStatus: "WAITING_PLC",
+          qrResult: "DUPLICATE",
+          operationStatus: "WAITING",
+          reason: "CUSTOMER_QR_ALREADY_MAPPED_SAME_PART",
+          message: "Customer QR already mapped to this part. Continue to next station.",
+        });
+        return res.status(200).json({
+          status: "DUPLICATE",
+          decision: "ALLOW",
+          qrStatus: "DUPLICATE",
+          operationStatus: "WAITING",
+          reason: "CUSTOMER_QR_ALREADY_MAPPED_SAME_PART",
+          message: "Customer QR already mapped to this part. Continue to next station.",
+          mapped: true,
+          duplicate: true,
+          partId: activePartId,
+          customerQrCode: scannedQrRaw,
+          scannerRead,
+          machine: {
+            id: machine.id,
+            machineName: machine.machine_name,
+            stationNo: normalizedStation,
+          },
+        });
+      }
       if (existingMapping && String(existingMapping.old_part_id || "").trim() !== activePartId) {
         return res.status(409).json({
           error: "Customer QR already mapped to another part",
@@ -3665,6 +3703,7 @@ exports.processScan = async (req, res) => {
 
       emitOperatorPopup(finalized.finalized ? "SUCCESS" : "INFO", {
         partId: activePartId,
+        customerQrCode: scannedQrRaw,
         stationNo: normalizedStation,
         machineId: machine.id,
         machineName: machine.machine_name,
