@@ -258,6 +258,8 @@ function emitCustomerQrScannerResult({
   operationStatus,
   status,
   plcStatus,
+  customerQrPending = false,
+  customerQrMapped = false,
   message,
 }) {
   const payload = {
@@ -275,6 +277,8 @@ function emitCustomerQrScannerResult({
     operationStatus,
     status,
     plcStatus,
+    customerQrPending,
+    customerQrMapped,
     message,
     timestamp: new Date().toISOString(),
   };
@@ -773,6 +777,7 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
         operationStatus: "WAITING",
         status: "WAITING",
         plcStatus: "WAITING_PLC",
+        customerQrPending: true,
         reason: "START_QR_REQUIRED",
         message: `${stationNo}: customer QR read. Scan Part ID / Start QR first, then scan Customer QR again.`,
       });
@@ -798,6 +803,7 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
         operationStatus: "WAITING",
         status: "DUPLICATE",
         plcStatus: "WAITING_PLC",
+        customerQrMapped: true,
         reason: "CUSTOMER_QR_ALREADY_MAPPED_SAME_PART",
         message: "Customer QR already mapped to this part. Continue to next station.",
         timestamp: new Date().toISOString(),
@@ -819,6 +825,7 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
         operationStatus: "BLOCKED",
         status: "BLOCKED",
         plcStatus: "BLOCKED",
+        customerQrMapped: false,
         reason: "CUSTOMER_QR_ALREADY_MAPPED",
         message: "Customer QR already mapped to another part.",
         timestamp: new Date().toISOString(),
@@ -854,6 +861,7 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
       operationStatus: finalized.operationStatus || "WAITING",
       status: finalized.finalized ? "ENDED_OK" : "SCANNED",
       plcStatus: finalized.finalized ? "ENDED_OK" : "WAITING_PLC",
+      customerQrMapped: true,
       reason: "CUSTOMER_QR_MAPPED",
       message: finalized.finalized
         ? "Customer QR mapped successfully. Operation passed."

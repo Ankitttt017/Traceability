@@ -806,6 +806,19 @@ const GlobalPopup = ({
   const customerQrCode = String(popup?.customerQrCode || popup?.customer_qr || "").trim();
   const qrFormatName = String(popup?.qrFormatName || popup?.qr_format_name || "").trim().toUpperCase();
   const popupReason = String(popup?.reason || "").trim().toUpperCase();
+  const reasonUpper = String(popup?.reason || popup?.qrReason || "").trim().toUpperCase();
+  const customerQrPending = Boolean(
+    popup?.customerQrPending ||
+    reasonUpper === "WAITING_CUSTOMER_QR" ||
+    String(popup?.operationStatus || popup?.plcStatus || "").trim().toUpperCase() === "WAITING_CUSTOMER_QR"
+  );
+  const customerQrMapped = Boolean(
+    popup?.customerQrMapped ||
+    reasonUpper === "CUSTOMER_QR_MAPPED" ||
+    reasonUpper === "CUSTOMER_QR_ONLY_STARTED"
+  );
+  const popupTypeUpper = String(popup?.type || "").trim().toUpperCase();
+  const popupStatusUpper = String(popup?.status || popup?.plcStatus || "").trim().toUpperCase();
   const isCustomerQrOnlyScan =
     qrFormatName === "CUSTOMER_QR_ONLY" ||
     Boolean(customerQrCode && partId && customerQrCode.toUpperCase() === partId.toUpperCase());
@@ -1058,9 +1071,20 @@ const GlobalPopup = ({
         duration = STANDARD_SUCCESS_CLOSE_MS;
       }
     } else if (signalCustomerMappingStation) {
-      setAutoCloseTimeLeft(null);
-      setAutoCloseDuration(0);
-      return undefined;
+      if (customerQrPending) {
+        setAutoCloseTimeLeft(null);
+        setAutoCloseDuration(0);
+        return undefined;
+      }
+      if (customerQrMapped || popupType === "SUCCESS" || popupQrState === "PASS") {
+        duration = STANDARD_SUCCESS_CLOSE_MS;
+      } else if (popup?.type === "ERROR" || popupQrState === "FAIL" || popupQrState === "BLOCKED") {
+        duration = STANDARD_ERROR_CLOSE_MS;
+      } else {
+        setAutoCloseTimeLeft(null);
+        setAutoCloseDuration(0);
+        return undefined;
+      }
     } else if (isManual) {
       // Manual-result station behavior:
       // Keep popup open until operator submits final OK/NG action.
@@ -1167,6 +1191,8 @@ const GlobalPopup = ({
     popup?.operationStatus,
     popup?.plcStatus,
     popup?.status,
+    customerQrPending,
+    customerQrMapped,
   ]);
 
   // Auto-clear only non-error helper messages for manual result stations.
@@ -1668,11 +1694,8 @@ const GlobalPopup = ({
   const plcOnline = !["COMM", "BLOCKED"].includes(String(liveOperationState || "").trim().toUpperCase());
   const plcReadingPreview = popup?.leakTestReading || popup?.plcReading || popup?.plcReadings || null;
 
-  const reasonUpper = String(popup?.reason || popup?.qrReason || "").trim().toUpperCase();
   const needsResetByReason = ["DUPLICATE_SCAN", "RESET_REQUIRED_AFTER_PLC_COMM_ERROR"].some(r => reasonUpper.startsWith(r)) || reasonUpper.startsWith("PLC_TIMEOUT");
   const canReset = (liveOperationState === "COMM" || liveOperationState === "FAIL" || needsResetByReason) && Boolean(partId) && Boolean(stationNo) && typeof onResetOperation === "function";
-  const popupTypeUpper = String(popup?.type || "").trim().toUpperCase();
-  const popupStatusUpper = String(popup?.status || popup?.plcStatus || "").trim().toUpperCase();
   const qrVisualState = (() => {
     if (localScanDecision === "PASS") return "PASS";
     if (["FAIL", "NG", "BLOCK", "DUPLICATE", "ERROR", "WARNING"].includes(localScanDecision)) return "FAIL";
