@@ -239,6 +239,25 @@ function deriveShotCandidates(log) {
 function getMinutesForDate(dateValue) {
   const date = new Date(dateValue);
   if (Number.isNaN(date.getTime())) return null;
+  try {
+    const formatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone: process.env.REPORT_TIMEZONE || "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    const parts = formatter.formatToParts(date).reduce((acc, part) => {
+      acc[part.type] = part.value;
+      return acc;
+    }, {});
+    const hours = Number(parts.hour);
+    const minutes = Number(parts.minute);
+    if (Number.isFinite(hours) && Number.isFinite(minutes)) {
+      return hours * 60 + minutes;
+    }
+  } catch (_) {
+    // Fall back to process-local time if the runtime does not support the configured timezone.
+  }
   return date.getHours() * 60 + date.getMinutes();
 }
 
@@ -271,15 +290,22 @@ function applyShiftFilter(rows, shiftCode, shifts) {
   if (!shiftCode) return rows;
   const target = String(shiftCode).trim().toUpperCase();
   if (!target || ["ALL", "ANY", "ALL_SHIFTS", "ALL SHIFT", "ALL SHIFTS"].includes(target)) return rows;
-  const shift = shifts.find((s) => {
+  const shift = findShiftDefinition(shifts, shiftCode);
+  if (!shift) return rows;
+  return rows.filter((row) => {
+    const timestamp = row.createdAt || row.updatedAt || row.latestAnchorCreatedAt;
+    return shift && isDateInShift(timestamp, shift);
+  });
+}
+
+function findShiftDefinition(shifts, shiftCode) {
+  const target = String(shiftCode || "").trim().toUpperCase();
+  if (!target) return null;
+  return (shifts || []).find((s) => {
     const code = String(s.shift_code || s.shiftCode || "").trim().toUpperCase();
     const name = String(s.shift_name || s.shiftName || "").trim().toUpperCase();
     return code === target || name === target;
-  });
-  if (!shift) return rows;
-  return rows.filter((row) => {
-    return shift && isDateInShift(row.createdAt, shift);
-  });
+  }) || null;
 }
 
 async function getPlcReadingColumns() {
@@ -803,16 +829,12 @@ async function fetchProductionData(filters = {}, options = {}) {
   if (shiftCode) {
     const target = String(shiftCode).trim().toUpperCase();
     const shifts = await getActiveShiftDefinitions();
-    const byCode = productionLogs.filter(
-      (row) => String(row.shift_code || row.shiftCode || "").trim().toUpperCase() === target
-    );
-    const byTime = applyShiftFilter(productionLogs, shiftCode, shifts);
-    const merged = new Map();
-    [...byCode, ...byTime].forEach((row) => {
-      const key = `${row.id || ""}|${row.part_id || ""}|${row.operation_no || row.station_no || ""}|${row.createdAt || ""}`;
-      if (!merged.has(key)) merged.set(key, row);
-    });
-    productionLogs = [...merged.values()];
+    const shift = findShiftDefinition(shifts, shiftCode);
+    productionLogs = shift
+      ? applyShiftFilter(productionLogs, shiftCode, shifts)
+      : productionLogs.filter(
+          (row) => String(row.shift_code || row.shiftCode || "").trim().toUpperCase() === target
+        );
   }
 
   const fetchPartStatusFallbackRows = async () => {
@@ -850,9 +872,12 @@ async function fetchProductionData(filters = {}, options = {}) {
       raw: true,
       limit: 5000,
     });
-    if (!parts.length) return [];
+    const scopedParts = shiftCode
+      ? applyShiftFilter(parts, shiftCode, await getActiveShiftDefinitions())
+      : parts;
+    if (!scopedParts.length) return [];
 
-    const partIds = parts.map((part) => String(part.part_id || "").trim()).filter(Boolean);
+    const partIds = scopedParts.map((part) => String(part.part_id || "").trim()).filter(Boolean);
     const mappings = partIds.length
       ? await PartCodeMapping.findAll({
           where: { old_part_id: { [Op.in]: partIds }, is_active: true },
@@ -867,7 +892,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       return acc;
     }, {});
 
-    return parts.map((part, index) => {
+    return scopedParts.map((part, index) => {
       const partId = String(part.part_id || "").trim();
       const partStatus = String(part.status || "IN_PROGRESS").trim().toUpperCase();
       const mappedCustomerQr = customerQrByPartId[normalizeKey(partId)] || "-";
