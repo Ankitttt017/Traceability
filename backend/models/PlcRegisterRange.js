@@ -2,6 +2,14 @@ const { DataTypes } = require("sequelize");
 const sequelize = require("../config/db");
 
 const PlcRegisterRange = sequelize.define("PlcRegisterRange", {
+  plant_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  line_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
   range_name: {
     type: DataTypes.STRING,
     allowNull: false,

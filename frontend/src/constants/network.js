@@ -22,5 +22,5 @@ export function redirectLegacyHost() {
   window.location.replace(`${getCanonicalOrigin()}${pathname}${search}${hash}`);
 }
 
-export const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || getCanonicalOrigin();
+export const SOCKET_URL = String(import.meta.env.VITE_SOCKET_URL || "").trim() || getCanonicalOrigin();
 export const SCANNER_CONNECTION_GRACE_MS = 20000;

@@ -11,6 +11,14 @@ const Machine = sequelize.define("Machine", {
     type: DataTypes.STRING,
     allowNull: false,
   },
+  plant_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  line_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
   sequence_no: {
     type: DataTypes.INTEGER,
     allowNull: false,

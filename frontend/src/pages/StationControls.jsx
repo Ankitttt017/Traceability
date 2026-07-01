@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { RefreshCw, Save, Settings2, ChevronDown, Info, Activity, X } from "lucide-react";
-import { machineApi, stationSettingsApi, traceabilityApi } from "../api/services";
+import { machineApi, organizationApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import { getMachineStage, sanitizeLineName } from "../utils/machineFields";
 import {
   DEFAULT_STATION_FEATURES,
@@ -181,9 +181,13 @@ const DOT_COLORS = {
   emerald: "#10b981",
 };
 
+const normalizeLineToken = (value) => sanitizeLineName(value).toLowerCase();
+
 /* -- Main component ----------------------------------------- */
 const StationControl = () => {
   const [machines, setMachines] = useState([]);
+  const [organization, setOrganization] = useState({ plants: [], lines: [] });
+  const [plantFilter, setPlantFilter] = useState("");
   const [lineFilter, setLineFilter] = useState("");
   const [stationSettings, setStationSettings] = useState(() => getStationFeatureSettings());
   const [loading, setLoading] = useState(true);
@@ -195,6 +199,10 @@ const StationControl = () => {
   const [testBarcode, setTestBarcode] = useState("");
   const [testLoading, setTestLoading] = useState(false);
   const [testResult, setTestResult] = useState(null);
+  const settingsScope = useMemo(() => ({
+    plantId: plantFilter || undefined,
+    lineId: Number(lineFilter) ? lineFilter : undefined,
+  }), [plantFilter, lineFilter]);
 
   const handleTestSubmit = async (e) => {
     e.preventDefault();
@@ -213,13 +221,20 @@ const StationControl = () => {
 
   const stationRows = useMemo(() => {
     const grouped = new Map();
-    for (const machine of machines) {
+    const scopeMachines = machines.filter((machine) => !plantFilter || String(machine.plantId || "") === String(plantFilter));
+    const lineAliasesById = new Map((organization.lines || []).map((line) => [
+      String(line.id),
+      normalizeLineToken(line.lineName),
+    ]));
+    for (const machine of scopeMachines) {
       const stationNo = normalizeStationKey(getMachineStage(machine));
       if (!stationNo) continue;
       if (!grouped.has(stationNo)) {
         grouped.set(stationNo, {
           stationNo,
+          lineIds: new Set(),
           lineNames: new Set(),
+          lineTokens: new Set(),
           sequenceNo: Number(machine.sequenceNo || 9999),
           machines: [],
           hasSpc: false,
@@ -228,7 +243,19 @@ const StationControl = () => {
       }
       const row = grouped.get(stationNo);
       const cleanLine = sanitizeLineName(machine.lineName);
-      row.lineNames.add(cleanLine || "-");
+      if (machine.lineId) {
+        const id = String(machine.lineId);
+        row.lineIds.add(id);
+        row.lineTokens.add(id);
+        const masterName = lineAliasesById.get(id);
+        if (masterName) row.lineTokens.add(masterName);
+      }
+      if (cleanLine) {
+        row.lineNames.add(cleanLine);
+        row.lineTokens.add(normalizeLineToken(cleanLine));
+      } else {
+        row.lineNames.add("-");
+      }
       row.hasSpc = row.hasSpc || machine?.spcConfig?.enabled === true;
       row.bypassedCount += machine?.machineBypassEnabled ? 1 : 0;
       row.machines.push({
@@ -244,32 +271,44 @@ const StationControl = () => {
     return Array.from(grouped.values())
       .map((row) => ({
         ...row,
+        lineIds: Array.from(row.lineIds),
         lineNames: Array.from(row.lineNames).sort((a, b) => a.localeCompare(b)),
+        lineTokens: Array.from(row.lineTokens),
         machines: [...row.machines].sort((a, b) => a.sequenceNo - b.sequenceNo),
         displayName: row.machines.length === 1
           ? `${row.machines[0].machineName} + ${row.stationNo}`
           : `${row.stationNo} (${row.machines.length} machines)`,
       }))
       .sort((a, b) => a.sequenceNo - b.sequenceNo);
-  }, [machines]);
+  }, [machines, organization.lines, plantFilter]);
 
   const availableLines = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          stationRows
-            .flatMap((row) => row.lineNames || [])
-            .map((entry) => String(entry || "").trim())
-            .filter((entry) => entry && entry !== "-")
-        )
-      ).sort((a, b) => a.localeCompare(b)),
-    [stationRows]
+    () => {
+      const masterLines = (organization.lines || [])
+        .filter((line) => !plantFilter || String(line.plantId) === String(plantFilter))
+        .map((line) => ({ id: String(line.id), name: line.lineName, token: normalizeLineToken(line.lineName) }));
+      const fallbackLines = machines
+        .filter((machine) => !plantFilter || String(machine.plantId || "") === String(plantFilter))
+        .map((machine) => sanitizeLineName(machine.lineName))
+        .filter(Boolean)
+        .map((name) => ({ id: normalizeLineToken(name), name, token: normalizeLineToken(name) }));
+      const byToken = new Map();
+      [...masterLines, ...fallbackLines].forEach((line) => {
+        if (line.name && !byToken.has(line.token)) byToken.set(line.token, line);
+      });
+      return Array.from(byToken.values()).sort((a, b) => a.name.localeCompare(b.name));
+    },
+    [machines, organization.lines, plantFilter]
   );
 
   const filteredStationRows = useMemo(() => {
     if (!lineFilter) return stationRows;
-    return stationRows.filter((row) => (row.lineNames || []).includes(lineFilter));
-  }, [lineFilter, stationRows]);
+    const selectedLine = availableLines.find((line) => String(line.id) === String(lineFilter));
+    const tokens = new Set([String(lineFilter), normalizeLineToken(lineFilter)]);
+    if (selectedLine?.token) tokens.add(selectedLine.token);
+    if (selectedLine?.name) tokens.add(normalizeLineToken(selectedLine.name));
+    return stationRows.filter((row) => (row.lineTokens || []).some((token) => tokens.has(token)));
+  }, [availableLines, lineFilter, stationRows]);
 
   const stationKeys = useMemo(() => stationRows.map((e) => e.stationNo), [stationRows]);
   const normalizedSettings = useMemo(
@@ -280,11 +319,13 @@ const StationControl = () => {
   const loadData = useCallback(async ({ silent = false, refreshSettings = true } = {}) => {
     if (!silent) setLoading(true);
     try {
-      const [m, s] = await Promise.all([
+      const [m, org, s] = await Promise.all([
         machineApi.list(),
-        refreshSettings ? stationSettingsApi.list().catch(() => null) : Promise.resolve(null),
+        organizationApi.context().catch(() => ({ plants: [], lines: [] })),
+        refreshSettings ? stationSettingsApi.list(settingsScope).catch(() => null) : Promise.resolve(null),
       ]);
       setMachines(m || []);
+      setOrganization({ plants: org?.plants || [], lines: org?.lines || [] });
       if (refreshSettings) {
         const localSettings = getStationFeatureSettings();
         if (s && typeof s === "object") {
@@ -305,7 +346,7 @@ const StationControl = () => {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, []);
+  }, [settingsScope]);
 
   useEffect(() => { loadData(); }, [loadData]);
   useEffect(() => {
@@ -324,7 +365,7 @@ const StationControl = () => {
   const saveSettings = async () => {
     setSaving(true);
     try {
-      await stationSettingsApi.save(normalizedSettings);
+      await stationSettingsApi.save(normalizedSettings, settingsScope);
       setPopup({ type: "SUCCESS", title: "Settings Saved", message: "Station protocols have been synchronized." });
     } catch (err) {
       setPopup({ type: "ERROR", title: "Save Error", message: err.response?.data?.error || "Unable to save station configuration." });
@@ -382,12 +423,23 @@ const StationControl = () => {
             </div>
 
             {/* Dropdown */}
+            <div className="flex items-center gap-2">
+            <select
+              value={plantFilter}
+              onChange={(e) => { setPlantFilter(e.target.value); setLineFilter(""); }}
+              className="h-8 rounded-lg border border-slate-200 bg-white px-3 text-[11px] font-semibold text-slate-800"
+            >
+              <option value="">All Plants</option>
+              {(organization.plants || []).map((plant) => (
+                <option key={plant.id} value={plant.id}>{plant.plantName}</option>
+              ))}
+            </select>
             <div style={{ position: "relative" }}>
               <button
                 onClick={() => setShowDropdown(!showDropdown)}
                 style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid rgba(15,23,42,0.12)", background: "#fff", fontSize: 11, fontWeight: 600, color: "#0f172a", cursor: "pointer" }}
               >
-                {lineFilter ? `Line: ${lineFilter}` : "All Lines"}
+                {lineFilter ? `Line: ${availableLines.find((line) => line.id === lineFilter)?.name || lineFilter}` : "All Lines"}
                 <ChevronDown size={12} style={{ opacity: 0.6 }} />
               </button>
               {showDropdown && (
@@ -398,13 +450,14 @@ const StationControl = () => {
                       All Lines
                     </div>
                     {availableLines.map((line) => (
-                      <div key={line} onClick={() => { setLineFilter(line); setShowDropdown(false); }} style={{ padding: "10px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer", color: "#0f172a", background: lineFilter === line ? "rgba(59,130,246,0.08)" : "transparent" }}>
-                        {line}
+                      <div key={line.id} onClick={() => { setLineFilter(line.id); setShowDropdown(false); }} style={{ padding: "10px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer", color: "#0f172a", background: lineFilter === line.id ? "rgba(59,130,246,0.08)" : "transparent" }}>
+                        {line.name}
                       </div>
                     ))}
                   </div>
                 </>
               )}
+            </div>
             </div>
           </div>
 

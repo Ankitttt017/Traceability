@@ -12,7 +12,7 @@ import {
   ResponsiveContainer, ComposedChart, CartesianGrid, XAxis, YAxis, Tooltip, Bar, Line,
 } from "recharts";
 import SafeChart from "../components/charts/SafeChart";
-import { machineApi, scannerApi, stationSettingsApi, traceabilityApi } from "../api/services";
+import { machineApi, scannerApi, shiftApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import GlobalPopup from "../components/GlobalPopup";
 import ConfirmModal from "../components/ConfirmModal";
 import { getMachineStage } from "../utils/machineFields";
@@ -344,17 +344,21 @@ const ConnDot = ({ connected }) => (
 
 const InfoRow = ({ label, value, mono, valueColor }) => (
   <div style={{
-    display: "flex", alignItems: "center", justifyContent: "space-between",
-    gap: 8, padding: "6px 0", borderBottom: `1px solid ${C.bdr(0.35)}`,
-    flexWrap: "wrap", minWidth: 0,
+    display: "flex", flexDirection: "column",
+    gap: 4, padding: "8px 10px", border: `1px solid ${C.bdr(0.35)}`,
+    borderRadius: 8, background: C.bg("card"), minWidth: 0,
   }}>
-    <span style={{ fontSize: 11, color: C.txt("sec"), fontWeight: 700, flexShrink: 0 }}>{label}</span>
     <span style={{
-      fontSize: 11, fontWeight: 800,
+      fontSize: 9, color: C.txt("muted"), fontWeight: 800,
+      textTransform: "uppercase", letterSpacing: "0.08em",
+      whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+    }}>{label}</span>
+    <span style={{
+      fontSize: 11, fontWeight: 850, lineHeight: 1.25,
       color: valueColor || C.txt("pri"),
       fontFamily: mono ? "'DM Mono',monospace" : "inherit",
-      textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-      maxWidth: "min(220px, 100%)",
+      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+      width: "100%",
     }}>{value || "—"}</span>
   </div>
 );
@@ -523,6 +527,8 @@ const OperatorView = () => {
   const [selectedMachineId, setSelectedMachineId] = useState("");
   const [liveState, setLiveState] = useState(null);
   const [stationStats, setStationStats] = useState(null);
+  const [shiftOptions, setShiftOptions] = useState([]);
+  const [selectedShiftCode, setSelectedShiftCode] = useState("CURRENT");
   const [stationSettings, setStationSettings] = useState(() => getStationFeatureSettings());
   const [loadingMachines, setLoadingMachines] = useState(true);
   const hasLoadedMachinesRef = useRef(false);
@@ -751,6 +757,13 @@ const OperatorView = () => {
   const statsWindowLabel = statsWindow?.from || statsWindow?.to
     ? `${fmtTime(statsWindow.from)} - ${fmtTime(statsWindow.to)}`
     : "";
+  const activeStatsShiftLabel = useMemo(() => {
+    const code = String(stationStats?.summary?.shiftCode || stationStats?.machine?.selectedShiftCode || "").trim().toUpperCase();
+    if (!code || code === "CURRENT") return "Current Shift";
+    if (code === "ALL") return "All Shifts";
+    const match = shiftOptions.find((shift) => String(shift.shiftCode || "").trim().toUpperCase() === code);
+    return match?.shiftName || code;
+  }, [shiftOptions, stationStats?.machine?.selectedShiftCode, stationStats?.summary?.shiftCode]);
   const hasLiveState = Boolean(liveState);
   const plcHealth = hasLiveState ? liveState?.plcHealth || null : stationStats?.plcHealth || null;
   const scannerHealth = hasLiveState ? liveState?.scannerHealth || null : stationStats?.scannerHealth || null;
@@ -1016,12 +1029,31 @@ const OperatorView = () => {
     finally { if (!silent) setLoadingMachines(false); }
   }, []);
 
+  const loadShifts = useCallback(async () => {
+    try {
+      const rows = await shiftApi.list();
+      setShiftOptions((rows || [])
+        .filter((row) => row?.isActive !== false)
+        .map((row) => ({
+          shiftCode: row.shiftCode || row.shift_code,
+          shiftName: row.shiftName || row.shift_name || row.shiftCode || row.shift_code,
+        }))
+        .filter((row) => row.shiftCode));
+    } catch (_error) {
+      setShiftOptions([]);
+    }
+  }, []);
+
   const loadMachineTelemetry = useCallback(async (machineId, showLoader = true) => {
     const id = Number(machineId || 0);
     if (!id) { setLiveState(null); setStationStats(null); return; }
     if (showLoader && !hasLoadedTelemetryRef.current) setLoadingStats(true); else setRefreshing(true);
     try {
-      const [live, stats] = await Promise.all([traceabilityApi.liveState(id), traceabilityApi.machineStats(id)]);
+      const shiftCode = selectedShiftCode === "CURRENT" ? "" : selectedShiftCode;
+      const [live, stats] = await Promise.all([
+        traceabilityApi.liveState(id),
+        traceabilityApi.machineStats(id, shiftCode ? { shiftCode } : {}),
+      ]);
       setLiveState(live || null); setStationStats(stats || null);
       hasLoadedTelemetryRef.current = true;
       if (live?.stationSettings) {
@@ -1032,7 +1064,7 @@ const OperatorView = () => {
       }
     } catch (e) { if (showLoader) setPopup({ type: "ERROR", title: t("operatorView.stationDataError", "Station Data Error"), message: e.response?.data?.error || t("operatorView.unableLoadTelemetry", "Unable to load machine telemetry") }); }
     finally { setLoadingStats(false); setRefreshing(false); }
-  }, []);
+  }, [selectedShiftCode]);
 
   const scheduleLiveRefresh = useCallback(() => {
     const active = selectedMachineIdRef.current; if (!active) return;
@@ -1312,9 +1344,9 @@ const OperatorView = () => {
     }
   }, [handleResetOperation, mergePopupPayload, resetConfirm]);
 
-  useEffect(() => { loadMachines(); }, [loadMachines]);
+  useEffect(() => { loadMachines(); loadShifts(); }, [loadMachines, loadShifts]);
   useEffect(() => {
-    const timer = setInterval(() => loadMachines({ silent: true }), 10000);
+    const timer = setInterval(() => loadMachines({ silent: true }), 30000);
     return () => clearInterval(timer);
   }, [loadMachines]);
   useEffect(() => {
@@ -1877,6 +1909,32 @@ const OperatorView = () => {
               </select>
             </div>
 
+            <div style={{
+              minWidth: isMobile ? "100%" : 132,
+              maxWidth: isMobile ? "100%" : 190,
+              flex: isMobile ? "1 1 100%" : undefined,
+            }}>
+              <select
+                value={selectedShiftCode}
+                onChange={(e) => setSelectedShiftCode(e.target.value)}
+                style={{
+                  height: isMobile ? 36 : 38, padding: "0 10px", width: "100%",
+                  background: C.bg("input"), border: `1px solid ${C.bdr()}`,
+                  borderRadius: 9, fontSize: isTablet ? 12 : (isMobile ? 12 : 13), color: C.txt("pri"),
+                  outline: "none", fontFamily: "'DM Sans',sans-serif",
+                  minWidth: 0,
+                }}
+              >
+                <option value="CURRENT">Current Shift</option>
+                <option value="ALL">All Shifts</option>
+                {shiftOptions.map((shift) => (
+                  <option key={shift.shiftCode} value={shift.shiftCode}>
+                    {shift.shiftName || shift.shiftCode}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <button
               onClick={toggleFullscreen}
               title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
@@ -2128,6 +2186,7 @@ const OperatorView = () => {
                 }}>
                   <InfoRow label={t("operatorView.operator", "Operator")} value={user.username || t("operatorView.operator", "Operator")} />
                   <InfoRow label={t("operatorView.status", "Status")} value={currentContext?.plcStatus || "WAITING"} />
+                  <InfoRow label={t("operatorView.shift", "Shift")} value={activeStatsShiftLabel} />
                   <InfoRow label={t("operatorView.lastPart", "Last Part")} value={currentContext?.partId} mono />
                   <InfoRow label={t("operatorView.updated", "Updated")} value={fmtTime(currentContext?.createdAt)} />
                   <InfoRow label={t("operatorView.statsWindow", "Stats Window")} value={statsWindowLabel} />

@@ -3,8 +3,9 @@ import { Clock3, Plus, Save, Trash2, Pencil, X, RefreshCw, CheckCircle2, Calenda
 import toast from "react-hot-toast";
 import { shiftApi } from "../api/services";
 import ConfirmModal from "../components/ConfirmModal";
+import PlantLineSelector from "../components/PlantLineSelector";
 
-const EMPTY_FORM = { shiftName: "", shiftCode: "", startTime: "", endTime: "", isActive: true };
+const EMPTY_FORM = { plantId: "", lineId: "", lineName: "", shiftName: "", shiftCode: "", startTime: "", endTime: "", isActive: true };
 
 const INPUT_CLS =
   "w-full bg-bg-dark border border-border rounded-lg px-3 py-2 text-sm text-text-main focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30 transition-colors placeholder:text-text-muted/50";
@@ -15,7 +16,7 @@ const Label = ({ children, required }) => (
   </label>
 );
 
-const SHIFT_COLORS = ["bg-primary/10 text-primary border-primary/20", "bg-accent/10 text-accent border-accent/20", "bg-warning/10 text-warning border-warning/20", "bg-secondary/10 text-secondary border-secondary/20"];
+const SHIFT_COLORS = ["bg-primary/10 text-primary border-primary/20", "bg-accent/10 text-accent border-accent/20", "bg-slate-100 text-slate-700 border-slate-200", "bg-secondary/10 text-secondary border-secondary/20"];
 
 const parseTimeParts = (value) => {
   if (value === null || value === undefined || value === "") return null;
@@ -79,20 +80,25 @@ const Shifts = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [showForm, setShowForm] = useState(false);
+  const [scopeFilter, setScopeFilter] = useState({ plantId: "", lineId: "" });
+  const [statusFilter, setStatusFilter] = useState("ALL");
 
   const set = (key) => (e) => setForm((p) => ({ ...p, [key]: e.target.value }));
 
   const loadShifts = useCallback(async (quiet = false) => {
     if (!quiet) setRefreshing(true);
     try {
-      const data = await shiftApi.list();
+      const params = {};
+      if (scopeFilter.plantId) params.plantId = scopeFilter.plantId;
+      if (scopeFilter.lineId) params.lineId = scopeFilter.lineId;
+      const data = await shiftApi.list(params);
       setShifts(data || []);
     } catch {
       if (!quiet) toast.error("Failed to load shifts");
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [scopeFilter]);
 
   useEffect(() => { loadShifts(); }, [loadShifts]);
 
@@ -102,6 +108,9 @@ const Shifts = () => {
     setEditingId(shift.id);
     setForm({
       shiftName: shift.shiftName || "",
+      plantId: String(shift.plantId || ""),
+      lineId: String(shift.lineId || ""),
+      lineName: shift.lineName || "",
       shiftCode: shift.shiftCode || "",
       startTime: formatTimeInputValue(shift.startTime),
       endTime: formatTimeInputValue(shift.endTime),
@@ -168,6 +177,11 @@ const Shifts = () => {
     return total;
   }, 0);
   const avgHoursPerShift = shifts.length > 0 ? (totalHours / shifts.length / 60).toFixed(1) : 0;
+  const visibleShifts = shifts.filter((shift) => {
+    if (statusFilter === "ACTIVE") return shift.isActive;
+    if (statusFilter === "INACTIVE") return !shift.isActive;
+    return true;
+  });
 
   return (
     <div className="space-y-6 rise-in" style={{ fontFamily: "var(--font-outfit)" }}>
@@ -236,6 +250,16 @@ const Shifts = () => {
             {editingId ? <><Pencil size={14} className="text-primary" /> Edit Shift</> : <><Plus size={14} className="text-primary" /> New Shift</>}
           </h2>
           <form onSubmit={handleSubmit} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="sm:col-span-2 lg:col-span-4">
+              <PlantLineSelector
+                value={form}
+                onChange={(scope) => setForm((p) => ({ ...p, ...scope }))}
+                includeAll
+                compact
+                className="grid grid-cols-1 gap-3 md:grid-cols-2"
+                inputClassName={INPUT_CLS}
+              />
+            </div>
             <div>
               <Label required>Shift Name</Label>
               <input value={form.shiftName} onChange={set("shiftName")} required className={INPUT_CLS} placeholder="e.g. Morning Shift" />
@@ -272,21 +296,55 @@ const Shifts = () => {
 
       {/* Shifts Table */}
       <div className="industrial-card p-0 overflow-hidden">
-        <div className="px-5 py-3 border-b border-border bg-bg-dark/40 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Clock3 size={14} className="text-primary" />
-            <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">Shift Directory</h2>
+        <div className="px-5 py-3 border-b border-border bg-white flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+          <div className="flex items-center justify-between gap-3 xl:self-center">
+            <div className="flex items-center gap-2">
+              <Clock3 size={14} className="text-primary" />
+              <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">Shift Directory</h2>
+            </div>
+            <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest bg-slate-50 px-2 py-1 rounded border border-border xl:hidden">
+              {visibleShifts.length} Shift{visibleShifts.length !== 1 ? "s" : ""}
+            </span>
           </div>
-          <span className="text-[9px] font-black text-text-muted uppercase tracking-widest bg-bg-dark px-2 py-1 rounded border border-border">
-            {shifts.length} Shift{shifts.length !== 1 ? "s" : ""}
-          </span>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(320px,520px)_150px_auto] md:items-end">
+            <PlantLineSelector
+              value={scopeFilter}
+              onChange={setScopeFilter}
+              includeAll
+              compact
+              hideLabels
+              className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+              inputClassName="h-9 w-full rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
+            />
+            <div>
+              <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="h-9 w-full rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10">
+                <option value="ALL">All Status</option>
+                <option value="ACTIVE">Active Only</option>
+                <option value="INACTIVE">Inactive Only</option>
+              </select>
+            </div>
+            {(scopeFilter.plantId || scopeFilter.lineId) ? (
+              <button
+                type="button"
+                onClick={() => setScopeFilter({ plantId: "", lineId: "" })}
+                className="h-9 rounded-md border border-border bg-white px-3 text-xs font-bold text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+              >
+                Clear Scope
+              </button>
+            ) : (
+              <span className="hidden text-center text-[9px] font-black text-slate-500 uppercase tracking-widest bg-slate-50 px-2 py-2 rounded border border-border md:block">
+                {visibleShifts.length} Shift{visibleShifts.length !== 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
         </div>
         
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-bg-dark/60 text-[9px] font-black uppercase tracking-wider text-text-muted border-b border-border">
+          <table className="w-full text-sm min-w-[860px]">
+            <thead className="bg-slate-50 text-[9px] font-black uppercase tracking-wider text-slate-500 border-b border-border">
               <tr>
                 <th className="px-4 py-3 text-left">Shift Name</th>
+                <th className="px-4 py-3 text-left">Scope</th>
                 <th className="px-4 py-3 text-left">Code</th>
                 <th className="px-4 py-3 text-left">Start</th>
                 <th className="px-4 py-3 text-left">End</th>
@@ -296,9 +354,10 @@ const Shifts = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-border/20">
-              {shifts.map((shift, i) => (
-                <tr key={shift.id} className="hover:bg-bg-dark/30 transition-colors">
+              {visibleShifts.map((shift, i) => (
+                <tr key={shift.id} className="hover:bg-slate-50 transition-colors">
                   <td className="px-4 py-3 font-semibold text-text-main text-sm">{shift.shiftName}</td>
+                  <td className="px-4 py-3 text-[10px] font-bold text-text-muted">{shift.plantId || shift.lineId ? `Plant ${shift.plantId || "-"} / Line ${shift.lineId || "-"}` : "Global"}</td>
                   <td className="px-4 py-3">
                     <span className={`text-[9px] font-black px-2 py-0.5 rounded border ${SHIFT_COLORS[i % SHIFT_COLORS.length]}`}>
                       {shift.shiftCode}
@@ -335,11 +394,11 @@ const Shifts = () => {
                   </td>
                 </tr>
               ))}
-              {shifts.length === 0 && (
+              {visibleShifts.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-16 text-center">
+                  <td colSpan={8} className="px-4 py-16 text-center">
                     <Clock3 size={32} className="mx-auto opacity-20 mb-3" />
-                    <p className="text-text-muted text-xs font-medium">No shifts configured</p>
+                    <p className="text-text-muted text-xs font-medium">No shifts found</p>
                     <button onClick={() => setShowForm(true)} className="mt-2 text-primary text-[10px] font-bold uppercase tracking-wider hover:underline">
                       + Add your first shift
                     </button>

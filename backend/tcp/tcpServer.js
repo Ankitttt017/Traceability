@@ -10,6 +10,13 @@ const ProductionLog = require("../models/ProductionLog");
 const { saveScan } = require("../services/scanService");
 const { getStationFeatureConfig } = require("../services/stationFeatureService");
 const { emitRealtime } = require("../services/realtimeService");
+const { isMachineBypassEnabled } = require("../services/machineBypassService");
+const {
+  LEAKTEST_OPERATION,
+  buildLeaktestIndex,
+  getLeaktestReadingForPartStation,
+  getLeaktestStageState,
+} = require("../services/leaktestLookupService");
 const { Op } = require("sequelize");
 const CUSTOMER_QR_ACTIVE_WINDOW_MS = Math.max(
   Number(process.env.CUSTOMER_QR_ACTIVE_WINDOW_MS || 10 * 60 * 1000),
@@ -171,7 +178,10 @@ async function finalizeCustomerQrMappingIfEligible({ partId, stationNo, machine 
     return { finalized: false, operationStatus: "WAITING" };
   }
 
-  const features = await getStationFeatureConfig(station).catch(() => null);
+  const features = await getStationFeatureConfig(station, {
+    plantId: machine.plantId || machine.plant_id,
+    lineId: machine.lineId || machine.line_id,
+  }).catch(() => null);
   const shouldAutoComplete =
     features &&
     features.manualResult !== true &&
@@ -294,7 +304,10 @@ async function canStartCustomerQrOnlyPart({ code, stationNo, machine }) {
   const raw = String(code || "").trim();
   const station = normalizeStation(stationNo);
   if (!raw || !station || !machine || !requiresCustomerQrForCompletion(machine)) return false;
-  const features = await getStationFeatureConfig(station).catch(() => null);
+  const features = await getStationFeatureConfig(station, {
+    plantId: machine.plantId || machine.plant_id,
+    lineId: machine.lineId || machine.line_id,
+  }).catch(() => null);
   if (features?.allowCustomerQrOnlyStart !== true) return false;
   return !(await isKnownPartOrMappedCustomerQr(raw));
 }
@@ -348,8 +361,13 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
 
   console.log(`[TCP] Routing payload from ${scannerIp} to ${scanners.length} scanner mapping(s). Payload=${partId}`);
   const customerQrTargets = await resolveSharedCustomerQrTargets({ scanners, partId });
+  const customerQrOnlyStartTargets = customerQrTargets.length > 0
+    ? []
+    : await resolveCustomerQrOnlyStartTargets({ scanners, partId });
   const routingTargets = customerQrTargets.length > 0
     ? customerQrTargets
+    : customerQrOnlyStartTargets.length > 0
+      ? customerQrOnlyStartTargets
     : scanners.map((scanner) => ({ scanner, forceCustomerQr: false }));
 
   for (const target of routingTargets) {
@@ -375,7 +393,7 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
           status: "WAITING",
           plcStatus: "WAITING_PREVIOUS",
           reason: "WAITING_PREVIOUS_STATION_OK",
-          message: `${delay.stationNo} Laser waiting. Submit ${delay.previousStation} OK first, then customer QR will map here.`,
+          message: `${delay.stationNo} waiting. Previous station ${delay.previousStation} is not completed OK for this part. Complete ${delay.previousStation} first, then scan the customer QR here.`,
           timestamp: new Date().toISOString(),
         });
         continue;
@@ -417,12 +435,39 @@ async function resolveSharedCustomerQrTargets({ scanners, partId }) {
   return targets;
 }
 
+async function resolveCustomerQrOnlyStartTargets({ scanners, partId }) {
+  const targets = [];
+  const existingPart = await Part.findOne({
+    where: { part_id: partId },
+    attributes: ["part_id"],
+  });
+
+  if (existingPart) {
+    return targets;
+  }
+
+  for (const scanner of scanners) {
+    const machine = await Machine.findByPk(scanner.mapped_machine_id);
+    const stationNo = String(machine?.operation_no || "").trim().toUpperCase();
+    if (!machine || machine.is_active === false || !stationNo) {
+      continue;
+    }
+    if (await canStartCustomerQrOnlyPart({ code: partId, stationNo, machine })) {
+      targets.push({ scanner, forceCustomerQr: false });
+    }
+  }
+
+  return targets;
+}
+
 async function hasStationPassed(partId, stationNo) {
   const station = normalizeStation(stationNo);
   if (!partId || !station) return false;
+  const { resolvedPartId } = await resolveMappedPartId(partId);
+  const effectivePartId = String(resolvedPartId || partId || "").trim();
   const passed = await OperationLog.findOne({
     where: {
-      part_id: partId,
+      part_id: effectivePartId,
       station_no: station,
       plc_status: "ENDED_OK",
       result: "OK",
@@ -430,7 +475,63 @@ async function hasStationPassed(partId, stationNo) {
     attributes: ["id"],
     order: [["createdAt", "DESC"]],
   });
-  return Boolean(passed);
+  if (passed) return true;
+  if (station !== LEAKTEST_OPERATION) return false;
+
+  const mapping = await PartCodeMapping.findOne({
+    where: {
+      old_part_id: effectivePartId,
+      is_active: true,
+    },
+    attributes: ["old_part_id", "customer_qr"],
+    order: [["updatedAt", "DESC"]],
+    raw: true,
+  });
+  const customerQr = String(mapping?.customer_qr || "").trim();
+  if (!customerQr) return false;
+
+  const machines = await Machine.findAll({
+    where: {
+      is_active: true,
+      operation_no: LEAKTEST_OPERATION,
+    },
+    attributes: ["id", "machine_name", "operation_no", "plc_ip", "qr_scanner_ip", "machine_ip"],
+    raw: true,
+  });
+  if (!machines.length) return false;
+
+  const index = await buildLeaktestIndex({
+    partIds: [effectivePartId],
+    customerQrByPartId: {
+      [effectivePartId.toUpperCase()]: customerQr,
+      [effectivePartId]: customerQr,
+    },
+    machines,
+  });
+  const reading = getLeaktestReadingForPartStation(index.byPartAndStation, effectivePartId, LEAKTEST_OPERATION);
+  return getLeaktestStageState(reading) === "PASSED";
+}
+
+async function isStationBypassedForValidation(stationNo) {
+  const station = normalizeStation(stationNo);
+  if (!station) return false;
+
+  const features = await getStationFeatureConfig(station).catch(() => null);
+  if (features?.operation === false || features?.bypass === true || features?.bypassEnabled === true) {
+    return true;
+  }
+
+  const machines = await Machine.findAll({
+    where: {
+      is_active: true,
+      operation_no: station,
+    },
+    attributes: ["id", "bypass_enabled"],
+    raw: true,
+  });
+  return machines.length > 0 && machines.every((machine) => (
+    machine.bypass_enabled === true || isMachineBypassEnabled(machine.id)
+  ));
 }
 
 async function shouldDelayCustomerQrStationStart({ scanner, partId }) {
@@ -440,14 +541,22 @@ async function shouldDelayCustomerQrStationStart({ scanner, partId }) {
     return { delayed: false };
   }
 
+  if (await canStartCustomerQrOnlyPart({ code: partId, stationNo, machine })) {
+    return { delayed: false };
+  }
+
   const sequence = await getActiveStationSequence();
   const stationIndex = sequence.indexOf(stationNo);
   const previousStation = stationIndex > 0 ? sequence[stationIndex - 1] : "";
   if (!previousStation) {
     return { delayed: false };
   }
+  if (await isStationBypassedForValidation(previousStation)) {
+    return { delayed: false };
+  }
 
-  const previousPassed = await hasStationPassed(partId, previousStation);
+  const { resolvedPartId } = await resolveMappedPartId(partId);
+  const previousPassed = await hasStationPassed(resolvedPartId || partId, previousStation);
   if (previousPassed) {
     return { delayed: false };
   }
@@ -746,6 +855,7 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
     skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart,
     skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart,
     skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart,
+    skipSequenceValidation: isCustomerQrOnlyStart,
   });
   if (response?.decision === "ALLOW" && isCustomerQrOnlyStart) {
     await markCustomerQrOnlyMapping({ code: scanPartId, machine, stationNo });
@@ -806,6 +916,7 @@ async function processCustomerQrOnlyStart({ scanner, scannerIp, partId, stationN
     skipQrFormatValidation: true,
     skipShotValidation: true,
     skipCustomerCodeValidation: true,
+    skipSequenceValidation: true,
   });
   if (response?.decision === "ALLOW") {
     await markCustomerQrOnlyMapping({ code: partId, machine, stationNo });

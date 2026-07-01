@@ -2,6 +2,14 @@ const { DataTypes } = require("sequelize");
 const sequelize = require("../config/db");
 
 const Shift = sequelize.define("Shift", {
+  plant_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  line_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
   shift_name: {
     type: DataTypes.STRING,
     allowNull: false,

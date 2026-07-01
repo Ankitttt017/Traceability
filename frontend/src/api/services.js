@@ -166,8 +166,8 @@ export const userApi = {
 };
 
 export const shiftApi = {
-  list: async () => {
-    const { data } = await apiClient.get(ENDPOINTS.shifts);
+  list: async (params = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.shifts, { params });
     return data;
   },
   create: async (payload) => {
@@ -184,12 +184,12 @@ export const shiftApi = {
 };
 
 export const stationSettingsApi = {
-  list: async () => {
-    const { data } = await apiClient.get(ENDPOINTS.stationSettings);
+  list: async (params = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.stationSettings, { params });
     return data;
   },
-  save: async (settings) => {
-    const { data } = await apiClient.put(ENDPOINTS.stationSettings, { settings });
+  save: async (settings, scope = {}) => {
+    const { data } = await apiClient.put(ENDPOINTS.stationSettings, { settings, ...scope });
     return data;
   },
 };
@@ -201,6 +201,61 @@ export const roleAccessApi = {
   },
   save: async (settings) => {
     const { data } = await apiClient.put(ENDPOINTS.roleAccessSettings, { settings });
+    return data;
+  },
+};
+
+export const organizationApi = {
+  context: async (config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.organization.context, config);
+    return data;
+  },
+  listPlants: async (config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.organization.plants, config);
+    return data;
+  },
+  createPlant: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.organization.plants, payload);
+    return data;
+  },
+  updatePlant: async (id, payload) => {
+    const { data } = await apiClient.put(ENDPOINTS.organization.plant(id), payload);
+    return data;
+  },
+  deletePlant: async (id) => {
+    const { data } = await apiClient.delete(ENDPOINTS.organization.plant(id));
+    return data;
+  },
+  listLines: async (params = {}, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.organization.lines, { ...config, params });
+    return data;
+  },
+  createLine: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.organization.lines, payload);
+    return data;
+  },
+  updateLine: async (id, payload) => {
+    const { data } = await apiClient.put(ENDPOINTS.organization.line(id), payload);
+    return data;
+  },
+  deleteLine: async (id) => {
+    const { data } = await apiClient.delete(ENDPOINTS.organization.line(id));
+    return data;
+  },
+  listParts: async (params = {}, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.organization.parts, { ...config, params });
+    return data;
+  },
+  createPart: async (payload) => {
+    const { data } = await apiClient.post(ENDPOINTS.organization.parts, payload);
+    return data;
+  },
+  updatePart: async (id, payload) => {
+    const { data } = await apiClient.put(ENDPOINTS.organization.part(id), payload);
+    return data;
+  },
+  deletePart: async (id) => {
+    const { data } = await apiClient.delete(ENDPOINTS.organization.part(id));
     return data;
   },
 };
@@ -561,15 +616,15 @@ export const packingApi = {
       return data;
     }
   },
-  generateNext: async () => {
+  generateNext: async (payload = {}) => {
     try {
-      const { data } = await apiClient.post(ENDPOINTS.packing.generateNext);
+      const { data } = await apiClient.post(ENDPOINTS.packing.generateNext, payload);
       return data;
     } catch (error) {
       if (!isNotFoundError(error)) {
         throw error;
       }
-      const { data } = await apiClient.post(ENDPOINTS.packing.generateNextLegacy);
+      const { data } = await apiClient.post(ENDPOINTS.packing.generateNextLegacy, payload);
       return data;
     }
   },
@@ -641,6 +696,9 @@ function normalizeReportFilters(params = {}) {
     out.partId = partSearch;
     out.barcode = partSearch;
   }
+  if (out.partName) out.partName = String(out.partName).trim().toUpperCase();
+  if (out.dieName) out.dieName = String(out.dieName).trim().toUpperCase();
+  if (out.dieCastingMachine) out.dieCastingMachine = String(out.dieCastingMachine).trim().toUpperCase();
   return out;
 }
 

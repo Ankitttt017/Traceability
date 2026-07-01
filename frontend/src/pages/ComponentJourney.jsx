@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { machineApi, shiftApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import { SOCKET_URL } from "../constants/network";
+import PlantLineSelector from "../components/PlantLineSelector";
 import {
   getStationFeatureSettings, getStationFeatures, saveStationFeatureSettings,
 } from "../utils/stationSettings";
@@ -507,6 +508,8 @@ const ComponentJourney = () => {
     dateFrom:"",
     dateTo:"",
     partId:"",
+    plantId:"",
+    lineId:"",
     machineId:"",
     stationNo:"",
     status:"",
@@ -543,8 +546,10 @@ const ComponentJourney = () => {
 
   const selectedPart    = useMemo(()=>parts.find(e=>e.partId===selectedPartId)||null,[parts,selectedPartId]);
   const lineOptions     = useMemo(
-    ()=>Array.from(new Set((machines||[]).map((row)=>String(row.lineName || "").trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b)),
-    [machines]
+    ()=>Array.from(new Set((machines||[])
+      .filter((row)=>!filters.plantId || String(row.plantId || "") === String(filters.plantId))
+      .map((row)=>String(row.lineName || "").trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b)),
+    [machines, filters.plantId]
   );
   const stationTimeline = useMemo(()=>journeyData?.stationTimeline||[],[journeyData?.stationTimeline]);
   const statusSummary   = useMemo(()=>stationTimeline.reduce((acc,st)=>{
@@ -564,6 +569,8 @@ const ComponentJourney = () => {
       dateFrom: filters.dateFrom || undefined,
       dateTo: filters.dateTo || undefined,
       partId: filters.partId || undefined,
+      plantId: filters.plantId || undefined,
+      lineId: filters.lineId || undefined,
       machineId: filters.machineId || undefined,
       stationNo: filters.stationNo || undefined,
       status: filters.status || undefined,
@@ -1081,14 +1088,14 @@ const ComponentJourney = () => {
               onChange={(e)=>setFilters((prev)=>({...prev,dateTo:e.target.value}))}
               style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
             />
-            <select
-              value={filters.lineName}
-              onChange={(e)=>setFilters((prev)=>({...prev,lineName:e.target.value,machineId:""}))}
-              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
-            >
-              <option value="">All Lines</option>
-              {lineOptions.map((line)=><option key={line} value={line}>{line}</option>)}
-            </select>
+            <PlantLineSelector
+              value={filters}
+              onChange={(scope)=>setFilters((prev)=>({...prev,...scope,machineId:""}))}
+              includeAll
+              compact
+              className="grid grid-cols-1 gap-2 sm:grid-cols-2"
+              inputClassName="h-[34px] rounded-lg border border-border bg-bg-dark px-3 text-xs font-bold text-text-main outline-none"
+            />
             <select
               value={filters.machineId}
               onChange={(e)=>setFilters((prev)=>({...prev,machineId:e.target.value}))}
@@ -1096,6 +1103,8 @@ const ComponentJourney = () => {
             >
               <option value="">All Machines</option>
               {machines
+                .filter((machine)=>!filters.plantId || String(machine.plantId || "") === String(filters.plantId))
+                .filter((machine)=>!filters.lineId || String(machine.lineId || "") === String(filters.lineId))
                 .filter((machine)=>!filters.lineName || String(machine.lineName || "").trim() === filters.lineName)
                 .map((machine)=>(
                   <option key={machine.id} value={machine.id}>{machine.machineName}</option>
@@ -1141,7 +1150,7 @@ const ComponentJourney = () => {
               style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
             />
             <button
-              onClick={()=>setFilters({dateFrom:"",dateTo:"",partId:"",machineId:"",stationNo:"",status:"",operatorId:"",shiftCode:"",lineName:""})}
+              onClick={()=>setFilters({dateFrom:"",dateTo:"",partId:"",plantId:"",lineId:"",machineId:"",stationNo:"",status:"",operatorId:"",shiftCode:"",lineName:""})}
               style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.ng(0.25)}`,background:C.ng(0.08),color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer"}}
             >
               Clear Filters
@@ -1421,7 +1430,7 @@ const ComponentJourney = () => {
                           </p>
                           <p style={{fontSize:11,color:C.txt("muted"),marginTop:2,
                             fontFamily:"'DM Mono',monospace"}}>
-                            {station.latestAt ? `Last: ${formatTime(station.latestAt)}` : "Not started"}
+                            {bypassed ? "Bypassed / auto passed" : station.latestAt ? `Last: ${formatTime(station.latestAt)}` : "Not started"}
                           </p>
                           {station.cycleStartTime && (
                             <div style={{display:"flex",gap:8,marginTop:4}}>

@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { scannerApi } from "../api/services";
+import PlantLineSelector from "../components/PlantLineSelector";
 import { formatMachineLabel } from "../utils/machineFields";
 import { useLanguage } from "../context/LanguageContext";
 
@@ -27,11 +28,9 @@ const DS = `
   :root{
     --sc-navy:  26,50,99;
     --sc-steel: 84,119,146;
-    --sc-amber: 250,185,91;
     --sc-linen: 232,226,219;
     --sc-ok:    34,197,94;
     --sc-ng:    239,68,68;
-    --sc-wip:   249,115,22;
     --sc-idle:  148,163,184;
   }
   [data-theme="light"]{
@@ -69,7 +68,6 @@ function injectDS() {
 const C = {
   navy:  (o=1) => `rgba(var(--sc-navy),${o})`,
   steel: (o=1) => `rgba(var(--sc-steel),${o})`,
-  amber: (o=1) => `rgba(var(--sc-amber),${o})`,
   linen: (o=1) => `rgba(var(--sc-linen),${o})`,
   ok:    (o=1) => `rgba(var(--sc-ok),${o})`,
   ng:    (o=1) => `rgba(var(--sc-ng),${o})`,
@@ -98,7 +96,7 @@ const Badge = ({ variant = "idle", label, pulse }) => {
   const map = {
     ok:   { fg: C.ok(),    bg: C.ok(0.1),    bd: C.ok(0.25)   },
     ng:   { fg: C.ng(),    bg: C.ng(0.1),    bd: C.ng(0.25)   },
-    warn: { fg: C.amber(), bg: C.amber(0.1), bd: C.amber(0.25) },
+    warn: { fg: C.steel(), bg: C.steel(0.1), bd: C.steel(0.25) },
     idle: { fg: C.txt("muted"), bg: C.bg("surf"), bd: C.bdr() },
   };
   const s = map[variant] || map.idle;
@@ -124,7 +122,6 @@ const Btn = ({ children, onClick, disabled, loading, variant = "ghost", size = "
   const [h, setH] = useState(false);
   const V = {
     ghost:  { bg: h ? C.bg("surf") : "transparent", color: C.txt("sec"), border: `1px solid ${C.bdr()}` },
-    amber:  { bg: h ? C.amber(0.9) : C.amber(),     color: C.navy(),     border: "none", fontWeight: 800, boxShadow: `0 3px 10px ${C.amber(0.25)}` },
     steel:  { bg: h ? C.steel(0.2) : C.steel(0.1),  color: C.steel(),    border: `1px solid ${C.steel(0.3)}` },
     ok:     { bg: h ? C.ok(0.18) : C.ok(0.1),       color: C.ok(),       border: `1px solid ${C.ok(0.3)}` },
     danger: { bg: h ? C.ng(0.18) : C.ng(0.1),       color: C.ng(),       border: `1px solid ${C.ng(0.3)}` },
@@ -191,7 +188,7 @@ const PingModal = ({ scanner, onClose }) => {
         boxShadow: SHM, animation: "scFadeIn .2s ease",
       }}>
         {/* Accent */}
-        <div style={{ height: 3, background: `linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})` }}/>
+        <div style={{ height: 3, background: `linear-gradient(90deg,${C.navy()},${C.steel()},${C.ok()})` }}/>
 
         {/* Header */}
         <div style={{
@@ -301,7 +298,7 @@ const PingModal = ({ scanner, onClose }) => {
             <Btn onClick={onClose} variant="ghost" style={{ flex: 1, justifyContent: "center" }}>
               Close
             </Btn>
-            <Btn onClick={runPing} loading={testing} variant="amber"
+            <Btn onClick={runPing} loading={testing} variant="steel"
               style={{ flex: 2, justifyContent: "center" }}>
               {!testing && <Play size={13}/>}
               {testing ? "Testing…" : result ? "Test Again" : "Start Test"}
@@ -321,6 +318,8 @@ const ScannerMonitor = () => {
   injectDS();
 
   const [rows,        setRows]        = useState([]);
+  const [scopeFilter, setScopeFilter] = useState({ plantId: "", lineId: "" });
+  const [statusFilter, setStatusFilter] = useState("ALL");
   const [loading,     setLoading]     = useState(true);
   const [refreshing,  setRefreshing]  = useState(false);
   const [pingTarget,  setPingTarget]  = useState(null);
@@ -400,16 +399,25 @@ const ScannerMonitor = () => {
     return { connected: false, label: "Offline", variant: "ng", pulse: false };
   }, []);
 
+  const filteredRows = useMemo(() => rows.filter((row) => {
+    const machine = row.mappedMachine || {};
+    const plantOk = !scopeFilter.plantId || String(machine.plantId || "") === String(scopeFilter.plantId);
+    const lineOk = !scopeFilter.lineId || String(machine.lineId || "") === String(scopeFilter.lineId);
+    const presence = getScannerPresence(row);
+    const statusOk = statusFilter === "ONLINE" ? presence.connected : statusFilter === "OFFLINE" ? !presence.connected : true;
+    return plantOk && lineOk && statusOk;
+  }), [rows, scopeFilter, statusFilter, getScannerPresence]);
+
   const summary = useMemo(() => {
-    const total     = rows.length;
-    const connected = rows.filter((r) => getScannerPresence(r).connected).length;
+    const total     = filteredRows.length;
+    const connected = filteredRows.filter((r) => getScannerPresence(r).connected).length;
     return {
       total,
       connected,
       disconnected: Math.max(total - connected, 0),
       rate: total ? Math.round((connected / total) * 100) : 0,
     };
-  }, [rows, getScannerPresence]);
+  }, [filteredRows, getScannerPresence]);
 
   // ═════════════════════════════════════════════════════════════════════
   return (
@@ -430,7 +438,7 @@ const ScannerMonitor = () => {
       }}>
         <div style={{
           height: 3,
-          background: `linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`,
+          background: `linear-gradient(90deg,${C.navy()},${C.steel()},${C.ok()})`,
           margin: "-16px -20px 14px",
         }}/>
         <div style={{
@@ -483,7 +491,7 @@ const ScannerMonitor = () => {
           { label: "Total Scanners", value: summary.total,        color: C.steel(), icon: ScanLine },
           { label: "Online",         value: summary.connected,    color: C.ok(),    icon: Wifi     },
           { label: "Offline",        value: summary.disconnected, color: C.ng(),    icon: WifiOff  },
-          { label: "Uptime Rate",    value: `${summary.rate}%`,   color: C.amber(), icon: Globe    },
+          { label: "Uptime Rate",    value: `${summary.rate}%`,   color: C.steel(), icon: Globe    },
         ].map((s, i) => (
           <div key={i} style={{
             background: C.bg("card"), border: `1px solid ${C.bdr()}`,
@@ -524,8 +532,8 @@ const ScannerMonitor = () => {
         {/* Table header */}
         <div style={{
           padding: "12px 18px", borderBottom: `1px solid ${C.bdr()}`,
-          background: C.bg("surf"), display: "flex",
-          alignItems: "center", justifyContent: "space-between",
+          background: "#ffffff", display: "flex",
+          alignItems: "flex-end", justifyContent: "space-between", gap: 12, flexWrap: "wrap",
         }}>
           <div>
             <p style={{
@@ -538,16 +546,28 @@ const ScannerMonitor = () => {
               {t("scannerMonitor.subtitle", "All Scanners")}
             </p>
           </div>
-          <div style={{
-            display: "flex", alignItems: "center", gap: 6,
-            padding: "4px 10px", borderRadius: 99,
-            background: C.ok(0.1), border: `1px solid ${C.ok(0.25)}`,
-          }}>
-            <div style={{
-              width: 5, height: 5, borderRadius: "50%", background: C.ok(),
-              animation: "scPulse 1.2s ease-in-out infinite",
-            }}/>
-            <span style={{ fontSize: 10, fontWeight: 700, color: C.ok() }}>{t("scannerMonitor.live", "Live")}</span>
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(320px,520px) 140px auto", gap: 10, alignItems: "center" }}>
+            <PlantLineSelector
+              value={scopeFilter}
+              onChange={setScopeFilter}
+              includeAll
+              compact
+              hideLabels
+              className="grid grid-cols-2 gap-2"
+              inputClassName="h-9 w-full rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
+            />
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="h-9 w-full rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
+            >
+              <option value="ALL">All Status</option>
+              <option value="ONLINE">Online</option>
+              <option value="OFFLINE">Offline</option>
+            </select>
+            <span className="hidden rounded-md border border-border bg-slate-50 px-3 py-2 text-center text-[10px] font-black uppercase tracking-widest text-slate-500 md:block">
+              {filteredRows.length} Scanner{filteredRows.length !== 1 ? "s" : ""}
+            </span>
           </div>
         </div>
 
@@ -557,7 +577,7 @@ const ScannerMonitor = () => {
               style={{ margin: "0 auto 12px", animation: "scSpin .9s linear infinite" }}/>
             <p style={{ fontSize: 12, color: C.txt("muted") }}>Loading scanner data…</p>
           </div>
-        ) : rows.length === 0 ? (
+        ) : filteredRows.length === 0 ? (
           <div style={{ padding: "56px 24px", textAlign: "center" }}>
             <ScanLine size={32} color={C.txt("muted")} style={{ margin: "0 auto 14px" }}/>
             <p style={{ fontSize: 14, fontWeight: 600, color: C.txt("sec"), marginBottom: 6 }}>
@@ -587,7 +607,7 @@ const ScannerMonitor = () => {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row, i) => {
+                {filteredRows.map((row, i) => {
                   const isUsbMode = String(row?.scannerMode || "").toUpperCase() === "USB_SERIAL";
                   const presence = getScannerPresence(row);
                   const conn = presence.connected;

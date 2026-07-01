@@ -39,6 +39,13 @@ function pickPreferredOperationResult(current, candidate) {
   return rank(candidate) > rank(current) ? candidate : (current || candidate);
 }
 
+function normalizeFinalPartStatus(value) {
+  const status = String(value || "").trim().toUpperCase();
+  if (["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(status)) return "PASSED";
+  if (["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(status)) return "NG";
+  return "IN_PROGRESS";
+}
+
 function calculateProductionMetrics(rows) {
   const metrics = {
     totalProduction: 0,
@@ -94,11 +101,10 @@ function calculateProductionMetrics(rows) {
     }
 
     const overallStatus = (() => {
+      const finalStatus = normalizeFinalPartStatus(latestRow.partStatus || latestRow.part_status || latestRow.status);
+      if (finalStatus === "PASSED" || finalStatus === "NG") return finalStatus;
       const values = requiredOperations.map((operation) => normalizeResult(operationResults[operation])).filter(Boolean);
       if (values.some((value) => value === "NG")) return "NG";
-      if (requiredOperations.length > 0 && requiredOperations.every((operation) => normalizeResult(operationResults[operation]) === "OK")) {
-        return "PASSED";
-      }
       return "IN_PROGRESS";
     })();
 

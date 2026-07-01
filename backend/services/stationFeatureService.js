@@ -1,4 +1,5 @@
 const StationFeatureSetting = require("../models/StationFeatureSetting");
+const { Op } = require("sequelize");
 
 const DEFAULT_FEATURES = {
   qr: true,
@@ -35,15 +36,35 @@ function normalizePlcPartCount(value) {
   return Math.min(Math.max(Math.trunc(parsed), 1), 20);
 }
 
-async function getStationFeatureConfig(stationNo) {
+function normalizeScope(scope = {}) {
+  return {
+    plantId: Number(scope.plantId ?? scope.plant_id ?? 0) || null,
+    lineId: Number(scope.lineId ?? scope.line_id ?? 0) || null,
+  };
+}
+
+function rowSpecificity(row, scope) {
+  let score = 0;
+  if (scope.plantId && Number(row.plant_id) === Number(scope.plantId)) score += 1;
+  if (scope.lineId && Number(row.line_id) === Number(scope.lineId)) score += 2;
+  return score;
+}
+
+async function getStationFeatureConfig(stationNo, scopeInput = {}) {
   const normalizedStation = normalizeStation(stationNo);
   if (!normalizedStation) {
     return { ...DEFAULT_FEATURES };
   }
 
-  const row = await StationFeatureSetting.findOne({
-    where: { station_no: normalizedStation },
+  const scope = normalizeScope(scopeInput);
+  const rows = await StationFeatureSetting.findAll({
+    where: {
+      station_no: normalizedStation,
+      plant_id: scope.plantId ? { [Op.or]: [scope.plantId, null] } : null,
+      line_id: scope.lineId ? { [Op.or]: [scope.lineId, null] } : null,
+    },
   });
+  const row = rows.sort((a, b) => rowSpecificity(b, scope) - rowSpecificity(a, scope))[0];
 
   if (!row) {
     return { ...DEFAULT_FEATURES };

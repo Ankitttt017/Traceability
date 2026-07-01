@@ -2,10 +2,17 @@ const { DataTypes } = require("sequelize");
 const sequelize = require("../config/db");
 
 const StationFeatureSetting = sequelize.define("StationFeatureSetting", {
+  plant_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  line_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
   station_no: {
     type: DataTypes.STRING,
     allowNull: false,
-    unique: true,
   },
   qr_enabled: {
     type: DataTypes.BOOLEAN,
@@ -49,6 +56,10 @@ const StationFeatureSetting = sequelize.define("StationFeatureSetting", {
     type: DataTypes.INTEGER,
     allowNull: true,
   },
+}, {
+  indexes: [
+    { unique: true, fields: ["plant_id", "line_id", "station_no"] },
+  ],
 });
 
 module.exports = StationFeatureSetting;

@@ -1,5 +1,5 @@
 ﻿import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { reportApi, machineApi, shiftApi } from '../../api/services';
+import { reportApi, machineApi, organizationApi, shiftApi } from '../../api/services';
 import { toDatetimeLocal } from '../../utils/time';
 import { loadReportConfig } from '../../utils/reportConfig';
 import ReportSummaryCards from './ReportSummaryCards';
@@ -7,6 +7,7 @@ import ReportTable from './ReportTable';
 import { FileText, Download, RefreshCw } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useLanguage } from '../../context/LanguageContext';
+import PlantLineSelector from '../../components/PlantLineSelector';
 
 const DEFAULT_PLC_CYCLE_COLUMNS = [
   "machine_name","shot_date","shot_time","shot_number","cycle_time",
@@ -191,6 +192,19 @@ const extractShotFromPartId = (partId) => {
   if (digits.length > 12) return digits.slice(12);
   return "";
 };
+const normalizePartToken = (value) => String(value || "").trim().toUpperCase();
+const splitPartDie = (value) => {
+  const raw = normalizePartToken(value);
+  if (!raw) return { partName: "", dieName: "" };
+  const [partName, ...dieParts] = raw.split("-");
+  return { partName: partName || "", dieName: dieParts.join("-") || "" };
+};
+const normalizeFinalPartStatus = (value) => {
+  const status = String(value || "").trim().toUpperCase();
+  if (["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(status)) return "PASSED";
+  if (["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(status)) return "NG";
+  return "IN_PROGRESS";
+};
 
 const ReportsPage = () => {
   const { t } = useLanguage();
@@ -207,8 +221,17 @@ const ReportsPage = () => {
   const [loading, setLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
   const [machines, setMachines] = useState([]);
+  const [organization, setOrganization] = useState({ plants: [], lines: [], parts: [] });
   const [availableShifts, setAvailableShifts] = useState([]);
-  const [data, setData] = useState({ rows: [], metrics: {}, availableShifts: [], plcColumns: [] });
+  const [data, setData] = useState({
+    rows: [],
+    metrics: {},
+    availableShifts: [],
+    plcColumns: [],
+    pagination: { page: 1, pageSize: 200, totalRows: 0, totalPages: 1 },
+  });
+  const [reportPage, setReportPage] = useState(1);
+  const [reportPageSize, setReportPageSize] = useState(200);
   const [reportConfig, setReportConfig] = useState(() => loadReportConfig());
   const reportAbortRef = useRef(null);
   
@@ -225,7 +248,12 @@ const ReportsPage = () => {
     return {
       dateFrom: toDatetimeLocal(r.start),
       dateTo: toDatetimeLocal(r.end),
-      machineId: '',
+        plantId: '',
+        lineId: '',
+        machineId: '',
+      partName: '',
+      dieName: '',
+      dieCastingMachine: '',
       lineName: '',
       shiftCode: '',
       status: '',
@@ -239,6 +267,7 @@ const ReportsPage = () => {
     };
   });
   const [quickRange, setQuickRange] = useState("today");
+  const filterControlCls = "h-9 min-w-0 rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10";
 
   const applyQuickRange = useCallback((key) => {
     const now = new Date();
@@ -271,14 +300,16 @@ const ReportsPage = () => {
     reportAbortRef.current?.abort();
     const controller = new AbortController();
     reportAbortRef.current = controller;
+    const requestPayload = { ...filters, page: reportPage, pageSize: reportPageSize };
     setLoading(true);
     try {
-      const response = await reportApi.getData(filters, { signal: controller.signal });
-      setData({ 
+      const response = await reportApi.getData(requestPayload, { signal: controller.signal });
+      setData({
         rows: response.rows || [], 
         metrics: response.metrics || {},
         availableShifts: response.availableShifts || [],
         plcColumns: response.plcColumns || [],
+        pagination: response.pagination || { page: reportPage, pageSize: reportPageSize, totalRows: response.rows?.length || 0, totalPages: 1 },
       });
     } catch (e) {
       if (e?.code === "ERR_CANCELED" || e?.name === "CanceledError") return;
@@ -290,10 +321,38 @@ const ReportsPage = () => {
         reportAbortRef.current = null;
       }
     }
-  }, [filters]);
+  }, [filters, reportPage, reportPageSize]);
+
+  const refreshReportData = useCallback(() => {
+    fetchData();
+  }, [fetchData]);
+
+  useEffect(() => {
+    setReportPage(1);
+  }, [
+    filters.dateFrom,
+    filters.dateTo,
+    filters.plantId,
+    filters.lineId,
+    filters.machineId,
+    filters.partName,
+    filters.dieName,
+    filters.dieCastingMachine,
+    filters.lineName,
+    filters.shiftCode,
+    filters.status,
+    filters.station,
+    filters.barcode,
+    filters.customerCode,
+    filters.operatorId,
+    filters.resultType,
+    filters.modelCode,
+    filters.operationNo,
+  ]);
 
   useEffect(() => {
     machineApi.list().then(setMachines).catch(console.error);
+    organizationApi.context().then((org) => setOrganization({ plants: org?.plants || [], lines: org?.lines || [], parts: org?.parts || [] })).catch(() => {});
     shiftApi.list().then(setAvailableShifts).catch(() => []);
     try { setReportConfig(loadReportConfig()); } catch (err) { void err; }
   }, []);
@@ -385,7 +444,7 @@ const ReportsPage = () => {
       : DEFAULT_PLC_CYCLE_COLUMNS;
     const plcKeys = discoveredPlcColumns
       .filter((key) => DEFAULT_PLC_CYCLE_COLUMNS.includes(key))
-      .filter((key) => !["machine_name", "shot_number", "shot_date", "shot_time"].includes(key));
+      .filter((key) => !["machine_name", "part_name", "shot_number", "shot_date", "shot_time"].includes(key));
     const plcColumns = (() => {
       const used = new Map();
       const baseColumns = [
@@ -412,8 +471,6 @@ const ReportsPage = () => {
       { key: "plc_shot_number", label: "Shot Number" },
       { key: "barcode", label: "Part Serial No." },
       { key: "customerCode", label: "Customer QR Code" },
-      { key: "partName", label: "Part Name" },
-      { key: "plc_machine_name", label: "Machine Name" },
       { key: "createdAt", label: "Scanned Date & Time" },
       ...stationPairs.map((s) => ({
         key: `station_${s.key}`,
@@ -487,23 +544,23 @@ const ReportsPage = () => {
           : (leakStatus || "-");
         operationResults[LEAK_TEST_OPERATION] = pickPreferredOperationResult(operationResults[LEAK_TEST_OPERATION], leakStatus);
       }
+      const plcPartDie = splitPartDie(plcData.part_name || first.partDieLabel || first.partName || "");
       const shaped = {
-        srNo: idx + 1,
+        srNo: ((Number(data.pagination?.page || 1) - 1) * Number(data.pagination?.pageSize || sourceRows.length || 0)) + idx + 1,
         plc_shot_number: plcData.shot_number ?? first.shot_number ?? first.shotNumber ?? "-",
         barcode: partKey || "â€”",
         plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
-        partName: plcData.part_name || first.partName || first.modelName || first.componentName || "-",
+        partName: plcPartDie.partName || first.partName || first.modelName || first.componentName || "-",
+        dieName: plcPartDie.dieName || first.dieName || "-",
         customerCode: entries
           .map((row) => row.customerQrCode || row.customerCode || row.customer_qr || "")
           .find((value) => String(value || "").trim() && String(value).trim() !== "-") || "-",
         overallStatus: (() => {
+          const finalStatus = normalizeFinalPartStatus(first.partStatus || first.part_status || first.status);
+          if (finalStatus === "PASSED" || finalStatus === "NG") return finalStatus;
           const vals = requiredOperations.map((operation) => normResult(operationResults[operation])).filter(Boolean);
           if (vals.some((v) => v === "NG")) return "NG";
-          if (requiredOperations.length > 0 && requiredOperations.every((operation) => normResult(operationResults[operation]) === "OK")) {
-            return "PASSED";
-          }
-          if (vals.some((v) => v === "IN_PROGRESS") || vals.length < requiredOperations.length) return "IN_PROGRESS";
           return "IN_PROGRESS";
         })(),
         ngReason: (() => {
@@ -555,37 +612,67 @@ const ReportsPage = () => {
   }, [data.rows, data.plcColumns, filters.machineId, machines]);
 
   const reportSummaryMetrics = useMemo(() => {
-    const rows = Array.isArray(reportTable.rows) ? reportTable.rows : [];
-    const sourceRows = Array.isArray(data.rows) ? data.rows : [];
-    const validationRejectParts = new Set(
-      sourceRows
-        .filter((row) => String(row?.category || "").trim().toUpperCase() === "VALIDATION")
-        .map((row) => String(row?.partId || row?.part_id || "").trim())
-        .filter(Boolean)
-    );
-    const summary = rows.reduce((acc, row) => {
-      const status = String(row?.overallStatus || "").trim().toUpperCase();
-      acc.totalProduction += 1;
-      if (status === "PASSED") acc.totalOK += 1;
-      else if (status === "NG" || status === "FAILED") acc.totalNG += 1;
-      else acc.inProgress += 1;
-      return acc;
-    }, {
-      totalProduction: 0,
-      totalOK: 0,
-      totalNG: 0,
-      inProgress: 0,
-      validationRejects: validationRejectParts.size,
-      passRate: 0,
-    });
-    const tested = summary.totalOK + summary.totalNG;
-    summary.passRate = tested > 0 ? Number(((summary.totalOK / tested) * 100).toFixed(2)) : 0;
-    return summary;
-  }, [data.rows, reportTable.rows]);
-  const availableLines = useMemo(
-    () => [...new Set((machines || []).map((m) => String(m.line_name || m.lineName || "").trim()).filter(Boolean))],
-    [machines]
+    const metrics = data.metrics || {};
+    return {
+      totalProduction: Number(metrics.totalProduction || 0),
+      totalOK: Number(metrics.totalOK || 0),
+      totalNG: Number(metrics.totalNG || 0),
+      inProgress: Number(metrics.inProgress || 0),
+      validationRejects: Number(metrics.validationRejects || 0),
+      passRate: Number(metrics.passRate || 0),
+      plcShotSummary: metrics.plcShotSummary || {},
+    };
+  }, [data.metrics]);
+  const scopedMachines = useMemo(
+    () => (machines || []).filter((machine) => !filters.plantId || String(machine.plantId || "") === String(filters.plantId)),
+    [machines, filters.plantId]
   );
+  const availableLines = useMemo(
+    () => [...new Set(scopedMachines.map((m) => String(m.line_name || m.lineName || "").trim()).filter(Boolean))],
+    [scopedMachines]
+  );
+  const activePartAssignments = useMemo(() => {
+    return (organization.parts || []).filter((part) => {
+      const active = String(part.status || "ACTIVE").toUpperCase() !== "INACTIVE" && part.isActive !== false;
+      const plantOk = !filters.plantId || String(part.plantId || "") === String(filters.plantId);
+      const lineOk = !filters.lineId || String(part.lineId || "") === String(filters.lineId);
+      return active && plantOk && lineOk;
+    });
+  }, [organization.parts, filters.plantId, filters.lineId]);
+  const availablePartNames = useMemo(() => (
+    [...new Set(activePartAssignments.map((part) => normalizePartToken(part.partName)).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+  ), [activePartAssignments]);
+  const availableDies = useMemo(() => (
+    [...new Set(activePartAssignments
+      .filter((part) => !filters.partName || normalizePartToken(part.partName) === normalizePartToken(filters.partName))
+      .map((part) => normalizePartToken(part.dieName))
+      .filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+  ), [activePartAssignments, filters.partName]);
+  const availableDieCastingMachines = useMemo(() => (
+    [...new Set(activePartAssignments
+      .filter((part) => !filters.partName || normalizePartToken(part.partName) === normalizePartToken(filters.partName))
+      .filter((part) => !filters.dieName || normalizePartToken(part.dieName) === normalizePartToken(filters.dieName))
+      .map((part) => normalizePartToken(part.dieCastingMachine))
+      .filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+  ), [activePartAssignments, filters.partName, filters.dieName]);
+
+  useEffect(() => {
+    if (!filters.lineId || filters.partName || availablePartNames.length !== 1) return;
+    setFilters((prev) => ({ ...prev, partName: availablePartNames[0], dieName: "" }));
+  }, [availablePartNames, filters.lineId, filters.partName]);
+
+  useEffect(() => {
+    if (!filters.lineId || filters.dieName || availableDies.length !== 1) return;
+    setFilters((prev) => ({ ...prev, dieName: availableDies[0], dieCastingMachine: "" }));
+  }, [availableDies, filters.lineId, filters.dieName]);
+
+  useEffect(() => {
+    if (!filters.lineId || filters.dieCastingMachine || availableDieCastingMachines.length !== 1) return;
+    setFilters((prev) => ({ ...prev, dieCastingMachine: availableDieCastingMachines[0] }));
+  }, [availableDieCastingMachines, filters.lineId, filters.dieCastingMachine]);
 
   return (
     <div className="space-y-4 pb-16 rise-in">
@@ -610,7 +697,7 @@ const ReportsPage = () => {
         <div className="flex items-center gap-2">
           <button
             disabled={loading}
-            onClick={fetchData}
+            onClick={refreshReportData}
             className="inline-flex items-center gap-2 bg-bg-dark text-text-main px-3 py-2 rounded-lg text-xs font-bold border border-border hover:border-primary/40 transition-all disabled:opacity-60"
           >
             <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> {loading ? t("reports.refreshing", "Refreshing...") : t("reports.refresh", "Refresh")}
@@ -624,7 +711,7 @@ const ReportsPage = () => {
           </button>
         </div>
       </div>
-      <div className="bg-bg-card border border-border rounded-xl p-4 shadow-sm grid gap-3 md:grid-cols-2 lg:grid-cols-5" style={{ boxShadow: "0 2px 12px rgba(26,50,99,.08),0 1px 3px rgba(26,50,99,.05)" }}>
+      <div className="bg-white border border-border rounded-lg p-4 shadow-sm grid gap-3 md:grid-cols-2 lg:grid-cols-5" style={{ boxShadow: "0 2px 12px rgba(26,50,99,.08),0 1px 3px rgba(26,50,99,.05)" }}>
         <select
           value={quickRange}
           onChange={(e) => {
@@ -632,7 +719,7 @@ const ReportsPage = () => {
             setQuickRange(key);
             applyQuickRange(key);
           }}
-          className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
+          className={filterControlCls}
         >
           <option value="today">{t("reports.today", "Today")}</option>
           <option value="yesterday">{t("reports.yesterday", "Yesterday")}</option>
@@ -644,29 +731,56 @@ const ReportsPage = () => {
           type="datetime-local"
           value={filters.dateFrom || ""}
           onChange={(e) => setFilters((prev) => ({ ...prev, dateFrom: e.target.value }))}
-          className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
+          className={filterControlCls}
         />
         <input
           type="datetime-local"
           value={filters.dateTo || ""}
           onChange={(e) => setFilters((prev) => ({ ...prev, dateTo: e.target.value }))}
-          className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
+          className={filterControlCls}
+        />
+        <PlantLineSelector
+          value={filters}
+          onChange={(scope) => setFilters((prev) => ({ ...prev, ...scope, machineId: "", partName: "", dieName: "", dieCastingMachine: "" }))}
+          includeAll
+          compact
+          requirePlantForLine
+          hideLabels
+          className="grid grid-cols-1 gap-2 min-w-0 sm:grid-cols-2 xl:col-span-2"
+          inputClassName={filterControlCls}
         />
         <select
-          value={filters.lineName}
-          onChange={(e) => setFilters((prev) => ({ ...prev, lineName: e.target.value, machineId: "" }))}
-          className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
+          value={filters.partName || ""}
+          onChange={(e) => setFilters((prev) => ({ ...prev, partName: normalizePartToken(e.target.value), dieName: "", dieCastingMachine: "" }))}
+          className={filterControlCls}
         >
-          <option value="">{t("reports.allLines", "All Lines")}</option>
-          {availableLines.map((line) => <option key={line} value={line}>{line}</option>)}
+          <option value="">All Parts</option>
+          {availablePartNames.map((partName) => <option key={partName} value={partName}>{partName}</option>)}
+        </select>
+        <select
+          value={filters.dieName || ""}
+          onChange={(e) => setFilters((prev) => ({ ...prev, dieName: normalizePartToken(e.target.value), dieCastingMachine: "" }))}
+          className={filterControlCls}
+        >
+          <option value="">All Dies</option>
+          {availableDies.map((dieName) => <option key={dieName} value={dieName}>{dieName}</option>)}
+        </select>
+        <select
+          value={filters.dieCastingMachine || ""}
+          onChange={(e) => setFilters((prev) => ({ ...prev, dieCastingMachine: normalizePartToken(e.target.value) }))}
+          className={filterControlCls}
+        >
+          <option value="">All Die Casting Machines</option>
+          {availableDieCastingMachines.map((machineName) => <option key={machineName} value={machineName}>{machineName}</option>)}
         </select>
         <select
           value={filters.machineId}
           onChange={(e) => setFilters((prev) => ({ ...prev, machineId: e.target.value }))}
-          className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
+          className={filterControlCls}
         >
           <option value="">{t("reports.allMachines", "All Machines")}</option>
-          {machines
+          {scopedMachines
+            .filter((m) => !filters.lineId || String(m.line_id || m.lineId || "") === String(filters.lineId))
             .filter((m) => !filters.lineName || String(m.line_name || m.lineName || "").trim() === filters.lineName)
             .map((m) => <option key={m.id} value={m.id}>{m.machine_name || m.machineName}</option>)}
         </select>
@@ -674,12 +788,12 @@ const ReportsPage = () => {
           value={filters.barcode || ""}
           onChange={(e) => setFilters((prev) => ({ ...prev, barcode: e.target.value }))}
           placeholder="Customer QR / Part ID / Shot Number"
-          className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
+          className={filterControlCls}
         />
         <select
           value={filters.status || ""}
           onChange={(e) => setFilters((prev) => ({ ...prev, status: e.target.value }))}
-          className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
+          className={filterControlCls}
         >
           <option value="">{t("reports.allStatus", "All Status")}</option>
           <option value="OK">{t("reports.passed", "PASSED")}</option>
@@ -688,7 +802,7 @@ const ReportsPage = () => {
         <select
           value={filters.shiftCode || ""}
           onChange={(e) => setFilters((prev) => ({ ...prev, shiftCode: e.target.value }))}
-          className="h-10 px-3 rounded-lg border border-border bg-bg-dark text-text-main text-xs min-w-0"
+          className={filterControlCls}
         >
           <option value="">{t("reports.allShifts", "All Shifts")}</option>
           {((data.availableShifts && data.availableShifts.length) ? data.availableShifts : availableShifts).map((shift) => (
@@ -701,17 +815,17 @@ const ReportsPage = () => {
           onClick={() => setFilters({
             dateFrom: toDatetimeLocal(getMesDayRange().start),
             dateTo: toDatetimeLocal(getMesDayRange().end),
-            machineId: '', lineName: '', shiftCode: '', status: '', station: '', barcode: '', customerCode: '',
+            plantId: '', lineId: '', machineId: '', partName: '', dieName: '', dieCastingMachine: '', lineName: '', shiftCode: '', status: '', station: '', barcode: '', customerCode: '',
             operatorId: '', resultType: '', modelCode: '', operationNo: ''
           })}
-          className="h-10 px-3 rounded-lg border border-red-400/30 bg-red-500/10 text-red-400 text-xs font-bold"
+          className="h-9 rounded-md border border-red-200 bg-red-50 px-3 text-xs font-bold text-red-600 transition-all hover:border-red-300"
         >
           {t("reports.clear", "Clear")}
         </button>
         <button
           disabled={loading}
-          onClick={fetchData}
-          className="h-10 px-3 rounded-lg border text-xs font-bold inline-flex items-center justify-center gap-2 disabled:opacity-60"
+          onClick={refreshReportData}
+          className="h-9 rounded-md border px-3 text-xs font-bold inline-flex items-center justify-center gap-2 disabled:opacity-60"
           style={{ background: "rgba(84,119,146,0.10)", borderColor: "rgba(84,119,146,0.30)", color: "rgb(84,119,146)" }}
         >
           <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> {loading ? t("reports.loading", "Loading...") : t("reports.applyFilters", "Apply Filters")}
@@ -720,7 +834,17 @@ const ReportsPage = () => {
 
       <ReportSummaryCards metrics={reportSummaryMetrics} />
 
-      <ReportTable rows={reportTable.rows} columns={reportTable.columns} loading={loading} />
+      <ReportTable
+        rows={reportTable.rows}
+        columns={reportTable.columns}
+        loading={loading}
+        pagination={data.pagination}
+        onPageChange={setReportPage}
+        onPageSizeChange={(nextSize) => {
+          setReportPageSize(nextSize);
+          setReportPage(1);
+        }}
+      />
     </div>
   );
 };

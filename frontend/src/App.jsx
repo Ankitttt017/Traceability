@@ -27,6 +27,9 @@ import IoMonitor from "./pages/IoMonitor";
 import ReportConfiguration from "./pages/ReportConfiguration";
 import ReportsPage from "./pages/Reports/ReportsPage";
 import RejectionConfiguration from "./pages/RejectionConfiguration";
+import Plants from "./pages/Plants";
+import Lines from "./pages/Lines";
+import Parts from "./pages/Parts";
 import { getUserRole, isAuthenticated } from "./utils/authStorage";
 import { APP_ROUTES } from "./constants/routes";
 import { canAccessModule, getRoleAccessSettings } from "./utils/roleAccess";
@@ -78,6 +81,9 @@ const MODULE_REDIRECT_ORDER = [
   { moduleKey: "part_process_flow", path: APP_ROUTES.partProcessFlow },
   { moduleKey: "process_flow", path: APP_ROUTES.processFlow },
   { moduleKey: "master_settings", path: APP_ROUTES.masterSettings },
+  { moduleKey: "master_settings", path: APP_ROUTES.plants },
+  { moduleKey: "master_settings", path: APP_ROUTES.lines },
+  { moduleKey: "master_settings", path: APP_ROUTES.parts },
   { moduleKey: "master_settings", path: APP_ROUTES.rejectionConfiguration },
   { moduleKey: "station_control", path: APP_ROUTES.stationControls },
   { moduleKey: "report_config", path: APP_ROUTES.masterReports },
@@ -196,6 +202,30 @@ function App() {
               element={
                 <ModuleRoute moduleKey="dashboard">
                   <Dashboard />
+                </ModuleRoute>
+              }
+            />
+            <Route
+              path={APP_ROUTES.plants.slice(1)}
+              element={
+                <ModuleRoute moduleKey="master_settings">
+                  <Plants />
+                </ModuleRoute>
+              }
+            />
+            <Route
+              path={APP_ROUTES.lines.slice(1)}
+              element={
+                <ModuleRoute moduleKey="master_settings">
+                  <Lines />
+                </ModuleRoute>
+              }
+            />
+            <Route
+              path={APP_ROUTES.parts.slice(1)}
+              element={
+                <ModuleRoute moduleKey="master_settings">
+                  <Parts />
                 </ModuleRoute>
               }
             />
