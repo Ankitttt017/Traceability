@@ -3750,6 +3750,7 @@ exports.processScan = async (req, res) => {
     customerQrCode = resolvedCode.customerQrCode;
     const isMappedCustomerQrScan = Boolean(customerQrCode) && customerQrCode === scannedQrRaw;
     const isCustomerQrOnlyStart =
+      scannerRole === "CUSTOMER_QR" &&
       !isMappedCustomerQrScan &&
       await canStartCustomerQrOnlyPart({
         code: scannedQrRaw,
@@ -3974,7 +3975,11 @@ exports.processScan = async (req, res) => {
 
     const qrStatus = response.qrStatus || (response.decision === "ALLOW" ? "PASSED" : "FAILED");
     const operationStatus = response.operationStatus || (response.decision === "ALLOW" ? "WAITING" : "BLOCKED");
-    const customerQrPending = response.decision === "ALLOW" && scannerRole === "START_QR" && hasCustomerQrScanner;
+    const customerQrPending =
+      response.decision === "ALLOW" &&
+      scannerRole === "START_QR" &&
+      requiresCustomerQrForCompletion(machine) &&
+      !isCustomerQrOnlyStart;
     if (customerQrPending) {
       response.operationStatus = "WAITING_CUSTOMER_QR";
       response.reason = "WAITING_CUSTOMER_QR";
@@ -4097,7 +4102,8 @@ exports.verifyScanForOperator = async (req, res) => {
     const isExistingMappedCustomerQr = Boolean(existingCustomerMapping);
     const isKnownPartId = Boolean(await Part.findOne({ where: { part_id: scannedQrRaw }, attributes: ["part_id"] }));
     const looksLikeCustomerQr =
-      hasCustomerQrScanner &&
+      requiresCustomerQrForCompletion(machine) &&
+      (hasCustomerQrScanner || isExistingMappedCustomerQr) &&
       scannedQrRaw &&
       scannedQrRaw !== activePartIdForMachine &&
       (!isKnownPartId || isExistingMappedCustomerQr);

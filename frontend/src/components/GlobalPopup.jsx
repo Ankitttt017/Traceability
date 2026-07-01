@@ -667,7 +667,10 @@ const GlobalPopup = ({
     }
     if (scannedCode.length < 4) {
       setValidationInfo("");
-      setValidationError("");
+      setValidationError("Invalid QR code. Scan a valid Part ID / Customer QR.");
+      setLocalQrValidated(false);
+      localValidatedPartIdRef.current = "";
+      setLastScannedCode("");
       return;
     }
     const requestSeq = ++validateRequestSeqRef.current;
@@ -858,6 +861,9 @@ const GlobalPopup = ({
       return;
     }
     if (!socketPartId) {
+      setLastScannedCode("");
+      setLocalQrValidated(false);
+      localValidatedPartIdRef.current = "";
       if (prevSocketPartIdRef.current) {
         prevSocketPartIdRef.current = "";
         setResetError("");
@@ -874,8 +880,6 @@ const GlobalPopup = ({
         setManualSuccessMsg("");
         setManualQrCode("");
         setShowNgReasonModal(false);
-        setLocalQrValidated(false);
-        localValidatedPartIdRef.current = "";
       }
       return;
     }
@@ -1059,6 +1063,13 @@ const GlobalPopup = ({
     const STANDARD_SUCCESS_CLOSE_MS = 4200;
     const STANDARD_ERROR_CLOSE_MS = 8000;
 
+    // Laser two-step flow must stay visible until the customer QR arrives and maps.
+    if (customerQrPending) {
+      setAutoCloseTimeLeft(null);
+      setAutoCloseDuration(0);
+      return undefined;
+    }
+
     // Faster auto-close / auto-reset for QR-focused industrial flow
     if (isOnlyQrCheck) {
       const qrState = popupQrState;
@@ -1071,11 +1082,6 @@ const GlobalPopup = ({
         duration = STANDARD_SUCCESS_CLOSE_MS;
       }
     } else if (signalCustomerMappingStation) {
-      if (customerQrPending) {
-        setAutoCloseTimeLeft(null);
-        setAutoCloseDuration(0);
-        return undefined;
-      }
       if (customerQrMapped || popupType === "SUCCESS" || popupQrState === "PASS") {
         duration = STANDARD_SUCCESS_CLOSE_MS;
       } else if (popup?.type === "ERROR" || popupQrState === "FAIL" || popupQrState === "BLOCKED") {
@@ -1774,13 +1780,13 @@ const GlobalPopup = ({
 
   return (
     <>
-    <div className={`fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 transition-opacity duration-200 ${isClosingSmoothly ? "opacity-0" : "opacity-100"}`}>
+    <div className={`fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-2 transition-opacity duration-200 sm:p-3 ${isClosingSmoothly ? "opacity-0" : "opacity-100"}`}>
       <div className={`w-full bg-bg-card shadow-2xl flex flex-col transition-all duration-200 ${isFullscreen
         ? "fixed inset-0 z-[1000] w-screen h-screen max-w-full max-h-screen rounded-none m-0 animate-none"
-        : `max-w-3xl rounded-xl max-h-[90vh] ${isClosingSmoothly ? "scale-[0.98]" : "animate-in zoom-in duration-200"}`
+        : `max-w-[44rem] rounded-xl max-h-[94vh] ${isClosingSmoothly ? "scale-[0.98]" : "animate-in zoom-in duration-200"}`
         }`}>
         {/* Header - Compact */}
-        <div className="px-5 py-3 flex-shrink-0 border-b border-border/50" style={{ background: "#1e293b" }}>
+        <div className="px-3 py-2.5 flex-shrink-0 border-b border-border/50 sm:px-4" style={{ background: "#1e293b" }}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="p-1.5 rounded-lg" style={{ background: "#0f172a" }}>
@@ -1793,9 +1799,9 @@ const GlobalPopup = ({
             </div>
             <div className="flex items-center gap-2">
               {displayedScanCode && (
-                <div className="px-3 py-2 rounded-lg border border-amber-500/20 max-w-[420px] min-w-[180px]" style={{ background: "#0f172a" }} title={displayedScanCode}>
+                <div className="px-2.5 py-1.5 rounded-lg border border-amber-500/20 max-w-[320px] min-w-[140px]" style={{ background: "#0f172a" }} title={displayedScanCode}>
                   <p className="text-[8px] font-bold uppercase tracking-wider text-slate-400">{displayedScanLabel}</p>
-                  <p className="font-mono text-m font-black text-amber-400 break-all leading-tight">{displayedScanCode}</p>
+                  <p className="font-mono text-xs font-black text-amber-400 break-all leading-tight sm:text-sm">{displayedScanCode}</p>
                 </div>
               )}
               <button
@@ -1825,22 +1831,22 @@ const GlobalPopup = ({
           </div>
 
           {/* Compact Stats */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2.5">
             <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
               <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">Machine</p>
-              <p className="text-white text-m font-bold truncate">{popup?.machineName || "N/A"}</p>
+              <p className="text-white text-xs font-bold truncate sm:text-sm">{popup?.machineName || "N/A"}</p>
             </div>
             <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
               <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">Station</p>
-              <p className="text-white text-m font-bold truncate">{currentStationName}</p>
+              <p className="text-white text-xs font-bold truncate sm:text-sm">{currentStationName}</p>
             </div>
             <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
               <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">Shift</p>
-              <p className="text-white text-m font-bold">{shiftText}</p>
+              <p className="text-white text-xs font-bold sm:text-sm">{shiftText}</p>
             </div>
             <div className="rounded-lg p-2" style={allPassed ? { background: "#064e3b" } : { background: "#0f172a" }}>
               <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5" >Pass</p>
-              <p className="text-m font-bold" style={{ color: allPassed ? "#4ade80" : "#fff" }}>{passCount}/{totalCount}</p>
+              <p className="text-xs font-bold sm:text-sm" style={{ color: allPassed ? "#4ade80" : "#fff" }}>{passCount}/{totalCount}</p>
             </div>
           </div>
 
@@ -1862,18 +1868,18 @@ const GlobalPopup = ({
         </div>
 
         {/* Timeline Body - Single source of truth */}
-        <div className="flex-1 overflow-y-auto px-5 py-3 bg-bg-card font-medium">
+        <div className="flex-1 overflow-y-auto px-3 py-2 bg-bg-card font-medium sm:px-4">
           {displayedScanCode && !isNextPartState && (
-            <div className={`mb-2 px-3 py-2 rounded-lg border shadow-sm flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 ${qrStripTheme.container}`}>
-              <span className={`text-[15px] font-bold uppercase tracking-wider whitespace-nowrap ${qrStripTheme.label}`}>
+            <div className={`mb-2 px-2.5 py-1.5 rounded-lg border shadow-sm flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2.5 ${qrStripTheme.container}`}>
+              <span className={`text-[12px] font-bold uppercase tracking-wider whitespace-nowrap ${qrStripTheme.label}`}>
                 {displayedScanLabel}
               </span>
               <div className="flex-1 min-w-0 text-center overflow-hidden">
-                <span className={`font-bold text-m tracking-wide text-black break-all sm:truncate ${qrStripTheme.value}`}>
+                <span className={`font-bold text-xs tracking-wide text-black break-all sm:text-sm ${qrStripTheme.value}`}>
                   {displayedScanCode}
                 </span>
               </div>
-              <span className={`inline-flex items-center justify-center px-2 py-1 rounded-md text-[15px] font-bold border whitespace-nowrap ${qrStripTheme.badge}`}>
+              <span className={`inline-flex items-center justify-center px-2 py-0.5 rounded-md text-[11px] font-bold border whitespace-nowrap ${qrStripTheme.badge}`}>
                 {qrStripTheme.badgeText}
               </span>
             </div>
@@ -1909,7 +1915,7 @@ const GlobalPopup = ({
           )}
 
           {effectivePartId && (
-            <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div className="mb-3 grid grid-cols-1 gap-2.5 md:grid-cols-2">
               <div className={`rounded-2xl border p-4 shadow-sm ${
                 previousStation ? (previousStationPassed ? "border-emerald-200 bg-emerald-50/80" : "border-rose-200 bg-rose-50/80") : "border-slate-200 bg-white"
               }`}>
@@ -1934,7 +1940,7 @@ const GlobalPopup = ({
                 )}
               </div>
 
-              <div className={`rounded-2xl border p-4 shadow-sm ${
+              <div className={`rounded-2xl border p-3 shadow-sm sm:p-4 ${
                 currentStationPassed ? "border-emerald-200 bg-emerald-50/80" : "border-sky-200 bg-sky-50/80"
               }`}>
                 <p className="mb-3 text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">{t("globalPopup.currentStation", "Current Station")}</p>
@@ -2024,28 +2030,28 @@ const GlobalPopup = ({
         </div>
 
         {/* Message & Footer */}
-        <div className="px-5 py-3 bg-bg-card border-t border-border/50 flex-shrink-0 space-y-3">
+        <div className="px-3 py-2 bg-bg-card border-t border-border/50 flex-shrink-0 space-y-2 sm:px-4">
           {showManualVerificationPanel && (
-            <div className="mb-3 space-y-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
+            <div className="mb-3 space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
               <div className="flex items-center gap-3 border-b border-slate-200 pb-3">
                 <div className="h-2.5 w-2.5 rounded-full bg-amber-500" />
                 <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-slate-700">{t("globalPopup.submitQualityVerification", "Manual Quality Inspection")}</h3>
               </div>
 
               {displayedScanCode && (
-                <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-3 text-center shadow-sm">
-                  <p className="text-[11px] font-black uppercase tracking-[0.2em] text-amber-700">{displayedScanLabel}</p>
-                  <p className="mt-1 break-all font-mono text-2xl font-black text-slate-950 sm:text-3xl">
+                <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 px-3 py-2.5 text-center shadow-sm">
+                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-amber-700">{displayedScanLabel}</p>
+                  <p className="mt-1 break-all font-mono text-base font-black text-slate-950 sm:text-lg">
                     {displayedScanCode}
                   </p>
                   {hasMappedCustomerQr && effectivePartId && effectivePartId !== displayedScanCode && (
-                    <p className="mt-2 text-[10px] font-bold text-slate-500">Internal Part ID: <span className="font-mono">{displayInternalPartId}</span></p>
+                    <p className="mt-1.5 text-[9px] font-bold text-slate-500">Internal Part ID: <span className="font-mono">{displayInternalPartId}</span></p>
                   )}
                   {isCustomerQrOnlyScan && (
-                    <p className="mt-2 text-[10px] font-bold text-slate-500">Part ID: <span className="font-mono">{displayInternalPartId}</span></p>
+                    <p className="mt-1.5 text-[9px] font-bold text-slate-500">Part ID: <span className="font-mono">{displayInternalPartId}</span></p>
                   )}
                   {!hasMappedCustomerQr && effectivePartId && !isCustomerQrOnlyScan && (
-                    <p className="mt-2 text-[10px] font-bold text-slate-500">Customer QR: <span className="font-mono">Waiting</span></p>
+                    <p className="mt-1.5 text-[9px] font-bold text-slate-500">Customer QR: <span className="font-mono">Waiting</span></p>
                   )}
                 </div>
               )}
