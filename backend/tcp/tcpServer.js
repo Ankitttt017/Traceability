@@ -23,8 +23,8 @@ const CUSTOMER_QR_ACTIVE_WINDOW_MS = Math.max(
   30 * 1000
 );
 const TCP_SCANNER_FLUSH_MS = Math.min(
-  Math.max(Number(process.env.TCP_SCANNER_FLUSH_MS || 80), 30),
-  250
+  Math.max(Number(process.env.TCP_SCANNER_FLUSH_MS || 250), 30),
+  500
 );
 
 function sanitizeScannerPayload(value) {
@@ -458,14 +458,19 @@ async function processIncomingScannerPayload({ scannerIp, payload }) {
   });
 
   if (!partId || partId.length < 4) {
-    const message = !partId
-      ? "START_QR scanner did not send a readable QR code. Scan again."
-      : `Invalid START_QR payload "${partId}". Scan a valid Part ID.`;
     const targets = scanners.length ? scanners : [null];
     for (const scanner of targets) {
       const machine = scanner?.mapped_machine_id
         ? await Machine.findByPk(scanner.mapped_machine_id)
         : null;
+      const role = String(scanner?.scanner_role || "START_QR").trim().toUpperCase();
+      const message = !partId
+        ? role === "CUSTOMER_QR"
+          ? "CUSTOMER_QR scanner did not send a readable QR code. Scan again."
+          : "START_QR scanner did not send a readable QR code. Scan again."
+        : role === "CUSTOMER_QR"
+          ? `Invalid CUSTOMER_QR payload "${partId}". Scan a valid Customer QR.`
+          : `Invalid START_QR payload "${partId}". Scan a valid Part ID.`;
       emitRealtime("operator_popup", {
         type: "ERROR",
         partId: "",
