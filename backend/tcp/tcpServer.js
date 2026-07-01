@@ -452,13 +452,42 @@ async function isCustomerQrOnlyTracePart(partId, customerQrCode = "") {
 
 async function processIncomingScannerPayload({ scannerIp, payload }) {
   const partId = sanitizeScannerPayload(payload);
-  if (!partId) return;
-  if (partId.length < 4) return;
-
   const scanners = await Scanner.findAll({
     where: { scanner_ip: scannerIp, is_active: true },
     order: [["mapped_machine_id", "ASC"], ["id", "ASC"]],
   });
+
+  if (!partId || partId.length < 4) {
+    const message = !partId
+      ? "START_QR scanner did not send a readable QR code. Scan again."
+      : `Invalid START_QR payload "${partId}". Scan a valid Part ID.`;
+    const targets = scanners.length ? scanners : [null];
+    for (const scanner of targets) {
+      const machine = scanner?.mapped_machine_id
+        ? await Machine.findByPk(scanner.mapped_machine_id)
+        : null;
+      emitRealtime("operator_popup", {
+        type: "ERROR",
+        partId: "",
+        stationNo: machine?.operation_no || null,
+        machineId: machine?.id || null,
+        machineName: machine?.machine_name || null,
+        scannerId: scanner?.id || null,
+        scannerName: scanner?.scanner_name || null,
+        scannerRole: scanner?.scanner_role || null,
+        scannerIp,
+        qrStatus: "FAILED",
+        operationStatus: "BLOCKED",
+        status: "BLOCKED",
+        plcStatus: "BLOCKED",
+        reason: !partId ? "QR_PAYLOAD_EMPTY" : "QR_PAYLOAD_TOO_SHORT",
+        message,
+        timestamp: new Date().toISOString(),
+      });
+    }
+    return;
+  }
+
   if (!scanners.length) {
     const msg = `No active scanner mapping found for IP ${scannerIp}.`;
     console.warn(`[TCP] ${msg} Payload ignored: ${partId}`);
@@ -875,6 +904,7 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
   const isMappedCustomerQrScan =
     Boolean(resolvedCode.customerQrCode) && resolvedCode.customerQrCode === partId;
   const isCustomerQrOnlyStart =
+    effectiveScannerRole === "CUSTOMER_QR" &&
     !isMappedCustomerQrScan &&
     await canStartCustomerQrOnlyPart({ code: partId, stationNo, machine });
 
@@ -979,6 +1009,15 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
     skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart,
     skipSequenceValidation: isCustomerQrOnlyStart,
   });
+  const customerQrPending = scannerRole === "START_QR" && requiresCustomerQrForCompletion(machine) && !isCustomerQrOnlyStart;
+  if (response?.decision === "ALLOW" && customerQrPending) {
+    response.operationStatus = "WAITING_CUSTOMER_QR";
+    response.plcStatus = "WAITING_PLC";
+    response.status = "SCANNED";
+    response.reason = "WAITING_CUSTOMER_QR";
+    response.customerQrPending = true;
+    response.message = `QR PASS - Waiting for Customer QR at ${stationNo}`;
+  }
   if (response?.decision === "ALLOW" && isCustomerQrOnlyStart) {
     await markCustomerQrOnlyMapping({ code: scanPartId, machine, stationNo });
     const finalized = await finalizeCustomerQrMappingIfEligible({
@@ -1006,13 +1045,19 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
     scannerRole,
     scannerIp,
     decision: response?.decision || "BLOCK",
-    reason: isCustomerQrOnlyStart && response?.decision === "ALLOW" ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || null),
-    status: response?.decision === "ALLOW" ? "SCANNED" : "BLOCKED",
+    reason: isCustomerQrOnlyStart && response?.decision === "ALLOW"
+      ? "CUSTOMER_QR_ONLY_STARTED"
+      : (customerQrPending && response?.decision === "ALLOW" ? "WAITING_CUSTOMER_QR" : (response?.reason || null)),
+    status: response?.decision === "ALLOW" ? (customerQrPending ? "WAITING" : "SCANNED") : "BLOCKED",
     qrStatus: response?.qrStatus || (response?.decision === "ALLOW" ? "PASSED" : "FAILED"),
-    operationStatus: response?.operationStatus || (response?.decision === "ALLOW" ? "WAITING" : "BLOCKED"),
+    operationStatus: response?.operationStatus || (response?.decision === "ALLOW" ? (customerQrPending ? "WAITING_CUSTOMER_QR" : "WAITING") : "BLOCKED"),
+    customerQrPending,
+    customerQrMapped: Boolean(isCustomerQrOnlyStart && response?.decision === "ALLOW"),
     message: isCustomerQrOnlyStart && response?.decision === "ALLOW"
       ? "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station."
-      : (response?.message || ""),
+      : (customerQrPending && response?.decision === "ALLOW"
+        ? `QR PASS - Waiting for Customer QR at ${stationNo}`
+        : (response?.message || "")),
     timestamp: new Date().toISOString(),
   });
 
@@ -1031,13 +1076,19 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
     scannerRole,
     scannerIp,
     qrStatus: response?.qrStatus || (response?.decision === "ALLOW" ? "PASSED" : "FAILED"),
-    operationStatus: response?.operationStatus || (response?.decision === "ALLOW" ? "WAITING" : "BLOCKED"),
-    status: response?.decision === "ALLOW" ? "SCANNED" : "BLOCKED",
-    plcStatus: response?.decision === "ALLOW" ? "WAITING_PLC" : "BLOCKED",
-    reason: isCustomerQrOnlyStart && response?.decision === "ALLOW" ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || null),
+    operationStatus: response?.operationStatus || (response?.decision === "ALLOW" ? (customerQrPending ? "WAITING_CUSTOMER_QR" : "WAITING") : "BLOCKED"),
+    status: response?.decision === "ALLOW" ? (customerQrPending ? "WAITING" : "SCANNED") : "BLOCKED",
+    plcStatus: response?.decision === "ALLOW" ? (customerQrPending ? "WAITING_PLC" : "WAITING_PLC") : "BLOCKED",
+    reason: isCustomerQrOnlyStart && response?.decision === "ALLOW"
+      ? "CUSTOMER_QR_ONLY_STARTED"
+      : (customerQrPending && response?.decision === "ALLOW" ? "WAITING_CUSTOMER_QR" : (response?.reason || null)),
+    customerQrPending,
+    customerQrMapped: Boolean(isCustomerQrOnlyStart && response?.decision === "ALLOW"),
     message: isCustomerQrOnlyStart && response?.decision === "ALLOW"
       ? "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station."
-      : (response?.message || ""),
+      : (customerQrPending && response?.decision === "ALLOW"
+        ? `QR PASS - Waiting for Customer QR at ${stationNo}`
+        : (response?.message || "")),
     timestamp: new Date().toISOString(),
   });
 }
