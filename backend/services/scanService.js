@@ -1473,6 +1473,8 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       scan_attempt_type: scanAttemptType,
       validation_result: "PASSED",
       operation_result: "WAITING",
+      result_source: resultSource,
+      result_input: options?.resultInput || null,
       user_id: userId,
       interlock_reason: null,
     });

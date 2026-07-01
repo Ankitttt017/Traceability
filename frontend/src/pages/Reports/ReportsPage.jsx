@@ -487,6 +487,7 @@ const ReportsPage = () => {
     const dynamicRows = Array.from(grouped.values()).map((entries, idx) => {
       const first = entries[0] || {};
       const partKey = String(first.partId || first.part_id || first.barcode || first.shot_uid || `row_${idx}`).trim();
+      const displayPartId = String(first.displayPartId || first.display_part_id || "").trim();
       const stationResults = {};
       const stationDisplayValues = {};
       const operationResults = {};
@@ -548,7 +549,7 @@ const ReportsPage = () => {
       const shaped = {
         srNo: ((Number(data.pagination?.page || 1) - 1) * Number(data.pagination?.pageSize || sourceRows.length || 0)) + idx + 1,
         plc_shot_number: plcData.shot_number ?? first.shot_number ?? first.shotNumber ?? "-",
-        barcode: partKey || "â€”",
+        barcode: displayPartId || partKey || "-",
         plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
         partName: plcPartDie.partName || first.partName || first.modelName || first.componentName || "-",

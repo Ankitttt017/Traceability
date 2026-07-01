@@ -804,7 +804,21 @@ const GlobalPopup = ({
   // Prefer locally validated QR immediately so strip/panel update without waiting socket partId
   const effectivePartId = localValidatedPartIdRef.current || partId || lastScannedCode;
   const customerQrCode = String(popup?.customerQrCode || popup?.customer_qr || "").trim();
-  const displayedScanCode = lastScannedCode || customerQrCode || effectivePartId;
+  const qrFormatName = String(popup?.qrFormatName || popup?.qr_format_name || "").trim().toUpperCase();
+  const popupReason = String(popup?.reason || "").trim().toUpperCase();
+  const isCustomerQrOnlyScan =
+    qrFormatName === "CUSTOMER_QR_ONLY" ||
+    Boolean(customerQrCode && partId && customerQrCode.toUpperCase() === partId.toUpperCase());
+  const hasMappedCustomerQr =
+    Boolean(customerQrCode) &&
+    (
+      isCustomerQrOnlyScan ||
+      customerQrCode.toUpperCase() !== String(partId || effectivePartId || "").trim().toUpperCase() ||
+      popupReason === "CUSTOMER_QR_MAPPED"
+    );
+  const displayInternalPartId = isCustomerQrOnlyScan ? "-" : (effectivePartId || "-");
+  const displayedScanCode = hasMappedCustomerQr ? customerQrCode : (effectivePartId || lastScannedCode);
+  const displayedScanLabel = hasMappedCustomerQr ? "Scanned Customer QR" : "Scanned Part ID";
 
   useEffect(() => {
     let isActive = true;
@@ -1761,7 +1775,7 @@ const GlobalPopup = ({
             <div className="flex items-center gap-2">
               {displayedScanCode && (
                 <div className="px-3 py-2 rounded-lg border border-amber-500/20 max-w-[420px] min-w-[180px]" style={{ background: "#0f172a" }} title={displayedScanCode}>
-                  <p className="text-[8px] font-bold uppercase tracking-wider text-slate-400">Scanned QR</p>
+                  <p className="text-[8px] font-bold uppercase tracking-wider text-slate-400">{displayedScanLabel}</p>
                   <p className="font-mono text-m font-black text-amber-400 break-all leading-tight">{displayedScanCode}</p>
                 </div>
               )}
@@ -1833,7 +1847,7 @@ const GlobalPopup = ({
           {displayedScanCode && !isNextPartState && (
             <div className={`mb-2 px-3 py-2 rounded-lg border shadow-sm flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 ${qrStripTheme.container}`}>
               <span className={`text-[15px] font-bold uppercase tracking-wider whitespace-nowrap ${qrStripTheme.label}`}>
-                Scanned QR
+                {displayedScanLabel}
               </span>
               <div className="flex-1 min-w-0 text-center overflow-hidden">
                 <span className={`font-bold text-m tracking-wide text-black break-all sm:truncate ${qrStripTheme.value}`}>
@@ -2001,12 +2015,18 @@ const GlobalPopup = ({
 
               {displayedScanCode && (
                 <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-3 text-center shadow-sm">
-                  <p className="text-[11px] font-black uppercase tracking-[0.2em] text-amber-700">Scanned Customer QR</p>
+                  <p className="text-[11px] font-black uppercase tracking-[0.2em] text-amber-700">{displayedScanLabel}</p>
                   <p className="mt-1 break-all font-mono text-2xl font-black text-slate-950 sm:text-3xl">
                     {displayedScanCode}
                   </p>
-                  {effectivePartId && effectivePartId !== displayedScanCode && (
-                    <p className="mt-2 text-[10px] font-bold text-slate-500">Internal Part ID: <span className="font-mono">{effectivePartId}</span></p>
+                  {hasMappedCustomerQr && effectivePartId && effectivePartId !== displayedScanCode && (
+                    <p className="mt-2 text-[10px] font-bold text-slate-500">Internal Part ID: <span className="font-mono">{displayInternalPartId}</span></p>
+                  )}
+                  {isCustomerQrOnlyScan && (
+                    <p className="mt-2 text-[10px] font-bold text-slate-500">Part ID: <span className="font-mono">-</span></p>
+                  )}
+                  {!hasMappedCustomerQr && effectivePartId && !isCustomerQrOnlyScan && (
+                    <p className="mt-2 text-[10px] font-bold text-slate-500">Customer QR: <span className="font-mono">Waiting</span></p>
                   )}
                 </div>
               )}

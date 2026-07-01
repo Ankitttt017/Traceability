@@ -552,6 +552,8 @@ const ComponentJourney = () => {
     [machines, filters.plantId]
   );
   const stationTimeline = useMemo(()=>journeyData?.stationTimeline||[],[journeyData?.stationTimeline]);
+  const selectedPartDisplayId = selectedPart?.displayPartId || journeyData?.part?.displayPartId || selectedPartId || "";
+  const selectedCustomerQrCode = selectedPart?.customerQrCode || journeyData?.part?.customerQrCode || "";
   const statusSummary   = useMemo(()=>stationTimeline.reduce((acc,st)=>{
     const s=String(getJourneyStationState(st, qrByStation[st.stationNo], getStationFeatures(st.stationNo, stationSettings))||"").toUpperCase();
     if (s==="PASSED" || s==="COMPLETED") acc.passed++;
@@ -1208,6 +1210,7 @@ const ComponentJourney = () => {
             {parts.map(part=>{
               const active = selectedPartId===part.partId;
               const meta   = getPartMeta(part.status);
+              const visiblePartId = part.displayPartId || part.partId || "-";
               return (
                 <div key={part.partId} style={{
                   borderRadius:10,
@@ -1238,7 +1241,7 @@ const ComponentJourney = () => {
                         color:active?C.navy():C.txt("primary"),
                         wordBreak:"break-all",lineHeight:1.35,flex:1,
                       }}>
-                        {part.partId}
+                        {visiblePartId}
                       </span>
                       {active&&(
                         <ChevronRight size={13} color={C.amber()} style={{flexShrink:0,marginTop:1}}/>
@@ -1295,15 +1298,25 @@ const ComponentJourney = () => {
 
           <SectionHead
             subtitle="Station Timeline"
-            title={selectedPartId||"Select a part from the list"}
+            title={selectedPartId ? selectedPartDisplayId : "Select a part from the list"}
             accent
             right={
-              selectedPart?.currentStation&&(
+              selectedPart&&(
                 <div style={{display:"flex",alignItems:"center",gap:8}}>
-                  <Zap size={12} color={C.amber()}/>
-                  <span style={{fontSize:11,fontWeight:700,color:C.amber()}}>
-                    {selectedPart.currentStation}
-                  </span>
+                  {selectedCustomerQrCode && (
+                    <span style={{fontSize:10,fontWeight:800,color:C.info(),
+                      background:C.info(0.12),padding:"2px 6px",borderRadius:5}}>
+                      Customer QR: {selectedCustomerQrCode}
+                    </span>
+                  )}
+                  {selectedPart.currentStation && (
+                    <>
+                      <Zap size={12} color={C.amber()}/>
+                      <span style={{fontSize:11,fontWeight:700,color:C.amber()}}>
+                        {selectedPart.currentStation}
+                      </span>
+                    </>
+                  )}
                 </div>
               )
             }

@@ -150,6 +150,19 @@ async function saveCustomerQrOnlyStart({ code, stationNo, machine, userId = null
   });
   if (response?.decision === "ALLOW") {
     await markCustomerQrOnlyMapping({ code, machine, stationNo: station });
+    const finalized = await finalizeCustomerQrMappingIfEligible({
+      partId: code,
+      stationNo: station,
+      machine,
+      userId,
+      stationFeatures: await getStationFeatureConfig(station).catch(() => null),
+    });
+    if (finalized?.finalized) {
+      response.operationStatus = "ENDED_OK";
+      response.plcStatus = "ENDED_OK";
+      response.status = "ENDED_OK";
+      response.message = "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station.";
+    }
   }
   return response;
 }
@@ -786,6 +799,9 @@ async function resolveActivePartIdForMachine(machine, stationNo) {
   const machineRunningStation = normalizeStation(machine.running_station_no);
   const targetStation = normalizeStation(stationNo);
   const activeStatuses = ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING"];
+  const mappingCandidateStatuses = requiresCustomerQrForCompletion(machine)
+    ? [...activeStatuses, "ENDED_OK"]
+    : activeStatuses;
   const freshCutoff = new Date(Date.now() - CUSTOMER_QR_ACTIVE_WINDOW_MS);
 
   if (machineRunningPartId && (!targetStation || !machineRunningStation || machineRunningStation === targetStation)) {
@@ -794,7 +810,8 @@ async function resolveActivePartIdForMachine(machine, stationNo) {
         part_id: machineRunningPartId,
         machine_id: machine.id,
         ...(targetStation ? { station_no: targetStation } : {}),
-        plc_status: { [Op.in]: activeStatuses },
+        plc_status: { [Op.in]: mappingCandidateStatuses },
+        result: "OK",
         updatedAt: { [Op.gte]: freshCutoff },
       },
       attributes: ["id", "part_id"],
@@ -809,7 +826,8 @@ async function resolveActivePartIdForMachine(machine, stationNo) {
     where: {
       machine_id: machine.id,
       ...(targetStation ? { station_no: targetStation } : {}),
-      plc_status: { [Op.in]: activeStatuses },
+      plc_status: { [Op.in]: mappingCandidateStatuses },
+      result: "OK",
       updatedAt: { [Op.gte]: freshCutoff },
     },
     attributes: ["id", "part_id", "updatedAt"],
@@ -3031,8 +3049,28 @@ exports.getPartJourney = async (req, res) => {
       };
     });
 
+    const mappedCustomerQrForPart = customerQrByPartId[String(partId || "").trim().toUpperCase()] || null;
+    const isCustomerQrOnlyPart =
+      String(part?.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ||
+      Boolean(mappedCustomerQrForPart && String(mappedCustomerQrForPart).trim().toUpperCase() === String(partId || "").trim().toUpperCase());
+    const partPayload = part
+      ? {
+          ...part.get({ plain: true }),
+          displayPartId: isCustomerQrOnlyPart ? "-" : String(part.part_id || partId || "").trim(),
+          isCustomerQrOnly: isCustomerQrOnlyPart,
+          customerQrCode: mappedCustomerQrForPart,
+        }
+      : {
+          part_id: partId,
+          status: "UNKNOWN",
+          current_station: null,
+          displayPartId: isCustomerQrOnlyPart ? "-" : String(partId || "").trim(),
+          isCustomerQrOnly: isCustomerQrOnlyPart,
+          customerQrCode: mappedCustomerQrForPart,
+        };
+
     res.json({
-      part,
+      part: partPayload,
       sequence: knownStations,
       expectedNextStation,
       journey,
@@ -3199,6 +3237,8 @@ exports.getPartCatalog = async (req, res) => {
         const machine = latest ? machineMap[latest.machine_id] || null : null;
         return {
           partId: part.part_id,
+          displayPartId: String(part.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ? "-" : part.part_id,
+          isCustomerQrOnly: String(part.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT,
           status: part.status,
           currentStation: part.current_station,
           currentOperation: part.current_operation,
@@ -3839,6 +3879,19 @@ exports.processScan = async (req, res) => {
     });
     if (response?.decision === "ALLOW" && isCustomerQrOnlyStart) {
       await markCustomerQrOnlyMapping({ code: normalizedPartId, machine, stationNo: normalizedStation });
+      const finalized = await finalizeCustomerQrMappingIfEligible({
+        partId: normalizedPartId,
+        stationNo: normalizedStation,
+        machine,
+        userId: req.user?.id,
+        stationFeatures,
+      });
+      if (finalized?.finalized) {
+        response.operationStatus = "ENDED_OK";
+        response.plcStatus = "ENDED_OK";
+        response.status = "ENDED_OK";
+        response.message = "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station.";
+      }
     }
     if (response?.decision === "ALLOW" && response?.operationLogId) {
       await safeRecordTimeline({
@@ -4307,6 +4360,19 @@ exports.verifyScanForOperator = async (req, res) => {
     });
     if (response?.decision === "ALLOW" && isCustomerQrOnlyStart) {
       await markCustomerQrOnlyMapping({ code: finalPartId, machine, stationNo });
+      const finalized = await finalizeCustomerQrMappingIfEligible({
+        partId: finalPartId,
+        stationNo,
+        machine,
+        userId: req.user?.id,
+        stationFeatures,
+      });
+      if (finalized?.finalized) {
+        response.operationStatus = "ENDED_OK";
+        response.plcStatus = "ENDED_OK";
+        response.status = "ENDED_OK";
+        response.message = "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station.";
+      }
     }
     if (response?.decision === "ALLOW" && response?.operationLogId) {
       await safeRecordTimeline({
@@ -7154,6 +7220,10 @@ async function getDashboardExportRows(filters) {
     const machine = machineMap[row.machine_id] || {};
     const part = partMap[row.part_id] || {};
     const qrFormatName = String(part.qr_format_name || "").trim();
+    const customerQrCode = customerQrByPartId[String(row.part_id || "").trim().toUpperCase()] || "";
+    const isCustomerQrOnlyRow =
+      qrFormatName.toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ||
+      Boolean(customerQrCode && String(customerQrCode).trim().toUpperCase() === String(row.part_id || "").trim().toUpperCase());
     const modelCode = modelByFormat[qrFormatName] || "";
     const status = deriveOperationStatus(row);
     const result = normalizeResultToken(row.result);
@@ -7172,8 +7242,8 @@ async function getDashboardExportRows(filters) {
       : null;
 
     return {
-      partId: row.part_id || "",
-      customerQrCode: customerQrByPartId[String(row.part_id || "").trim().toUpperCase()] || "",
+      partId: isCustomerQrOnlyRow ? "-" : (row.part_id || ""),
+      customerQrCode,
       modelCode,
       qrFormatName,
       machineName: machine.machine_name || "",
