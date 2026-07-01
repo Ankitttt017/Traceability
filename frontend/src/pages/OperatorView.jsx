@@ -1269,8 +1269,15 @@ const OperatorView = () => {
   const mergePopupPayload = useCallback((payload = {}) => {
     if (!isPayloadForActiveMachine(payload)) return;
     setPopup(prev => {
-      const nextPartId = payload.partId || payload.part_id || prev?.partId || "";
-      const nextStationNo = resolvePopupStationNo(payload) || prev?.stationNo || "";
+      const explicitPartId = Object.prototype.hasOwnProperty.call(payload, "partId") || Object.prototype.hasOwnProperty.call(payload, "part_id");
+      const rawPartId = payload.partId !== undefined ? payload.partId : payload.part_id;
+      const nextPartId = explicitPartId
+        ? String(rawPartId || "").trim()
+        : String(payload.partId || payload.part_id || prev?.partId || "").trim();
+      const explicitStationNo = Object.prototype.hasOwnProperty.call(payload, "stationNo") || Object.prototype.hasOwnProperty.call(payload, "station_no") || Object.prototype.hasOwnProperty.call(payload, "sourceStationNo") || Object.prototype.hasOwnProperty.call(payload, "source_station_no");
+      const nextStationNo = explicitStationNo
+        ? resolvePopupStationNo(payload)
+        : (resolvePopupStationNo(payload) || prev?.stationNo || "");
       const nextType = payload.type || prev?.type || "";
       const prevPartId = prev?.partId || prev?.part_id || "";
       const prevStationNo = prev?.stationNo || prev?.station_no || "";
@@ -1290,15 +1297,19 @@ const OperatorView = () => {
         !isDowngradeToWait &&
         (iplcS !== "WAIT" || !pplcS || pplcS === "WAIT" || rl);
       return {
-        ...prev, ...(payload.type && { type: payload.type }), ...(payload.title && { title: payload.title }),
-        ...(applyQr && { qrResult: iqr }), ...(applyPlc && { plcStatus: iplc }),
+        ...prev,
+        ...(payload.type && { type: payload.type }),
+        ...(payload.title && { title: payload.title }),
+        ...(applyQr && { qrResult: iqr }),
+        ...(applyPlc && { plcStatus: iplc }),
         ...(payload.operationStatus && { operationStatus: payload.operationStatus }),
         ...(payload.status && { status: payload.status }),
-        ...(payload.message && { message: payload.message }), ...(payload.reason && { reason: payload.reason }),
+        ...(payload.message && { message: payload.message }),
+        ...(payload.reason && { reason: payload.reason }),
         ...(payload.expectedStation && { expectedStation: payload.expectedStation }),
         ...(payload.lastCompletedStation && { lastCompletedStation: payload.lastCompletedStation }),
-        ...((payload.partId || payload.part_id) && { partId: payload.partId || payload.part_id }),
-        ...(resolvePopupStationNo(payload) && { stationNo: resolvePopupStationNo(payload) }),
+        ...(explicitPartId ? { partId: nextPartId } : (nextPartId ? { partId: nextPartId } : {})),
+        ...(explicitStationNo ? { stationNo: nextStationNo } : (nextStationNo ? { stationNo: nextStationNo } : {})),
         ...((payload.machineId || payload.machine_id) && { machineId: payload.machineId || payload.machine_id }),
         ...(payload.machineName && { machineName: payload.machineName }),
         ...((payload.partName || payload.part_name) && { partName: payload.partName || payload.part_name }),
