@@ -3974,6 +3974,13 @@ exports.processScan = async (req, res) => {
 
     const qrStatus = response.qrStatus || (response.decision === "ALLOW" ? "PASSED" : "FAILED");
     const operationStatus = response.operationStatus || (response.decision === "ALLOW" ? "WAITING" : "BLOCKED");
+    const customerQrPending = response.decision === "ALLOW" && scannerRole === "START_QR" && hasCustomerQrScanner;
+    if (customerQrPending) {
+      response.operationStatus = "WAITING_CUSTOMER_QR";
+      response.reason = "WAITING_CUSTOMER_QR";
+      response.customerQrPending = true;
+      response.message = `QR PASS - Waiting for Customer QR at ${normalizedStation}`;
+    }
 
     emitOperatorPopup(response.decision === "ALLOW" ? "INFO" : "ERROR", {
       partId: normalizedPartId,
@@ -3981,14 +3988,15 @@ exports.processScan = async (req, res) => {
       machineId: machine.id,
       machineName: getModelValue(machine, "machine_name"),
       qrStatus,
-      operationStatus,
+      operationStatus: customerQrPending ? "WAITING_CUSTOMER_QR" : operationStatus,
       status: response.decision === "ALLOW" ? "SCANNED" : "BLOCKED",
       plcStatus: response.decision === "ALLOW" ? "WAITING_PLC" : "BLOCKED",
-      reason: response.reason || null,
+      reason: customerQrPending ? "WAITING_CUSTOMER_QR" : (response.reason || null),
+      customerQrPending,
       expectedStation: response.expectedStation || null,
       lastCompletedStation: response.lastCompletedStation || null,
       message: response.decision === "ALLOW"
-        ? `QR PASS - Starting ${normalizedStation}`
+        ? (customerQrPending ? `QR PASS - Waiting for Customer QR at ${normalizedStation}` : `QR PASS - Starting ${normalizedStation}`)
         : getBlockedPopupMessage(response),
     });
 
