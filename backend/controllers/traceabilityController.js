@@ -76,6 +76,7 @@ const CUSTOMER_QR_ACTIVE_WINDOW_MS = Math.max(
   Number(process.env.CUSTOMER_QR_ACTIVE_WINDOW_MS || 10 * 60 * 1000),
   30 * 1000
 );
+const CUSTOMER_QR_ONLY_FORMAT = "CUSTOMER_QR_ONLY";
 
 function normalizeStation(value) {
   return String(value || "")
@@ -151,6 +152,39 @@ async function saveCustomerQrOnlyStart({ code, stationNo, machine, userId = null
     await markCustomerQrOnlyMapping({ code, machine, stationNo: station });
   }
   return response;
+}
+
+async function isCustomerQrOnlyTracePart(partId, customerQrCode = "") {
+  const normalizedPartId = String(partId || "").trim();
+  const normalizedCustomerQr = String(customerQrCode || "").trim();
+  if (!normalizedPartId && !normalizedCustomerQr) return false;
+
+  const [part, mapping] = await Promise.all([
+    normalizedPartId
+      ? Part.findOne({
+          where: { part_id: normalizedPartId },
+          attributes: ["part_id", "qr_format_name"],
+        })
+      : null,
+    PartCodeMapping.findOne({
+      where: {
+        is_active: true,
+        [Op.or]: [
+          ...(normalizedPartId ? [{ old_part_id: normalizedPartId }, { customer_qr: normalizedPartId }] : []),
+          ...(normalizedCustomerQr ? [{ customer_qr: normalizedCustomerQr }, { old_part_id: normalizedCustomerQr }] : []),
+        ],
+      },
+      attributes: ["old_part_id", "customer_qr"],
+      order: [["updatedAt", "DESC"]],
+    }),
+  ]);
+
+  const formatName = String(part?.qr_format_name || "").trim().toUpperCase();
+  if (formatName === CUSTOMER_QR_ONLY_FORMAT) return true;
+
+  const mappedOldPartId = String(mapping?.old_part_id || "").trim();
+  const mappedCustomerQr = String(mapping?.customer_qr || "").trim();
+  return Boolean(mappedOldPartId && mappedCustomerQr && mappedOldPartId === mappedCustomerQr);
 }
 
 async function resolvePartIdSearchValues(inputCode) {
@@ -930,16 +964,27 @@ async function isAfterCustomerQrMappingStation(stationNo) {
 async function shouldBlockUnknownQrAfterLaser({ code, stationNo }) {
   const raw = String(code || "").trim();
   if (!raw) return false;
-  const [part, mapping] = await Promise.all([
-    Part.findOne({ where: { part_id: raw }, attributes: ["part_id"] }),
+  const afterCustomerQrStation = await isAfterCustomerQrMappingStation(stationNo);
+  if (!afterCustomerQrStation) return false;
+
+  const [mapping, successfulHistory] = await Promise.all([
     PartCodeMapping.findOne({
       where: { customer_qr: raw, is_active: true },
       attributes: ["id"],
       order: [["updatedAt", "DESC"]],
     }),
+    OperationLog.findOne({
+      where: {
+        part_id: raw,
+        result: "OK",
+        plc_status: { [Op.in]: ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "ENDED_OK", "PASSED", "COMPLETED_OK"] },
+      },
+      attributes: ["id"],
+      order: [["createdAt", "DESC"]],
+    }),
   ]);
-  if (part || mapping) return false;
-  return isAfterCustomerQrMappingStation(stationNo);
+  if (mapping || successfulHistory) return false;
+  return true;
 }
 
 async function unknownQrAfterLaserMessage(stationNo) {
@@ -3511,8 +3556,8 @@ exports.processScan = async (req, res) => {
             operationStatus: response?.operationStatus || (allowed ? "WAITING" : "BLOCKED"),
             reason: allowed ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || "CUSTOMER_QR_ONLY_BLOCKED"),
             message: allowed
-              ? "Customer QR-only part started. Continue normal process."
-              : (response?.message || "Customer QR-only start blocked."),
+              ? "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station."
+              : (response?.message || "Customer QR start blocked."),
           });
           return res.status(allowed ? 200 : 409).json({
             ...response,
@@ -3520,8 +3565,8 @@ exports.processScan = async (req, res) => {
             decision: response?.decision || "BLOCK",
             reason: allowed ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || "CUSTOMER_QR_ONLY_BLOCKED"),
             message: allowed
-              ? "Customer QR-only part started. Continue normal process."
-              : (response?.message || "Customer QR-only start blocked."),
+              ? "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station."
+              : (response?.message || "Customer QR start blocked."),
             mapped: allowed,
             customerQrOnly: true,
             partId: scannedQrRaw,
@@ -3771,6 +3816,7 @@ exports.processScan = async (req, res) => {
     const validateDuplicateBarcode = stationFeatures.validateDuplicateBarcode !== false;
     const validateCustomerCode = stationFeatures.validateCustomerCode === true;
     const bypassState = machineBypassEnabled ? getMachineBypass(machine.id) : null;
+    const isCustomerQrOnlyTrace = isCustomerQrOnlyStart || await isCustomerQrOnlyTracePart(normalizedPartId, customerQrCode);
     const response = await saveScan(normalizedPartId, normalizedStation, finalResult, machine.id, req.user?.id, {
       ...(ngReason ? { ngReason } : {}),
       resultSource: isCustomerQrOnlyStart ? "CUSTOMER_QR_ONLY_START" : resultSource,
@@ -3785,7 +3831,7 @@ exports.processScan = async (req, res) => {
       customerCodePattern: stationFeatures.customerCodePattern || "",
       shotValidationPartId: normalizedPartId,
       skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateQrFormat,
-      skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !validateShotNumber,
+      skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyTrace || !validateShotNumber,
       skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
       skipInterlockValidation: skipAllBypassValidations,
       skipDuplicateValidation: false,
@@ -3982,8 +4028,8 @@ exports.verifyScanForOperator = async (req, res) => {
           operationStatus: response?.operationStatus || (allowed ? "WAITING" : "BLOCKED"),
           reason: allowed ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || "CUSTOMER_QR_ONLY_BLOCKED"),
           message: allowed
-            ? "Customer QR-only part started. Continue normal process."
-            : (response?.message || "Customer QR-only start blocked."),
+            ? "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station."
+            : (response?.message || "Customer QR start blocked."),
         });
         return res.status(allowed ? 200 : 409).json({
           ...response,
@@ -3991,8 +4037,8 @@ exports.verifyScanForOperator = async (req, res) => {
           decision: response?.decision || "BLOCK",
           reason: allowed ? "CUSTOMER_QR_ONLY_STARTED" : (response?.reason || "CUSTOMER_QR_ONLY_BLOCKED"),
           message: allowed
-            ? "Customer QR-only part started. Continue normal process."
-            : (response?.message || "Customer QR-only start blocked."),
+            ? "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station."
+            : (response?.message || "Customer QR start blocked."),
           mapped: allowed,
           customerQrOnly: true,
           partId: scannedQrRaw,
@@ -4238,6 +4284,7 @@ exports.verifyScanForOperator = async (req, res) => {
     const validateDuplicateBarcode = stationFeatures.validateDuplicateBarcode !== false;
     const validateCustomerCode = stationFeatures.validateCustomerCode === true;
     const bypassState = machineBypassEnabled ? getMachineBypass(machine.id) : null;
+    const isCustomerQrOnlyTrace = isCustomerQrOnlyStart || await isCustomerQrOnlyTracePart(finalPartId, customerQrCode);
     const response = await saveScan(finalPartId, stationNo, finalResult, machine.id, req.user?.id, {
       ...(ngReason ? { ngReason } : {}),
       resultSource: isCustomerQrOnlyStart ? "CUSTOMER_QR_ONLY_START" : resultSource,
@@ -4252,7 +4299,7 @@ exports.verifyScanForOperator = async (req, res) => {
       customerCodePattern: stationFeatures.customerCodePattern || "",
       shotValidationPartId: finalPartId,
       skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateQrFormat,
-      skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !validateShotNumber,
+      skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyTrace || !validateShotNumber,
       skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
       skipInterlockValidation: skipAllBypassValidations,
       skipDuplicateValidation: false,
