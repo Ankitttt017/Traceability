@@ -233,7 +233,13 @@ function normalizeOperationState(value) {
 }
 function makeEventIdentityKey(payload = {}) {
   const partId = normalizePartId(payload.partId || payload.part_id);
-  const stationNo = String(payload.stationNo || payload.station_no || "").trim().toUpperCase();
+  const stationNo = String(
+    payload.stationNo ||
+    payload.station_no ||
+    payload.sourceStationNo ||
+    payload.source_station_no ||
+    ""
+  ).trim().toUpperCase();
   const machineId = String(payload.machineId || payload.machine_id || "").trim();
   const decision = normalizeDecisionState(payload.qrResult || payload.qr_result || payload.decision || payload.qrStatus);
   const opState = normalizeOperationState(payload.operationStatus || payload.plcStatus || payload.plc_status || payload.status);
@@ -707,12 +713,25 @@ const OperatorView = () => {
       payload.station_no ||
       payload.sourceStationNo ||
       payload.source_station_no ||
+      ""
+    ).trim().toUpperCase();
+  }, []);
+
+  const resolvePopupStationCandidates = useCallback((payload = {}) => {
+    return [
+      payload.stationNo,
+      payload.station_no,
+      payload.sourceStationNo,
+      payload.source_station_no,
       payload.expectedStation ||
       payload.expected_station ||
       payload.lastCompletedStation ||
       payload.last_completed_station ||
       ""
-    ).trim().toUpperCase();
+    ]
+      .flat()
+      .map((value) => String(value || "").trim().toUpperCase())
+      .filter(Boolean);
   }, []);
 
   const qualitySummary = stationStats?.summary || { okCount: 0, ngCount: 0, interlockedCount: 0, inProgressCount: 0, processedCount: 0, accuracy: 0 };
@@ -1096,22 +1115,18 @@ const OperatorView = () => {
     if (!popupStationReady) return false;
     const payloadMachineId = String(payload.machineId || payload.machine_id || "").trim();
     const payloadStation = resolvePopupStationNo(payload);
+    const stationCandidates = resolvePopupStationCandidates(payload);
     const activeMachineId = String(selectedMachineIdRef.current || "").trim();
     const activeStation = String(selectedStationRef.current || "").trim().toUpperCase();
 
-    if (!payloadStation) return false;
-
-    if (payloadMachineId && payloadStation) {
-      return payloadMachineId === activeMachineId && payloadStation === activeStation;
-    }
     if (payloadMachineId) {
-      return payloadMachineId === activeMachineId;
+      if (payloadMachineId !== activeMachineId) return false;
+      if (!payloadStation) return true;
+      return payloadStation === activeStation || stationCandidates.includes(activeStation);
     }
-    if (payloadStation) {
-      return payloadStation === activeStation;
-    }
-    return false;
-  }, [popupStationReady, resolvePopupStationNo]);
+    if (!payloadStation && stationCandidates.length === 0) return false;
+    return payloadStation === activeStation || stationCandidates.includes(activeStation);
+  }, [popupStationReady, resolvePopupStationNo, resolvePopupStationCandidates]);
 
   const shouldIgnoreStartupPopup = useCallback((payload = {}) => {
     const now = Date.now();
@@ -1426,7 +1441,6 @@ const OperatorView = () => {
     socket.on("operator_popup", (p = {}) => {
       if (shouldSuppressPopupPayload(p) || isDuplicatePopupEvent(p)) return;
       if (!isPayloadForActiveMachine(p)) return;
-      processIncomingSocketScanEvent(p, "operator_popup");
       if (String(p.partId || p.part_id || "").trim()) {
         setSuppressReadyPopup(false);
       }
@@ -1434,6 +1448,7 @@ const OperatorView = () => {
         ? formatScanErrorMessage({ ...p, reason: p.reason || p.qrReason }, t)
         : p.message;
       mergePopupPayload({ ...p, ...(nm ? { message: nm } : {}) });
+      processQrSignal(p);
       scheduleLiveRefresh();
     });
     socket.on("dashboard_refresh", () => scheduleLiveRefresh());

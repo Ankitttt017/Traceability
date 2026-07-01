@@ -757,7 +757,7 @@ const GlobalPopup = ({
 
   const socketPartId = String(popup?.partId || popup?.part_id || "").trim();
   const partId = socketPartId;
-  const stationNo = String(activeStation || popup?.stationNo || popup?.station_no || "").trim();
+  const stationNo = String(popup?.stationNo || popup?.station_no || activeStation || "").trim();
 
   // Reset manual state only when station changes (not on partId change — that would wipe localQrValidated)
   useEffect(() => {
