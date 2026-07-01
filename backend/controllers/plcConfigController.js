@@ -1,4 +1,5 @@
 const { Op } = require("sequelize");
+const sequelize = require("../config/db");
 const Machine = require("../models/Machine");
 const PlcRegisterRange = require("../models/PlcRegisterRange");
 
@@ -19,6 +20,17 @@ function toInt(value) {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+}
+
+async function ensureScopeColumns() {
+  await sequelize.query(`
+    IF COL_LENGTH('PlcRegisterRanges', 'plant_id') IS NULL
+      ALTER TABLE [PlcRegisterRanges] ADD [plant_id] INT NULL;
+  `);
+  await sequelize.query(`
+    IF COL_LENGTH('PlcRegisterRanges', 'line_id') IS NULL
+      ALTER TABLE [PlcRegisterRanges] ADD [line_id] INT NULL;
+  `);
 }
 
 function normalizeText(value) {
@@ -137,6 +149,8 @@ function resolveRangePayload(body = {}, existingRow = null) {
   );
 
   return {
+    plant_id: toInt(body.plantId ?? body.plant_id ?? existingRow?.plant_id),
+    line_id: toInt(body.lineId ?? body.line_id ?? existingRow?.line_id),
     range_name: rangeName,
     plc_name: normalizeText(body.plcName ?? body.plc_name ?? existingRow?.plc_name) || null,
     plc_ip: normalizeText(body.plcIp ?? body.plc_ip ?? existingRow?.plc_ip) || null,
@@ -164,6 +178,8 @@ function toRangeResponse(row, usage = {}) {
   const defaultRegisters = parseRowDefaultRegisters(row);
   return {
     id: row.id,
+    plantId: row.plant_id || null,
+    lineId: row.line_id || null,
     rangeName: row.range_name,
     plcName: row.plc_name,
     plcIp: row.plc_ip,
@@ -202,10 +218,12 @@ function getMachineRegisterUsageRows(machine) {
   }, []);
 }
 
-async function ensureNoOverlap({ rangeStart, rangeEnd, plcIp = null, plcPort = null, excludeId = null }) {
+async function ensureNoOverlap({ rangeStart, rangeEnd, plcIp = null, plcPort = null, plantId = null, lineId = null, excludeId = null }) {
   const conflict = await PlcRegisterRange.findOne({
     where: {
       ...(excludeId ? { id: { [Op.ne]: excludeId } } : {}),
+      plant_id: plantId || null,
+      line_id: lineId || null,
       plc_ip: plcIp || null,
       plc_port: plcPort || null,
       range_start: { [Op.lte]: rangeEnd },
@@ -229,10 +247,17 @@ function csvCell(value) {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-exports.listRanges = async (_req, res) => {
+exports.listRanges = async (req, res) => {
   try {
+    await ensureScopeColumns();
+    const where = {};
+    const plantId = toInt(req.query.plantId ?? req.query.plant_id);
+    const lineId = toInt(req.query.lineId ?? req.query.line_id);
+    if (plantId) where.plant_id = plantId;
+    if (lineId) where.line_id = lineId;
     const [ranges, machines] = await Promise.all([
       PlcRegisterRange.findAll({
+        where,
         order: [["range_start", "ASC"]],
       }),
       Machine.findAll({
@@ -278,6 +303,7 @@ exports.listRanges = async (_req, res) => {
 
 exports.createRange = async (req, res) => {
   try {
+    await ensureScopeColumns();
     const payload = resolveRangePayload({
       ...req.body,
       updatedBy: req.user?.id || null,
@@ -287,6 +313,8 @@ exports.createRange = async (req, res) => {
       rangeEnd: payload.range_end,
       plcIp: payload.plc_ip,
       plcPort: payload.plc_port,
+      plantId: payload.plant_id,
+      lineId: payload.line_id,
     });
 
     const row = await PlcRegisterRange.create(payload);
@@ -298,6 +326,7 @@ exports.createRange = async (req, res) => {
 
 exports.updateRange = async (req, res) => {
   try {
+    await ensureScopeColumns();
     const id = toInt(req.params.id);
     if (!id) {
       return res.status(400).json({ error: "Invalid range id" });
@@ -321,6 +350,8 @@ exports.updateRange = async (req, res) => {
       rangeEnd: payload.range_end,
       plcIp: payload.plc_ip,
       plcPort: payload.plc_port,
+      plantId: payload.plant_id,
+      lineId: payload.line_id,
       excludeId: id,
     });
 

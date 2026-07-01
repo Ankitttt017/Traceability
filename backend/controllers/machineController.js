@@ -17,6 +17,7 @@ const {
   FILTERED_QR_SCANNER_INDEX,
   ensureMachineQrScannerUniqueness,
 } = require("../services/machineSchemaService");
+const { resolveLineForPayload } = require("../services/organizationService");
 
 function toInt(value) {
   if (value === undefined || value === null || value === "") return null;
@@ -341,11 +342,14 @@ function toMachineResponse(machine) {
   const plain = typeof machine?.get === "function" ? machine.get({ plain: true }) : machine;
   const { plcConfig, plcSignalMap, spcConfig } = buildParsedPlcSnapshot(plain);
   const bypass = getMachineBypass(plain.id);
+  const persistedBypassEnabled = plain.bypass_enabled === true;
   return {
     id: plain.id,
     machineNumber: plain.machine_number,
     machineName: plain.machine_name,
     machineType: plain.machine_type || "HPDC",
+    plantId: plain.plant_id || null,
+    lineId: plain.line_id || null,
     lineName: plain.line_name,
     sequenceNo: plain.sequence_no,
     operationNo: plain.operation_no,
@@ -387,7 +391,7 @@ function toMachineResponse(machine) {
     plcConfig,
     plcSignalMap,
     spcConfig,
-    machineBypassEnabled: Boolean(bypass?.enabled),
+    machineBypassEnabled: Boolean(bypass?.enabled || persistedBypassEnabled),
     machineBypassReason: bypass?.reason || null,
     machineBypassUpdatedAt: bypass?.updatedAt || null,
     createdAt: plain.createdAt,
@@ -421,7 +425,7 @@ async function ensureUniqueMachineNumber(seed, excludeId = null) {
   }
 }
 
-function normalizePayload(body = {}, existing = null) {
+async function normalizePayload(body = {}, existing = null) {
   const parsedExisting = existing ? buildParsedPlcSnapshot(existing).plcConfig : {};
   const cfgRaw = body.plcConfig && typeof body.plcConfig === "object" ? body.plcConfig : {};
   const normalizedProtocol = normalizeProtocol(body.plcProtocol ?? body.plc_protocol ?? existing?.plc_protocol ?? "TCP_TEXT");
@@ -461,10 +465,18 @@ function normalizePayload(body = {}, existing = null) {
   const spcConfig = normalizeSpcConfig(body.spcConfig || {});
   const plcSignalMap = normalizePlcSignalMap(body.plcSignalMap ?? body.plc_signal_map);
 
+  const resolvedLine = await resolveLineForPayload({
+    plantId: body.plantId ?? body.plant_id ?? existing?.plant_id,
+    lineId: body.lineId ?? body.line_id ?? existing?.line_id,
+    lineName: body.lineName ?? body.line_name ?? existing?.line_name,
+  });
+
   const payload = {
     machine_name: toText(body.machineName ?? body.machine_name ?? existing?.machine_name),
     machine_type: toText(body.machineType ?? body.machine_type ?? existing?.machine_type) || "HPDC",
-    line_name: toText(body.lineName ?? body.line_name ?? existing?.line_name) || "-",
+    plant_id: resolvedLine.plant_id,
+    line_id: resolvedLine.id,
+    line_name: resolvedLine.line_name,
     sequence_no: toInt(body.sequenceNo ?? body.sequence_no ?? existing?.sequence_no),
     operation_no: toText(body.operationNo ?? body.operation_no ?? existing?.operation_no).toUpperCase(),
     machine_ip: toText(body.machineIp ?? body.machine_ip ?? body.plcIp ?? body.plc_ip ?? existing?.machine_ip ?? existing?.plc_ip) || "0.0.0.0",
@@ -672,9 +684,14 @@ function resolveSignalMapEntry(machine, signalKey) {
   return parsedMap.find((row) => row.key === key) || null;
 }
 
-exports.getMachines = async (_req, res) => {
+exports.getMachines = async (req, res) => {
   try {
-    const rows = await Machine.findAll({ order: [["sequence_no", "ASC"], ["id", "ASC"]] });
+    const where = {};
+    const plantId = toInt(req.query.plantId ?? req.query.plant_id);
+    const lineId = toInt(req.query.lineId ?? req.query.line_id);
+    if (plantId) where.plant_id = plantId;
+    if (lineId) where.line_id = lineId;
+    const rows = await Machine.findAll({ where, order: [["sequence_no", "ASC"], ["id", "ASC"]] });
     res.json(rows.map((row) => toMachineResponse(row)));
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -695,7 +712,7 @@ exports.getMachineById = async (req, res) => {
 
 exports.createMachine = async (req, res) => {
   try {
-    const payload = normalizePayload(req.body);
+    const payload = await normalizePayload(req.body);
     if (!payload.machine_name || !payload.operation_no || payload.sequence_no === null) {
       return res.status(400).json({ error: "machineName, operationNo and sequenceNo are required" });
     }
@@ -735,7 +752,7 @@ exports.updateMachine = async (req, res) => {
     const existing = await Machine.findByPk(id);
     if (!existing) return res.status(404).json({ error: "Machine not found" });
 
-    const payload = normalizePayload(req.body, existing.get({ plain: true }));
+    const payload = await normalizePayload(req.body, existing.get({ plain: true }));
     if (!payload.machine_name || !payload.operation_no || payload.sequence_no === null) {
       return res.status(400).json({ error: "machineName, operationNo and sequenceNo are required" });
     }

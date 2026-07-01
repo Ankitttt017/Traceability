@@ -6,7 +6,6 @@ const StationFeatureSetting = require("../models/StationFeatureSetting");
 const QrFormatRule = require("../models/QrFormatRule");
 const PartCodeMapping = require("../models/PartCodeMapping");
 const { emitRealtime } = require("./realtimeService");
-const { testQrPattern } = require("../utils/qrRegex");
 const { getStationFeatureConfig } = require("./stationFeatureService");
 const { isMachineBypassEnabled } = require("./machineBypassService");
 const {
@@ -614,10 +613,30 @@ function uniqueStages(stages) {
 }
 
 async function getActiveQrRules() {
+  await ensureQrRuleScopeColumns();
   return QrFormatRule.findAll({
     where: { is_active: true },
     order: [["updatedAt", "DESC"]],
   });
+}
+
+async function ensureQrRuleScopeColumns() {
+  await sequelize.query(`
+    IF COL_LENGTH('QrFormatRules', 'plant_id') IS NULL
+      ALTER TABLE [QrFormatRules] ADD [plant_id] INT NULL;
+  `);
+  await sequelize.query(`
+    IF COL_LENGTH('QrFormatRules', 'line_id') IS NULL
+      ALTER TABLE [QrFormatRules] ADD [line_id] INT NULL;
+  `);
+  await sequelize.query(`
+    IF COL_LENGTH('QrFormatRules', 'part_name') IS NULL
+      ALTER TABLE [QrFormatRules] ADD [part_name] NVARCHAR(255) NULL;
+  `);
+  await sequelize.query(`
+    IF COL_LENGTH('QrFormatRules', 'die_name') IS NULL
+      ALTER TABLE [QrFormatRules] ADD [die_name] NVARCHAR(255) NULL;
+  `);
 }
 
 async function getStationValidationPlan() {
@@ -705,8 +724,11 @@ async function getLeaktestSequenceStateForPart(partId, sequence) {
 
   const mapping = await PartCodeMapping.findOne({
     where: {
-      old_part_id: normalizedPartId,
       is_active: true,
+      [Op.or]: [
+        { old_part_id: normalizedPartId },
+        { customer_qr: normalizedPartId },
+      ],
     },
     attributes: ["old_part_id", "customer_qr"],
     order: [["updatedAt", "DESC"]],
@@ -716,6 +738,7 @@ async function getLeaktestSequenceStateForPart(partId, sequence) {
   if (!customerQr) {
     return null;
   }
+  const effectivePartId = String(mapping?.old_part_id || normalizedPartId).trim();
 
   const machines = await Machine.findAll({
     where: {
@@ -730,13 +753,14 @@ async function getLeaktestSequenceStateForPart(partId, sequence) {
   }
 
   const index = await buildLeaktestIndex({
-    partIds: [normalizedPartId],
+    partIds: [effectivePartId],
     customerQrByPartId: {
-      [normalizedPartId.toUpperCase()]: customerQr,
+      [effectivePartId.toUpperCase()]: customerQr,
+      [effectivePartId]: customerQr,
     },
     machines,
   });
-  const reading = getLeaktestReadingForPartStation(index.byPartAndStation, normalizedPartId, LEAKTEST_OPERATION);
+  const reading = getLeaktestReadingForPartStation(index.byPartAndStation, effectivePartId, LEAKTEST_OPERATION);
   if (!reading) {
     return null;
   }
@@ -862,6 +886,62 @@ function isRuleApplicableToStation(rule, station) {
     return true;
   }
   return scopeSet.has(normalizeStation(station));
+}
+
+function normalizeRuleScopeToken(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function isRuleApplicableToMachine(rule, machine) {
+  if (!rule) return false;
+  const rulePlantId = Number(rule.plant_id || rule.plantId || 0);
+  const ruleLineId = Number(rule.line_id || rule.lineId || 0);
+  if (rulePlantId && Number(machine?.plant_id || machine?.plantId || 0) !== rulePlantId) return false;
+  if (ruleLineId && Number(machine?.line_id || machine?.lineId || 0) !== ruleLineId) return false;
+  return true;
+}
+
+function getRegexMatch(rule, value) {
+  try {
+    const pattern = new RegExp(rule.regex_pattern, "i");
+    return pattern.exec(String(value || "").trim());
+  } catch (_error) {
+    return null;
+  }
+}
+
+function isRulePartScopeMatch(rule, value, match) {
+  const expectedPart = normalizeRuleScopeToken(rule?.part_name || rule?.partName);
+  const expectedDie = normalizeRuleScopeToken(rule?.die_name || rule?.dieName);
+  if (!expectedPart && !expectedDie) return true;
+
+  const groups = match?.groups || {};
+  const candidates = [
+    value,
+    groups.partName,
+    groups.part_name,
+    groups.part,
+    groups.model,
+    groups.modelCode,
+    groups.model_code,
+  ].map(normalizeRuleScopeToken).filter(Boolean);
+  const dieCandidates = [
+    groups.dieName,
+    groups.die_name,
+    groups.die,
+    groups.cavity,
+    value,
+  ].map(normalizeRuleScopeToken).filter(Boolean);
+
+  if (expectedPart) {
+    const partOk = candidates.some((candidate) => candidate === expectedPart || candidate.includes(expectedPart));
+    if (!partOk) return false;
+  }
+  if (expectedDie) {
+    const dieOk = dieCandidates.some((candidate) => candidate === expectedDie || candidate.includes(`-${expectedDie}`) || candidate.endsWith(expectedDie));
+    if (!dieOk) return false;
+  }
+  return true;
 }
 
 function getRuleLabel(rule) {
@@ -1003,8 +1083,11 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
   }
 
   try {
+    const currentMachine = mId ? await Machine.findByPk(mId, { raw: true }) : null;
     const activeRules = await getActiveQrRules();
-    const applicableRules = activeRules.filter((rule) => isRuleApplicableToStation(rule, station));
+    const applicableRules = activeRules.filter((rule) =>
+      isRuleApplicableToStation(rule, station) && isRuleApplicableToMachine(rule, currentMachine)
+    );
     let matchedRule = null;
 
     if (!skipQrFormatValidation && applicableRules.length === 0) {
@@ -1020,7 +1103,8 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     if (!skipQrFormatValidation && applicableRules.length > 0) {
       for (const rule of applicableRules) {
         try {
-          if (testQrPattern(rule.regex_pattern, normalizedPartId)) {
+          const match = getRegexMatch(rule, normalizedPartId);
+          if (match && isRulePartScopeMatch(rule, normalizedPartId, match)) {
             matchedRule = rule;
             break;
           }

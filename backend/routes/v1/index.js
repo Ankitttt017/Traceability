@@ -15,6 +15,7 @@ const alarmRoutes = require("./alarmRoutes");
 const industrialRoutes = require("./industrialRoutes");
 const reportRoutes = require("./reportRoutes");
 const rejectionConfigRoutes = require("./rejectionConfigRoutes");
+const organizationRoutes = require("./organizationRoutes");
 
 const router = express.Router();
 
@@ -31,6 +32,7 @@ router.use("/parts", partRoutes); // GET /api/parts/:partId/journey
 router.use("/alarms", alarmRoutes);
 router.use("/reports", reportRoutes);
 router.use("/rejection-config", rejectionConfigRoutes);
+router.use("/organization", organizationRoutes);
 router.use(industrialRoutes);
 router.use(traceabilityRoutes);
 router.use(dashboardRoutes);

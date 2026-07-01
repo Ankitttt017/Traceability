@@ -1,7 +1,7 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/db");
 
-const QrFormatRule = sequelize.define("QrFormatRule", {
+const LinePartAssignment = sequelize.define("LinePartAssignment", {
   plant_id: {
     type: DataTypes.INTEGER,
     allowNull: true,
@@ -10,43 +10,42 @@ const QrFormatRule = sequelize.define("QrFormatRule", {
     type: DataTypes.INTEGER,
     allowNull: true,
   },
-  format_name: {
-    type: DataTypes.STRING,
+  machine_id: {
+    type: DataTypes.INTEGER,
     allowNull: true,
-    unique: true,
   },
-  model_code: {
+  die_casting_machine: {
     type: DataTypes.STRING,
     allowNull: true,
   },
   part_name: {
     type: DataTypes.STRING,
-    allowNull: true,
+    allowNull: false,
   },
   die_name: {
     type: DataTypes.STRING,
     allowNull: true,
   },
-  regex_pattern: {
-    type: DataTypes.STRING,
-    allowNull: false,
-  },
-  station_scope: {
+  display_label: {
     type: DataTypes.STRING,
     allowNull: true,
   },
-  sample_value: {
-    type: DataTypes.STRING,
-    allowNull: true,
-  },
-  description: {
-    type: DataTypes.STRING,
-    allowNull: true,
+  status: {
+    type: DataTypes.ENUM("ACTIVE", "INACTIVE"),
+    defaultValue: "ACTIVE",
   },
   is_active: {
     type: DataTypes.BOOLEAN,
-    defaultValue: false,
+    defaultValue: true,
   },
+}, {
+  tableName: "LinePartAssignments",
+  indexes: [
+    { fields: ["plant_id", "line_id"] },
+    { fields: ["part_name"] },
+    { fields: ["die_name"] },
+    { fields: ["die_casting_machine"] },
+  ],
 });
 
-module.exports = QrFormatRule;
+module.exports = LinePartAssignment;

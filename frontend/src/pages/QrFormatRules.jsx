@@ -1,7 +1,7 @@
 // QrFormatRules.jsx — QR Validation Engine (Fully Responsive)
 // Modes: SEGMENT (field-by-field builder) + REGEX (pattern with named groups)
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Plus, Save, Trash2, CheckCircle, AlertCircle, Scan, Edit2,
   RefreshCw, Info, X, Copy, Check, ChevronDown, ChevronRight,
@@ -10,8 +10,9 @@ import {
   HelpCircle, Clock, CalendarDays, MoveHorizontal, UserRound,
 } from "lucide-react";
 import toast from "react-hot-toast";
-import { qrFormatApi } from "../api/services";
+import { organizationApi, qrFormatApi } from "../api/services";
 import ConfirmModal from "../components/ConfirmModal";
+import PlantLineSelector from "../components/PlantLineSelector";
 
 /* ─── segment field catalog ─────────────────────────────── */
 const FIELD_TYPES = [
@@ -144,10 +145,14 @@ const parseGroups = (value, pattern) => {
 
 /* ─── empty form state ──────────────────────────────────── */
 const empty = {
-  formatName: "", modelCode: "", ruleType: "SEGMENT",
+  plantId: "", lineId: "", lineName: "", formatName: "", modelCode: "", ruleType: "SEGMENT",
+  partName: "", dieName: "",
   regexPattern: "", segments: [], separator: "",
   stationScope: "", sampleValue: "", description: "", isActive: true,
 };
+const normalizePartToken = (value) => String(value || "").trim().toUpperCase();
+const inputLightCls = "h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10";
+const labelLightCls = "mb-1.5 block text-[10px] font-black uppercase tracking-wider text-slate-400";
 
 /* ─── main component ────────────────────────────────────── */
 export default function QrFormatRules() {
@@ -161,6 +166,8 @@ export default function QrFormatRules() {
   const [deleteId, setDeleteId] = useState(null);
   const [copied, setCopied] = useState(null);
   const [filterStatus, setFilter] = useState("all");
+  const [scopeFilter, setScopeFilter] = useState({ plantId: "", lineId: "" });
+  const [organization, setOrganization] = useState({ plants: [], lines: [], parts: [] });
   const [previewId, setPreviewId] = useState(null);
   const [dragIndex, setDragIndex] = useState(null);
   const [tooltipField, setTooltipField] = useState(null);
@@ -171,7 +178,14 @@ export default function QrFormatRules() {
 
   const load = async () => {
     setLoading(true);
-    try { setRules((await qrFormatApi.list()) || []); }
+    try {
+      const [ruleRows, org] = await Promise.all([
+        qrFormatApi.list(),
+        organizationApi.context().catch(() => ({ plants: [], lines: [], parts: [] })),
+      ]);
+      setRules(ruleRows || []);
+      setOrganization({ plants: org?.plants || [], lines: org?.lines || [], parts: org?.parts || [] });
+    }
     catch { toast.error("Failed to load rules"); }
     finally { setLoading(false); }
   };
@@ -188,8 +202,13 @@ export default function QrFormatRules() {
       : [];
     setEditingId(rule.id);
     setForm({
+      plantId: String(rule.plantId || ""),
+      lineId: String(rule.lineId || ""),
+      lineName: rule.lineName || "",
       formatName: rule.formatName || "",
       modelCode: rule.modelCode || "",
+      partName: rule.partName || "",
+      dieName: rule.dieName || "",
       ruleType: rule.ruleType || "REGEX",
       regexPattern: rule.regexPattern || "",
       segments: segs.length ? segs : [],
@@ -208,6 +227,8 @@ export default function QrFormatRules() {
     setSaving(true);
     const payload = {
       ...form,
+      partName: normalizePartToken(form.partName),
+      dieName: normalizePartToken(form.dieName),
       regexPattern: liveRegex,
       segmentsJson: form.ruleType === "SEGMENT" ? JSON.stringify(form.segments) : null,
     };
@@ -282,14 +303,60 @@ export default function QrFormatRules() {
     toast.success("Copied");
   };
 
-  const visibleRules = rules.filter(r =>
-    filterStatus === "active" ? r.isActive :
-      filterStatus === "inactive" ? !r.isActive : true
+  const plantNameById = useMemo(
+    () => new Map((organization.plants || []).map((plant) => [String(plant.id), plant.plantName])),
+    [organization.plants]
   );
+  const lineNameById = useMemo(
+    () => new Map((organization.lines || []).map((line) => [String(line.id), line.lineName])),
+    [organization.lines]
+  );
+  const activePartAssignments = useMemo(() => (
+    (organization.parts || []).filter((part) => {
+      const active = String(part.status || "ACTIVE").toUpperCase() !== "INACTIVE" && part.isActive !== false;
+      const plantOk = !form.plantId || String(part.plantId || "") === String(form.plantId);
+      const lineOk = !form.lineId || String(part.lineId || "") === String(form.lineId);
+      return active && plantOk && lineOk;
+    })
+  ), [organization.parts, form.plantId, form.lineId]);
+  const formPartOptions = useMemo(() => (
+    [...new Set(activePartAssignments.map((part) => normalizePartToken(part.partName)).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+  ), [activePartAssignments]);
+  const formDieOptions = useMemo(() => (
+    [...new Set(activePartAssignments
+      .filter((part) => !form.partName || normalizePartToken(part.partName) === normalizePartToken(form.partName))
+      .map((part) => normalizePartToken(part.dieName))
+      .filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+  ), [activePartAssignments, form.partName]);
+  const formatScopeLabel = (row) => {
+    const plantName = row.plantId ? plantNameById.get(String(row.plantId)) || `Plant ${row.plantId}` : "";
+    const lineName = row.lineId ? lineNameById.get(String(row.lineId)) || row.lineName || `Line ${row.lineId}` : "";
+    if (plantName && lineName) return `${plantName} / ${lineName}`;
+    if (plantName) return plantName;
+    if (lineName) return lineName;
+    return "All Plants / All Lines";
+  };
+  const formatPartScopeLabel = (row) => {
+    const part = normalizePartToken(row.partName);
+    const die = normalizePartToken(row.dieName);
+    if (part && die) return `${part}-${die}`;
+    if (part) return part;
+    if (die) return `Die ${die}`;
+    return "All Parts";
+  };
+
+  const visibleRules = rules.filter((r) => {
+    const statusOk = filterStatus === "active" ? r.isActive : filterStatus === "inactive" ? !r.isActive : true;
+    const plantOk = !scopeFilter.plantId || String(r.plantId || "") === String(scopeFilter.plantId);
+    const lineOk = !scopeFilter.lineId || String(r.lineId || "") === String(scopeFilter.lineId);
+    return statusOk && plantOk && lineOk;
+  });
 
   // Responsive input classes
-  const inp = "w-full bg-bg-dark border border-border rounded-lg px-3 py-2 text-sm text-text-main outline-none focus:border-accent/60 focus:ring-1 focus:ring-accent/30 transition-all placeholder:text-text-muted/40";
-  const seg_inp = "bg-bg-dark border border-border rounded-md px-2 py-1.5 text-xs text-text-main outline-none focus:border-accent/60 focus:ring-1 focus:ring-accent/30 transition-all font-mono w-full";
+  const inp = "w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 outline-none transition-all placeholder:text-slate-400 focus:border-primary focus:ring-2 focus:ring-primary/10";
+  const seg_inp = "w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10 font-mono";
 
   return (
     <div className="space-y-4 md:space-y-5 px-3 sm:px-4 md:px-0 pb-8" style={{ fontFamily: "var(--font-outfit)" }}>
@@ -322,36 +389,68 @@ export default function QrFormatRules() {
       {/* Stat row - Responsive grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
         {[
-          { n: rules.length, lbl: "Total rules", icon: <Database size={14} />, col: "text-text-muted" },
-          { n: rules.filter(r => r.isActive).length, lbl: "Active", icon: <Shield size={14} />, col: "text-accent" },
-          { n: rules.filter(r => r.ruleType === "SEGMENT").length, lbl: "Segment", icon: <Sliders size={14} />, col: "text-blue-400" },
-          { n: rules.filter(r => r.ruleType !== "SEGMENT").length, lbl: "Regex", icon: <Code2 size={14} />, col: "text-purple-400" },
+          { n: rules.length, lbl: "Total rules", icon: <Database size={14} />, col: "text-slate-500", border: "border-l-slate-700" },
+          { n: rules.filter(r => r.isActive).length, lbl: "Active", icon: <Shield size={14} />, col: "text-emerald-700", border: "border-l-emerald-600" },
+          { n: rules.filter(r => r.ruleType === "SEGMENT").length, lbl: "Segment", icon: <Sliders size={14} />, col: "text-primary", border: "border-l-primary" },
+          { n: rules.filter(r => r.ruleType !== "SEGMENT").length, lbl: "Regex", icon: <Code2 size={14} />, col: "text-slate-600", border: "border-l-slate-400" },
         ].map(s => (
-          <div key={s.lbl} className="bg-bg-card border border-border rounded-xl p-3 sm:p-4 flex items-center gap-2 sm:gap-3">
+          <div key={s.lbl} className={`rounded-lg border border-slate-200 border-l-4 bg-white p-3 sm:p-4 flex items-center gap-2 sm:gap-3 shadow-sm ${s.border}`}>
             <span className={s.col}>{s.icon}</span>
             <div>
-              <p className="text-lg sm:text-xl font-bold text-text-main leading-none">{s.n}</p>
-              <p className="text-[8px] sm:text-[10px] text-text-muted mt-0.5">{s.lbl}</p>
+              <p className="text-lg sm:text-xl font-black text-slate-900 leading-none font-mono">{s.n}</p>
+              <p className="text-[8px] sm:text-[10px] font-black uppercase tracking-wider text-slate-400 mt-0.5">{s.lbl}</p>
             </div>
           </div>
         ))}
       </div>
 
       {/* Rules table - Horizontal scroll on mobile */}
-      <div className="bg-bg-card border border-border rounded-2xl overflow-hidden">
-        <div className="px-3 sm:px-5 py-3 border-b border-border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Scan size={14} className="text-primary" />
-            <span className="text-xs font-bold text-text-main uppercase tracking-wider">Validation rules</span>
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="px-3 sm:px-5 py-3 border-b border-border bg-white flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+          <div className="flex items-center justify-between gap-3 xl:self-center">
+            <div className="flex items-center gap-2">
+              <Scan size={14} className="text-primary" />
+              <span className="text-xs font-bold text-text-main uppercase tracking-wider">Validation rules</span>
+            </div>
+            <span className="rounded border border-border bg-slate-50 px-2 py-1 text-[9px] font-black uppercase tracking-widest text-slate-500 xl:hidden">
+              {visibleRules.length} Rule{visibleRules.length !== 1 ? "s" : ""}
+            </span>
           </div>
-          <div className="flex items-center gap-1">
-            {["all", "active", "inactive"].map(f => (
-              <button key={f} onClick={() => setFilter(f)}
-                className={`px-2 sm:px-3 py-1 rounded-lg text-[9px] sm:text-[10px] font-semibold uppercase tracking-wider transition-all
-                  ${filterStatus === f ? "bg-primary text-white" : "text-text-muted hover:text-text-main"}`}>
-                {f}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(320px,520px)_150px_auto] md:items-end">
+            <PlantLineSelector
+              value={scopeFilter}
+              onChange={setScopeFilter}
+              includeAll
+              compact
+              hideLabels
+              className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+              inputClassName="h-9 w-full rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
+            />
+            <div>
+              <select
+                value={filterStatus}
+                onChange={(e) => setFilter(e.target.value)}
+                className="h-9 w-full rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
+              >
+                <option value="all">All Status</option>
+                <option value="active">Active Only</option>
+                <option value="inactive">Inactive Only</option>
+              </select>
+            </div>
+            {(scopeFilter.plantId || scopeFilter.lineId) && (
+              <button
+                type="button"
+                onClick={() => setScopeFilter({ plantId: "", lineId: "" })}
+                className="h-9 rounded-md border border-border bg-white px-3 text-xs font-bold text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+              >
+                Clear Scope
               </button>
-            ))}
+            )}
+            {!scopeFilter.plantId && !scopeFilter.lineId && (
+              <span className="hidden rounded border border-border bg-slate-50 px-2 py-2 text-center text-[9px] font-black uppercase tracking-widest text-slate-500 md:block">
+                {visibleRules.length} Rule{visibleRules.length !== 1 ? "s" : ""}
+              </span>
+            )}
           </div>
         </div>
 
@@ -367,8 +466,8 @@ export default function QrFormatRules() {
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[500px]">
-              <thead className="bg-bg-dark/50 text-[9px] sm:text-[10px] font-semibold uppercase tracking-widest text-text-muted border-b border-border">
+            <table className="w-full text-sm min-w-[860px]">
+              <thead className="border-b border-slate-200 bg-slate-50 text-[9px] sm:text-[10px] font-black uppercase tracking-widest text-slate-400">
                 <tr>
                   <th className="px-3 sm:px-5 py-3 text-left">Rule</th>
                   <th className="px-3 sm:px-5 py-3 text-left">Mode</th>
@@ -383,15 +482,15 @@ export default function QrFormatRules() {
                     ? (() => { try { return JSON.parse(rule.segmentsJson); } catch { return []; } })()
                     : [];
                   return (
-                    <tr key={rule.id} className="hover:bg-bg-dark/20 transition-colors">
+                    <tr key={rule.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-3 sm:px-5 py-3 sm:py-4">
                         <div className="flex items-center gap-2">
                           <div className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full flex-shrink-0 ${rule.isActive ? "bg-accent" : "bg-text-muted/30"}`} />
                           <div>
-                            <p className={`font-semibold text-xs sm:text-sm ${rule.isActive ? "text-text-main" : "text-text-muted"}`}>
+                            <p className={`font-bold text-xs sm:text-sm ${rule.isActive ? "text-slate-900" : "text-slate-400"}`}>
                               {rule.formatName}
                             </p>
-                            <p className="text-[8px] sm:text-[10px] text-text-muted font-mono mt-0.5">{rule.modelCode || "GLOBAL"}</p>
+                            <p className="text-[8px] sm:text-[10px] text-slate-400 font-mono mt-0.5">{rule.modelCode || "GLOBAL"}</p>
                           </div>
                         </div>
                       </td>
@@ -423,10 +522,17 @@ export default function QrFormatRules() {
                         )}
                       </td>
                       <td className="px-3 sm:px-5 py-3 sm:py-4">
-                        {rule.stationScope
-                          ? <span className="px-1.5 sm:px-2 py-0.5 bg-primary/10 border border-primary/20 rounded text-[9px] sm:text-xs font-mono text-primary">{rule.stationScope}</span>
-                          : <span className="px-1.5 sm:px-2 py-0.5 bg-accent/10 border border-accent/20 rounded text-[9px] sm:text-xs font-semibold text-accent">All</span>
-                        }
+                        <div className="flex max-w-[240px] flex-col gap-1">
+                          <span className="w-fit rounded border border-accent/20 bg-accent/10 px-2 py-0.5 text-[9px] font-bold text-accent sm:text-xs">
+                            {formatScopeLabel(rule)}
+                          </span>
+                          <span className="w-fit rounded border border-slate-300 bg-white px-2 py-0.5 text-[9px] font-mono font-bold text-slate-700 sm:text-xs">
+                            {formatPartScopeLabel(rule)}
+                          </span>
+                          <span className="w-fit rounded border border-primary/20 bg-primary/10 px-2 py-0.5 text-[9px] font-mono text-primary sm:text-xs">
+                            {rule.stationScope || "All Stations"}
+                          </span>
+                        </div>
                       </td>
                       <td className="px-3 sm:px-5 py-3 sm:py-4 text-right">
                         <div className="flex items-center justify-end gap-0.5">
@@ -519,15 +625,15 @@ export default function QrFormatRules() {
         <div className="fixed inset-0 z-50 flex items-start justify-center p-2 sm:p-4 pt-8 sm:pt-10">
           <div className="absolute inset-0 bg-bg-dark/85 backdrop-blur-sm" onClick={resetForm} />
 
-          <div className="relative w-full max-w-full sm:max-w-4xl lg:max-w-5xl xl:max-w-6xl bg-bg-card border border-border/70 rounded-2xl shadow-2xl flex flex-col max-h-[95vh] sm:max-h-[90vh] m-2 sm:m-0">
+          <div className="relative w-full max-w-full sm:max-w-4xl lg:max-w-5xl xl:max-w-6xl bg-white border border-slate-200 rounded-xl shadow-2xl flex flex-col max-h-[95vh] sm:max-h-[90vh] m-2 sm:m-0">
 
             {/* Modal header */}
-            <div className="px-4 sm:px-6 py-4 sm:py-5 border-b border-border flex items-center justify-between flex-shrink-0">
+            <div className="px-4 sm:px-6 py-4 sm:py-5 border-b border-slate-200 bg-slate-50 flex items-center justify-between flex-shrink-0">
               <div>
-                <h2 className="font-bold text-text-main text-base sm:text-lg">{editingId ? "Edit rule" : "New validation rule"}</h2>
-                <p className="text-[10px] sm:text-xs text-text-muted mt-0.5">Define how this barcode is validated and parsed</p>
+                <h2 className="font-black text-slate-900 text-base sm:text-lg">{editingId ? "Edit rule" : "New validation rule"}</h2>
+                <p className="text-[10px] sm:text-xs text-slate-500 mt-0.5">Define how this barcode is validated and parsed</p>
               </div>
-              <button onClick={resetForm} className="p-1.5 sm:p-2 rounded-xl text-text-muted hover:text-text-main hover:bg-bg-dark transition-all">
+              <button onClick={resetForm} className="p-1.5 sm:p-2 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-white transition-all">
                 <X size={16} className="sm:size-[17]" />
               </button>
             </div>
@@ -535,22 +641,58 @@ export default function QrFormatRules() {
             {/* Scrollable body */}
             <form id="qr-form" onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5">
 
+              <PlantLineSelector
+                value={form}
+                onChange={(scope) => setForm((prev) => ({ ...prev, ...scope, partName: "", dieName: "" }))}
+                includeAll
+                compact
+                className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+                inputClassName={inputLightCls}
+                labelClassName={labelLightCls}
+              />
+
               {/* Basic info - Responsive grid */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
                 <div>
-                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Rule name *</label>
+                  <label className={labelLightCls}>Part name</label>
+                  <input
+                    list="qr-part-options"
+                    value={form.partName}
+                    onChange={e => setForm(p => ({ ...p, partName: normalizePartToken(e.target.value), dieName: "" }))}
+                    placeholder="OPK12 or blank = all"
+                    className={`${inp} font-mono`}
+                  />
+                  <datalist id="qr-part-options">
+                    {formPartOptions.map((partName) => <option key={partName} value={partName} />)}
+                  </datalist>
+                </div>
+                <div>
+                  <label className={labelLightCls}>Die name</label>
+                  <input
+                    list="qr-die-options"
+                    value={form.dieName}
+                    onChange={e => setForm(p => ({ ...p, dieName: normalizePartToken(e.target.value) }))}
+                    placeholder="S16 or blank = all"
+                    className={`${inp} font-mono`}
+                  />
+                  <datalist id="qr-die-options">
+                    {formDieOptions.map((dieName) => <option key={dieName} value={dieName} />)}
+                  </datalist>
+                </div>
+                <div>
+                  <label className={labelLightCls}>Rule name *</label>
                   <input required value={form.formatName}
                     onChange={e => setForm(p => ({ ...p, formatName: e.target.value }))}
                     placeholder="Engine head QR" className={inp} />
                 </div>
                 <div>
-                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Model code</label>
+                  <label className={labelLightCls}>Model code</label>
                   <input value={form.modelCode}
                     onChange={e => setForm(p => ({ ...p, modelCode: e.target.value.toUpperCase() }))}
                     placeholder="e.g. ENG-001" className={`${inp} font-mono`} />
                 </div>
                 <div>
-                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Station scope</label>
+                  <label className={labelLightCls}>Station scope</label>
                   <input value={form.stationScope}
                     onChange={e => setForm(p => ({ ...p, stationScope: e.target.value.toUpperCase() }))}
                     placeholder="OP010 or blank = all" className={`${inp} font-mono`} />
@@ -559,7 +701,7 @@ export default function QrFormatRules() {
 
               {/* Mode picker - Responsive */}
               <div>
-                <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-2">Validation mode</label>
+                <label className={labelLightCls}>Validation mode</label>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {[
                     {
@@ -580,13 +722,13 @@ export default function QrFormatRules() {
                     },
                   ].map(m => (
                     <button key={m.value} type="button" onClick={() => setForm(p => ({ ...p, ruleType: m.value }))}
-                      className={`p-3 sm:p-4 rounded-xl border text-left transition-all ${form.ruleType === m.value ? m.selCls : "border-border bg-bg-dark/20 hover:border-border/80"}`}>
-                      <div className={`flex items-center gap-2 mb-1.5 ${form.ruleType === m.value ? m.iconCls : "text-text-muted"}`}>
+                      className={`p-3 sm:p-4 rounded-lg border text-left transition-all ${form.ruleType === m.value ? "border-primary/40 bg-primary/5" : "border-slate-200 bg-white hover:border-slate-300"}`}>
+                      <div className={`flex items-center gap-2 mb-1.5 ${form.ruleType === m.value ? "text-primary" : "text-slate-400"}`}>
                         {m.icon}
-                        <span className="text-sm font-semibold text-text-main">{m.title}</span>
+                        <span className="text-sm font-bold text-slate-900">{m.title}</span>
                         {form.ruleType === m.value && <CheckCircle size={13} className="ml-auto" />}
                       </div>
-                      <p className="text-[11px] text-text-muted leading-relaxed">{m.desc}</p>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">{m.desc}</p>
                     </button>
                   ))}
                 </div>

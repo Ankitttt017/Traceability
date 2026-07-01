@@ -4,6 +4,7 @@ import { Cpu, Plus, Save, Trash2, RefreshCw, Download, AlertTriangle, Info, Penc
 import toast from "react-hot-toast";
 import ConfirmModal from "../components/ConfirmModal";
 import { plcConfigApi } from "../api/services";
+import PlantLineSelector from "../components/PlantLineSelector";
 
 const PROTO_OPTIONS = [
   { value: "MODBUS_TCP", label: "Modbus TCP" },
@@ -15,7 +16,7 @@ const PlcConfiguration = () => {
   const [ranges, setRanges] = useState([]);
   const [showAddModal, setShowAddModal] = useState(false);
   const [formData, setFormData] = useState({
-    plcName: "", plcIp: "", plcPort: "502", plcProtocol: "MODBUS_TCP", rangeInput: "",
+    plantId: "", lineId: "", lineName: "", plcName: "", plcIp: "", plcPort: "502", plcProtocol: "MODBUS_TCP", rangeInput: "",
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -72,7 +73,7 @@ const PlcConfiguration = () => {
         toast.success("Register block added successfully");
       }
       setShowAddModal(false);
-      setFormData({ plcName: "", plcIp: "", plcPort: "502", plcProtocol: "MODBUS_TCP", rangeInput: "" });
+      setFormData({ plantId: "", lineId: "", lineName: "", plcName: "", plcIp: "", plcPort: "502", plcProtocol: "MODBUS_TCP", rangeInput: "" });
       setEditingRangeId(null);
       await loadData();
     } catch (err) {
@@ -85,6 +86,9 @@ const PlcConfiguration = () => {
   const openEditModal = (range) => {
     setEditingRangeId(range.id);
     setFormData({
+      plantId: String(range.plantId || ""),
+      lineId: String(range.lineId || ""),
+      lineName: range.lineName || "",
       plcName: range.plcName || "",
       plcIp: range.plcIp || "",
       plcPort: String(range.plcPort ?? "502"),
@@ -133,6 +137,19 @@ const PlcConfiguration = () => {
         </div>
       </div>
 
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        {[
+          { label: "Register Blocks", value: ranges.length, tone: "text-primary" },
+          { label: "Active Blocks", value: ranges.filter((range) => range.status !== "INACTIVE").length, tone: "text-emerald-500" },
+          { label: "Assigned Machines", value: ranges.reduce((sum, range) => sum + Number(range.assignedMachineCount || 0), 0), tone: "text-text-main" },
+        ].map((item) => (
+          <div key={item.label} className="rounded-xl border border-border bg-bg-card p-3 shadow-sm">
+            <p className="text-[9px] font-black uppercase tracking-wider text-text-muted">{item.label}</p>
+            <p className={`mt-1 font-mono text-2xl font-black ${item.tone}`}>{item.value}</p>
+          </div>
+        ))}
+      </div>
+
       {/* Table */}
       <div className="bg-bg-card border border-border rounded-2xl overflow-hidden">
         <div className="px-5 py-4 border-b border-border flex justify-between bg-bg-dark/30 items-center">
@@ -146,10 +163,11 @@ const PlcConfiguration = () => {
           <div className="py-20 text-center text-text-muted">No register blocks yet. Click "Add Register Block".</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full min-w-[900px] text-sm">
               <thead className="bg-bg-dark/50 text-[10px] font-semibold uppercase tracking-widest text-text-muted border-b border-border">
                 <tr>
                   <th className="px-5 py-3 text-left">PLC Name</th>
+                  <th className="px-5 py-3 text-left">Scope</th>
                   <th className="px-5 py-3 text-left">Endpoint</th>
                   <th className="px-5 py-3 text-left">Protocol</th>
                   <th className="px-5 py-3 text-left">Range</th>
@@ -160,6 +178,9 @@ const PlcConfiguration = () => {
                 {ranges.map(r => (
                   <tr key={r.id} className="hover:bg-bg-dark/20 transition-colors group">
                     <td className="px-5 py-4 font-bold text-text-main">{r.plcName || "—"}</td>
+                    <td className="px-5 py-4 text-xs text-text-muted">
+                      {r.plantId || r.lineId ? `Plant ${r.plantId || "-"} / Line ${r.lineId || "-"}` : "Global"}
+                    </td>
                     <td className="px-5 py-4 font-mono text-black flex flex-col gap-0.5 text-xs"><span>{r.plcIp}</span><span className="text-text-muted">Port {r.plcPort}</span></td>
                     <td className="px-5 py-4">
                       <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-primary/10 text-black border border-primary/20 rounded-md">{r.plcProtocol}</span>
@@ -195,6 +216,15 @@ const PlcConfiguration = () => {
             </div>
 
             <form onSubmit={handleSubmit} className="p-6 space-y-5">
+              <PlantLineSelector
+                value={formData}
+                onChange={(scope) => setFormData((prev) => ({ ...prev, ...scope }))}
+                includeAll
+                compact
+                inputClassName="w-full bg-bg-dark border border-border rounded-2xl px-4 py-3 text-sm focus:border-primary outline-none"
+                labelClassName="block text-xs font-semibold text-text-muted mb-1.5"
+              />
+
               <div>
                 <label className="block text-xs font-semibold text-text-muted mb-1.5">PLC Friendly Name</label>
                 <input value={formData.plcName} onChange={e => updateField("plcName", e.target.value)}

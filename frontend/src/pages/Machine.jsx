@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import toast from "react-hot-toast";
 import ConfirmModal from "../components/ConfirmModal";
-import { machineApi, plcConfigApi, traceabilityApi } from "../api/services";
+import { machineApi, organizationApi, plcConfigApi, traceabilityApi } from "../api/services";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -42,14 +42,39 @@ const DATA_TYPES = [
 
 const MACHINE_TYPES = [
   { value: "HPDC",    label: "HPDC / Die Cast Machine" },
-  { value: "CMM",     label: "CMM / Gauge / Measurement" },
+  { value: "CNC",     label: "CNC / Machining Center"    },
+  { value: "CNC_TURNING", label: "CNC Turning Center"    },
+  { value: "CNC_MILLING", label: "CNC Milling Center"    },
+  { value: "CNC_GRINDING", label: "CNC Grinding Machine" },
+  { value: "CNC_DRILLING", label: "CNC Drilling / Tapping" },
+  { value: "VMC",     label: "VMC / Milling"             },
+  { value: "HMC",     label: "HMC / Horizontal Machining" },
+  { value: "LATHE",   label: "Lathe / Turning"           },
+  { value: "CMM",     label: "CMM / Measurement"         },
+  { value: "CMM_INLINE", label: "Inline CMM"              },
+  { value: "GAUGE",   label: "Gauge / Manual Inspection" },
+  { value: "AIR_GAUGE", label: "Air Gauge"               },
+  { value: "BORE_GAUGE", label: "Bore Gauge"             },
+  { value: "HEIGHT_GAUGE", label: "Height Gauge"         },
+  { value: "PDI",     label: "PDI / Final Inspection"    },
+  { value: "CASTING_PDI", label: "Casting PDI"           },
   { value: "ASSEMBLY",label: "Assembly Station"          },
+  { value: "TORQUE",  label: "Torque / Fastening Station" },
   { value: "PRESS",   label: "Press / Forming"           },
   { value: "LASER",   label: "Laser / Marking"           },
+  { value: "DOT_PEEN", label: "Dot Peen Marking"         },
   { value: "LEAK",    label: "Leak Test Machine"         },
+  { value: "FLOW_TEST", label: "Flow Test Machine"       },
   { value: "VISION",  label: "Vision / Camera System"   },
+  { value: "SCANNER", label: "Scanner / Verification Station" },
   { value: "ROBOT",   label: "Robot / Extractor"         },
-  { value: "OTHER",   label: "Other"                     },
+  { value: "WASHING", label: "Washing / Cleaning"        },
+  { value: "DEBURRING", label: "Deburring"               },
+  { value: "HEAT_TREAT", label: "Heat Treatment"         },
+  { value: "PAINTING", label: "Painting / Coating"       },
+  { value: "PACKING", label: "Packing Station"           },
+  { value: "CONVEYOR", label: "Conveyor / Transfer"      },
+  { value: "OTHER",   label: "Other / Utility"           },
 ];
 
 // Default handshake signals — user can modify freely
@@ -427,7 +452,7 @@ function IconBtn({ icon: Icon, title, onClick, color = C.sec, hoverColor, hoverB
 
 function emptyForm() {
   return {
-    machineName: "", lineName: "", machineType: "HPDC",
+    machineName: "", plantId: "", lineId: "", lineName: "", machineType: "HPDC",
     sequenceNo: "", operationNo: "", status: "ACTIVE",
     cycleTime: "0", loadingTime: "0", dailyTargetQty: "0",
     plcEnabled: true,
@@ -539,6 +564,8 @@ function formFromMachine(m) {
 
   return {
     machineName: m.machineName || "",
+    plantId: String(m.plantId || ""),
+    lineId: String(m.lineId || ""),
     lineName: m.lineName || "",
     machineType: m.machineType || "HPDC",
     sequenceNo: String(m.sequenceNo ?? ""),
@@ -700,6 +727,8 @@ function buildPayload(f) {
 
   return {
     machineName: f.machineName.trim(),
+    plantId: f.plantId ? Number(f.plantId) : null,
+    lineId: f.lineId ? Number(f.lineId) : null,
     lineName: f.lineName.trim(),
     machineType: f.machineType,
     sequenceNo: toNum(f.sequenceNo),
@@ -963,6 +992,7 @@ const FORM_TABS = [
 
 export default function MachinePage() {
   const [machines,  setMachines]  = useState([]);
+  const [organization, setOrganization] = useState({ plants: [], lines: [] });
   const [plcRanges, setPlcRanges] = useState([]);
   const [plcEndpoints, setPlcEndpoints] = useState([]);
   const [loading,   setLoading]   = useState(true);
@@ -1279,12 +1309,14 @@ export default function MachinePage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [m, r, ep] = await Promise.all([
+      const [m, org, r, ep] = await Promise.all([
         machineApi.list(),
+        organizationApi.context().catch(() => ({ plants: [], lines: [] })),
         plcConfigApi.listRanges().catch(() => []),
         plcConfigApi.listEndpoints().catch(() => []),
       ]);
       setMachines(m || []);
+      setOrganization({ plants: org?.plants || [], lines: org?.lines || [] });
       setPlcRanges(r || []);
       setPlcEndpoints(ep || []);
     } catch { toast.error("Failed to load machines"); }
@@ -1295,6 +1327,14 @@ export default function MachinePage() {
 
   // ── Derived ─────────────────────────────────────────────────────────────────
   const lines = useMemo(() => [...new Set((machines || []).map((m) => m.lineName).filter(Boolean))].sort(), [machines]);
+  const activePlants = useMemo(() => (organization.plants || []).filter((p) => p.isActive !== false), [organization.plants]);
+  const activeLines = useMemo(() => (organization.lines || []).filter((l) => l.isActive !== false), [organization.lines]);
+  const defaultPlant = activePlants.find((p) => String(p.plantName || "").toLowerCase() === "bawal") || activePlants[0] || null;
+  const defaultLine = activeLines.find((l) => String(l.lineName || "").toUpperCase() === "OIL PAN K-12") || activeLines[0] || null;
+  const linesForPlant = useMemo(
+    () => activeLines.filter((line) => !form.plantId || String(line.plantId) === String(form.plantId)),
+    [activeLines, form.plantId]
+  );
 
   const filtered = useMemo(() => {
     const s = search.trim().toLowerCase();
@@ -1314,6 +1354,23 @@ export default function MachinePage() {
 
   // ── Form helpers ────────────────────────────────────────────────────────────
   const setF = (key, val) => setForm((p) => ({ ...p, [key]: val }));
+  const selectPlant = (plantId) => {
+    const firstLine = activeLines.find((line) => String(line.plantId) === String(plantId));
+    setForm((prev) => ({
+      ...prev,
+      plantId,
+      lineId: firstLine ? String(firstLine.id) : "",
+      lineName: firstLine?.lineName || "",
+    }));
+  };
+  const selectLine = (lineId) => {
+    const line = activeLines.find((row) => String(row.id) === String(lineId));
+    setForm((prev) => ({
+      ...prev,
+      lineId,
+      lineName: line?.lineName || prev.lineName,
+    }));
+  };
 
   const addDynamicRegister = () => {
     setForm((p) => ({
@@ -1418,7 +1475,20 @@ export default function MachinePage() {
   };
 
   // ── Open / close modal ──────────────────────────────────────────────────────
-  const openCreate = () => { setForm(emptyForm()); setEditingId(null); setActiveTab("identity"); setShowModal(true); };
+  const openCreate = () => {
+    const next = emptyForm();
+    const plant = defaultPlant;
+    const line = (plant && activeLines.find((row) => String(row.plantId) === String(plant.id) && row.lineName === "OIL PAN K-12"))
+      || (plant && activeLines.find((row) => String(row.plantId) === String(plant.id)))
+      || defaultLine;
+    next.plantId = plant ? String(plant.id) : "";
+    next.lineId = line ? String(line.id) : "";
+    next.lineName = line?.lineName || "";
+    setForm(next);
+    setEditingId(null);
+    setActiveTab("identity");
+    setShowModal(true);
+  };
   const openEdit   = (m) => { setForm(formFromMachine(m)); setEditingId(m.id); setActiveTab("identity"); setShowModal(true); };
   const closeModal = () => { setShowModal(false); setEditingId(null); };
 
@@ -1704,8 +1774,26 @@ export default function MachinePage() {
                     </FSelect>
                   </div>
                   <div>
-                    <Label>Line / Department</Label>
-                    <FInput value={form.lineName} onChange={(e) => setF("lineName", e.target.value)} placeholder="e.g. Assembly Line A" />
+                    <Label>Plant</Label>
+                    <FSelect value={form.plantId || ""} onChange={(e) => selectPlant(e.target.value)}>
+                      <option value="">Select Plant</option>
+                      {activePlants.map((plant) => (
+                        <option key={plant.id} value={plant.id}>{plant.plantName}</option>
+                      ))}
+                    </FSelect>
+                  </div>
+                  <div>
+                    <Label>Line</Label>
+                    {linesForPlant.length > 0 ? (
+                      <FSelect value={form.lineId || ""} onChange={(e) => selectLine(e.target.value)}>
+                        <option value="">Select Line</option>
+                        {linesForPlant.map((line) => (
+                          <option key={line.id} value={line.id}>{line.lineName}</option>
+                        ))}
+                      </FSelect>
+                    ) : (
+                      <FInput value={form.lineName} onChange={(e) => setF("lineName", e.target.value)} placeholder="e.g. OIL PAN K-12" />
+                    )}
                   </div>
                   <div>
                     <Label required>Operation code</Label>

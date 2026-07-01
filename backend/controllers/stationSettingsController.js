@@ -1,4 +1,5 @@
 const StationFeatureSetting = require("../models/StationFeatureSetting");
+const sequelize = require("../config/db");
 
 function normalizeStation(value) {
   return String(value || "")
@@ -12,6 +13,30 @@ function normalizePlcPartCount(value) {
     return 1;
   }
   return Math.min(Math.max(Math.trunc(parsed), 1), 20);
+}
+
+async function ensureStationScopeSchema() {
+  await sequelize.query(`
+    IF COL_LENGTH('StationFeatureSettings', 'plant_id') IS NULL
+      ALTER TABLE [StationFeatureSettings] ADD [plant_id] INT NULL;
+  `);
+  await sequelize.query(`
+    IF COL_LENGTH('StationFeatureSettings', 'line_id') IS NULL
+      ALTER TABLE [StationFeatureSettings] ADD [line_id] INT NULL;
+  `);
+}
+
+function toScope(queryOrBody = {}) {
+  const plantId = Number(queryOrBody.plantId ?? queryOrBody.plant_id ?? 0) || null;
+  const lineId = Number(queryOrBody.lineId ?? queryOrBody.line_id ?? 0) || null;
+  return { plantId, lineId };
+}
+
+function scopeWhere(scope = {}) {
+  return {
+    plant_id: scope.plantId || null,
+    line_id: scope.lineId || null,
+  };
 }
 
 function normalizeInputMap(rawSettings = {}) {
@@ -97,9 +122,12 @@ function rowsToMap(rows = []) {
   }, {});
 }
 
-exports.getSettings = async (_req, res) => {
+exports.getSettings = async (req, res) => {
   try {
+    await ensureStationScopeSchema();
+    const scope = toScope(req.query);
     const rows = await StationFeatureSetting.findAll({
+      where: scopeWhere(scope),
       order: [["station_no", "ASC"]],
     });
     res.json(rowsToMap(rows));
@@ -110,6 +138,8 @@ exports.getSettings = async (_req, res) => {
 
 exports.saveSettings = async (req, res) => {
   try {
+    await ensureStationScopeSchema();
+    const scope = toScope(req.query?.plantId || req.query?.lineId ? req.query : req.body);
     const payload = normalizeInputMap(req.body?.settings || req.body);
     const stations = Object.keys(payload);
 
@@ -123,6 +153,8 @@ exports.saveSettings = async (req, res) => {
         
         // Sanitize data to ensure only valid fields are passed to Sequelize
         const updateData = {
+          plant_id: scope.plantId,
+          line_id: scope.lineId,
           station_no: stationNo,
           qr_enabled: Boolean(data.qr),
           operation_enabled: Boolean(data.operation),
@@ -134,12 +166,17 @@ exports.saveSettings = async (req, res) => {
           updated_by: req.user?.id || null,
         };
 
-        return StationFeatureSetting.upsert(updateData);
+        return StationFeatureSetting.findOne({
+          where: {
+            ...scopeWhere(scope),
+            station_no: stationNo,
+          },
+        }).then((row) => (row ? row.update(updateData) : StationFeatureSetting.create(updateData)));
       })
     );
 
     const rows = await StationFeatureSetting.findAll({
-      where: { station_no: stations },
+      where: { ...scopeWhere(scope), station_no: stations },
       order: [["station_no", "ASC"]],
     });
 

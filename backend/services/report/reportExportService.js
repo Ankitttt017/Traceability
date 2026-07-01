@@ -12,6 +12,7 @@ const Part = require("../../models/Part");
 const PartCodeMapping = require("../../models/PartCodeMapping");
 const Shift = require("../../models/Shift");
 const QrFormatRule = require("../../models/QrFormatRule");
+const LinePartAssignment = require("../../models/LinePartAssignment");
 const MachineModel = require("../../models/Machine");
 const { calculateProductionMetrics } = require("./reportMetricsService");
 const { generateIndustrialExcel } = require("./excelTemplateEngine");
@@ -166,6 +167,19 @@ function shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr) {
 function normalizeKey(value) {
   return String(value || "").trim().toUpperCase();
 }
+function normalizePartToken(value) {
+  return String(value || "").trim().toUpperCase();
+}
+function splitPlcPartDie(value) {
+  const raw = normalizePartToken(value);
+  if (!raw) return { partName: "", dieName: "", label: "" };
+  const [partName, ...dieParts] = raw.split("-");
+  return {
+    partName: partName || "",
+    dieName: dieParts.join("-") || "",
+    label: raw,
+  };
+}
 function normalizeShotToken(value) {
   const raw = String(value ?? "").trim();
   if (!raw || raw.toUpperCase() === "NULL") return "";
@@ -247,6 +261,7 @@ function isDateInShift(dateValue, shift) {
 async function getActiveShiftDefinitions() {
   return Shift.findAll({
     where: { is_active: true },
+    attributes: ["id", "shift_name", "shift_code", "start_time", "end_time"],
     order: [["start_time", "ASC"]],
     raw: true,
   });
@@ -280,6 +295,180 @@ async function getPlcReadingColumns() {
     return new Set((rows || []).map((row) => String(row.column_name || "").trim()).filter(Boolean));
   } catch (_) {
     return new Set();
+  }
+}
+
+function normalizeReportDateRange(filters = {}) {
+  const now = new Date();
+  const from = filters.dateFrom ? new Date(filters.dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const to = filters.dateTo ? new Date(filters.dateTo) : now;
+  return {
+    safeFrom: Number.isNaN(from.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : from,
+    safeTo: Number.isNaN(to.getTime()) ? now : to,
+  };
+}
+
+function normalizeShotStatusBucket(value) {
+  const raw = String(value ?? "").trim().toUpperCase();
+  const numeric = Number(raw);
+  if (numeric === 1 || ["OK", "GOOD", "PASS", "PASSED"].includes(raw)) return "ok";
+  if (numeric === 3 || raw.includes("WARM")) return "warmUp";
+  if (numeric === 5 || raw.includes("OFF") || raw.includes("OFFSET")) return "off";
+  return "other";
+}
+
+function normalizeOptionalToken(value) {
+  const token = String(value || "").trim();
+  const upper = token.toUpperCase();
+  return ["", "ALL", "ANY", "ALL_SHIFTS", "ALL SHIFT", "ALL SHIFTS"].includes(upper) ? "" : token;
+}
+
+async function applyPlcShiftWhere(whereParts, replacements, shiftCode) {
+  const target = normalizeOptionalToken(shiftCode).toUpperCase();
+  if (!target) return;
+  const shifts = await getActiveShiftDefinitions();
+  const shift = shifts.find((row) => {
+    const code = String(row.shift_code || row.shiftCode || "").trim().toUpperCase();
+    const name = String(row.shift_name || row.shiftName || "").trim().toUpperCase();
+    return code === target || name === target;
+  });
+  if (!shift) return;
+  const start = toShiftMinutes(shift.start_time);
+  const end = toShiftMinutes(shift.end_time);
+  if (start === null || end === null) return;
+  const minuteExpr = "(DATEPART(HOUR, recorded_at) * 60 + DATEPART(MINUTE, recorded_at))";
+  if (start === end) return;
+  replacements.shiftStartMinutes = start;
+  replacements.shiftEndMinutes = end;
+  whereParts.push(start < end
+    ? `${minuteExpr} >= :shiftStartMinutes AND ${minuteExpr} < :shiftEndMinutes`
+    : `(${minuteExpr} >= :shiftStartMinutes OR ${minuteExpr} < :shiftEndMinutes)`);
+}
+
+async function fetchPlcShotSummary(filters = {}) {
+  const { safeFrom, safeTo } = normalizeReportDateRange(filters);
+  const whereParts = ["recorded_at BETWEEN :dateFrom AND :dateTo"];
+  const replacements = { dateFrom: safeFrom, dateTo: safeTo };
+  const partName = normalizePartToken(filters.partName || filters.part_name);
+  const dieName = normalizePartToken(filters.dieName || filters.die_name);
+  const dieCastingMachine = String(filters.dieCastingMachine || filters.die_casting_machine || "").trim();
+
+  const assignmentWhere = { is_active: true };
+  if (filters.plantId) assignmentWhere.plant_id = filters.plantId;
+  if (filters.lineId) assignmentWhere.line_id = filters.lineId;
+  if (partName) assignmentWhere.part_name = partName;
+  if (dieName) assignmentWhere.die_name = dieName;
+  if (dieCastingMachine) assignmentWhere.die_casting_machine = dieCastingMachine;
+
+  let assignmentRows = [];
+  try {
+    assignmentRows = await LinePartAssignment.findAll({
+      where: assignmentWhere,
+      attributes: ["part_name", "die_name", "die_casting_machine"],
+      raw: true,
+    });
+  } catch (error) {
+    console.warn(`[REPORT] Part assignment scope unavailable: ${error.message}`);
+  }
+
+  const machineNames = [];
+  if (dieCastingMachine) {
+    machineNames.push(dieCastingMachine);
+  } else if (assignmentRows.length) {
+    machineNames.push(...assignmentRows.map((row) => String(row.die_casting_machine || "").trim()).filter(Boolean));
+  }
+
+  if (!machineNames.length && filters.machineId) {
+    const machine = await Machine.findByPk(filters.machineId, { attributes: ["machine_name"], raw: true });
+    if (!machine?.machine_name) return { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
+    machineNames.push(String(machine.machine_name).trim());
+  } else if (!machineNames.length && (filters.lineId || filters.lineName || filters.plantId)) {
+    const machineWhere = {};
+    if (filters.lineId) machineWhere.line_id = filters.lineId;
+    else if (filters.lineName) machineWhere.line_name = filters.lineName;
+    if (filters.plantId) machineWhere.plant_id = filters.plantId;
+    const machines = await Machine.findAll({
+      where: machineWhere,
+      attributes: ["machine_name"],
+      raw: true,
+    });
+    machineNames.push(...machines.map((machine) => String(machine.machine_name || "").trim()).filter(Boolean));
+    if (!machineNames.length) return { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
+  }
+
+  const uniqueMachineNames = [...new Set(machineNames.map((name) => String(name || "").trim()).filter(Boolean))];
+  if (assignmentRows.length) {
+    const clauses = [];
+    assignmentRows.forEach((row, index) => {
+      const rowPart = normalizePartToken(row.part_name);
+      const rowDie = normalizePartToken(row.die_name);
+      const rowMachine = String(row.die_casting_machine || "").trim();
+      if (!rowPart && !rowMachine) return;
+      const parts = [];
+      if (rowPart) {
+        const key = `assignmentPart${index}`;
+        replacements[key] = rowDie ? `${rowPart}-${rowDie}%` : `${rowPart}%`;
+        parts.push(`UPPER(LTRIM(RTRIM(CAST(part_name AS NVARCHAR(255))))) LIKE :${key}`);
+      }
+      if (rowMachine) {
+        const key = `assignmentMachine${index}`;
+        replacements[key] = rowMachine;
+        parts.push(`LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255)))) = :${key}`);
+      }
+      if (parts.length) clauses.push(`(${parts.join(" AND ")})`);
+    });
+    if (clauses.length) whereParts.push(`(${clauses.join(" OR ")})`);
+  } else if (uniqueMachineNames.length) {
+    const placeholders = uniqueMachineNames.map((_, index) => `:machineName${index}`).join(", ");
+    whereParts.push(`LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255)))) IN (${placeholders})`);
+    uniqueMachineNames.forEach((name, index) => {
+      replacements[`machineName${index}`] = name;
+    });
+  }
+
+  const searchToken = String(filters.barcode || filters.customerCode || "").trim();
+  if (searchToken) {
+    whereParts.push(`(
+      LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) LIKE :searchToken
+      OR LTRIM(RTRIM(CAST(part_name AS NVARCHAR(255)))) LIKE :searchToken
+    )`);
+    replacements.searchToken = `%${searchToken}%`;
+  }
+
+  if (partName) {
+    whereParts.push(`UPPER(LTRIM(RTRIM(CAST(part_name AS NVARCHAR(255))))) LIKE :partNameLike`);
+    replacements.partNameLike = `${partName}%`;
+  }
+  if (dieName) {
+    whereParts.push(`UPPER(LTRIM(RTRIM(CAST(part_name AS NVARCHAR(255))))) LIKE :dieNameLike`);
+    replacements.dieNameLike = partName ? `${partName}-${dieName}%` : `%-${dieName}%`;
+  }
+  await applyPlcShiftWhere(whereParts, replacements, filters.shiftCode || filters.shift_code);
+
+  try {
+    const [rows] = await sequelize.query(
+      `
+        SELECT shot_status, COUNT(*) AS count
+        FROM ${PLC_READING_TABLE}
+        WHERE ${whereParts.join(" AND ")}
+        GROUP BY shot_status
+      `,
+      { replacements }
+    );
+
+    const summary = { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
+    for (const row of rows || []) {
+      const count = Number(row.count || 0) || 0;
+      summary.totalProduction += count;
+      const bucket = normalizeShotStatusBucket(row.shot_status);
+      if (bucket === "ok") summary.okShot += count;
+      else if (bucket === "warmUp") summary.warmUpShot += count;
+      else if (bucket === "off") summary.offShot += count;
+    }
+    return summary;
+  } catch (error) {
+    console.warn(`[REPORT] PLC shot summary unavailable: ${error.message}`);
+    return { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
   }
 }
 
@@ -486,7 +675,9 @@ async function runIndustrialExport(res, { filters, reportConfig, type = "full" }
   const rows = await fetchProductionData(filters);
   const machineWhere = {};
   if (filters?.machineId) machineWhere.id = filters.machineId;
-  if (filters?.lineName) machineWhere.line_name = filters.lineName;
+  if (filters?.plantId) machineWhere.plant_id = filters.plantId;
+  if (filters?.lineId) machineWhere.line_id = filters.lineId;
+  else if (filters?.lineName) machineWhere.line_name = filters.lineName;
   const machines = await Machine.findAll({ where: machineWhere, raw: true });
   const stationPairs = (machines || [])
     .map((m) => {
@@ -528,12 +719,15 @@ async function fetchProductionData(filters = {}, options = {}) {
   };
   const {
     dateFrom, dateTo,
-    machineId, lineName,
+    machineId, plantId, lineId, lineName,
     shiftCode: rawShiftCode, modelCode,
     operationNo, resultType,
     barcode, customerCode, station, operatorId, status
   } = filters;
   const shiftCode = normalizeOptionalFilter(rawShiftCode);
+  const filterPartName = normalizePartToken(filters.partName || filters.part_name);
+  const filterDieName = normalizePartToken(filters.dieName || filters.die_name);
+  const filterDieCastingMachine = String(filters.dieCastingMachine || filters.die_casting_machine || "").trim().toUpperCase();
 
   // Safe date defaults — always query last 24 hours if nothing specified
   const now = new Date();
@@ -568,8 +762,12 @@ async function fetchProductionData(filters = {}, options = {}) {
         { station_no: stationToken },
       ];
     }
-    if (lineName) {
-      const machines = await Machine.findAll({ where: { line_name: lineName }, attributes: ["id"] });
+    if (plantId || lineId || lineName) {
+      const machineWhere = {};
+      if (plantId) machineWhere.plant_id = plantId;
+      if (lineId) machineWhere.line_id = lineId;
+      else if (lineName) machineWhere.line_name = lineName;
+      const machines = await Machine.findAll({ where: machineWhere, attributes: ["id"] });
       const ids = machines.map((m) => Number(m.id)).filter((id) => Number.isFinite(id) && id > 0);
       if (machineId) {
         const selectedMachineId = Number(machineId);
@@ -657,7 +855,7 @@ async function fetchProductionData(filters = {}, options = {}) {
   const partIds = anchorPartIds;
   const parts = await Part.findAll({
     where: { part_id: { [Op.in]: partIds } },
-    attributes: ["part_id", "qr_format_name"],
+    attributes: ["part_id", "qr_format_name", "status"],
     raw: true
   });
   const partCodeMappings = await PartCodeMapping.findAll({
@@ -685,7 +883,8 @@ async function fetchProductionData(filters = {}, options = {}) {
   const leakLookupMachines = await MachineModel.findAll({
     where: {
       is_active: true,
-      ...(lineName ? { line_name: lineName } : {}),
+      ...(plantId ? { plant_id: plantId } : {}),
+      ...(lineId ? { line_id: lineId } : (lineName ? { line_name: lineName } : {})),
     },
     attributes: ["id", "machine_name", "operation_no", "plc_ip", "qr_scanner_ip", "machine_ip"],
     raw: true,
@@ -839,6 +1038,7 @@ async function fetchProductionData(filters = {}, options = {}) {
             })
           : null
       );
+    const plcPartDie = splitPlcPartDie(plcReadingFromDb?.part_name || "");
 
     return {
       ...log,
@@ -857,7 +1057,11 @@ async function fetchProductionData(filters = {}, options = {}) {
       operationNo: log.operation_no || log.Machine?.operation_no || "-",
       stationNo: log.station_no || log.operation_no || "-",
       qrFormatName: part.qr_format_name || "-",
+      partStatus: part.status || "",
       modelCode:    qrMap[part.qr_format_name] || "-",
+      partName: plcPartDie.partName || "",
+      dieName: plcPartDie.dieName || "",
+      partDieLabel: plcPartDie.label || "",
       shiftCode:    log.shift_code || "A",
       cycleStartTime: cycleStartTime ? new Date(cycleStartTime).toLocaleString() : "-",
       cycleEndTime:   (leakTestReading?.cycleEndTime || cycleEndTime) ? new Date(leakTestReading?.cycleEndTime || cycleEndTime).toLocaleString()   : "-",
@@ -878,6 +1082,18 @@ async function fetchProductionData(filters = {}, options = {}) {
   }));
 
   let filtered = enriched;
+
+  if (filterPartName || filterDieName) {
+    filtered = filtered.filter((row) => {
+      const parsed = splitPlcPartDie(row.partDieLabel || row.plcReading?.part_name || row.partName || "");
+      const partOk = !filterPartName || parsed.partName === filterPartName || normalizePartToken(row.partName) === filterPartName;
+      const dieOk = !filterDieName || parsed.dieName === filterDieName || normalizePartToken(row.dieName) === filterDieName;
+      return partOk && dieOk;
+    });
+  }
+  if (filterDieCastingMachine) {
+    filtered = filtered.filter((row) => String(row.plcReading?.machine_name || "").trim().toUpperCase() === filterDieCastingMachine);
+  }
 
   if (customerCode) {
     const cc = String(customerCode).trim().toUpperCase();
@@ -904,4 +1120,5 @@ module.exports = {
   runIndustrialExport,
   fetchProductionData,
   getPlcReadingColumns,
+  fetchPlcShotSummary,
 };

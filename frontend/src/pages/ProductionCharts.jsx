@@ -24,6 +24,7 @@ import {
 import { dashboardApi, machineApi, reportApi } from "../api/services";
 import { CHART_COLORS, STATUS_COLORS } from "../constants/chartTheme";
 import SafeChart from "../components/charts/SafeChart";
+import PlantLineSelector from "../components/PlantLineSelector";
 import { SOCKET_URL } from "../constants/network";
 import { useLanguage } from "../context/LanguageContext";
 
@@ -367,6 +368,8 @@ const ProductionCharts=()=>{
   const refreshTimerRef = useRef(null);
   const lastRefreshAtRef = useRef(0);
   const[filters,setFilters]=useState({
+    plantId:"",
+    lineId:"",
     machineId:"",
     lineName:"",
     partId:"",
@@ -402,6 +405,8 @@ const ProductionCharts=()=>{
   const query=useMemo(()=>{
     const commonFilters = {
       machineId: filters.machineId || undefined,
+      plantId: filters.plantId || undefined,
+      lineId: filters.lineId || undefined,
       lineName: filters.lineName || undefined,
       partId: filters.partId || undefined,
       status: filters.status || undefined,
@@ -1434,16 +1439,14 @@ const ProductionCharts=()=>{
         gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",
         gap:8,
       }}>
-        <select
-          value={filters.lineName}
-          onChange={(e)=>setFilters((prev)=>({...prev,lineName:e.target.value,machineId:""}))}
-          style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.bdr()}`,background:C.bg("surf"),color:C.txt("pri"),fontSize:12}}
-        >
-          <option value="">{t("production.allLines", "All Lines")}</option>
-          {(report.availableLines || []).map((line)=>(
-            <option key={line} value={line}>{line}</option>
-          ))}
-        </select>
+        <PlantLineSelector
+          value={filters}
+          onChange={(scope)=>setFilters((prev)=>({...prev,...scope,machineId:""}))}
+          includeAll
+          compact
+          className="grid grid-cols-1 gap-2 sm:grid-cols-2"
+          inputClassName="h-[34px] rounded-lg border border-border bg-bg-dark px-3 text-xs font-bold text-text-main outline-none"
+        />
         <select
           value={filters.machineId}
           onChange={(e)=>setFilters((prev)=>({...prev,machineId:e.target.value}))}
@@ -1451,6 +1454,8 @@ const ProductionCharts=()=>{
         >
           <option value="">{t("production.allMachines", "All Machines")}</option>
           {machines
+            .filter((m)=>!filters.plantId || String(m.plantId || "") === String(filters.plantId))
+            .filter((m)=>!filters.lineId || String(m.lineId || "") === String(filters.lineId))
             .filter((m)=>!filters.lineName || String(m.lineName || "").trim() === filters.lineName)
             .map((m)=>(
               <option key={m.id} value={m.id}>{m.machineName}</option>
@@ -1482,7 +1487,7 @@ const ProductionCharts=()=>{
           ))}
         </select>
         <button
-          onClick={()=>setFilters({machineId:"",lineName:"",partId:"",status:"",shiftCode:""})}
+          onClick={()=>setFilters({plantId:"",lineId:"",machineId:"",lineName:"",partId:"",status:"",shiftCode:""})}
           style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.ng(0.3)}`,background:C.ng(0.08),color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer"}}
         >
           {t("reports.clear", "Clear")}

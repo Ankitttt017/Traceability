@@ -24,6 +24,9 @@ import {
   BarChart3,
   Sheet,
   AlertTriangle,
+  Building2,
+  GitBranch,
+  PackageCheck,
 } from "lucide-react";
 
 import { APP_ROUTES } from "../constants/routes";
@@ -60,6 +63,7 @@ const Sidebar = ({ onClose }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [traceOpen, setTraceOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [organizationOpen, setOrganizationOpen] = useState(false);
   const [roleAccessSettings, setRoleAccessSettings] = useState(() =>
     getRoleAccessSettings()
   );
@@ -217,6 +221,30 @@ const Sidebar = ({ onClose }) => {
     [t]
   );
 
+  const organizationNavigation = useMemo(
+    () => [
+      {
+        name: "Plant Manager",
+        path: APP_ROUTES.plants,
+        icon: Building2,
+        moduleKey: "master_settings",
+      },
+      {
+        name: "Line Manager",
+        path: APP_ROUTES.lines,
+        icon: GitBranch,
+        moduleKey: "master_settings",
+      },
+      {
+        name: "Part Manager",
+        path: APP_ROUTES.parts,
+        icon: PackageCheck,
+        moduleKey: "master_settings",
+      },
+    ],
+    []
+  );
+
   const visibleTraceNavigation = useMemo(
     () =>
       traceabilityNavigation.filter((item) =>
@@ -231,6 +259,14 @@ const Sidebar = ({ onClose }) => {
         canAccessModule(userRole, item.moduleKey, roleAccessSettings)
       ),
     [roleAccessSettings, settingsNavigation, userRole]
+  );
+
+  const visibleOrganizationNavigation = useMemo(
+    () =>
+      organizationNavigation.filter((item) =>
+        canAccessModule(userRole, item.moduleKey, roleAccessSettings)
+      ),
+    [organizationNavigation, roleAccessSettings, userRole]
   );
 
   useEffect(() => {
@@ -357,6 +393,21 @@ const Sidebar = ({ onClose }) => {
 
             {visibleSettingsNavigation.length > 0 && (
               <div className="mt-1">
+                {visibleOrganizationNavigation.length > 0 && (
+                  <>
+                    {renderSectionToggle(
+                      "Organization",
+                      Building2,
+                      organizationOpen,
+                      () => setOrganizationOpen((prev) => !prev)
+                    )}
+                    {(organizationOpen || collapsed) && (
+                      <div className="space-y-0.5 mt-0.5">
+                        {visibleOrganizationNavigation.map((item) => renderNavItem(item, true))}
+                      </div>
+                    )}
+                  </>
+                )}
                 {renderSectionToggle(
                   t("pages.settings", "Settings"),
                   Settings2,

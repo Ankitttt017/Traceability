@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { packingApi } from "../api/services";
 import { useLanguage } from "../context/LanguageContext";
+import PlantLineSelector from "../components/PlantLineSelector";
 
 function toPositiveInt(value, fallback) {
   const parsed = Number(value);
@@ -86,6 +87,7 @@ const PackingManagement = () => {
   const [boxes, setBoxes] = useState([]);
   const [stats, setStats] = useState({ total: 0, open: 0, closed: 0 });
   const [statusFilter, setStatusFilter] = useState("ALL");
+  const [scopeFilter, setScopeFilter] = useState({ plantId: "", lineId: "" });
   const [popup, setPopup] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -96,8 +98,17 @@ const PackingManagement = () => {
     try {
       const [s, b, all] = await Promise.all([
         packingApi.managementSettings(),
-        packingApi.managementBoxes({ limit: 100, status: statusFilter === "ALL" ? undefined : statusFilter }),
-        packingApi.managementBoxes({ limit: 1000 })
+        packingApi.managementBoxes({
+          limit: 100,
+          status: statusFilter === "ALL" ? undefined : statusFilter,
+          plantId: scopeFilter.plantId || undefined,
+          lineId: scopeFilter.lineId || undefined,
+        }),
+        packingApi.managementBoxes({
+          limit: 1000,
+          plantId: scopeFilter.plantId || undefined,
+          lineId: scopeFilter.lineId || undefined,
+        })
       ]);
       setSettings(prev => ({ ...prev, ...s }));
       setBoxes(b?.rows || []);
@@ -111,7 +122,7 @@ const PackingManagement = () => {
       console.error(err);
       setPopup({ type: "ERROR", title: "Sync Failed", message: err.response?.data?.error || "Network error in management hub." });
     } finally { setLoading(false); }
-  }, [statusFilter]);
+  }, [statusFilter, scopeFilter]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -125,7 +136,9 @@ const PackingManagement = () => {
         nextSerial: toPositiveInt(settings.nextSerial, 1),
         defaultCapacity: Math.min(500, Math.max(1, toPositiveInt(settings.defaultCapacity, 65))),
         autoCreateNextBox: !!settings.autoCreateNextBox,
-        labelPrefix: settings.labelPrefix.trim().toUpperCase()
+        labelPrefix: settings.labelPrefix.trim().toUpperCase(),
+        plantId: scopeFilter.plantId || null,
+        lineId: scopeFilter.lineId || null,
       };
       await packingApi.updateManagementSettings(p);
       setPopup({ type: "SUCCESS", title: "Configuration Locked", message: "Global packing parameters updated successfully." });
@@ -138,7 +151,7 @@ const PackingManagement = () => {
   const generateNextBox = async () => {
     setGenerating(true);
     try {
-      const res = await packingApi.generateNext();
+      const res = await packingApi.generateNext({ plantId: scopeFilter.plantId || null, lineId: scopeFilter.lineId || null });
       setPopup({ type: "SUCCESS", title: "Sequence Advanced", message: `Box unit ${res?.box?.boxNumber} initialized.` });
       loadData();
     } catch (err) {
@@ -215,9 +228,23 @@ const PackingManagement = () => {
 
       {/* Settings Form - Full Width */}
       <div className="industrial-card p-0 overflow-hidden">
-        <div className="px-5 py-3 border-b border-border bg-bg-dark/40 flex items-center gap-2">
+        <div className="px-5 py-3 border-b border-border bg-white flex items-center gap-2">
           <Hash size={14} className="text-primary" />
           <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">{t("packingManagement.configurationParameters", "Configuration Parameters")}</h2>
+        </div>
+        <div className="border-b border-border p-5">
+          <div className="mb-3">
+            <p className="text-[10px] font-black uppercase tracking-widest text-text-muted">Packing Scope</p>
+            <p className="text-xs font-semibold text-text-main">Configure and review packing for the selected plant and line.</p>
+          </div>
+          <PlantLineSelector
+            value={scopeFilter}
+            onChange={setScopeFilter}
+            includeAll
+            compact
+            className="grid grid-cols-1 gap-3 md:grid-cols-2"
+            inputClassName="w-full h-9 bg-bg-dark border border-border rounded-lg px-3 text-sm text-text-main focus:border-primary focus:ring-1 focus:ring-primary/20 transition-all outline-none"
+          />
         </div>
         <div className="p-5 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
           <div className="space-y-1">
@@ -286,7 +313,7 @@ const PackingManagement = () => {
           </div>
         </div>
         
-        <div className="px-5 py-3 bg-bg-dark/40 border-t border-border flex items-center justify-between">
+        <div className="px-5 py-3 bg-white border-t border-border flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 cursor-pointer group" onClick={() => setSettings(p => ({ ...p, autoCreateNextBox: !p.autoCreateNextBox }))}>
               <div className={`w-8 h-4 rounded-full p-0.5 transition-colors ${settings.autoCreateNextBox ? 'bg-primary' : 'bg-border'}`}>
@@ -308,25 +335,36 @@ const PackingManagement = () => {
 
       {/* Box Registry Table */}
       <div className="industrial-card p-0 overflow-hidden">
-        <div className="px-5 py-3 border-b border-border bg-bg-dark/40 flex items-center justify-between">
+        <div className="px-5 py-3 border-b border-border bg-white flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div className="flex items-center gap-2">
             <Package size={14} className="text-primary" />
             <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">{t("packingManagement.boxRegistry", "Box Registry")}</h2>
           </div>
+          <div className="grid w-full grid-cols-1 gap-3 sm:grid-cols-[minmax(280px,520px)_160px] lg:w-auto">
+          <PlantLineSelector
+            value={scopeFilter}
+            onChange={setScopeFilter}
+            includeAll
+            compact
+            hideLabels
+            className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+            inputClassName="h-9 w-full rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
+          />
           <select
             value={statusFilter}
             onChange={e => setStatusFilter(e.target.value)}
-            className="bg-bg-dark border border-border rounded-lg px-3 py-1.5 text-[9px] font-black text-text-main uppercase tracking-wider focus:outline-none focus:border-primary"
+            className="h-9 rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
           >
             <option value="ALL">{t("packingManagement.allBoxes", "All Boxes")}</option>
             <option value="OPEN">{t("packingManagement.openOnly", "Open Only")}</option>
             <option value="CLOSED">{t("packingManagement.closedOnly", "Closed Only")}</option>
           </select>
+          </div>
         </div>
         
         <div className="overflow-x-auto">
           <table className="w-full text-left">
-            <thead className="bg-bg-dark/60 text-[9px] font-black text-text-muted uppercase tracking-wider border-b border-border">
+            <thead className="bg-slate-50 text-[9px] font-black text-slate-500 uppercase tracking-wider border-b border-border">
               <tr>
                 <th className="px-4 py-3">{t("packingManagement.serial", "Serial")}</th>
                 <th className="px-4 py-3">{t("packingManagement.boxId", "Box ID")}</th>
@@ -348,7 +386,7 @@ const PackingManagement = () => {
                   </td>
                 </tr>
               ) : boxes.map((box) => (
-                <tr key={box.id} className="hover:bg-primary/5 transition-colors group">
+                <tr key={box.id} className="hover:bg-slate-50 transition-colors group">
                   <td className="px-4 py-3 font-mono font-black text-text-muted text-xs">{box.serialNo}</td>
                   <td className="px-4 py-3">
                     <span className="font-black text-primary font-mono text-sm">{box.boxNumber}</span>

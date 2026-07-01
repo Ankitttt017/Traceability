@@ -145,6 +145,7 @@ async function saveCustomerQrOnlyStart({ code, stationNo, machine, userId = null
     skipQrFormatValidation: true,
     skipShotValidation: true,
     skipCustomerCodeValidation: true,
+    skipSequenceValidation: true,
   });
   if (response?.decision === "ALLOW") {
     await markCustomerQrOnlyMapping({ code, machine, stationNo: station });
@@ -867,6 +868,33 @@ function requiresCustomerQrForCompletion(machine = {}) {
   return tokens.some((token) => CUSTOMER_QR_WAITING_OPERATIONS.has(token) || token.includes("LASER"));
 }
 
+async function getStationBypassMetaForJourney(stationNo, machines = []) {
+  const station = normalizeStation(stationNo);
+  if (!station) {
+    return { bypassed: false, reason: null };
+  }
+
+  const features = await getStationFeatureConfig(station).catch(() => null);
+  if (features?.operation === false) {
+    return { bypassed: true, reason: "STATION_OPERATION_DISABLED_AUTO_OK" };
+  }
+  if (features?.bypass === true || features?.bypassEnabled === true) {
+    return { bypassed: true, reason: "STATION_BYPASS_AUTO_OK" };
+  }
+
+  const stationMachines = (Array.isArray(machines) ? machines : [])
+    .filter((machine) => getMachineOperationStage(machine) === station);
+  const allMachinesBypassed = stationMachines.length > 0 && stationMachines.every((machine) => {
+    const machineId = getModelValue(machine, "id");
+    return getModelValue(machine, "bypass_enabled") === true || isMachineBypassEnabled(machineId);
+  });
+
+  return {
+    bypassed: allMachinesBypassed,
+    reason: allMachinesBypassed ? "MACHINE_BYPASS_AUTO_OK" : null,
+  };
+}
+
 async function shouldBlockMappedCustomerQrOnStartScan(stationNo) {
   const station = normalizeStation(stationNo);
   if (!station) return false;
@@ -990,7 +1018,19 @@ function getQualitySummaryFromOperationLogs(rows, getMappedCustomerQr = null) {
     inProgressCount: 0,
   };
 
-  for (const row of rows) {
+  const latestByPart = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const partKey = String(row?.part_id || row?.partId || "").trim().toUpperCase();
+    if (!partKey) continue;
+    const rowTime = new Date(row?.updatedAt || row?.createdAt || 0).getTime() || 0;
+    const existing = latestByPart.get(partKey);
+    const existingTime = existing ? (new Date(existing.updatedAt || existing.createdAt || 0).getTime() || 0) : -1;
+    if (!existing || rowTime >= existingTime) {
+      latestByPart.set(partKey, row);
+    }
+  }
+
+  for (const row of latestByPart.values()) {
     const mappedCustomerQr = typeof getMappedCustomerQr === "function" ? getMappedCustomerQr(row) : null;
     const effectiveOutcome = getEffectiveOperationOutcome(row, mappedCustomerQr);
 
@@ -2788,6 +2828,13 @@ exports.getPartJourney = async (req, res) => {
         machines: Array.isArray(sequenceData?.machines) ? sequenceData.machines : [],
       })
     ).byPartAndStation;
+    const bypassMetaByStation = {};
+    await Promise.all(knownStations.map(async (stationNo) => {
+      bypassMetaByStation[stationNo] = await getStationBypassMetaForJourney(
+        stationNo,
+        Array.isArray(sequenceData?.machines) ? sequenceData.machines : []
+      );
+    }));
 
     const currentStation = normalizeStation(part?.current_station);
     const currentIndex = sequenceData.sequence.findIndex((station) => station === currentStation);
@@ -2803,7 +2850,7 @@ exports.getPartJourney = async (req, res) => {
       const leakTestReading = stationNo === LEAKTEST_OPERATION
         ? getLeaktestReadingForPartStation(leaktestIndex, partId, stationNo)
         : null;
-      const attempts = (logsByStation[stationNo] || []).map((row) => ({
+      let attempts = (logsByStation[stationNo] || []).map((row) => ({
         id: row.id,
         plcStatus: row.plcStatus,
         result: row.result,
@@ -2818,6 +2865,35 @@ exports.getPartJourney = async (req, res) => {
         createdAt: row.createdAt,
         machine: machineMap[row.machineId] || null,
       }));
+      const bypassMeta = bypassMetaByStation[stationNo] || { bypassed: false, reason: null };
+      const hasBypassAttempt = attempts.some((attempt) => attempt.isBypassed === true);
+      if (bypassMeta.bypassed && !hasBypassAttempt) {
+        attempts = [
+          ...attempts,
+          {
+            id: `bypass-${stationNo}`,
+            plcStatus: "ENDED_OK",
+            result: "OK",
+            resultSource: "BYPASS",
+            resultInput: null,
+            qualityPayload: null,
+            interlockReason: null,
+            isBypassed: true,
+            bypassReason: bypassMeta.reason || "STATION_BYPASS_AUTO_OK",
+            plcStartTime: null,
+            plcEndTime: null,
+            createdAt: null,
+            machine: stationMeta
+              ? {
+                id: stationMeta.machineId,
+                machineName: stationMeta.machineName,
+                stationNo,
+                sequenceNo: stationMeta.sequenceNo,
+              }
+              : null,
+          },
+        ];
+      }
 
       const latestAttempt = attempts[attempts.length - 1] || null;
 
@@ -2838,6 +2914,8 @@ exports.getPartJourney = async (req, res) => {
 
       if (leakTestReading) {
         stageState = getLeaktestStageState(leakTestReading);
+      } else if (bypassMeta.bypassed) {
+        stageState = "PASSED";
       } else if (endedOkAttempt) {
         stageState = "PASSED";
       } else if (endedNgAttempt) {
@@ -3131,7 +3209,13 @@ exports.getMachineStationStats = async (req, res) => {
     });
 
     const stationNo = getMachineOperationStage(machine);
-    const { from, to } = getDateRangeFromQuery(req.query);
+    const shifts = await getActiveShiftDefinitions();
+    const currentShift = resolveShift(new Date(), shifts);
+    const requestedShiftCode = String(req.query.shiftCode || req.query.shift_code || "").trim().toUpperCase();
+    const effectiveShiftCode = isAllShiftToken(requestedShiftCode)
+      ? ""
+      : (requestedShiftCode || String(currentShift?.shift_code || "").trim().toUpperCase());
+    const { from, to } = getOperatorStatsDateRange(req.query, shifts, effectiveShiftCode, currentShift);
 
     const logs = await OperationLog.findAll({
       where: {
@@ -3168,16 +3252,22 @@ exports.getMachineStationStats = async (req, res) => {
 
     const stationLogs = logs.filter((row) => !isJourneyNoiseLog(row));
     const effectiveLogs = stationLogs.length > 0 ? stationLogs : logs;
+    const shiftFilteredLogs = effectiveShiftCode
+      ? applyShiftFilter(effectiveLogs, effectiveShiftCode, shifts)
+      : effectiveLogs;
 
-    const summary = getQualitySummaryFromOperationLogs(effectiveLogs, getMappedCustomerQr);
-    const shifts = await getActiveShiftDefinitions();
-    const currentShift = resolveShift(new Date(), shifts);
-    const targetProduction = computeTargetProduction({ machine, shift: currentShift });
+    const summary = getQualitySummaryFromOperationLogs(shiftFilteredLogs, getMappedCustomerQr);
+    const selectedShift = effectiveShiftCode
+      ? shifts.find((row) => String(row.shift_code || "").trim().toUpperCase() === effectiveShiftCode) || currentShift
+      : null;
+    const targetProduction = selectedShift
+      ? computeTargetProduction({ machine, shift: selectedShift })
+      : shifts.reduce((total, shift) => total + computeTargetProduction({ machine, shift }), 0);
     const produced = Number(summary.processedCount || 0);
     const achievementPct = targetProduction > 0
       ? Number(((produced / targetProduction) * 100).toFixed(2))
       : 0;
-    const hourlyMap = effectiveLogs.reduce((acc, row) => {
+    const hourlyMap = shiftFilteredLogs.reduce((acc, row) => {
       const key = formatHourBucket(row.createdAt);
       if (!acc[key]) {
         acc[key] = { hour: key, ok: 0, ng: 0, interlocked: 0, commErrors: 0, total: 0 };
@@ -3203,9 +3293,9 @@ exports.getMachineStationStats = async (req, res) => {
       .sort((a, b) => String(a.hour).localeCompare(String(b.hour)))
       .slice(-12);
 
-    const current = resolveCurrentOperationForMachine(effectiveLogs, machine);
-    const lastEvent = effectiveLogs[0] || logs[0] || null;
-    const recentParts = effectiveLogs.slice(0, 10).map((row) => ({
+    const current = resolveCurrentOperationForMachine(shiftFilteredLogs, machine);
+    const lastEvent = shiftFilteredLogs[0] || effectiveLogs[0] || logs[0] || null;
+    const recentParts = shiftFilteredLogs.slice(0, 10).map((row) => ({
       id: row.id,
       partId: row.part_id,
       plcStatus: row.plc_status,
@@ -3226,12 +3316,19 @@ exports.getMachineStationStats = async (req, res) => {
         sequenceNo: machine.sequence_no,
         stationNo,
         currentShiftCode: currentShift?.shift_code || null,
+        selectedShiftCode: effectiveShiftCode || "ALL",
         targetProduction,
         achievementPct,
       },
       range: {
         from,
         to,
+      },
+      filters: {
+        from,
+        to,
+        shiftCode: effectiveShiftCode || "ALL",
+        currentShiftCode: currentShift?.shift_code || null,
       },
       plcHealth: plcHealth || null,
       plcCircuit,
@@ -3241,10 +3338,13 @@ exports.getMachineStationStats = async (req, res) => {
       scannerHealthList: scannerBundle.scannerHealth,
       summary: {
         ...summary,
+        countMode: "DISTINCT_PART_LATEST_STATION_STATUS",
         producedCount: produced,
         targetProduction,
         targetQty: targetProduction,
         achievementPct,
+        shiftCode: effectiveShiftCode || "ALL",
+        currentShiftCode: currentShift?.shift_code || null,
       },
       trend,
       current: current
@@ -3661,7 +3761,7 @@ exports.processScan = async (req, res) => {
           : hasManualResultInput
             ? "PLC_PAYLOAD"
             : "DEFAULT_OK";
-    const machineBypassEnabled = isMachineBypassEnabled(machine.id);
+    const machineBypassEnabled = isMachineBypassEnabled(machine.id) || machine.bypass_enabled === true;
     const qrValidationEnabled = stationFeatures.qr !== false;
     const stationBypassEnabled = stationFeatures.bypass === true || stationFeatures.operation === false;
     const skipAllBypassValidations = machineBypassEnabled || stationBypassEnabled;
@@ -3689,7 +3789,7 @@ exports.processScan = async (req, res) => {
       skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
       skipInterlockValidation: skipAllBypassValidations,
       skipDuplicateValidation: false,
-      skipSequenceValidation: !validatePreviousStation || skipAllBypassValidations,
+      skipSequenceValidation: isCustomerQrOnlyStart || !validatePreviousStation || skipAllBypassValidations,
     });
     if (response?.decision === "ALLOW" && isCustomerQrOnlyStart) {
       await markCustomerQrOnlyMapping({ code: normalizedPartId, machine, stationNo: normalizedStation });
@@ -4128,7 +4228,7 @@ exports.verifyScanForOperator = async (req, res) => {
           : hasManualResultInput
             ? "PLC_PAYLOAD"
             : "DEFAULT_OK";
-    const machineBypassEnabled = isMachineBypassEnabled(machine.id);
+    const machineBypassEnabled = isMachineBypassEnabled(machine.id) || machine.bypass_enabled === true;
     const qrValidationEnabled = stationFeatures.qr !== false;
     const stationBypassEnabled = stationFeatures.bypass === true || stationFeatures.operation === false;
     const skipAllBypassValidations = machineBypassEnabled || stationBypassEnabled;
@@ -4156,8 +4256,11 @@ exports.verifyScanForOperator = async (req, res) => {
       skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
       skipInterlockValidation: skipAllBypassValidations,
       skipDuplicateValidation: false,
-      skipSequenceValidation: !validatePreviousStation || skipAllBypassValidations,
+      skipSequenceValidation: isCustomerQrOnlyStart || !validatePreviousStation || skipAllBypassValidations,
     });
+    if (response?.decision === "ALLOW" && isCustomerQrOnlyStart) {
+      await markCustomerQrOnlyMapping({ code: finalPartId, machine, stationNo });
+    }
     if (response?.decision === "ALLOW" && response?.operationLogId) {
       await safeRecordTimeline({
         operationId: response.operationLogId,
@@ -4878,6 +4981,7 @@ exports.bypassOperation = async (req, res) => {
         reason || (enabled ? "MACHINE_BYPASS_ENABLED" : "MACHINE_BYPASS_DISABLED"),
         req.user?.id || null
       );
+      await machine.update({ bypass_enabled: enabled });
       emitRealtime("dashboard_refresh", { reason: "MACHINE_BYPASS_TOGGLED", machineId: machine.id, enabled });
       return res.json({
         message: enabled
@@ -5359,6 +5463,61 @@ function getDateRangeFromQuery(query) {
   return { from, to };
 }
 
+function setDateMinutes(baseDate, minutes) {
+  const date = new Date(baseDate);
+  date.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+  return date;
+}
+
+function getShiftWindowForDate(shift, now = new Date()) {
+  const startMinutes = toMinutes(shift?.start_time);
+  const endMinutes = toMinutes(shift?.end_time);
+  if (startMinutes === null || endMinutes === null) {
+    return null;
+  }
+
+  const currentMinutes = getMinutesForDate(now);
+  let from = setDateMinutes(now, startMinutes);
+  let to = setDateMinutes(now, endMinutes);
+
+  if (startMinutes === endMinutes) {
+    to = new Date(from.getTime() + 24 * 60 * 60 * 1000);
+  } else if (startMinutes > endMinutes) {
+    if (currentMinutes < endMinutes) {
+      from.setDate(from.getDate() - 1);
+    } else {
+      to.setDate(to.getDate() + 1);
+    }
+  }
+
+  return { from, to };
+}
+
+function getProductionDayWindow(shifts = [], now = new Date()) {
+  const starts = shifts
+    .map((shift) => toMinutes(shift?.start_time))
+    .filter((value) => value !== null);
+  const startMinutes = starts.length ? Math.min(...starts) : 6 * 60;
+  let from = setDateMinutes(now, startMinutes);
+  if (getMinutesForDate(now) < startMinutes) {
+    from.setDate(from.getDate() - 1);
+  }
+  const to = new Date(from.getTime() + 24 * 60 * 60 * 1000);
+  return { from, to };
+}
+
+function getOperatorStatsDateRange(query, shifts, effectiveShiftCode, currentShift) {
+  if (query?.dateFrom || query?.dateTo) {
+    return getDateRangeFromQuery(query);
+  }
+  if (effectiveShiftCode) {
+    const selectedShift = shifts.find((row) => String(row.shift_code || "").trim().toUpperCase() === effectiveShiftCode) || currentShift;
+    const selectedWindow = getShiftWindowForDate(selectedShift);
+    if (selectedWindow) return selectedWindow;
+  }
+  return getProductionDayWindow(shifts);
+}
+
 async function finalizeCustomerQrMappingIfEligible({
   partId,
   stationNo,
@@ -5496,6 +5655,7 @@ function isDateInShift(dateValue, shift) {
 async function getActiveShiftDefinitions() {
   const rows = await Shift.findAll({
     where: { is_active: true },
+    attributes: ["id", "shift_name", "shift_code", "start_time", "end_time"],
     order: [["start_time", "ASC"]],
     raw: true,
   });
@@ -5517,6 +5677,10 @@ function applyShiftFilter(rows, shiftCode, shifts) {
   }
   const target = String(shiftCode).trim().toUpperCase();
   return rows.filter((row) => resolveShiftCodeForDate(row.createdAt, shifts) === target);
+}
+
+function isAllShiftToken(value) {
+  return ["ALL", "ALL_SHIFT", "ALL_SHIFTS"].includes(String(value || "").trim().toUpperCase());
 }
 
 function formatHourBucket(dateValue) {

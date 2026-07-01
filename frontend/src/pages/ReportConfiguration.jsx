@@ -1,5 +1,5 @@
 // ReportConfiguration.jsx - Define report heading, branding & layout settings
-import { useRef, useState, useEffect } from "react";
+import { useMemo, useRef, useState, useEffect } from "react";
 import { FileText, Save, RefreshCw, Download, Settings, Type, Building2, ShieldCheck, ClipboardCheck, AlertCircle } from "lucide-react";
 import toast from "react-hot-toast";
 import {
@@ -7,9 +7,10 @@ import {
   loadReportConfig,
   saveReportConfig,
 } from "../utils/reportConfig";
-import { reportApi, machineApi } from "../api/services";
+import { reportApi, machineApi, organizationApi, shiftApi } from "../api/services";
 
 const inputCls = "w-full bg-bg-dark border border-border rounded-lg px-3 py-2.5 text-sm text-text-main outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/20 transition-all placeholder:text-text-muted/40";
+const normalizePartToken = (value) => String(value || "").trim().toUpperCase();
 
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -24,16 +25,65 @@ const ReportConfiguration = () => {
   const [activeSection, setActiveSection] = useState("branding");
   const [exportLoading, setExportLoading] = useState(false);
   const [machines, setMachines] = useState([]);
+  const [organization, setOrganization] = useState({ plants: [], lines: [], parts: [] });
+  const [shifts, setShifts] = useState([]);
   
   const [filters, setFilters] = useState({
-    dateFrom: "", dateTo: "", machineId: "", lineName: "", shiftCode: ""
+    dateFrom: "",
+    dateTo: "",
+    plantId: "",
+    lineId: "",
+    machineId: "",
+    lineName: "",
+    partName: "",
+    dieName: "",
+    dieCastingMachine: "",
+    shiftCode: "",
   });
 
   const logoFileInputRef = useRef(null);
 
   useEffect(() => {
     machineApi.list().then(m => setMachines(m || [])).catch(() => {});
+    organizationApi.context().then((org) => setOrganization({ plants: org?.plants || [], lines: org?.lines || [], parts: org?.parts || [] })).catch(() => {});
+    shiftApi.list().then((rows) => setShifts((rows || []).filter((row) => row?.isActive !== false))).catch(() => {});
   }, []);
+
+  const scopedMachines = useMemo(
+    () => machines.filter((machine) => !filters.plantId || String(machine.plantId || "") === String(filters.plantId)),
+    [machines, filters.plantId]
+  );
+  const scopedLines = useMemo(
+    () => (organization.lines || []).filter((line) => !filters.plantId || String(line.plantId || "") === String(filters.plantId)),
+    [organization.lines, filters.plantId]
+  );
+  const activePartAssignments = useMemo(() => {
+    return (organization.parts || []).filter((part) => {
+      const active = String(part.status || "ACTIVE").toUpperCase() !== "INACTIVE" && part.isActive !== false;
+      const plantOk = !filters.plantId || String(part.plantId || "") === String(filters.plantId);
+      const lineOk = !filters.lineId || String(part.lineId || "") === String(filters.lineId);
+      return active && plantOk && lineOk;
+    });
+  }, [organization.parts, filters.plantId, filters.lineId]);
+  const availablePartNames = useMemo(() => (
+    [...new Set(activePartAssignments.map((part) => normalizePartToken(part.partName)).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+  ), [activePartAssignments]);
+  const availableDies = useMemo(() => (
+    [...new Set(activePartAssignments
+      .filter((part) => !filters.partName || normalizePartToken(part.partName) === normalizePartToken(filters.partName))
+      .map((part) => normalizePartToken(part.dieName))
+      .filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+  ), [activePartAssignments, filters.partName]);
+  const availableDieCastingMachines = useMemo(() => (
+    [...new Set(activePartAssignments
+      .filter((part) => !filters.partName || normalizePartToken(part.partName) === normalizePartToken(filters.partName))
+      .filter((part) => !filters.dieName || normalizePartToken(part.dieName) === normalizePartToken(filters.dieName))
+      .map((part) => normalizePartToken(part.dieCastingMachine))
+      .filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+  ), [activePartAssignments, filters.partName, filters.dieName]);
 
   const updateField = (key, value) => setConfig(p => ({ ...p, [key]: value }));
 
@@ -343,25 +393,63 @@ const ReportConfiguration = () => {
                   <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Shift</label>
                   <select className={inputCls} value={filters.shiftCode} onChange={e => setFilters(f => ({ ...f, shiftCode: e.target.value }))}>
                     <option value="">All Shifts</option>
-                    <option value="SHIFT_A">Shift A</option>
-                    <option value="SHIFT_B">Shift B</option>
-                    <option value="SHIFT_C">Shift C</option>
+                    {shifts.map((shift) => (
+                      <option key={shift.id || shift.shiftCode || shift.shift_code} value={shift.shiftCode || shift.shift_code}>
+                        {shift.shiftName || shift.shift_name || shift.shiftCode || shift.shift_code}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div>
-                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Line No</label>
-                  <select className={inputCls} value={filters.lineName} onChange={e => setFilters(f => ({ ...f, lineName: e.target.value, machineId: "" }))}>
-                    <option value="">All Lines</option>
-                    {[...new Set(machines.map(m => m.lineName).filter(Boolean))].map(l => (
-                      <option key={l} value={l}>{l}</option>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Plant</label>
+                  <select className={inputCls} value={filters.plantId} onChange={e => setFilters(f => ({ ...f, plantId: e.target.value, lineId: "", lineName: "", machineId: "", partName: "", dieName: "", dieCastingMachine: "" }))}>
+                    <option value="">All Plants</option>
+                    {(organization.plants || []).map((plant) => (
+                      <option key={plant.id} value={plant.id}>{plant.plantName}</option>
                     ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Line</label>
+                  <select className={inputCls} value={filters.lineId} onChange={e => {
+                    const line = scopedLines.find((item) => String(item.id) === String(e.target.value));
+                    setFilters(f => ({ ...f, lineId: e.target.value, lineName: line?.lineName || "", machineId: "", partName: "", dieName: "", dieCastingMachine: "" }));
+                  }}>
+                    <option value="">All Lines</option>
+                    {scopedLines.map(line => (
+                      <option key={line.id} value={line.id}>{line.lineName}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Part</label>
+                  <select className={inputCls} value={filters.partName} onChange={e => setFilters(f => ({ ...f, partName: normalizePartToken(e.target.value), dieName: "", dieCastingMachine: "" }))}>
+                    <option value="">All Parts</option>
+                    {availablePartNames.map((partName) => <option key={partName} value={partName}>{partName}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Die</label>
+                  <select className={inputCls} value={filters.dieName} onChange={e => setFilters(f => ({ ...f, dieName: normalizePartToken(e.target.value), dieCastingMachine: "" }))}>
+                    <option value="">All Dies</option>
+                    {availableDies.map((dieName) => <option key={dieName} value={dieName}>{dieName}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Die Casting Machine</label>
+                  <select className={inputCls} value={filters.dieCastingMachine} onChange={e => setFilters(f => ({ ...f, dieCastingMachine: normalizePartToken(e.target.value) }))}>
+                    <option value="">All Die Casting Machines</option>
+                    {availableDieCastingMachines.map((machineName) => <option key={machineName} value={machineName}>{machineName}</option>)}
                   </select>
                 </div>
                 <div>
                   <label className="text-[10px] font-semibold text-text-muted uppercase tracking-widest block mb-1.5">Machine Name</label>
                   <select className={inputCls} value={filters.machineId} onChange={e => setFilters(f => ({ ...f, machineId: e.target.value }))}>
                     <option value="">All Machines</option>
-                    {machines.filter(m => !filters.lineName || m.lineName === filters.lineName).map(m => (
+                    {scopedMachines
+                      .filter(m => !filters.lineId || String(m.lineId || m.line_id || "") === String(filters.lineId))
+                      .filter(m => !filters.lineName || m.lineName === filters.lineName)
+                      .map(m => (
                       <option key={m.id} value={m.id}>{m.machineName}</option>
                     ))}
                   </select>

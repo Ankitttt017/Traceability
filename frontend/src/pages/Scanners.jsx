@@ -7,9 +7,10 @@ import {
   Activity, Server, CheckCircle
 } from "lucide-react";
 import toast from "react-hot-toast";
-import { scannerApi, machineApi, traceabilityApi } from "../api/services";
+import { scannerApi, machineApi, organizationApi, traceabilityApi } from "../api/services";
 import { formatMachineLabel, sanitizeLineName } from "../utils/machineFields";
 import ConfirmModal from "../components/ConfirmModal";
+import PlantLineSelector from "../components/PlantLineSelector";
 
 /* ─── constants ────────────────────────────────────────────── */
 const EMPTY_FORM = {
@@ -57,6 +58,9 @@ const PLC_DATA_TYPES = [
 const Scanners = () => {
   const [scanners, setScanners] = useState([]);
   const [machines, setMachines] = useState([]);
+  const [organization, setOrganization] = useState({ plants: [], lines: [] });
+  const [scope, setScope] = useState({ plantId: "", lineId: "" });
+  const [statusFilter, setStatusFilter] = useState("ALL");
   const [form, setForm] = useState(EMPTY_FORM);
   const [editingId, setEditingId] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -72,18 +76,33 @@ const Scanners = () => {
   const loadData = useCallback(async (quiet = false) => {
     if (!quiet) setRefreshing(true);
     try {
-      const [scannerData, machineData] = await Promise.all([
+      const [scannerData, machineData, org] = await Promise.all([
         scannerApi.list(),
         machineApi.list(),
+        organizationApi.context().catch(() => ({ plants: [], lines: [] })),
       ]);
       setScanners(scannerData || []);
       setMachines((machineData || []).filter(m => m.status === "ACTIVE"));
+      setOrganization({ plants: org?.plants || [], lines: org?.lines || [] });
     } catch {
       if (!quiet) toast.error("Failed to load scanner data");
     } finally { setRefreshing(false); }
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  const scopedMachines = machines.filter((machine) => {
+    const plantOk = !scope.plantId || String(machine.plantId || "") === String(scope.plantId);
+    const lineOk = !scope.lineId || String(machine.lineId || "") === String(scope.lineId);
+    return plantOk && lineOk;
+  });
+  const filteredScanners = scanners.filter((scanner) => {
+    const machine = scanner.mappedMachine || {};
+    const plantOk = !scope.plantId || String(machine.plantId || "") === String(scope.plantId);
+    const lineOk = !scope.lineId || String(machine.lineId || "") === String(scope.lineId);
+    const statusOk = statusFilter === "ACTIVE" ? scanner.isActive : statusFilter === "INACTIVE" ? !scanner.isActive : true;
+    return plantOk && lineOk && statusOk;
+  });
 
   const resetForm = () => {
     setForm(EMPTY_FORM);
@@ -94,6 +113,12 @@ const Scanners = () => {
   };
 
   const handleEdit = (scanner) => {
+    if (scanner.mappedMachine) {
+      setScope({
+        plantId: String(scanner.mappedMachine.plantId || ""),
+        lineId: String(scanner.mappedMachine.lineId || ""),
+      });
+    }
     setEditingId(scanner.id);
     setForm({
       scannerName: scanner.scannerName || "",
@@ -267,8 +292,8 @@ const Scanners = () => {
   const inputCls = "w-full bg-bg-dark border border-border rounded-lg px-3 py-2 text-sm text-text-main outline-none focus:border-primary/60 transition-colors placeholder:text-text-muted/40";
   const selectCls = "w-full bg-bg-dark border border-border rounded-lg px-3 py-2 text-sm text-text-main outline-none focus:border-primary/60 transition-colors";
 
-  const activeScanners = scanners.filter(s => s.isActive);
-  const connectedScanners = scanners.filter(s => s.mappedMachineId).length;
+  const activeScanners = filteredScanners.filter(s => s.isActive);
+  const connectedScanners = filteredScanners.filter(s => s.mappedMachineId).length;
 
   return (
     <div className="space-y-6 rise-in" style={{ fontFamily: "var(--font-outfit)" }}>
@@ -303,7 +328,7 @@ const Scanners = () => {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-[9px] font-black text-text-muted uppercase tracking-wider mb-1">Total Scanners</p>
-              <p className="text-2xl font-black text-primary font-mono">{scanners.length}</p>
+              <p className="text-2xl font-black text-primary font-mono">{filteredScanners.length}</p>
             </div>
             <Server size={28} className="text-primary/30" />
           </div>
@@ -332,8 +357,8 @@ const Scanners = () => {
 
       {/* ── Info banner if no machines ── */}
       {machines.length === 0 && (
-        <div className="flex items-start gap-3 p-4 bg-warning/5 border border-warning/20 rounded-xl">
-          <Info size={16} className="text-warning mt-0.5 flex-shrink-0" />
+        <div className="flex items-start gap-3 p-4 bg-slate-50 border border-slate-200 rounded-xl">
+          <Info size={16} className="text-primary mt-0.5 flex-shrink-0" />
           <p className="text-sm text-text-muted">
             No active machines found. <span className="font-semibold text-text-main">Add machines first</span> in the Machine Registry before mapping scanners.
           </p>
@@ -343,7 +368,7 @@ const Scanners = () => {
       {/* ── Add / Edit Form (inline slide-in) ── */}
       {showForm && (
         <div className="industrial-card overflow-hidden">
-          <div className="px-5 py-3 border-b border-border bg-bg-dark/40 flex items-center justify-between">
+          <div className="px-5 py-3 border-b border-border bg-white flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Network size={14} className="text-primary" />
               <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">
@@ -408,12 +433,26 @@ const Scanners = () => {
                   </div>
                 </>
               )}
+              <div className="sm:col-span-2">
+                <PlantLineSelector
+                  value={scope}
+                  onChange={(nextScope) => {
+                    setScope(nextScope);
+                    setForm((prev) => ({ ...prev, mappedMachineId: "" }));
+                  }}
+                  includeAll
+                  compact
+                  className="grid grid-cols-1 gap-4 sm:grid-cols-2"
+                  inputClassName={selectCls}
+                  labelClassName="text-[9px] font-black text-text-muted uppercase tracking-wider block mb-1.5"
+                />
+              </div>
               <div>
                 <label className="text-[9px] font-black text-text-muted uppercase tracking-wider block mb-1.5">Map to Machine *</label>
                 <select required value={form.mappedMachineId} onChange={e => setForm({ ...form, mappedMachineId: e.target.value })}
                   className={selectCls}>
                   <option value="">— Select Machine —</option>
-                  {machines.map(m => <option key={m.id} value={m.id}>{formatMachineLabel(m)}</option>)}
+                  {scopedMachines.map(m => <option key={m.id} value={m.id}>{formatMachineLabel(m)}</option>)}
                 </select>
               </div>
               <div>
@@ -620,26 +659,59 @@ const Scanners = () => {
 
       {/* ── Scanner List Table ── */}
       <div className="industrial-card p-0 overflow-hidden">
-        <div className="px-5 py-3 border-b border-border bg-bg-dark/40 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Network size={14} className="text-primary" />
-            <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">Registered Devices</h2>
+        <div className="px-5 py-3 border-b border-border bg-white flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+          <div className="flex items-center justify-between gap-3 xl:self-center">
+            <div className="flex items-center gap-2">
+              <Network size={14} className="text-primary" />
+              <h2 className="text-[10px] font-black text-text-main uppercase tracking-wider">Registered Devices</h2>
+            </div>
+            <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest bg-slate-50 px-2 py-1 rounded border border-border xl:hidden">
+              {filteredScanners.length} Device{filteredScanners.length !== 1 ? "s" : ""}
+            </span>
           </div>
-          <span className="text-[9px] font-black text-text-muted uppercase tracking-widest bg-bg-dark px-2 py-1 rounded border border-border">
-            {scanners.length} Device{scanners.length !== 1 ? "s" : ""}
-          </span>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(320px,520px)_150px_auto] md:items-end">
+            <PlantLineSelector
+              value={scope}
+              onChange={setScope}
+              includeAll
+              compact
+              hideLabels
+              className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+              inputClassName="h-9 w-full rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
+            />
+            <div>
+              <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="h-9 w-full rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10">
+                <option value="ALL">All Status</option>
+                <option value="ACTIVE">Active Only</option>
+                <option value="INACTIVE">Inactive Only</option>
+              </select>
+            </div>
+            {(scope.plantId || scope.lineId) ? (
+              <button
+                type="button"
+                onClick={() => setScope({ plantId: "", lineId: "" })}
+                className="h-9 rounded-md border border-border bg-white px-3 text-xs font-bold text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+              >
+                Clear Scope
+              </button>
+            ) : (
+              <span className="hidden text-center text-[9px] font-black text-slate-500 uppercase tracking-widest bg-slate-50 px-2 py-2 rounded border border-border md:block">
+                {filteredScanners.length} Device{filteredScanners.length !== 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
         </div>
 
-        {scanners.length === 0 ? (
+        {filteredScanners.length === 0 ? (
           <div className="flex flex-col items-center py-20 text-text-muted">
             <ScanLine size={40} className="opacity-15 mb-3" />
-            <p className="font-semibold text-sm">No scanners registered</p>
-            <p className="text-xs mt-1 text-text-muted/60">Click "Add Scanner" to register your first device</p>
+            <p className="font-semibold text-sm">No scanners found</p>
+            <p className="text-xs mt-1 text-text-muted/60">Clear scope or add a scanner for this line.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-bg-dark/60 text-[9px] font-black uppercase tracking-wider text-text-muted border-b border-border">
+            <table className="w-full text-sm min-w-[860px]">
+              <thead className="bg-slate-50 text-[9px] font-black uppercase tracking-wider text-slate-500 border-b border-border">
                 <tr>
                   <th className="px-4 py-3 text-left">Scanner</th>
                   <th className="px-4 py-3 text-left">Mode</th>
@@ -650,14 +722,14 @@ const Scanners = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/20">
-                {scanners.map(scanner => (
-                  <tr key={scanner.id} className="hover:bg-bg-dark/20 transition-colors">
+                {filteredScanners.map(scanner => (
+                  <tr key={scanner.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2.5">
                         <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
                           scanner.isActive 
                             ? "bg-primary/10 text-primary border border-primary/20" 
-                            : "bg-bg-dark text-text-muted border border-border opacity-50"
+                            : "bg-slate-50 text-text-muted border border-border opacity-70"
                         }`}>
                           {scanner.isActive ? <Wifi size={14} /> : <WifiOff size={14} />}
                         </div>

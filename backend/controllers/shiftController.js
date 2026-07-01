@@ -1,9 +1,28 @@
 const { Sequelize } = require("sequelize");
+const sequelize = require("../config/db");
 const Shift = require("../models/Shift");
 const { normalizeTimeValue } = require("../utils/time");
 
+function toInt(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : null;
+}
+
+async function ensureScopeColumns() {
+  await sequelize.query(`
+    IF COL_LENGTH('Shifts', 'plant_id') IS NULL
+      ALTER TABLE [Shifts] ADD [plant_id] INT NULL;
+  `);
+  await sequelize.query(`
+    IF COL_LENGTH('Shifts', 'line_id') IS NULL
+      ALTER TABLE [Shifts] ADD [line_id] INT NULL;
+  `);
+}
+
 function toPayload(body = {}) {
   return {
+    plant_id: toInt(body.plantId ?? body.plant_id),
+    line_id: toInt(body.lineId ?? body.line_id),
     shift_name: String(body.shiftName ?? body.shift_name ?? "").trim(),
     shift_code: String(body.shiftCode ?? body.shift_code ?? "")
       .trim()
@@ -20,6 +39,8 @@ function toPayload(body = {}) {
 function toResponse(shift) {
   return {
     id: shift.id,
+    plantId: shift.plant_id || null,
+    lineId: shift.line_id || null,
     shiftName: shift.shift_name,
     shiftCode: shift.shift_code,
     startTime: normalizeTimeValue(shift.start_time, { includeSeconds: true }),
@@ -60,9 +81,16 @@ function handleError(error, res) {
   return res.status(500).json({ error: error.message });
 }
 
-exports.listShifts = async (_req, res) => {
+exports.listShifts = async (req, res) => {
   try {
+    await ensureScopeColumns();
+    const where = {};
+    const plantId = toInt(req.query.plantId ?? req.query.plant_id);
+    const lineId = toInt(req.query.lineId ?? req.query.line_id);
+    if (plantId) where.plant_id = plantId;
+    if (lineId) where.line_id = lineId;
     const rows = await Shift.findAll({
+      where,
       order: [["start_time", "ASC"]],
     });
     res.json(rows.map(toResponse));
@@ -73,6 +101,7 @@ exports.listShifts = async (_req, res) => {
 
 exports.createShift = async (req, res) => {
   try {
+    await ensureScopeColumns();
     const payload = toPayload(req.body);
     const missing = validatePayload(payload);
     if (missing.length > 0) {
@@ -88,6 +117,7 @@ exports.createShift = async (req, res) => {
 
 exports.updateShift = async (req, res) => {
   try {
+    await ensureScopeColumns();
     const shift = await Shift.findByPk(req.params.id);
     if (!shift) {
       return res.status(404).json({ error: "Shift not found" });

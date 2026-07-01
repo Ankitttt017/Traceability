@@ -96,7 +96,11 @@ async function checkSilentMachineAlarms() {
     // Check if we are currently in any active shift
     const now = new Date();
     const currentMinutes = now.getHours() * 60 + now.getMinutes();
-    const shifts = await Shift.findAll({ where: { is_active: true }, raw: true });
+    const shifts = await Shift.findAll({
+      where: { is_active: true },
+      attributes: ["id", "shift_name", "shift_code", "start_time", "end_time"],
+      raw: true,
+    });
 
     const inActiveShift = shifts.some((s) => {
       const start = toMinutes(s.start_time);

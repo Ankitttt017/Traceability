@@ -48,6 +48,9 @@ require("./models/PackingSession");
 require("./models/PackingItem");
 require("./models/PackingManagementSetting");
 require("./models/StationFeatureSetting");
+require("./models/Plant");
+require("./models/Line");
+require("./models/LinePartAssignment");
 require("./models/RoleAccessSetting");
 require("./models/PlcRegisterRange");
 require("./models/ScannerConnection");
@@ -89,6 +92,7 @@ const {
 } = require("./services/industrialConfigCacheService");
 
 const { startTcpServer, shutdownTcpServer } = require("./tcp/tcpServer");
+const { ensureDefaultOrganization, ensureLinePartAssignmentSchema } = require("./services/organizationService");
 require("./models/AuditLog"); // UPGRADE 5 — auto-sync AuditLog table
 require("./models/Alarm");    // UPGRADE 6 — auto-sync Alarms table
 
@@ -454,6 +458,8 @@ async function startServer() {
       await runStartupDbTask("ensureRoleAccessSchema", () => ensureRoleAccessSchema());
       await runStartupDbTask("ensureUserRoleSchema", () => ensureUserRoleSchema());
       await runStartupDbTask("ensureRejectionSchema", () => ensureRejectionSchema());
+      await runStartupDbTask("ensureDefaultOrganization", () => ensureDefaultOrganization());
+      await runStartupDbTask("ensureLinePartAssignmentSchema", () => ensureLinePartAssignmentSchema());
       await runStartupDbTask("ensureMachineQrScannerUniqueness", () => ensureMachineQrScannerUniqueness());
       await runStartupDbTask("resetAllMachineLocks", () => resetAllMachineLocks());
       await runStartupDbTask("resetAllScannerConnectionStates", () => scannerService.resetAllScannerConnectionStates());

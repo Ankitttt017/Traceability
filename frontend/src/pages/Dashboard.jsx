@@ -23,6 +23,7 @@ import {
 import { dashboardApi, machineApi, rejectionConfigApi } from "../api/services";
 import ChartTooltip from "../components/charts/ChartTooltip";
 import SafeChart from "../components/charts/SafeChart";
+import PlantLineSelector from "../components/PlantLineSelector";
 import { CHART_COLORS } from "../constants/chartTheme";
 import { useLanguage } from "../context/LanguageContext";
 
@@ -505,7 +506,7 @@ const Dashboard = () => {
   const [plcMap,       setPlcMap]       = useState({});
   const [nowMs,        setNowMs]        = useState(Date.now());
   const [filters,      setFilters]      = useState({
-    dateFrom:"", dateTo:"", datePreset:"", machineId:"", lineName:"", partId:"", status:"", shiftCode:"",
+    dateFrom:"", dateTo:"", datePreset:"", plantId:"", lineId:"", lineName:"", machineId:"", partId:"", status:"", shiftCode:"",
   });
   const [chartModeHourly, setChartModeHourly] = useState("line");
   const [chartModeShift, setChartModeShift] = useState("bar");
@@ -573,6 +574,8 @@ const Dashboard = () => {
     dateFrom,
     dateTo,
     machineId:  filters.machineId  || undefined,
+    plantId:    filters.plantId    || undefined,
+    lineId:     filters.lineId     || undefined,
     lineName:   filters.lineName   || undefined,
     partId:     filters.partId     || undefined,
     status:     filters.status     || undefined,
@@ -1335,25 +1338,15 @@ const Dashboard = () => {
             </div>
 
             <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.productionLine", "Production Line")}</label>
-              <select
-                value={filters.lineName}
-                onChange={e=>setFilters(prev=>({...prev,lineName:e.target.value,machineId:""}))}
-                style={{
-                  height:36,padding:"0 12px",
-                  background:C.bg("input"),
-                  border:`1px solid ${C.bdr()}`,
-                  borderRadius:8,fontSize:12,
-                  color:C.txt("pri"),outline:"none",
-                  fontFamily:"var(--font-db)",
-                  cursor:"pointer",
-                  appearance:"auto",
-                }}>
-                <option value="">{t("dashboard.allLines", "All Lines")}</option>
-                {uniqueStages((summary.availableLines || []).map((line) => String(line || "").trim()).filter(Boolean)).map((line)=>(
-                  <option key={line} value={line}>{line}</option>
-                ))}
-              </select>
+              <PlantLineSelector
+                value={filters}
+                onChange={(scope)=>setFilters(prev=>({...prev,...scope,machineId:""}))}
+                includeAll
+                compact
+                hideLabels
+                className="grid grid-cols-1 gap-2 sm:grid-cols-2"
+                inputClassName="h-9 rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
+              />
             </div>
 
             <div style={{display:"flex", flexDirection:"column", gap:5}}>
@@ -1373,6 +1366,8 @@ const Dashboard = () => {
                 }}>
                 <option value="">{t("dashboard.allMachines", "All Machines")}</option>
                 {machines
+                  .filter((m) => !filters.plantId || String(m.plantId || "") === String(filters.plantId))
+                  .filter((m) => !filters.lineId || String(m.lineId || "") === String(filters.lineId))
                   .filter((m) => !filters.lineName || String(m.lineName || "").trim() === filters.lineName)
                   .map(m=>(
                   <option key={m.id} value={m.id}>{m.machineName}</option>
@@ -1486,7 +1481,7 @@ const Dashboard = () => {
           </div>
           <button 
             onClick={() => {
-              setFilters({dateFrom:"",dateTo:"",datePreset:"",machineId:"",lineName:"",partId:"",status:"",shiftCode:""});
+              setFilters({dateFrom:"",dateTo:"",datePreset:"",plantId:"",lineId:"",lineName:"",machineId:"",partId:"",status:"",shiftCode:""});
             }}
             style={{
               background: "transparent",

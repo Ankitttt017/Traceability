@@ -17,7 +17,8 @@ const DEFAULT_SERVER_URL =
 // Production-safe default:
 // 1) Use VITE_API_BASE_URL when provided.
 // 2) Else call same-origin backend path (/api/v1), avoiding hardcoded LAN IP in live deploy.
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || `${DEFAULT_SERVER_URL}/api/v1`;
+const ENV_API_BASE_URL = String(import.meta.env.VITE_API_BASE_URL || "").trim();
+const BASE_URL = ENV_API_BASE_URL || `${DEFAULT_SERVER_URL}/api/v1`;
 
 // Live Production / LAN
 // const BASE_URL = "http://172.16.9.110:4000/api/v1";
