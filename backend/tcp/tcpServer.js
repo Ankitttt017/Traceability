@@ -1220,15 +1220,6 @@ function startTcpServer() {
       const chunk = buffer.toString("utf8");
       console.log(`[TCP] Raw chunk from ${remoteIp}: ${JSON.stringify(chunk)}`);
 
-      if (!/[\r\n\0]/.test(chunk)) {
-        const cleanChunk = sanitizeScannerPayload(chunk);
-        const cleanPending = sanitizeScannerPayload(pending);
-        if (cleanPending && cleanChunk && cleanChunk.length >= 4) {
-          consumeMessage(cleanPending);
-          pending = "";
-        }
-      }
-
       pending += chunk;
 
       const parts = pending.split(/\r?\n|\0/);
