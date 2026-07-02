@@ -1310,6 +1310,10 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     const hasExistingSuccess =
       stationLogs.some((row) => isTerminalOperationLog(row)) ||
       ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"].includes(latestStationStatus);
+    const hasExistingInProgressAtStation =
+      latestStationLog &&
+      !hasExistingSuccess &&
+      ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING", "WAITING_END"].includes(latestStationStatus);
 
     const scanAttemptType = hasExistingSuccess ? "RE-SCAN" : "INITIAL";
 
@@ -1376,6 +1380,24 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
         expectedStation: nextStationAfterCurrent,
         lastCompletedStation: station,
         operationLogId: blockedLog.id,
+      };
+    }
+
+    if (hasExistingInProgressAtStation && !part.is_rework) {
+      return {
+        decision: "ALLOW",
+        reason: "STATION_ALREADY_IN_PROGRESS",
+        qrStatus: "PASSED",
+        operationStatus: latestStationStatus || "WAITING",
+        plcStatus: latestStationStatus || "WAITING_PLC",
+        status: "WAITING",
+        message: `${station} already scanned. Waiting for operation result.`,
+        currentStatus: part.status,
+        expectedStation: station,
+        lastCompletedStation,
+        operationLogId: latestStationLog.id,
+        stationNo: station,
+        resultSource,
       };
     }
 

@@ -325,7 +325,7 @@ async function shouldBlockMappedCustomerQrOnStartScan(stationNo) {
   });
   if (customerQrStationIndex < 0) return true;
   if (currentIndex < 0) return false;
-  return currentIndex <= customerQrStationIndex;
+  return currentIndex < customerQrStationIndex;
 }
 
 
@@ -533,6 +533,7 @@ function emitCustomerQrScannerResult({
   type = "INFO",
   partId = "",
   customerQrCode = "",
+  mappedPartId = "",
   stationNo,
   machine,
   scanner,
@@ -549,10 +550,16 @@ function emitCustomerQrScannerResult({
   closePopup = false,
   message,
 }) {
-  const displayContext = buildScannerDisplayContext({ rawPayload: customerQrCode || partId, partId, customerQrCode, mappedPartId: partId });
+  const displayContext = buildScannerDisplayContext({
+    rawPayload: customerQrCode || partId,
+    partId,
+    customerQrCode,
+    mappedPartId: mappedPartId || partId,
+  });
   const payload = attachScannerDisplayMetadata({
     partId: partId || displayContext.mappedPartId || "",
     customerQrCode: displayContext.customerQrCode,
+    mappedPartId: displayContext.mappedPartId,
     stationNo,
     machineId: machine?.id || null,
     machineName: machine?.machine_name || null,
@@ -574,7 +581,7 @@ function emitCustomerQrScannerResult({
     rawPayload: customerQrCode || partId,
     partId,
     customerQrCode: displayContext.customerQrCode,
-    mappedPartId: partId,
+    mappedPartId: mappedPartId || partId,
   });
 
 
@@ -823,14 +830,28 @@ async function promoteTraceabilityIdentityToCustomerQr({ partId, customerQrCode,
     await customerPart.save();
   }
 
+  const sequence = await getActiveStationSequence().catch(() => []);
+  const currentStationIndex = sequence.indexOf(station);
+  const stationsToPromote = currentStationIndex >= 0
+    ? sequence.slice(0, currentStationIndex + 1)
+    : [station];
+
   await OperationLog.update(
     { part_id: customerQr },
     {
       where: {
         part_id: dotPinPartId,
-        station_no: station,
+        station_no: { [Op.in]: stationsToPromote },
+      },
+    }
+  );
+
+  await ProductionLog.update(
+    { part_id: customerQr },
+    {
+      where: {
+        part_id: dotPinPartId,
         machine_id: machine.id,
-        plc_status: { [Op.in]: ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "PLC_COMM_ERROR", "RESET", "RETRY", "VALIDATION_ONLY"] },
       },
     }
   );
@@ -1043,22 +1064,7 @@ async function processIncomingScannerPayload({ scannerIp, rawPacket }) {
 
 async function resolveSharedCustomerQrTargets({ scanners, partId }) {
   const targets = [];
-  const existingPart = await Part.findOne({
-    where: { part_id: partId },
-    attributes: ["part_id"],
-  });
-
-
-  if (existingPart) {
-    return targets;
-  }
-
-
   const customerRoleScanners = scanners.filter((scanner) => String(scanner.scanner_role || "").trim().toUpperCase() === "CUSTOMER_QR");
-  const startRoleScanners = scanners.filter((scanner) => String(scanner.scanner_role || "").trim().toUpperCase() === "START_QR");
-  if (startRoleScanners.length > 0 && looksLikeInternalStartQr(partId)) {
-    return targets;
-  }
   const candidates = customerRoleScanners;
 
 
@@ -1075,6 +1081,23 @@ async function resolveSharedCustomerQrTargets({ scanners, partId }) {
     targets.push({ scanner, forceCustomerQr: true });
   }
 
+
+  if (targets.length > 0) {
+    return targets;
+  }
+
+  const existingPart = await Part.findOne({
+    where: { part_id: partId },
+    attributes: ["part_id"],
+  });
+  if (existingPart) {
+    return targets;
+  }
+
+  const startRoleScanners = scanners.filter((scanner) => String(scanner.scanner_role || "").trim().toUpperCase() === "START_QR");
+  if (startRoleScanners.length > 0 && looksLikeInternalStartQr(partId)) {
+    return targets;
+  }
 
   return targets;
 }
@@ -1387,6 +1410,42 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
   const scanStartedAt = Date.now();
   const workflowKey = buildWorkflowKey(machine.id, stationNo);
   const activePartId = await resolveActivePartIdForMachine(machine, stationNo);
+  if (activePartId && String(activePartId).trim() === String(partId || "").trim()) {
+    emitCustomerQrScannerResult({
+      type: "WARNING",
+      partId: activePartId,
+      customerQrCode: "",
+      mappedPartId: activePartId,
+      stationNo,
+      machine,
+      scanner,
+      scannerRole,
+      scannerIp,
+      decision: "WAIT",
+      qrStatus: "WAIT",
+      operationStatus: "WAITING_CUSTOMER_QR",
+      status: "WAITING",
+      plcStatus: "WAITING_PLC",
+      customerQrPending: true,
+      reason: "START_QR_SCANNED_AS_CUSTOMER_QR",
+      message: `${stationNo}: Start QR already accepted. Scan the Customer QR for this part.`,
+      timestamp: new Date().toISOString(),
+    });
+    logScannerTrace({
+      stage: "customer_qr_same_as_start_blocked",
+      scannerIp,
+      scannerName: scanner.scanner_name,
+      machineId: machine.id,
+      stationNo,
+      flowType: flowContext.flowType,
+      qrType,
+      payload: partId,
+      reason: "START_QR_SCANNED_AS_CUSTOMER_QR",
+      status: "WARNING",
+      durationMs: Date.now() - scanStartedAt,
+    });
+    return;
+  }
   if (!activePartId) {
     resetWorkflowState(workflowKey, { reason: "NO_ACTIVE_START_QR" });
     const allowCustomerQrOnlyStart = isCustomerQrScannerRole(scannerRole, qrType);
@@ -1515,6 +1574,7 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
     type: finalized.finalized ? "SUCCESS" : "INFO",
     partId: traceabilityPartId,
     customerQrCode: partId,
+    mappedPartId: activePartId,
     stationNo,
     machine,
     scanner,
@@ -1571,6 +1631,54 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
   const normalizedPartId = resolvedCode.resolvedPartId;
   const isMappedCustomerQrScan = Boolean(resolvedCode.customerQrCode) && resolvedCode.customerQrCode === partId;
   const isCustomerQrOnlyStart = flowContext.flowType === "CUSTOMER_QR_ONLY";
+  const existingWorkflowState = getWorkflowState(workflowKey);
+  const repeatedPendingStartQr =
+    !isMappedCustomerQrScan &&
+    !isCustomerQrOnlyStart &&
+    flowContext.flowType === "NORMAL" &&
+    flowContext.qrType === "START_QR" &&
+    existingWorkflowState?.waitingForCustomerQr === true &&
+    String(existingWorkflowState.activePartId || "").trim() === String(normalizedPartId || partId || "").trim();
+
+  if (repeatedPendingStartQr) {
+    const message = `QR already accepted at ${stationNo}. Waiting for Customer QR.`;
+    const payload = attachScannerDisplayMetadata({
+      partId: normalizedPartId || partId,
+      customerQrCode: "",
+      stationNo,
+      machineId: machine.id,
+      machineName: machine.machine_name,
+      scannerId: scanner.id,
+      scannerName: scanner.scanner_name,
+      scannerRole,
+      scannerIp,
+      qrStatus: "PASSED",
+      operationStatus: "WAITING_CUSTOMER_QR",
+      status: "WAITING",
+      plcStatus: "WAITING_PLC",
+      reason: "WAITING_CUSTOMER_QR",
+      customerQrPending: true,
+      customerQrMapped: false,
+      message,
+      timestamp: new Date().toISOString(),
+    }, { rawPacket, rawPayload: rawPacket, partId: normalizedPartId || partId, customerQrCode: "", mappedPartId: normalizedPartId || partId });
+    emitRealtime("scan_event", { sourceEvent: "scan_event", decision: "WAIT", ...payload });
+    emitRealtime("operator_popup", { type: "INFO", ...payload });
+    logScannerTrace({
+      stage: "start_qr_already_waiting_customer_qr",
+      scannerIp,
+      scannerName: scanner.scanner_name,
+      machineId: machine.id,
+      stationNo,
+      flowType: flowContext.flowType,
+      qrType,
+      payload: partId,
+      reason: "WAITING_CUSTOMER_QR",
+      status: "WAITING",
+      durationMs: Date.now() - scanStartedAt,
+    });
+    return;
+  }
 
 
   if (!isMappedCustomerQrScan && !isCustomerQrOnlyStart && await shouldBlockUnknownQrAfterLaser({ code: partId, stationNo })) {
@@ -1690,7 +1798,18 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
 
 
   const scanPartId = isCustomerQrOnlyStart ? partId : normalizedPartId;
+  const displayMappedPartId = isMappedCustomerQrScan
+    ? (resolvedCode.mappedPartId || scanPartId)
+    : scanPartId;
   const isCustomerQrOnlyTrace = isCustomerQrOnlyStart || await isCustomerQrOnlyTracePart(scanPartId, resolvedCode.customerQrCode || (isCustomerQrOnlyStart ? scanPartId : ""));
+  if (isMappedCustomerQrScan && resolvedCode.mappedPartId && resolvedCode.customerQrCode) {
+    await promoteTraceabilityIdentityToCustomerQr({
+      partId: resolvedCode.mappedPartId,
+      customerQrCode: resolvedCode.customerQrCode,
+      stationNo,
+      machine,
+    });
+  }
   const response = await saveScan(scanPartId, stationNo, "OK", machine.id, null, {
     resultSource: isCustomerQrOnlyStart ? "CUSTOMER_QR_ONLY_START" : "TCP_PUSH_SCANNER",
     resultInput: "OK",
@@ -1759,7 +1878,7 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
     reason: isCustomerQrOnlyStart && response?.decision === "ALLOW"
       ? "CUSTOMER_QR_ONLY_STARTED"
       : (customerQrPending && response?.decision === "ALLOW" ? "WAITING_CUSTOMER_QR" : (response?.reason || null)),
-    status: response?.decision === "ALLOW" ? (customerQrPending ? "WAITING" : "SCANNED") : "BLOCKED",
+    status: response?.status || (response?.decision === "ALLOW" ? (customerQrPending ? "WAITING" : "SCANNED") : "BLOCKED"),
     qrStatus: response?.qrStatus || (response?.decision === "ALLOW" ? "PASSED" : "FAILED"),
     operationStatus: response?.operationStatus || (response?.decision === "ALLOW" ? (customerQrPending ? "WAITING_CUSTOMER_QR" : "WAITING") : "BLOCKED"),
     customerQrPending,
@@ -1771,7 +1890,7 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
         ? `QR PASS - Waiting for Customer QR at ${stationNo}`
         : (response?.message || "")),
     timestamp: new Date().toISOString(),
-  }, { rawPacket, rawPayload: rawPacket, partId: scanPartId, customerQrCode: isCustomerQrOnlyStart ? scanPartId : (resolvedCode.customerQrCode || null), mappedPartId: scanPartId }));
+  }, { rawPacket, rawPayload: rawPacket, partId: scanPartId, customerQrCode: isCustomerQrOnlyStart ? scanPartId : (resolvedCode.customerQrCode || null), mappedPartId: displayMappedPartId }));
 
 
   emitRealtime("operator_popup", attachScannerDisplayMetadata({
@@ -1787,8 +1906,8 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
     scannerIp,
     qrStatus: response?.qrStatus || (response?.decision === "ALLOW" ? "PASSED" : "FAILED"),
     operationStatus: response?.operationStatus || (response?.decision === "ALLOW" ? (customerQrPending ? "WAITING_CUSTOMER_QR" : "WAITING") : "BLOCKED"),
-    status: response?.decision === "ALLOW" ? (customerQrPending ? "WAITING" : "SCANNED") : "BLOCKED",
-    plcStatus: response?.decision === "ALLOW" ? (customerQrPending ? "WAITING_PLC" : "WAITING_PLC") : "BLOCKED",
+    status: response?.status || (response?.decision === "ALLOW" ? (customerQrPending ? "WAITING" : "SCANNED") : "BLOCKED"),
+    plcStatus: response?.plcStatus || (response?.decision === "ALLOW" ? "WAITING_PLC" : "BLOCKED"),
     reason: isCustomerQrOnlyStart && response?.decision === "ALLOW"
       ? "CUSTOMER_QR_ONLY_STARTED"
       : (customerQrPending && response?.decision === "ALLOW" ? "WAITING_CUSTOMER_QR" : (response?.reason || null)),
@@ -1801,7 +1920,7 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
         ? `QR PASS - Waiting for Customer QR at ${stationNo}`
         : (response?.message || "")),
     timestamp: new Date().toISOString(),
-  }, { rawPacket, rawPayload: rawPacket, partId: scanPartId, customerQrCode: isCustomerQrOnlyStart ? scanPartId : (resolvedCode.customerQrCode || null), mappedPartId: scanPartId }));
+  }, { rawPacket, rawPayload: rawPacket, partId: scanPartId, customerQrCode: isCustomerQrOnlyStart ? scanPartId : (resolvedCode.customerQrCode || null), mappedPartId: displayMappedPartId }));
 
 
   const processingDurationMs = Date.now() - scanStartedAt;

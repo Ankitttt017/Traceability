@@ -807,6 +807,7 @@ const GlobalPopup = ({
   // Prefer locally validated QR immediately so strip/panel update without waiting socket partId
   const effectivePartId = localValidatedPartIdRef.current || partId || lastScannedCode;
   const customerQrCode = String(popup?.customerQrCode || popup?.customer_qr || "").trim();
+  const mappedPartId = sanitizeScannerCode(popup?.mappedPartId || popup?.mapped_part_id || popup?.dotPinPartId || popup?.dot_pin_part_id || "");
   const scannedQr = sanitizeScannerCode(popup?.scannedQr || popup?.displayQr || popup?.rawQr || popup?.customerQrCode || popup?.customer_qr || popup?.partId || popup?.part_id || lastScannedCode);
   const qrFormatName = String(popup?.qrFormatName || popup?.qr_format_name || "").trim().toUpperCase();
   const popupReason = String(popup?.reason || "").trim().toUpperCase();
@@ -823,18 +824,22 @@ const GlobalPopup = ({
   );
   const popupTypeUpper = String(popup?.type || "").trim().toUpperCase();
   const popupStatusUpper = String(popup?.status || popup?.plcStatus || "").trim().toUpperCase();
+  const mappedPartDiffersFromCustomerQr =
+    Boolean(mappedPartId && customerQrCode) &&
+    mappedPartId.toUpperCase() !== customerQrCode.toUpperCase();
   const isCustomerQrOnlyScan =
     qrFormatName === "CUSTOMER_QR_ONLY" ||
-    Boolean(customerQrCode && partId && customerQrCode.toUpperCase() === partId.toUpperCase());
+    Boolean(customerQrCode && partId && customerQrCode.toUpperCase() === partId.toUpperCase() && !mappedPartDiffersFromCustomerQr);
   const hasMappedCustomerQr =
     Boolean(customerQrCode) &&
     (
+      mappedPartDiffersFromCustomerQr ||
       isCustomerQrOnlyScan ||
       customerQrCode.toUpperCase() !== String(partId || effectivePartId || "").trim().toUpperCase() ||
       popupReason === "CUSTOMER_QR_MAPPED"
     );
   const displayedScanCode = hasMappedCustomerQr ? (scannedQr || customerQrCode) : (scannedQr || effectivePartId || lastScannedCode);
-  const displayInternalPartId = effectivePartId || customerQrCode || displayedScanCode || "-";
+  const displayInternalPartId = mappedPartId || effectivePartId || customerQrCode || displayedScanCode || "-";
   const displayedScanLabel = hasMappedCustomerQr ? "Scanned Customer QR" : (scannedQr ? "Scanned QR" : "Scanned Part ID");
 
   useEffect(() => {
@@ -1781,10 +1786,10 @@ const GlobalPopup = ({
 
   return (
     <>
-    <div className={`fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-2 transition-opacity duration-200 sm:p-4 md:p-6 ${isClosingSmoothly ? "opacity-0" : "opacity-100"}`}>
-      <div className={`w-full bg-bg-card shadow-2xl flex flex-col transition-all duration-200 ${isFullscreen
+    <div className={`fixed inset-0 z-[1000] flex items-start justify-center overflow-y-auto bg-black/70 p-2 backdrop-blur-sm transition-opacity duration-200 sm:p-4 md:p-5 ${isClosingSmoothly ? "opacity-0" : "opacity-100"}`}>
+      <div className={`w-full min-h-0 bg-bg-card shadow-2xl flex flex-col transition-all duration-200 ${isFullscreen
         ? "fixed inset-0 z-[1000] w-screen h-screen max-w-full max-h-screen rounded-none m-0 animate-none"
-        : `max-w-[44rem] md:max-w-[54rem] lg:max-w-[60rem] rounded-2xl max-h-[94vh] md:max-h-[90vh] ${isClosingSmoothly ? "scale-[0.98]" : "animate-in zoom-in duration-200"}`
+        : `max-w-[44rem] md:max-w-[54rem] lg:max-w-[60rem] rounded-2xl max-h-[calc(100dvh-1rem)] md:max-h-[calc(100dvh-2.5rem)] ${isClosingSmoothly ? "scale-[0.98]" : "animate-in zoom-in duration-200"}`
         }`}>
         {/* Header - Compact */}
         <div className="px-3 py-2.5 flex-shrink-0 border-b border-border/50 sm:px-4 md:px-6 md:py-4" style={{ background: "#1e293b" }}>
@@ -1800,9 +1805,9 @@ const GlobalPopup = ({
             </div>
             <div className="flex items-center gap-2 md:gap-3">
               {displayedScanCode && (
-                <div className="px-2.5 py-1.5 md:px-3.5 md:py-2 rounded-lg border border-amber-500/20 max-w-[320px] md:max-w-[380px] min-w-[140px]" style={{ background: "#0f172a" }} title={displayedScanCode}>
+                <div className="px-2.5 py-1.5 md:px-3 md:py-2 rounded-lg border border-amber-500/20 max-w-[260px] md:max-w-[340px] min-w-[120px]" style={{ background: "#0f172a" }} title={displayedScanCode}>
                   <p className="text-[8px] md:text-[9px] font-bold uppercase tracking-wider text-slate-400">{displayedScanLabel}</p>
-                  <p className="font-mono text-xs font-black text-amber-400 break-all leading-tight sm:text-sm">{displayedScanCode}</p>
+                  <p className="font-mono text-[11px] font-black text-amber-400 break-all leading-tight sm:text-xs md:text-sm">{displayedScanCode}</p>
                 </div>
               )}
               <button
@@ -1869,7 +1874,7 @@ const GlobalPopup = ({
         </div>
 
         {/* Timeline Body - Single source of truth */}
-        <div className="flex-1 overflow-y-auto px-3 py-2 bg-bg-card font-medium sm:px-4 md:px-6 md:py-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2 bg-bg-card font-medium sm:px-4 md:px-6 md:py-4">
           {displayedScanCode && !isNextPartState && (
             <div className={`mb-2 md:mb-3 px-2.5 py-1.5 md:px-3.5 md:py-2.5 rounded-lg md:rounded-xl border shadow-sm flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2.5 ${qrStripTheme.container}`}>
               <span className={`text-[12px] md:text-sm font-bold uppercase tracking-wider whitespace-nowrap ${qrStripTheme.label}`}>
@@ -1879,6 +1884,11 @@ const GlobalPopup = ({
                 <span className={`font-bold text-xs tracking-wide text-black break-all sm:text-sm md:text-base ${qrStripTheme.value}`}>
                   {displayedScanCode}
                 </span>
+                {hasMappedCustomerQr && displayInternalPartId && displayInternalPartId !== displayedScanCode && (
+                  <p className={`mt-0.5 break-all font-mono text-[10px] font-bold ${qrStripTheme.label}`}>
+                    Internal Part ID: {displayInternalPartId}
+                  </p>
+                )}
               </div>
               <span className={`inline-flex items-center justify-center px-2 md:px-3 py-0.5 md:py-1 rounded-md text-[11px] md:text-xs font-bold border whitespace-nowrap ${qrStripTheme.badge}`}>
                 {qrStripTheme.badgeText}
@@ -1917,14 +1927,14 @@ const GlobalPopup = ({
 
           {effectivePartId && (
           <div className="mb-3 md:mb-4 grid grid-cols-1 gap-2.5 md:gap-3 md:grid-cols-2">
-              <div className={`rounded-2xl border p-4 md:p-5 shadow-sm ${
+              <div className={`rounded-xl md:rounded-2xl border p-3 md:p-4 shadow-sm ${
                 previousStation ? (previousStationPassed ? "border-emerald-200 bg-emerald-50/80" : "border-rose-200 bg-rose-50/80") : "border-slate-200 bg-white"
               }`}>
-                <p className="mb-3 text-[11px] md:text-xs font-bold uppercase tracking-[0.2em] text-slate-500">{t("globalPopup.previousStation", "Previous Station")}</p>
+                <p className="mb-2 md:mb-3 text-[10px] md:text-xs font-bold uppercase tracking-[0.18em] text-slate-500">{t("globalPopup.previousStation", "Previous Station")}</p>
                 {previousStation ? (
                   <div className="space-y-2 md:space-y-2.5">
                     <div className="flex items-center justify-between gap-2">
-                      <p className="text-sm md:text-base font-bold text-slate-900">{previousStation.stationName || previousStation.stationNo || "-"}</p>
+                      <p className="text-sm font-bold text-slate-900 md:text-base">{previousStation.stationName || previousStation.stationNo || "-"}</p>
                       <span className={`rounded-full px-2.5 py-1 text-[10px] md:text-[11px] font-bold ${previousStationPassed ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
                         {previousStationPassed ? t("globalPopup.passed", "PASSED") : t("globalPopup.notPassed", "NOT PASSED")}
                       </span>
@@ -1941,14 +1951,14 @@ const GlobalPopup = ({
                 )}
               </div>
 
-              <div className={`rounded-2xl border p-3 md:p-5 shadow-sm sm:p-4 ${
+              <div className={`rounded-xl md:rounded-2xl border p-3 md:p-4 shadow-sm ${
                 currentStationPassed ? "border-emerald-200 bg-emerald-50/80" : "border-sky-200 bg-sky-50/80"
               }`}>
-                <p className="mb-3 text-[11px] md:text-xs font-bold uppercase tracking-[0.2em] text-slate-500">{t("globalPopup.currentStation", "Current Station")}</p>
+                <p className="mb-2 md:mb-3 text-[10px] md:text-xs font-bold uppercase tracking-[0.18em] text-slate-500">{t("globalPopup.currentStation", "Current Station")}</p>
                 {currentStationCard ? (
                   <div className="space-y-2 md:space-y-2.5">
                     <div className="flex items-center justify-between gap-2">
-                      <p className="text-sm md:text-base font-bold text-slate-900">{currentStationCard.stationName || currentStationCard.stationNo || currentStationName}</p>
+                      <p className="text-sm font-bold text-slate-900 md:text-base">{currentStationCard.stationName || currentStationCard.stationNo || currentStationName}</p>
                       <span className={`rounded-full px-2.5 py-1 text-[10px] md:text-[11px] font-bold ${currentStationPassed ? "bg-emerald-100 text-emerald-700" : "bg-sky-100 text-sky-700"}`}>
                         {currentStationPassed ? t("globalPopup.passed", "PASSED") : t("globalPopup.inProcess", "IN PROCESS")}
                       </span>
@@ -2031,22 +2041,22 @@ const GlobalPopup = ({
         </div>
 
         {/* Message & Footer */}
-        <div className="px-3 py-2 bg-bg-card border-t border-border/50 flex-shrink-0 space-y-2 sm:px-4 md:px-6 md:py-3">
+        <div className="max-h-[48dvh] flex-shrink-0 space-y-2 overflow-y-auto border-t border-border/50 bg-bg-card px-3 py-2 sm:px-4 md:max-h-[42dvh] md:px-6 md:py-3">
           {showManualVerificationPanel && (
-            <div className="mb-3 space-y-4 rounded-2xl border border-slate-200 bg-white p-4 md:p-5 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
+            <div className="mb-3 space-y-3 rounded-xl md:rounded-2xl border border-slate-200 bg-white p-3 md:p-4 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
               <div className="flex items-center gap-3 border-b border-slate-200 pb-3">
                 <div className="h-2.5 w-2.5 rounded-full bg-amber-500" />
-                <h3 className="text-sm md:text-base font-bold uppercase tracking-[0.2em] text-slate-700">{t("globalPopup.submitQualityVerification", "Manual Quality Inspection")}</h3>
+                <h3 className="text-xs md:text-sm font-bold uppercase tracking-[0.16em] text-slate-700">{t("globalPopup.submitQualityVerification", "Manual Quality Inspection")}</h3>
               </div>
 
               {displayedScanCode && (
-                <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 px-3 py-2.5 md:px-4 md:py-3 text-center shadow-sm">
+                <div className="rounded-xl border-2 border-amber-300 bg-amber-50 px-3 py-2.5 md:px-4 md:py-3 text-center shadow-sm">
                   <p className="text-[10px] font-black uppercase tracking-[0.2em] text-amber-700">{displayedScanLabel}</p>
-                  <p className="mt-1 break-all font-mono text-base font-black text-slate-950 sm:text-lg md:text-xl">
+                  <p className="mt-1 break-all font-mono text-sm font-black text-slate-950 sm:text-base md:text-lg">
                     {displayedScanCode}
                   </p>
-                  {hasMappedCustomerQr && effectivePartId && effectivePartId !== displayedScanCode && (
-                    <p className="mt-1.5 text-[9px] font-bold text-slate-500">Internal Part ID: <span className="font-mono">{displayInternalPartId}</span></p>
+                  {hasMappedCustomerQr && displayInternalPartId && displayInternalPartId !== displayedScanCode && (
+                    <p className="mt-1.5 break-all text-[10px] font-bold text-slate-600">Mapped Part ID: <span className="font-mono">{displayInternalPartId}</span></p>
                   )}
                   {isCustomerQrOnlyScan && (
                     <p className="mt-1.5 text-[9px] font-bold text-slate-500">Part ID: <span className="font-mono">{displayInternalPartId}</span></p>
@@ -2057,7 +2067,7 @@ const GlobalPopup = ({
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-4 md:gap-5">
+              <div className="grid grid-cols-2 gap-2.5 md:gap-4">
                 <button
                   type="button"
                   onClick={() => {
@@ -2065,13 +2075,13 @@ const GlobalPopup = ({
                     setManualReason("");
                     setManualReasonQuery("");
                   }}
-                  className={`flex flex-col items-center justify-center p-5 md:p-6 rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${manualSelection === "OK"
+                  className={`flex flex-col items-center justify-center p-3 md:p-5 rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${manualSelection === "OK"
                     ? "bg-emerald-500 border-emerald-300 text-white shadow-lg shadow-emerald-500/25 scale-[1.02]"
                     : "bg-slate-50 border-slate-200 text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50"
                     }`}
                 >
-                  <CheckCircle size={28} className={manualSelection === "OK" ? "text-white" : "text-emerald-600"} />
-                  <span className="mt-2 text-sm md:text-base font-black uppercase tracking-wider text-center">{t("common.ok", "OK")} ({t("operatorView.pass", "Pass")})</span>
+                  <CheckCircle size={24} className={manualSelection === "OK" ? "text-white" : "text-emerald-600"} />
+                  <span className="mt-2 text-xs md:text-sm font-black uppercase tracking-wider text-center">{t("common.ok", "OK")} ({t("operatorView.pass", "Pass")})</span>
                 </button>
 
                 <button
@@ -2088,13 +2098,13 @@ const GlobalPopup = ({
                     setShowReasonDropdown(false);
                     setShowNgReasonModal(true);
                   }}
-                  className={`flex flex-col items-center justify-center p-5 md:p-6 rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${manualSelection === "NG"
+                  className={`flex flex-col items-center justify-center p-3 md:p-5 rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${manualSelection === "NG"
                     ? "bg-rose-500 border-rose-300 text-white shadow-lg shadow-rose-500/25 scale-[1.02]"
                     : "bg-slate-50 border-slate-200 text-rose-700 hover:border-rose-300 hover:bg-rose-50"
                     }`}
                 >
-                  <AlertTriangle size={28} className={manualSelection === "NG" ? "text-white" : "text-rose-600"} />
-                  <span className="mt-2 text-sm md:text-base font-black uppercase tracking-wider text-center">{t("common.ng", "NG")} ({t("operatorView.fail", "Fail")})</span>
+                  <AlertTriangle size={24} className={manualSelection === "NG" ? "text-white" : "text-rose-600"} />
+                  <span className="mt-2 text-xs md:text-sm font-black uppercase tracking-wider text-center">{t("common.ng", "NG")} ({t("operatorView.fail", "Fail")})</span>
                 </button>
               </div>
 
@@ -2140,7 +2150,7 @@ const GlobalPopup = ({
                 type="button"
                 onClick={handleSubmitManualResult}
                 disabled={submittingManual || !manualSelection || (manualSelection === "NG" && (!manualReason || !isValidNgReason))}
-                className={`w-full py-4 md:py-4.5 rounded-xl text-base font-black uppercase tracking-widest text-white transition-all duration-200 ${submittingManual || !manualSelection || (manualSelection === "NG" && (!manualReason || !isValidNgReason))
+                className={`w-full py-3 md:py-3.5 rounded-xl text-sm md:text-base font-black uppercase tracking-widest text-white transition-all duration-200 ${submittingManual || !manualSelection || (manualSelection === "NG" && (!manualReason || !isValidNgReason))
                   ? "bg-slate-200 border-slate-200 text-slate-500 cursor-not-allowed opacity-70"
                   : manualSelection === "OK"
                     ? "bg-emerald-500 hover:bg-emerald-400 border border-emerald-300 shadow-lg shadow-emerald-500/20 active:scale-[0.99] text-slate-950 font-black"
@@ -2160,7 +2170,7 @@ const GlobalPopup = ({
           )}
 
           {(validationError || validationInfo || popup.message) && (
-            <div className={`p-4 md:p-5 rounded-2xl border-2 flex gap-3 md:gap-4 items-start text-base shadow-sm transition-colors duration-300 ${validationError ? "bg-rose-50 border-rose-300 text-rose-700" : !duplicateLike && (liveOperationState === "FAIL" || liveQrState === "FAIL" || popup.type === "ERROR" || popup.gate === "FORMAT" || popup.gate === "PLC_MATCH") ? "bg-rose-50 border-rose-300 text-rose-700" :
+            <div className={`p-3 md:p-4 rounded-xl md:rounded-2xl border-2 flex gap-3 items-start text-sm shadow-sm transition-colors duration-300 ${validationError ? "bg-rose-50 border-rose-300 text-rose-700" : !duplicateLike && (liveOperationState === "FAIL" || liveQrState === "FAIL" || popup.type === "ERROR" || popup.gate === "FORMAT" || popup.gate === "PLC_MATCH") ? "bg-rose-50 border-rose-300 text-rose-700" :
               liveOperationState === "COMM" || popup.type === "WARNING" || popup.reason === "PREVIOUS_STATION_NOT_COMPLETED" ? "bg-amber-50 border-amber-300 text-amber-800" :
                 popup.type === "SUCCESS" || popup.type === "INFO" ? "bg-emerald-50 border-emerald-300 text-emerald-800" :
                   "bg-white border-slate-300 text-slate-800"
@@ -2171,7 +2181,7 @@ const GlobalPopup = ({
                 <AlertTriangle size={22} className="mt-0.5 flex-shrink-0" />
               )}
               <div className="min-w-0">
-                <p className="text-base font-black leading-snug tracking-wide sm:text-lg">{validationError || validationInfo || (localScanDecision ? "" : friendlyErrorMessage(popup.message, popup))}</p>
+                <p className="text-sm font-black leading-snug tracking-wide sm:text-base">{validationError || validationInfo || (localScanDecision ? "" : friendlyErrorMessage(popup.message, popup))}</p>
                 {/* Gate status indicators */}
                 {popup.gate && (
                   <div className="flex gap-3 mt-2">
