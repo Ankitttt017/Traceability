@@ -1045,6 +1045,15 @@ async function fetchProductionData(filters = {}, options = {}) {
     if (customerKey && customerQr && !acc[customerKey]) acc[customerKey] = customerQr;
     return acc;
   }, {});
+  const oldPartMap = partCodeMappings.reduce((acc, row) => {
+    const oldPart = String(row.old_part_id || "").trim();
+    const customerQr = String(row.customer_qr || "").trim();
+    const oldKey = normalizeKey(oldPart);
+    const customerKey = normalizeKey(customerQr);
+    if (oldKey && oldPart && !acc[oldKey]) acc[oldKey] = oldPart;
+    if (customerKey && oldPart && !acc[customerKey]) acc[customerKey] = oldPart;
+    return acc;
+  }, {});
   const leakLookupMachines = await MachineModel.findAll({
     where: {
       is_active: true,
@@ -1148,6 +1157,7 @@ async function fetchProductionData(filters = {}, options = {}) {
 
     const partIdValue = String(log.part_id || "").trim();
     const mappedCustomerQr = String(partCodeMap[normalizeKey(partIdValue)] || "").trim();
+    const mappedOldPartId = String(oldPartMap[normalizeKey(partIdValue)] || "").trim();
     const recoveryCompletedByCustomerQr = shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr);
     const stationNo = String(log.operation_no || log.station_no || "").trim().toUpperCase();
     const leakTestReading = getLeaktestReadingForPartStation(leaktestIndex, partIdValue, LEAKTEST_OPERATION);
@@ -1178,11 +1188,17 @@ async function fetchProductionData(filters = {}, options = {}) {
       ? ""
       : (structuredRejectionReason || log.interlock_reason || "");
 
-    const partLookupKey = normalizeKey(partIdValue);
-    const compactQrKey = parseCompactQrPartId(partIdValue)?.key || "";
-    const customerQrOnlyPart = isCustomerQrOnlyPart(partIdValue);
-    const displayPartId = partIdValue || "-";
-    const shotCandidates = deriveShotCandidates(log).map((s) => normalizeShotToken(s) || normalizeKey(s));
+    const customerQrOnlyPart = isCustomerQrOnlyPart(partIdValue) ||
+      Boolean(mappedCustomerQr && mappedOldPartId && normalizeKey(mappedCustomerQr) === normalizeKey(mappedOldPartId));
+    const displayPartId = customerQrOnlyPart ? "" : (mappedOldPartId || partIdValue);
+    const reportGroupKey = customerQrOnlyPart
+      ? (mappedCustomerQr || partIdValue)
+      : (mappedOldPartId || mappedCustomerQr || partIdValue);
+    const shotLookupPartId = displayPartId || partIdValue;
+    const partLookupKey = normalizeKey(shotLookupPartId);
+    const compactQrKey = parseCompactQrPartId(shotLookupPartId)?.key || parseCompactQrPartId(partIdValue)?.key || "";
+    const shotSourceLog = { ...log, part_id: shotLookupPartId };
+    const shotCandidates = deriveShotCandidates(shotSourceLog).map((s) => normalizeShotToken(s) || normalizeKey(s));
     const shouldLookupPlcReading = includePlcReadings && (!customerQrOnlyPart || compactQrKey || shotCandidates.length);
     const plcReadingFromDbRaw = shouldLookupPlcReading
       ? (
@@ -1198,7 +1214,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       : (
         shouldLookupPlcReading
           ? await fetchLatestPlcReadingByMachineShotContext({
-              shotCandidates: deriveShotCandidates(log),
+              shotCandidates: deriveShotCandidates(shotSourceLog),
               machineName: log.Machine?.machine_name || "",
               logCreatedAt: log.createdAt,
             })
@@ -1209,7 +1225,9 @@ async function fetchProductionData(filters = {}, options = {}) {
     return {
       ...log,
       srNo: index + 1,
-      partId:      partIdValue || "-",
+      partId:      displayPartId,
+      reportGroupKey,
+      traceabilityPartId: partIdValue || "-",
       displayPartId,
       isCustomerQrOnly: customerQrOnlyPart,
       firstScanCreatedAt: earliestScanByPart.get(partIdValue) || log.createdAt || null,
@@ -1276,6 +1294,8 @@ async function fetchProductionData(filters = {}, options = {}) {
       filtered = filtered.filter((row) => row.bypassStatus === true);
     } else if (normalizedStatus === "PENDING") {
       filtered = filtered.filter((row) => String(row.statusLabel || "").toUpperCase() === "UNKNOWN");
+    } else if (normalizedStatus === "OTHER") {
+      filtered = filtered.filter((row) => row.isCustomerQrOnly === true || !String(row.displayPartId || row.partId || "").trim());
     } else {
       filtered = filtered.filter((row) => String(row.industrialResult || "").toUpperCase() === normalizedStatus);
     }

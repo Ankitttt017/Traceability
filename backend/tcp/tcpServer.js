@@ -599,6 +599,22 @@ function emitCustomerQrScannerResult({
 }
 
 
+async function hasTerminalStationLog(partId, stationNo) {
+  const normalizedPartId = String(partId || "").trim();
+  const station = normalizeStation(stationNo);
+  if (!normalizedPartId || !station) return false;
+  const latest = await OperationLog.findOne({
+    where: {
+      part_id: normalizedPartId,
+      station_no: station,
+      plc_status: { [Op.in]: ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "FAILED", "COMPLETED_NG"] },
+    },
+    order: [["createdAt", "DESC"]],
+  });
+  return Boolean(latest);
+}
+
+
 async function resolveActivePartIdForMachine(machine, stationNo) {
   if (!machine) return "";
   const targetStation = String(stationNo || "").trim().toUpperCase();
@@ -1574,6 +1590,44 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
     machine,
   });
   const traceabilityPartId = identity.traceabilityPartId || partId;
+  if (existingSamePartMapping && await hasTerminalStationLog(traceabilityPartId, stationNo)) {
+    resetWorkflowState(workflowKey, { reason: "DUPLICATE_CUSTOMER_QR_AT_LASER" });
+    emitCustomerQrScannerResult({
+      type: "ERROR",
+      partId: traceabilityPartId,
+      customerQrCode: partId,
+      mappedPartId: activePartId,
+      stationNo,
+      machine,
+      scanner,
+      scannerRole,
+      scannerIp,
+      decision: "BLOCK",
+      qrStatus: "DUPLICATE",
+      operationStatus: "PASSED",
+      status: "BLOCKED",
+      plcStatus: "ENDED_OK",
+      customerQrMapped: true,
+      closePopup: false,
+      reason: "DUPLICATE_SCAN",
+      message: `${stationNo}: Customer QR already passed. Continue to next station.`,
+      timestamp: new Date().toISOString(),
+    });
+    logScannerTrace({
+      stage: "customer_qr_duplicate_after_mapping",
+      scannerIp,
+      scannerName: scanner.scanner_name,
+      machineId: machine.id,
+      stationNo,
+      flowType: "CUSTOMER_QR",
+      qrType,
+      payload: partId,
+      reason: "DUPLICATE_SCAN",
+      status: "BLOCKED",
+      durationMs: Date.now() - scanStartedAt,
+    });
+    return;
+  }
   const finalized = await finalizeCustomerQrMappingIfEligible({ partId: traceabilityPartId, stationNo, machine });
   markCustomerQrMapped(workflowKey, { customerQr: partId, partId: traceabilityPartId });
   completeWorkflow(workflowKey);

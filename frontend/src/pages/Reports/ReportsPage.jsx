@@ -461,7 +461,7 @@ const ReportsPage = () => {
     })();
     const grouped = new Map();
     sourceRows.forEach((row, idx) => {
-      const partKey = String(row.partId || row.part_id || row.barcode || row.shot_uid || `row_${idx}`).trim();
+      const partKey = String(row.reportGroupKey || row.report_group_key || row.traceabilityPartId || row.traceability_part_id || row.partId || row.part_id || row.barcode || row.shot_uid || `row_${idx}`).trim();
       const key = partKey || `row_${idx}`;
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key).push(row);
@@ -470,7 +470,7 @@ const ReportsPage = () => {
     const dynamicColumns = [
       { key: "srNo", label: "Sr No" },
       { key: "plc_shot_number", label: "Shot Number" },
-      { key: "barcode", label: "Part Serial No." },
+      { key: "barcode", label: "Part Serial No.", blankIfEmpty: true },
       { key: "customerCode", label: "Customer QR Code" },
       { key: "createdAt", label: "Scanned Date & Time" },
       ...stationPairs.map((s) => ({
@@ -487,7 +487,7 @@ const ReportsPage = () => {
 
     const dynamicRows = Array.from(grouped.values()).map((entries, idx) => {
       const first = entries[0] || {};
-      const partKey = String(first.partId || first.part_id || first.barcode || first.shot_uid || `row_${idx}`).trim();
+      const partKey = String(first.reportGroupKey || first.report_group_key || first.traceabilityPartId || first.traceability_part_id || first.partId || first.part_id || first.barcode || first.shot_uid || `row_${idx}`).trim();
       const displayPartId = String(first.displayPartId || first.display_part_id || "").trim();
       const stationResults = {};
       const stationDisplayValues = {};
@@ -548,9 +548,11 @@ const ReportsPage = () => {
       }
       const plcPartDie = splitPartDie(plcData.part_name || first.partDieLabel || first.partName || "");
       const shaped = {
+        reportGroupKey: partKey,
+        traceabilityPartId: partKey,
         srNo: ((Number(data.pagination?.page || 1) - 1) * Number(data.pagination?.pageSize || sourceRows.length || 0)) + idx + 1,
-        plc_shot_number: plcData.shot_number ?? first.shot_number ?? first.shotNumber ?? "-",
-        barcode: displayPartId || partKey || "-",
+        plc_shot_number: displayPartId ? (plcData.shot_number ?? first.shot_number ?? first.shotNumber ?? "-") : "-",
+        barcode: displayPartId,
         plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
         partName: plcPartDie.partName || first.partName || first.modelName || first.componentName || "-",
@@ -800,6 +802,7 @@ const ReportsPage = () => {
           <option value="">{t("reports.allStatus", "All Status")}</option>
           <option value="OK">{t("reports.passed", "PASSED")}</option>
           <option value="NG">{t("reports.failed", "FAILED")}</option>
+          <option value="OTHER">{t("reports.otherParts", "Other Parts")}</option>
         </select>
         <select
           value={filters.shiftCode || ""}

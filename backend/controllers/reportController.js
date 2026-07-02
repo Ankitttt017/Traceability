@@ -54,7 +54,7 @@ function getPagination(query = {}) {
 }
 
 function getReportPartKey(row = {}, fallback = "") {
-  return String(row.partId || row.part_id || row.barcode || row.shot_uid || fallback || "").trim();
+  return String(row.reportGroupKey || row.report_group_key || row.traceabilityPartId || row.traceability_part_id || row.partId || row.part_id || row.barcode || row.shot_uid || fallback || "").trim();
 }
 
 function normalizeShotStatusBucket(value) {
