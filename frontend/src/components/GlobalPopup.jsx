@@ -1383,14 +1383,12 @@ const GlobalPopup = ({
 
       if (event.key === "Backspace") {
         usbScanBufferRef.current = usbScanBufferRef.current.slice(0, -1);
-        setManualQrCode(usbScanBufferRef.current);
         return;
       }
 
       if (event.key.length === 1) {
         if (/[\u0000-\u001F\u007F]/.test(event.key)) return;
         usbScanBufferRef.current += event.key;
-        setManualQrCode(usbScanBufferRef.current);
         event.preventDefault();
       }
     };
