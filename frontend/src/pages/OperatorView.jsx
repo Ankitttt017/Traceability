@@ -1487,6 +1487,16 @@ const OperatorView = () => {
       if (String(p.partId || p.part_id || "").trim()) {
         setSuppressReadyPopup(false);
       }
+      if (p.closePopup === true || p.close_popup === true) {
+        setPopup(null);
+        if (hasQrDecision(p)) {
+          const sig = toQrSignal(p, t);
+          setQrSignal(sig);
+          setQrFeed(prev => [sig, ...prev].slice(0, 6));
+        }
+        scheduleLiveRefresh();
+        return;
+      }
       const nm = String(p.type || "").toUpperCase() === "ERROR"
         ? formatScanErrorMessage({ ...p, reason: p.reason || p.qrReason }, t)
         : p.message;
