@@ -239,7 +239,7 @@ function uniqueStages(values) {
   return result;
 }
 
-const CUSTOMER_QR_WAITING_OPERATIONS = new Set(["LASER", "LASER_MARKING", "LASER MARKING", "OP_LASER", "OP160", "OP170"]);
+const CUSTOMER_QR_WAITING_OPERATIONS = new Set(["LASER", "LASER_MARKING", "LASER MARKING", "OP_LASER", "OP110", "OP160", "OP170"]);
 
 function requiresCustomerQrForCompletion(machine = {}) {
   const tokens = [
@@ -247,6 +247,19 @@ function requiresCustomerQrForCompletion(machine = {}) {
     machine.machine_name,
   ].map((value) => String(value || "").trim().toUpperCase());
   return tokens.some((token) => CUSTOMER_QR_WAITING_OPERATIONS.has(token) || token.includes("LASER"));
+}
+
+async function stationRequiresCustomerQrForCompletion(machine = {}, stationNo = "") {
+  const station = normalizeStation(stationNo || machine?.operation_no);
+  if (!machine || !station) return false;
+  const features = await getStationFeatureConfig(station, {
+    plantId: machine.plantId || machine.plant_id,
+    lineId: machine.lineId || machine.line_id,
+  }).catch(() => null);
+  if (features?.customerQrRequiredConfigured === true) {
+    return features.customerQrRequired === true;
+  }
+  return requiresCustomerQrForCompletion(machine);
 }
 
 async function getActiveStationSequence() {
@@ -278,9 +291,15 @@ async function shouldBlockMappedCustomerQrOnStartScan(stationNo) {
   const sequenceData = await getActiveMachineSequenceData();
   const sequence = Array.isArray(sequenceData?.sequence) ? sequenceData.sequence : [];
   const currentIndex = sequence.indexOf(station);
+  const customerQrStations = new Set();
+  for (const machine of sequenceData?.machines || []) {
+    if (await stationRequiresCustomerQrForCompletion(machine, machine.operation_no)) {
+      customerQrStations.add(normalizeStation(machine.operation_no));
+    }
+  }
   const customerQrStationIndex = sequence.findIndex((candidateStation) => {
     const machines = (sequenceData?.machines || []).filter((machine) => normalizeStation(machine.operation_no) === candidateStation);
-    return machines.some((machine) => requiresCustomerQrForCompletion(machine));
+    return customerQrStations.has(candidateStation) || machines.some((machine) => requiresCustomerQrForCompletion(machine));
   });
   if (customerQrStationIndex < 0) return true;
   if (currentIndex < 0) return false;
@@ -297,9 +316,15 @@ async function isAfterCustomerQrMappingStation(stationNo) {
   const sequenceData = await getActiveMachineSequenceData();
   const sequence = Array.isArray(sequenceData?.sequence) ? sequenceData.sequence : [];
   const currentIndex = sequence.indexOf(station);
+  const customerQrStations = new Set();
+  for (const machine of sequenceData?.machines || []) {
+    if (await stationRequiresCustomerQrForCompletion(machine, machine.operation_no)) {
+      customerQrStations.add(normalizeStation(machine.operation_no));
+    }
+  }
   const customerQrStationIndex = sequence.findIndex((candidateStation) => {
     const machines = (sequenceData?.machines || []).filter((machine) => normalizeStation(machine.operation_no) === candidateStation);
-    return machines.some((machine) => requiresCustomerQrForCompletion(machine));
+    return customerQrStations.has(candidateStation) || machines.some((machine) => requiresCustomerQrForCompletion(machine));
   });
   return currentIndex >= 0 && customerQrStationIndex >= 0 && currentIndex > customerQrStationIndex;
 }
@@ -542,7 +567,7 @@ async function isKnownPartOrMappedCustomerQr(code) {
 async function canStartCustomerQrOnlyPart({ code, stationNo, machine }) {
   const raw = String(code || "").trim();
   const station = normalizeStation(stationNo);
-  if (!raw || !station || !machine || !requiresCustomerQrForCompletion(machine)) return false;
+  if (!raw || !station || !machine || !(await stationRequiresCustomerQrForCompletion(machine, station))) return false;
   const minCustomerQrLength = Math.max(Number(process.env.TCP_CUSTOMER_QR_MIN_LENGTH || 2), 2);
   if (raw.length < minCustomerQrLength) return false;
   const features = await getStationFeatureConfig(station, {
@@ -856,7 +881,7 @@ async function resolveSharedCustomerQrTargets({ scanners, partId }) {
   for (const scanner of scanners) {
     const machine = await Machine.findByPk(scanner.mapped_machine_id);
     const stationNo = String(machine?.operation_no || "").trim().toUpperCase();
-    if (!machine || machine.is_active === false || !stationNo || !requiresCustomerQrForCompletion(machine)) {
+    if (!machine || machine.is_active === false || !stationNo || !(await stationRequiresCustomerQrForCompletion(machine, stationNo))) {
       continue;
     }
     const activePartId = await resolveActivePartIdForMachine(machine, stationNo, partId);
@@ -971,7 +996,7 @@ async function isStationBypassedForValidation(stationNo) {
 async function shouldDelayCustomerQrStationStart({ scanner, partId }) {
   const machine = await Machine.findByPk(scanner.mapped_machine_id);
   const stationNo = normalizeStation(machine?.operation_no);
-  if (!machine || machine.is_active === false || !stationNo || !requiresCustomerQrForCompletion(machine)) {
+  if (!machine || machine.is_active === false || !stationNo || !(await stationRequiresCustomerQrForCompletion(machine, stationNo))) {
     return { delayed: false };
   }
 
@@ -1186,6 +1211,7 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
     return;
   }
 
+  let existingSamePartMapping = false;
   const transaction = await PartCodeMapping.sequelize.transaction();
   try {
     const existingMapping = await PartCodeMapping.findOne({
@@ -1195,30 +1221,9 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
     });
 
     if (existingMapping && String(existingMapping.old_part_id || "").trim() === activePartId) {
+      existingSamePartMapping = true;
       await transaction.commit();
-      emitCustomerQrScannerResult({
-        type: "WARNING",
-        partId: activePartId,
-        customerQrCode: partId,
-        stationNo,
-        machine,
-        scanner,
-        scannerRole,
-        scannerIp,
-        decision: "ALLOW",
-        qrStatus: "DUPLICATE",
-        operationStatus: "WAITING",
-        status: "DUPLICATE",
-        plcStatus: "WAITING_PLC",
-        customerQrMapped: true,
-        reason: "CUSTOMER_QR_ALREADY_MAPPED_SAME_PART",
-        message: "Customer QR already mapped to this part. Continue to next station.",
-        timestamp: new Date().toISOString(),
-      });
-      return;
-    }
-
-    if (existingMapping && String(existingMapping.old_part_id || "").trim() !== activePartId) {
+    } else if (existingMapping && String(existingMapping.old_part_id || "").trim() !== activePartId) {
       await transaction.commit();
       emitCustomerQrScannerResult({
         type: "ERROR",
@@ -1240,16 +1245,16 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
         timestamp: new Date().toISOString(),
       });
       return;
+    } else {
+      await PartCodeMapping.upsert({
+        old_part_id: activePartId,
+        customer_qr: partId,
+        machine_id: machine.id,
+        station_no: stationNo || null,
+        is_active: true,
+      }, { transaction });
+      await transaction.commit();
     }
-
-    await PartCodeMapping.upsert({
-      old_part_id: activePartId,
-      customer_qr: partId,
-      machine_id: machine.id,
-      station_no: stationNo || null,
-      is_active: true,
-    }, { transaction });
-    await transaction.commit();
   } catch (error) {
     await transaction.rollback();
     logScannerTrace({
@@ -1285,8 +1290,10 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
     status: finalized.finalized ? "ENDED_OK" : "SCANNED",
     plcStatus: finalized.finalized ? "ENDED_OK" : "WAITING_PLC",
     customerQrMapped: true,
-    reason: "CUSTOMER_QR_MAPPED",
-    message: finalized.finalized
+    reason: existingSamePartMapping ? "CUSTOMER_QR_ALREADY_MAPPED_SAME_PART" : "CUSTOMER_QR_MAPPED",
+    message: existingSamePartMapping
+      ? "Customer QR already mapped to this part. Operation confirmed."
+      : finalized.finalized
       ? "Customer QR mapped successfully. Operation passed."
       : "Customer QR mapped successfully to active part.",
     timestamp: new Date().toISOString(),
@@ -1442,7 +1449,7 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
   const customerQrPending =
     flowContext.flowType === "NORMAL" &&
     flowContext.qrType === "START_QR" &&
-    requiresCustomerQrForCompletion(machine) &&
+    (await stationRequiresCustomerQrForCompletion(machine, stationNo)) &&
     !isCustomerQrOnlyStart;
   if (response?.decision === "ALLOW" && customerQrPending) {
     beginWorkflow(workflowKey, { machineId: machine.id, stationNo, partId: scanPartId });

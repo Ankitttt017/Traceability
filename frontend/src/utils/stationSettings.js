@@ -18,6 +18,7 @@ export const DEFAULT_STATION_FEATURES = {
   validateShotNumber: true,
   validatePreviousStation: true,
   validateDuplicateBarcode: true,
+  customerQrRequired: false,
   validateCustomerCode: false,
   allowCustomerQrOnlyStart: false,
   customerCodePattern: "",
@@ -85,6 +86,9 @@ function normalizeFeatureMap(rawMap) {
       validateShotNumber: rawValue.validateShotNumber !== false,
       validatePreviousStation: rawValue.validatePreviousStation !== false,
       validateDuplicateBarcode: rawValue.validateDuplicateBarcode !== false,
+      customerQrRequired: rawValue.customerQrRequired === true ||
+        rawValue.requiresCustomerQr === true ||
+        rawValue.customerQrRequiredForCompletion === true,
       validateCustomerCode: rawValue.validateCustomerCode === true,
       allowCustomerQrOnlyStart: rawValue.allowCustomerQrOnlyStart === true,
       customerCodePattern: String(rawValue.customerCodePattern || ""),
@@ -186,6 +190,9 @@ export function getStationFeatures(stationNo, settings = {}) {
     validateShotNumber: stationSettings.validateShotNumber !== false,
     validatePreviousStation: stationSettings.validatePreviousStation !== false,
     validateDuplicateBarcode: stationSettings.validateDuplicateBarcode !== false,
+    customerQrRequired: stationSettings.customerQrRequired === true ||
+      stationSettings.requiresCustomerQr === true ||
+      stationSettings.customerQrRequiredForCompletion === true,
     validateCustomerCode: stationSettings.validateCustomerCode === true,
     allowCustomerQrOnlyStart: stationSettings.allowCustomerQrOnlyStart === true,
     customerCodePattern: String(stationSettings.customerCodePattern || ""),

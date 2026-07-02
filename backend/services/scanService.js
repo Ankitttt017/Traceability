@@ -1054,12 +1054,12 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     .trim()
     .toUpperCase();
   const skipInterlockValidation = options?.skipInterlockValidation === true;
-  const skipDuplicateValidation = options?.skipDuplicateValidation === true;
-  const skipSequenceValidation = options?.skipSequenceValidation === true;
-  const skipQrFormatValidation = options?.skipQrFormatValidation === true;
-  const skipShotValidation = options?.skipShotValidation === true;
-  const skipCustomerCodeValidation = options?.skipCustomerCodeValidation === true;
-  const customerCodePattern = String(options?.customerCodePattern || "").trim();
+  let skipDuplicateValidation = options?.skipDuplicateValidation === true;
+  let skipSequenceValidation = options?.skipSequenceValidation === true;
+  let skipQrFormatValidation = options?.skipQrFormatValidation === true;
+  let skipShotValidation = options?.skipShotValidation === true;
+  let skipCustomerCodeValidation = options?.skipCustomerCodeValidation === true;
+  let customerCodePattern = String(options?.customerCodePattern || "").trim();
   const mId = Number(machineId) || 0;
   const scanInflightKey = makeScanInflightKey(normalizedPartId, station, mId);
   const scanStartAllowed = beginScanInflight(scanInflightKey);
@@ -1084,6 +1084,17 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
 
   try {
     const currentMachine = mId ? await Machine.findByPk(mId, { raw: true }) : null;
+    const stationFeatures = options?.stationFeatures || await getStationFeatureConfig(station);
+    const qrValidationEnabled = stationFeatures.qr !== false;
+    skipQrFormatValidation = skipQrFormatValidation || !qrValidationEnabled || stationFeatures.validateQrFormat === false;
+    skipShotValidation = skipShotValidation || stationFeatures.validateShotNumber === false;
+    skipSequenceValidation = skipSequenceValidation || stationFeatures.validatePreviousStation === false;
+    skipDuplicateValidation = skipDuplicateValidation || stationFeatures.validateDuplicateBarcode === false;
+    skipCustomerCodeValidation = skipCustomerCodeValidation || stationFeatures.validateCustomerCode !== true;
+    if (!customerCodePattern && stationFeatures.validateCustomerCode === true) {
+      customerCodePattern = String(stationFeatures.customerCodePattern || "").trim();
+    }
+
     const activeRules = await getActiveQrRules();
     const applicableRules = activeRules.filter((rule) =>
       isRuleApplicableToStation(rule, station) && isRuleApplicableToMachine(rule, currentMachine)
@@ -1245,9 +1256,6 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
         await part.save();
       }
     }
-
-    const stationFeatures = await getStationFeatureConfig(station);
-
     const partExpectedStation = getExpectedStation(part, sequence);
     const derivedSequenceState = await deriveSequenceStateFromHistory(normalizedPartId, sequence);
     const expectedStation = derivedSequenceState.expectedStation || partExpectedStation;
@@ -1308,14 +1316,20 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     if (part.is_interlocked && !part.is_rework) {
       const lockedReason = String(part.interlock_reason || "").trim().toUpperCase();
       if (["DUPLICATE_SCAN", "ALREADY_COMPLETED", "DUPLICATE_SCAN_LOCK"].includes(lockedReason)) {
-        return {
-          decision: "BLOCK",
-          reason: lockedReason || "DUPLICATE_SCAN_LOCK",
-          qrStatus: "DUPLICATE",
-          operationStatus: "PASSED",
-          message: "This part is locked after a duplicate scan. Reset the journey before scanning again.",
-          currentStatus: part.status,
-        };
+        if (!hasExistingSuccess && lockedReason !== "ALREADY_COMPLETED") {
+          part.is_interlocked = false;
+          part.interlock_reason = null;
+          await part.save();
+        } else {
+          return {
+            decision: "BLOCK",
+            reason: lockedReason || "DUPLICATE_SCAN_LOCK",
+            qrStatus: "DUPLICATE",
+            operationStatus: "PASSED",
+            message: "This part is locked after a duplicate scan. Reset the journey before scanning again.",
+            currentStatus: part.status,
+          };
+        }
       }
     }
 
@@ -1350,8 +1364,6 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       });
       
       part.last_validation_result = "DUPLICATE";
-      part.is_interlocked = true;
-      part.interlock_reason = "DUPLICATE_SCAN_LOCK";
       await part.save();
 
       return {
