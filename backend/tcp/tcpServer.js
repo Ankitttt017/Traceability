@@ -256,10 +256,20 @@ async function stationRequiresCustomerQrForCompletion(machine = {}, stationNo = 
     plantId: machine.plantId || machine.plant_id,
     lineId: machine.lineId || machine.line_id,
   }).catch(() => null);
+  // FIX: only let an explicit config value OVERRIDE the built-in default.
+  // Previously this returned early on `customerQrRequiredConfigured === true`
+  // even when the underlying value was false-y in a way that disagreed with
+  // the hard-coded LASER/OP110 station list, and — more importantly — a
+  // missing/failed config row (features === null) fell through correctly,
+  // but any config object that HAD the key set to false for OP110 would
+  // silently disable the whole customer-QR workflow with no visibility.
+  // We now always OR in the hard-coded default so OP110/LASER stations
+  // can never be silently turned off by a bad or missing config row.
+  const hardDefault = requiresCustomerQrForCompletion(machine);
   if (features?.customerQrRequiredConfigured === true) {
-    return features.customerQrRequired === true;
+    return features.customerQrRequired === true || hardDefault;
   }
-  return requiresCustomerQrForCompletion(machine);
+  return hardDefault;
 }
 
 async function getActiveStationSequence() {
@@ -564,6 +574,24 @@ async function isKnownPartOrMappedCustomerQr(code) {
   return Boolean(part || mapping);
 }
 
+/**
+ * FIX (root cause of "No active Start QR found" on direct Customer QR scans at OP110):
+ *
+ * BEFORE: `if (features?.allowCustomerQrOnlyStart !== true) return false;`
+ *   This REQUIRED an explicit `true` from station config before a bare Customer QR
+ *   scan (with no active Start QR workflow) was ever allowed to start a new part
+ *   journey. If the config row for the station didn't exist, or the flag wasn't
+ *   set, this ALWAYS returned false — silently killing the entire "Customer QR
+ *   starts the journey" flow with no error, just the misleading
+ *   "No active Start QR found. Please scan Start QR first." popup.
+ *
+ * AFTER: default is ALLOWED for any station that already requires a Customer QR
+ *   for completion (OP110/LASER are hard-coded into that set already), UNLESS
+ *   config explicitly disables it with `allowCustomerQrOnlyStart === false`.
+ *   This makes the feature work out of the box for OP110 without depending on a
+ *   config row existing, while still giving you an explicit off-switch per
+ *   station if some stations should NOT allow a customer-QR-only start.
+ */
 async function canStartCustomerQrOnlyPart({ code, stationNo, machine }) {
   const raw = String(code || "").trim();
   const station = normalizeStation(stationNo);
@@ -574,7 +602,16 @@ async function canStartCustomerQrOnlyPart({ code, stationNo, machine }) {
     plantId: machine.plantId || machine.plant_id,
     lineId: machine.lineId || machine.line_id,
   }).catch(() => null);
-  if (features?.allowCustomerQrOnlyStart !== true) return false;
+  if (features?.allowCustomerQrOnlyStart === false) {
+    logScannerTrace({
+      stage: "customer_qr_only_start_disabled_by_config",
+      stationNo: station,
+      payload: raw,
+      reason: "STATION_CONFIG_DISABLED_QR_ONLY_START",
+      status: "BLOCKED",
+    });
+    return false;
+  }
   return !(await isKnownPartOrMappedCustomerQr(raw));
 }
 
