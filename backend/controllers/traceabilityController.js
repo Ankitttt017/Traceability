@@ -2762,18 +2762,36 @@ exports.getPartJourney = async (req, res) => {
     const requestedPartId = String(req.params.partId || "").trim();
     const resolvedCode = await resolveMappedPartId(requestedPartId);
     const partId = resolvedCode.resolvedPartId || requestedPartId;
+    const mappingSeedIds = uniqueStages([requestedPartId, partId].filter(Boolean));
+    const initialCustomerMappings = await PartCodeMapping.findAll({
+      where: {
+        is_active: true,
+        [Op.or]: [
+          { old_part_id: { [Op.in]: mappingSeedIds } },
+          { customer_qr: { [Op.in]: mappingSeedIds } },
+        ],
+      },
+      attributes: ["old_part_id", "customer_qr"],
+      raw: true,
+    });
+    const traceabilityPartIds = uniqueStages([
+      ...mappingSeedIds,
+      ...initialCustomerMappings.flatMap((row) => [row.old_part_id, row.customer_qr]),
+    ]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean));
     const [part, logs, reworkHistory, auditLogs, sequenceData] = await Promise.all([
-      Part.findOne({ where: { part_id: partId } }),
+      Part.findOne({ where: { part_id: { [Op.in]: traceabilityPartIds } } }),
       OperationLog.findAll({
-        where: { part_id: partId },
+        where: { part_id: { [Op.in]: traceabilityPartIds } },
         order: [["createdAt", "ASC"]],
       }),
       ReworkLog.findAll({
-        where: { part_id: partId },
+        where: { part_id: { [Op.in]: traceabilityPartIds } },
         order: [["createdAt", "DESC"]],
       }),
       ProductionLog.findAll({
-        where: { part_id: partId },
+        where: { part_id: { [Op.in]: traceabilityPartIds } },
         order: [["createdAt", "DESC"]],
         limit: 150,
       }),
@@ -2864,8 +2882,8 @@ exports.getPartJourney = async (req, res) => {
     const customerMappings = await PartCodeMapping.findAll({
       where: {
         [Op.or]: [
-          { old_part_id: String(partId || "").trim() },
-          { customer_qr: String(partId || "").trim() },
+          { old_part_id: { [Op.in]: traceabilityPartIds } },
+          { customer_qr: { [Op.in]: traceabilityPartIds } },
         ],
         is_active: true,
       },
@@ -2897,7 +2915,7 @@ exports.getPartJourney = async (req, res) => {
     }, {});
     const leaktestIndex = (
       await buildLeaktestIndex({
-        partIds: [partId],
+        partIds: traceabilityPartIds,
         customerQrByPartId,
         machines: Array.isArray(sequenceData?.machines) ? sequenceData.machines : [],
       })
@@ -2922,7 +2940,11 @@ exports.getPartJourney = async (req, res) => {
     const stationTimeline = knownStations.map((stationNo, idx) => {
       const stationMeta = stationMachineMeta[stationNo] || null;
       const leakTestReading = stationNo === LEAKTEST_OPERATION
-        ? getLeaktestReadingForPartStation(leaktestIndex, partId, stationNo)
+        ? (
+          traceabilityPartIds
+            .map((candidatePartId) => getLeaktestReadingForPartStation(leaktestIndex, candidatePartId, stationNo))
+            .find(Boolean) || null
+        )
         : null;
       let attempts = (logsByStation[stationNo] || []).map((row) => ({
         id: row.id,

@@ -1067,6 +1067,7 @@ const GlobalPopup = ({
 
     let duration = 0;
     const STANDARD_SUCCESS_CLOSE_MS = 4200;
+    const CUSTOMER_QR_MAPPED_CLOSE_MS = 7000;
     const STANDARD_ERROR_CLOSE_MS = 8000;
 
     // Laser two-step flow must stay visible until the customer QR arrives and maps.
@@ -1080,7 +1081,7 @@ const GlobalPopup = ({
     if (isOnlyQrCheck) {
       const qrState = popupQrState;
       if (qrState === "PASS" || qrState === "DUPLICATE") {
-        duration = STANDARD_SUCCESS_CLOSE_MS;
+        duration = customerQrMapped ? CUSTOMER_QR_MAPPED_CLOSE_MS : STANDARD_SUCCESS_CLOSE_MS;
       } else if (popup?.type === "ERROR" || qrState === "FAIL" || qrState === "BLOCKED") {
         duration = STANDARD_ERROR_CLOSE_MS;
       } else {
@@ -1089,7 +1090,7 @@ const GlobalPopup = ({
       }
     } else if (signalCustomerMappingStation) {
       if (customerQrMapped || popupType === "SUCCESS" || popupQrState === "PASS") {
-        duration = STANDARD_SUCCESS_CLOSE_MS;
+        duration = customerQrMapped ? CUSTOMER_QR_MAPPED_CLOSE_MS : STANDARD_SUCCESS_CLOSE_MS;
       } else if (popup?.type === "ERROR" || popupQrState === "FAIL" || popupQrState === "BLOCKED") {
         duration = STANDARD_ERROR_CLOSE_MS;
       } else {
@@ -1121,7 +1122,7 @@ const GlobalPopup = ({
         const operationState = resolveOperationState(popup);
 
         if (popupType === "SUCCESS" || operationState === "PASS") {
-          duration = STANDARD_SUCCESS_CLOSE_MS; // Auto-close for PASS
+          duration = customerQrMapped ? CUSTOMER_QR_MAPPED_CLOSE_MS : STANDARD_SUCCESS_CLOSE_MS; // Auto-close for PASS
         } else if (["FAIL", "COMM", "TIMEOUT"].includes(operationState) || popupType === "ERROR" || qrState === "FAIL") {
           duration = STANDARD_ERROR_CLOSE_MS; // shorter for errors
         } else {
