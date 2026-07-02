@@ -57,6 +57,43 @@ function getReportPartKey(row = {}, fallback = "") {
   return String(row.partId || row.part_id || row.barcode || row.shot_uid || fallback || "").trim();
 }
 
+function normalizeShotStatusBucket(value) {
+  const raw = String(value ?? "").trim().toUpperCase();
+  const numeric = Number(raw);
+  if (numeric === 1 || ["OK", "GOOD", "PASS", "PASSED"].includes(raw)) return "ok";
+  if (numeric === 3 || raw.includes("WARM")) return "warmUp";
+  if (numeric === 5 || raw.includes("OFF") || raw.includes("OFFSET")) return "off";
+  return "other";
+}
+
+function derivePlcShotSummaryFromRows(rows = []) {
+  const summary = { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
+  const seen = new Set();
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const plc = row?.plcReading || row?.plc_reading || row?.plcReadings || row?.plcCycleReadings || row?.plc_cycle_readings || {};
+    const shotNumber = String(plc.shot_number ?? row.shot_number ?? row.shotNumber ?? "").trim();
+    const shotStatus = plc.shot_status ?? row.shot_status;
+    if (!shotNumber && (shotStatus === undefined || shotStatus === null || shotStatus === "")) continue;
+
+    const key = [
+      shotNumber || getReportPartKey(row, ""),
+      String(plc.recorded_at || plc.recordedAt || plc.shot_date || row.createdAt || "").trim(),
+      String(shotStatus ?? "").trim(),
+    ].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    summary.totalProduction += 1;
+    const bucket = normalizeShotStatusBucket(shotStatus);
+    if (bucket === "ok") summary.okShot += 1;
+    else if (bucket === "warmUp") summary.warmUpShot += 1;
+    else if (bucket === "off") summary.offShot += 1;
+  }
+
+  return summary;
+}
+
 function paginateReportRowsByPart(rows = [], pagination = {}) {
   const grouped = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
@@ -139,7 +176,11 @@ exports.getReportData = async (req, res) => {
       fetchPlcShotSummary(filters),
     ]);
     const metrics = calculateProductionMetrics(rows);
-    metrics.plcShotSummary = plcShotSummary;
+    const rowShotSummary = derivePlcShotSummaryFromRows(rows);
+    metrics.plcShotSummary = Number(plcShotSummary?.totalProduction || 0) > 0
+      ? plcShotSummary
+      : rowShotSummary;
+    metrics.plcShotSummarySource = Number(plcShotSummary?.totalProduction || 0) > 0 ? "PLC_SUMMARY" : "REPORT_ROWS";
     const paged = paginateReportRowsByPart(rows, pagination);
     
     res.json({
@@ -214,4 +255,8 @@ exports.exportAuditReportExcel = async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+};
+
+exports._private = {
+  derivePlcShotSummaryFromRows,
 };

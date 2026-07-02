@@ -807,6 +807,7 @@ const GlobalPopup = ({
   // Prefer locally validated QR immediately so strip/panel update without waiting socket partId
   const effectivePartId = localValidatedPartIdRef.current || partId || lastScannedCode;
   const customerQrCode = String(popup?.customerQrCode || popup?.customer_qr || "").trim();
+  const scannedQr = sanitizeScannerCode(popup?.scannedQr || popup?.displayQr || popup?.rawQr || popup?.customerQrCode || popup?.customer_qr || popup?.partId || popup?.part_id || lastScannedCode);
   const qrFormatName = String(popup?.qrFormatName || popup?.qr_format_name || "").trim().toUpperCase();
   const popupReason = String(popup?.reason || "").trim().toUpperCase();
   const reasonUpper = String(popup?.reason || popup?.qrReason || "").trim().toUpperCase();
@@ -832,9 +833,9 @@ const GlobalPopup = ({
       customerQrCode.toUpperCase() !== String(partId || effectivePartId || "").trim().toUpperCase() ||
       popupReason === "CUSTOMER_QR_MAPPED"
     );
-  const displayedScanCode = hasMappedCustomerQr ? customerQrCode : (effectivePartId || lastScannedCode);
+  const displayedScanCode = hasMappedCustomerQr ? (scannedQr || customerQrCode) : (scannedQr || effectivePartId || lastScannedCode);
   const displayInternalPartId = effectivePartId || customerQrCode || displayedScanCode || "-";
-  const displayedScanLabel = hasMappedCustomerQr ? "Scanned Customer QR" : "Scanned Part ID";
+  const displayedScanLabel = hasMappedCustomerQr ? "Scanned Customer QR" : (scannedQr ? "Scanned QR" : "Scanned Part ID");
 
   useEffect(() => {
     let isActive = true;

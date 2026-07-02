@@ -26,6 +26,7 @@ const {
 } = require("../leaktestLookupService");
 const PLC_READING_TABLE = "PlcCycleReadings";
 const CUSTOMER_QR_ONLY_FORMAT = "CUSTOMER_QR_ONLY";
+const IST_OFFSET_MINUTES = 330;
 
 async function resolveReportPartSearchValues(input) {
   const raw = String(input || "").trim();
@@ -334,6 +335,20 @@ function normalizeReportDateRange(filters = {}) {
   };
 }
 
+function toSqlLocalDateTime(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-") + " " + [
+    String(date.getHours()).padStart(2, "0"),
+    String(date.getMinutes()).padStart(2, "0"),
+    String(date.getSeconds()).padStart(2, "0"),
+  ].join(":");
+}
+
 function normalizeShotStatusBucket(value) {
   const raw = String(value ?? "").trim().toUpperCase();
   const numeric = Number(raw);
@@ -362,29 +377,41 @@ async function applyPlcShiftWhere(whereParts, replacements, shiftCode) {
   const start = toShiftMinutes(shift.start_time);
   const end = toShiftMinutes(shift.end_time);
   if (start === null || end === null) return;
-  const minuteExpr = "(DATEPART(HOUR, recorded_at) * 60 + DATEPART(MINUTE, recorded_at))";
+  const localMinuteExpr = "(DATEPART(HOUR, recorded_at) * 60 + DATEPART(MINUTE, recorded_at))";
+  const istMinuteExpr = `(DATEPART(HOUR, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at)) * 60 + DATEPART(MINUTE, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at)))`;
   if (start === end) return;
   replacements.shiftStartMinutes = start;
   replacements.shiftEndMinutes = end;
-  whereParts.push(start < end
-    ? `${minuteExpr} >= :shiftStartMinutes AND ${minuteExpr} < :shiftEndMinutes`
-    : `(${minuteExpr} >= :shiftStartMinutes OR ${minuteExpr} < :shiftEndMinutes)`);
+  const directShiftClause = start < end
+    ? `(${localMinuteExpr} >= :shiftStartMinutes AND ${localMinuteExpr} < :shiftEndMinutes)`
+    : `(${localMinuteExpr} >= :shiftStartMinutes OR ${localMinuteExpr} < :shiftEndMinutes)`;
+  const istShiftClause = start < end
+    ? `(${istMinuteExpr} >= :shiftStartMinutes AND ${istMinuteExpr} < :shiftEndMinutes)`
+    : `(${istMinuteExpr} >= :shiftStartMinutes OR ${istMinuteExpr} < :shiftEndMinutes)`;
+  whereParts.push(`(${directShiftClause} OR ${istShiftClause})`);
 }
 
 async function fetchPlcShotSummary(filters = {}) {
   const { safeFrom, safeTo } = normalizeReportDateRange(filters);
-  const whereParts = ["recorded_at BETWEEN :dateFrom AND :dateTo"];
-  const replacements = { dateFrom: safeFrom, dateTo: safeTo };
+  const whereParts = [`
+    (
+      recorded_at BETWEEN :dateFrom AND :dateTo
+      OR DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at) BETWEEN :dateFromIst AND :dateToIst
+    )
+  `];
+  const replacements = {
+    dateFrom: safeFrom,
+    dateTo: safeTo,
+    dateFromIst: toSqlLocalDateTime(safeFrom),
+    dateToIst: toSqlLocalDateTime(safeTo),
+  };
   const partName = normalizePartToken(filters.partName || filters.part_name);
   const dieName = normalizePartToken(filters.dieName || filters.die_name);
-  const dieCastingMachine = String(filters.dieCastingMachine || filters.die_casting_machine || "").trim();
+  const dieCastingMachine = String(filters.dieCastingMachine || filters.die_casting_machine || "").trim().toUpperCase();
 
   const assignmentWhere = { is_active: true };
   if (filters.plantId) assignmentWhere.plant_id = filters.plantId;
   if (filters.lineId) assignmentWhere.line_id = filters.lineId;
-  if (partName) assignmentWhere.part_name = partName;
-  if (dieName) assignmentWhere.die_name = dieName;
-  if (dieCastingMachine) assignmentWhere.die_casting_machine = dieCastingMachine;
 
   let assignmentRows = [];
   try {
@@ -396,18 +423,27 @@ async function fetchPlcShotSummary(filters = {}) {
   } catch (error) {
     console.warn(`[REPORT] Part assignment scope unavailable: ${error.message}`);
   }
+  assignmentRows = assignmentRows.filter((row) => {
+    const rowPart = normalizePartToken(row.part_name);
+    const rowDie = normalizePartToken(row.die_name);
+    const rowMachine = String(row.die_casting_machine || "").trim().toUpperCase();
+    if (partName && rowPart !== partName) return false;
+    if (dieName && rowDie !== dieName) return false;
+    if (dieCastingMachine && rowMachine !== dieCastingMachine) return false;
+    return true;
+  });
 
   const machineNames = [];
   if (dieCastingMachine) {
     machineNames.push(dieCastingMachine);
   } else if (assignmentRows.length) {
-    machineNames.push(...assignmentRows.map((row) => String(row.die_casting_machine || "").trim()).filter(Boolean));
+    machineNames.push(...assignmentRows.map((row) => String(row.die_casting_machine || "").trim().toUpperCase()).filter(Boolean));
   }
 
   if (!machineNames.length && filters.machineId) {
     const machine = await Machine.findByPk(filters.machineId, { attributes: ["machine_name"], raw: true });
     if (!machine?.machine_name) return { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
-    machineNames.push(String(machine.machine_name).trim());
+    machineNames.push(String(machine.machine_name).trim().toUpperCase());
   } else if (!machineNames.length && (filters.lineId || filters.lineName || filters.plantId)) {
     const machineWhere = {};
     if (filters.lineId) machineWhere.line_id = filters.lineId;
@@ -418,7 +454,7 @@ async function fetchPlcShotSummary(filters = {}) {
       attributes: ["machine_name"],
       raw: true,
     });
-    machineNames.push(...machines.map((machine) => String(machine.machine_name || "").trim()).filter(Boolean));
+    machineNames.push(...machines.map((machine) => String(machine.machine_name || "").trim().toUpperCase()).filter(Boolean));
     if (!machineNames.length) return { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
   }
 
@@ -428,7 +464,7 @@ async function fetchPlcShotSummary(filters = {}) {
     assignmentRows.forEach((row, index) => {
       const rowPart = normalizePartToken(row.part_name);
       const rowDie = normalizePartToken(row.die_name);
-      const rowMachine = String(row.die_casting_machine || "").trim();
+      const rowMachine = String(row.die_casting_machine || "").trim().toUpperCase();
       if (!rowPart && !rowMachine) return;
       const parts = [];
       if (rowPart) {
@@ -439,14 +475,14 @@ async function fetchPlcShotSummary(filters = {}) {
       if (rowMachine) {
         const key = `assignmentMachine${index}`;
         replacements[key] = rowMachine;
-        parts.push(`LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255)))) = :${key}`);
+        parts.push(`UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))) = :${key}`);
       }
       if (parts.length) clauses.push(`(${parts.join(" AND ")})`);
     });
     if (clauses.length) whereParts.push(`(${clauses.join(" OR ")})`);
   } else if (uniqueMachineNames.length) {
     const placeholders = uniqueMachineNames.map((_, index) => `:machineName${index}`).join(", ");
-    whereParts.push(`LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255)))) IN (${placeholders})`);
+    whereParts.push(`UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))) IN (${placeholders})`);
     uniqueMachineNames.forEach((name, index) => {
       replacements[`machineName${index}`] = name;
     });
