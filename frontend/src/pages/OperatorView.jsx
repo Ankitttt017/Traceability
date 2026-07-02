@@ -155,6 +155,7 @@ function toQrSignal(payload = {}, t = (_key, fallback) => fallback) {
     label: isPass ? t("operatorView.qrPass", "QR Pass") : isFail ? t("operatorView.qrFail", "QR Fail") : t("operatorView.qrWait", "QR Wait"),
     variant: isPass ? "ok" : isFail ? "ng" : "idle",
     partId: normalizePartId(payload.partId || payload.part_id),
+    scannedQr: sanitizeScannerCode(payload.scannedQr || payload.displayQr || payload.customerQrCode || payload.customer_qr || payload.partId || payload.part_id),
     stationNo: String(payload.stationNo || payload.station_no || "").trim().toUpperCase(),
     decision: d,
     reason: String(payload.reason || payload.qrReason || "").trim(),
@@ -1221,6 +1222,7 @@ const OperatorView = () => {
       message: fallbackMessage,
       reason: String(payload.reason || payload.qrReason || "").trim(),
       partId: nextPartId,
+      scannedQr: sanitizeScannerCode(payload.scannedQr || payload.displayQr || payload.customerQrCode || payload.customer_qr || payload.partId || payload.part_id || prev?.scannedQr || ""),
       stationNo: nextStationNo,
       machineId: payload.machineId || payload.machine_id || prev?.machineId || prev?.machine_id || "",
       machineName: payload.machineName || prev?.machineName || "",
@@ -1283,6 +1285,11 @@ const OperatorView = () => {
       const nextCustomerQrCode = explicitCustomerQrCode
         ? String(rawCustomerQrCode || "").trim()
         : String(payload.customerQrCode || payload.customer_qr || prev?.customerQrCode || "").trim();
+      const explicitScannedQr = Object.prototype.hasOwnProperty.call(payload, "scannedQr") || Object.prototype.hasOwnProperty.call(payload, "displayQr") || Object.prototype.hasOwnProperty.call(payload, "rawQr");
+      const rawScannedQr = payload.scannedQr !== undefined ? payload.scannedQr : (payload.displayQr !== undefined ? payload.displayQr : payload.rawQr);
+      const nextScannedQr = explicitScannedQr
+        ? sanitizeScannerCode(rawScannedQr || "")
+        : sanitizeScannerCode(payload.scannedQr || payload.displayQr || payload.rawQr || payload.customerQrCode || payload.customer_qr || prev?.scannedQr || "");
       const explicitCustomerQrPending = Object.prototype.hasOwnProperty.call(payload, "customerQrPending") || Object.prototype.hasOwnProperty.call(payload, "customer_qr_pending");
       const nextCustomerQrPending = explicitCustomerQrPending
         ? Boolean(payload.customerQrPending || payload.customer_qr_pending)
@@ -1322,6 +1329,7 @@ const OperatorView = () => {
         ...(payload.expectedStation && { expectedStation: payload.expectedStation }),
         ...(payload.lastCompletedStation && { lastCompletedStation: payload.lastCompletedStation }),
         ...(explicitPartId ? { partId: nextPartId } : (nextPartId ? { partId: nextPartId } : {})),
+        ...(explicitScannedQr ? { scannedQr: nextScannedQr } : (nextScannedQr ? { scannedQr: nextScannedQr } : {})),
         ...(explicitStationNo ? { stationNo: nextStationNo } : (nextStationNo ? { stationNo: nextStationNo } : {})),
         ...(explicitCustomerQrCode ? { customerQrCode: nextCustomerQrCode } : (nextCustomerQrCode ? { customerQrCode: nextCustomerQrCode } : {})),
         ...(explicitCustomerQrPending ? { customerQrPending: nextCustomerQrPending } : (nextCustomerQrPending ? { customerQrPending: nextCustomerQrPending } : {})),

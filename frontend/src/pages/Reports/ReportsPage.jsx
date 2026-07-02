@@ -278,10 +278,11 @@ const ReportsPage = () => {
       from.setTime(r.start.getTime());
       to.setTime(r.end.getTime());
     } else if (key === "yesterday") {
+      const r = getMesDayRange();
+      from.setTime(r.start.getTime());
+      to.setTime(r.end.getTime());
       from.setDate(from.getDate() - 1);
       to.setDate(to.getDate() - 1);
-      from.setHours(0, 0, 0, 0);
-      to.setHours(23, 59, 59, 999);
     } else if (key === "last7") {
       from.setDate(from.getDate() - 7);
     } else if (key === "last15") {
