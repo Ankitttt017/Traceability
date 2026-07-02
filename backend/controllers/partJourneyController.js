@@ -17,7 +17,7 @@ const NON_QUALITY_AUDIT_REASONS = new Set([
   "INVALID_INPUT",
 ]);
 
-const CUSTOMER_QR_WAITING_OPERATIONS = new Set(["LASER", "LASER_MARKING", "LASER MARKING", "OP_LASER", "OP160", "OP170"]);
+const CUSTOMER_QR_WAITING_OPERATIONS = new Set(["LASER", "LASER_MARKING", "LASER MARKING", "OP_LASER", "OP110", "OP160", "OP170"]);
 
 function toUpper(value) {
   return String(value || "").trim().toUpperCase();

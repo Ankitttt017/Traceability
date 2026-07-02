@@ -1223,6 +1223,8 @@ const OperatorView = () => {
       reason: String(payload.reason || payload.qrReason || "").trim(),
       partId: nextPartId,
       scannedQr: sanitizeScannerCode(payload.scannedQr || payload.displayQr || payload.customerQrCode || payload.customer_qr || payload.partId || payload.part_id || prev?.scannedQr || ""),
+      customerQrCode: String(payload.customerQrCode || payload.customer_qr || prev?.customerQrCode || "").trim(),
+      mappedPartId: String(payload.mappedPartId || payload.mapped_part_id || payload.dotPinPartId || payload.dot_pin_part_id || prev?.mappedPartId || "").trim(),
       stationNo: nextStationNo,
       machineId: payload.machineId || payload.machine_id || prev?.machineId || prev?.machine_id || "",
       machineName: payload.machineName || prev?.machineName || "",
@@ -1285,6 +1287,17 @@ const OperatorView = () => {
       const nextCustomerQrCode = explicitCustomerQrCode
         ? String(rawCustomerQrCode || "").trim()
         : String(payload.customerQrCode || payload.customer_qr || prev?.customerQrCode || "").trim();
+      const explicitMappedPartId = Object.prototype.hasOwnProperty.call(payload, "mappedPartId") || Object.prototype.hasOwnProperty.call(payload, "mapped_part_id") || Object.prototype.hasOwnProperty.call(payload, "dotPinPartId") || Object.prototype.hasOwnProperty.call(payload, "dot_pin_part_id");
+      const rawMappedPartId = payload.mappedPartId !== undefined
+        ? payload.mappedPartId
+        : payload.mapped_part_id !== undefined
+          ? payload.mapped_part_id
+          : payload.dotPinPartId !== undefined
+            ? payload.dotPinPartId
+            : payload.dot_pin_part_id;
+      const nextMappedPartId = explicitMappedPartId
+        ? String(rawMappedPartId || "").trim()
+        : String(payload.mappedPartId || payload.mapped_part_id || payload.dotPinPartId || payload.dot_pin_part_id || prev?.mappedPartId || "").trim();
       const explicitScannedQr = Object.prototype.hasOwnProperty.call(payload, "scannedQr") || Object.prototype.hasOwnProperty.call(payload, "displayQr") || Object.prototype.hasOwnProperty.call(payload, "rawQr");
       const rawScannedQr = payload.scannedQr !== undefined ? payload.scannedQr : (payload.displayQr !== undefined ? payload.displayQr : payload.rawQr);
       const nextScannedQr = explicitScannedQr
@@ -1332,6 +1345,7 @@ const OperatorView = () => {
         ...(explicitScannedQr ? { scannedQr: nextScannedQr } : (nextScannedQr ? { scannedQr: nextScannedQr } : {})),
         ...(explicitStationNo ? { stationNo: nextStationNo } : (nextStationNo ? { stationNo: nextStationNo } : {})),
         ...(explicitCustomerQrCode ? { customerQrCode: nextCustomerQrCode } : (nextCustomerQrCode ? { customerQrCode: nextCustomerQrCode } : {})),
+        ...(explicitMappedPartId ? { mappedPartId: nextMappedPartId } : (nextMappedPartId ? { mappedPartId: nextMappedPartId } : {})),
         ...(explicitCustomerQrPending ? { customerQrPending: nextCustomerQrPending } : (nextCustomerQrPending ? { customerQrPending: nextCustomerQrPending } : {})),
         ...(explicitCustomerQrMapped ? { customerQrMapped: nextCustomerQrMapped } : (nextCustomerQrMapped ? { customerQrMapped: nextCustomerQrMapped } : {})),
         ...((payload.machineId || payload.machine_id) && { machineId: payload.machineId || payload.machine_id }),

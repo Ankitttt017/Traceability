@@ -916,7 +916,13 @@ async function fetchProductionData(filters = {}, options = {}) {
     const partIds = scopedParts.map((part) => String(part.part_id || "").trim()).filter(Boolean);
     const mappings = partIds.length
       ? await PartCodeMapping.findAll({
-          where: { old_part_id: { [Op.in]: partIds }, is_active: true },
+          where: {
+            [Op.or]: [
+              { old_part_id: { [Op.in]: partIds } },
+              { customer_qr: { [Op.in]: partIds } },
+            ],
+            is_active: true,
+          },
           attributes: ["old_part_id", "customer_qr"],
           order: [["updatedAt", "DESC"]],
           raw: true,
@@ -924,7 +930,10 @@ async function fetchProductionData(filters = {}, options = {}) {
       : [];
     const customerQrByPartId = mappings.reduce((acc, row) => {
       const key = normalizeKey(row.old_part_id);
-      if (key && !acc[key]) acc[key] = String(row.customer_qr || "").trim();
+      const customerKey = normalizeKey(row.customer_qr);
+      const customerQr = String(row.customer_qr || "").trim();
+      if (key && customerQr && !acc[key]) acc[key] = customerQr;
+      if (customerKey && customerQr && !acc[customerKey]) acc[customerKey] = customerQr;
       return acc;
     }, {});
 
@@ -1011,7 +1020,10 @@ async function fetchProductionData(filters = {}, options = {}) {
   });
   const partCodeMappings = await PartCodeMapping.findAll({
     where: {
-      old_part_id: { [Op.in]: partIds },
+      [Op.or]: [
+        { old_part_id: { [Op.in]: partIds } },
+        { customer_qr: { [Op.in]: partIds } },
+      ],
       is_active: true,
     },
     attributes: ["old_part_id", "customer_qr"],
@@ -1026,9 +1038,11 @@ async function fetchProductionData(filters = {}, options = {}) {
   const isCustomerQrOnlyPart = (partId) =>
     String(partMap[normalizeKey(partId)]?.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT;
   const partCodeMap = partCodeMappings.reduce((acc, row) => {
-    if (!row?.old_part_id) return acc;
     const key = normalizeKey(row.old_part_id);
-    if (!acc[key]) acc[key] = String(row.customer_qr || "").trim();
+    const customerKey = normalizeKey(row.customer_qr);
+    const customerQr = String(row.customer_qr || "").trim();
+    if (key && customerQr && !acc[key]) acc[key] = customerQr;
+    if (customerKey && customerQr && !acc[customerKey]) acc[customerKey] = customerQr;
     return acc;
   }, {});
   const leakLookupMachines = await MachineModel.findAll({
