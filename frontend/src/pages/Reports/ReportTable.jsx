@@ -103,10 +103,11 @@ const ReportTable = ({
           </thead>
           <tbody className="divide-y divide-border/40">
             {pagedRows.map((row, idx) => (
-              <tr key={`${row.barcode || "row"}-${idx}`} className={`${idx % 2 === 0 ? "bg-transparent" : "bg-white/[0.02]"} hover:bg-primary/5 transition-colors group`}>
+              <tr key={`${row.traceabilityPartId || row.customerCode || row.barcode || "row"}-${idx}`} className={`${idx % 2 === 0 ? "bg-transparent" : "bg-white/[0.02]"} hover:bg-primary/5 transition-colors group`}>
                 {columns.map((column) => {
                   const value = row[column.key];
-                  const text = value === null || value === undefined || value === "" ? "-" : String(value);
+                  const isEmptyValue = value === null || value === undefined || value === "";
+                  const text = isEmptyValue ? (column.blankIfEmpty ? "" : "-") : String(value);
                   if (column.renderLeakOperation) {
                     const machineName = String(value?.machineName || "").trim();
                     const status = String(value?.status || "").trim().toUpperCase() || "-";

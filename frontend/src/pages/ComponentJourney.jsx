@@ -620,11 +620,7 @@ const ComponentJourney = () => {
 
   const patchPartFromRealtime = useCallback((payload={})=>{
     const rPartId=normalizePartId(payload.partId||payload.part_id);
-    const reason = String(payload.reason || payload.qrReason || "").trim().toUpperCase();
     if (!rPartId) return;
-    if (reason === "CUSTOMER_QR_MAPPED") {
-      return;
-    }
     const opStatus=String(payload.operationStatus||payload.plcStatus||"").trim().toUpperCase();
     const rStatus=String(payload.currentStatus||payload.partStatus||opStatus||payload.status||"").trim().toUpperCase();
     const resolved=["COMPLETED","IN_PROGRESS","NG","INTERLOCKED","REWORK"].includes(rStatus)?rStatus
@@ -635,14 +631,36 @@ const ComponentJourney = () => {
       :rStatus==="ENDED_NG" || rStatus==="COMPLETED_NG"?"NG":"";
     const rStation=String(payload.stationNo||payload.station_no||"").trim().toUpperCase();
     const rTimestamp=payload.timestamp||new Date().toISOString();
+    const customerQrCode=normalizePartId(payload.customerQrCode||payload.customer_qr);
+    const mappedPartId=normalizePartId(payload.mappedPartId||payload.mapped_part_id||payload.dotPinPartId||payload.dot_pin_part_id);
+    const isCustomerQrOnly=Boolean(customerQrCode&&mappedPartId&&customerQrCode===mappedPartId);
+    const displayPartId=isCustomerQrOnly ? "" : mappedPartId;
     setParts(prev=>{
       const idx=prev.findIndex(r=>r.partId===rPartId);
       if (idx===-1){
         if (searchTermRef.current) return prev;
-        return [{partId:rPartId,status:resolved||"IN_PROGRESS",currentStation:rStation||null,updatedAt:rTimestamp},...prev].slice(0,80);
+        return [{
+          partId:rPartId,
+          displayPartId:displayPartId||undefined,
+          mappedPartId:mappedPartId||undefined,
+          customerQrCode:customerQrCode||undefined,
+          isCustomerQrOnly,
+          status:resolved||"IN_PROGRESS",
+          currentStation:rStation||null,
+          updatedAt:rTimestamp,
+        },...prev].slice(0,80);
       }
       const next=[...prev];
-      next[idx]={...prev[idx],status:resolved||prev[idx].status,currentStation:rStation||prev[idx].currentStation,updatedAt:rTimestamp};
+      next[idx]={
+        ...prev[idx],
+        ...(displayPartId ? { displayPartId } : {}),
+        ...(mappedPartId ? { mappedPartId } : {}),
+        ...(customerQrCode ? { customerQrCode } : {}),
+        ...(customerQrCode && mappedPartId ? { isCustomerQrOnly } : {}),
+        status:resolved||prev[idx].status,
+        currentStation:rStation||prev[idx].currentStation,
+        updatedAt:rTimestamp,
+      };
       return next;
     });
   },[]);
@@ -1077,31 +1095,44 @@ const ComponentJourney = () => {
             </div>
           </div>
 
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:8,marginBottom:14}}>
+          <div style={{
+            display:"grid",
+            gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",
+            gap:10,
+            marginBottom:14,
+            padding:12,
+            border:`1px solid ${C.border()}`,
+            borderRadius:12,
+            background:C.bg("surface"),
+            alignItems:"start",
+            overflow:"visible",
+          }}>
             <input
               type="date"
               value={filters.dateFrom}
               onChange={(e)=>setFilters((prev)=>({...prev,dateFrom:e.target.value}))}
-              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
             />
             <input
               type="date"
               value={filters.dateTo}
               onChange={(e)=>setFilters((prev)=>({...prev,dateTo:e.target.value}))}
-              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
             />
-            <PlantLineSelector
-              value={filters}
-              onChange={(scope)=>setFilters((prev)=>({...prev,...scope,machineId:""}))}
-              includeAll
-              compact
-              className="grid grid-cols-1 gap-2 sm:grid-cols-2"
-              inputClassName="h-[34px] rounded-lg border border-border bg-bg-dark px-3 text-xs font-bold text-text-main outline-none"
-            />
+            <div style={{gridColumn:"1 / -1",minWidth:0}}>
+              <PlantLineSelector
+                value={filters}
+                onChange={(scope)=>setFilters((prev)=>({...prev,...scope,machineId:""}))}
+                includeAll
+                compact
+                className="grid grid-cols-1 gap-2 md:grid-cols-2"
+                inputClassName="h-9 min-w-0 rounded-lg border border-border bg-bg-dark px-3 text-xs font-bold text-text-main outline-none"
+              />
+            </div>
             <select
               value={filters.machineId}
               onChange={(e)=>setFilters((prev)=>({...prev,machineId:e.target.value}))}
-              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
             >
               <option value="">All Machines</option>
               {machines
@@ -1116,29 +1147,30 @@ const ComponentJourney = () => {
               value={filters.stationNo}
               onChange={(e)=>setFilters((prev)=>({...prev,stationNo:e.target.value.toUpperCase()}))}
               placeholder="Station"
-              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
             />
             <select
               value={filters.status}
               onChange={(e)=>setFilters((prev)=>({...prev,status:e.target.value}))}
-              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
             >
               <option value="">All Status</option>
               <option value="IN_PROGRESS">RUNNING</option>
               <option value="COMPLETED">PASSED</option>
               <option value="NG">FAILED</option>
               <option value="INTERLOCKED">BLOCKED</option>
+              <option value="OTHER">OTHER CATEGORY</option>
             </select>
             <input
               value={filters.operatorId}
               onChange={(e)=>setFilters((prev)=>({...prev,operatorId:e.target.value}))}
               placeholder="Operator ID"
-              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
             />
             <select
               value={filters.shiftCode}
               onChange={(e)=>setFilters((prev)=>({...prev,shiftCode:e.target.value}))}
-              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
             >
               <option value="">All Shifts</option>
               {availableShifts.map((shift)=>(
@@ -1149,11 +1181,11 @@ const ComponentJourney = () => {
               value={filters.partId}
               onChange={(e)=>setFilters((prev)=>({...prev,partId:e.target.value}))}
               placeholder="Part ID"
-              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12}}
+              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
             />
             <button
               onClick={()=>setFilters({dateFrom:"",dateTo:"",partId:"",plantId:"",lineId:"",machineId:"",stationNo:"",status:"",operatorId:"",shiftCode:"",lineName:""})}
-              style={{height:34,padding:"0 10px",borderRadius:8,border:`1px solid ${C.ng(0.25)}`,background:C.ng(0.08),color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer"}}
+              style={{width:"100%",height:36,padding:"0 12px",borderRadius:8,border:`1px solid ${C.ng(0.25)}`,background:C.ng(0.08),color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer",boxSizing:"border-box"}}
             >
               Clear Filters
             </button>

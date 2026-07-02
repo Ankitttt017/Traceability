@@ -3083,21 +3083,36 @@ exports.getPartJourney = async (req, res) => {
     });
 
     const mappedCustomerQrForPart = customerQrByPartId[String(partId || "").trim().toUpperCase()] || null;
+    const mappedOldPartForPart = customerMappings.reduce((acc, row) => {
+      const oldPart = String(row.old_part_id || "").trim();
+      const customerQr = String(row.customer_qr || "").trim();
+      if (!oldPart) return acc;
+      const oldKey = oldPart.toUpperCase();
+      const customerKey = customerQr.toUpperCase();
+      if (oldKey && !acc[oldKey]) acc[oldKey] = oldPart;
+      if (customerKey && !acc[customerKey]) acc[customerKey] = oldPart;
+      return acc;
+    }, {})[String(partId || requestedPartId || "").trim().toUpperCase()] || null;
     const isCustomerQrOnlyPart =
       String(part?.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ||
       Boolean(mappedCustomerQrForPart && String(mappedCustomerQrForPart).trim().toUpperCase() === String(partId || "").trim().toUpperCase());
+    const journeyDisplayPartId = isCustomerQrOnlyPart ? "" : (mappedOldPartForPart || String(part?.part_id || partId || "").trim());
     const partPayload = part
       ? {
           ...part.get({ plain: true }),
-          displayPartId: String(part.part_id || partId || "").trim(),
+          traceabilityPartId: String(part.part_id || partId || "").trim(),
+          mappedPartId: mappedOldPartForPart,
+          displayPartId: journeyDisplayPartId,
           isCustomerQrOnly: isCustomerQrOnlyPart,
           customerQrCode: mappedCustomerQrForPart,
         }
       : {
           part_id: partId,
+          traceabilityPartId: partId,
+          mappedPartId: mappedOldPartForPart,
           status: "UNKNOWN",
           current_station: null,
-          displayPartId: String(partId || "").trim(),
+          displayPartId: journeyDisplayPartId,
           isCustomerQrOnly: isCustomerQrOnlyPart,
           customerQrCode: mappedCustomerQrForPart,
         };
@@ -3216,6 +3231,38 @@ exports.getPartCatalog = async (req, res) => {
     }
 
     const partIds = parts.map((part) => part.part_id);
+    const catalogMappings = partIds.length
+      ? await PartCodeMapping.findAll({
+        where: {
+          is_active: true,
+          [Op.or]: [
+            { old_part_id: { [Op.in]: partIds } },
+            { customer_qr: { [Op.in]: partIds } },
+          ],
+        },
+        attributes: ["old_part_id", "customer_qr"],
+        order: [["updatedAt", "DESC"]],
+        raw: true,
+      })
+      : [];
+    const catalogCustomerQrByPartId = catalogMappings.reduce((acc, row) => {
+      const oldPart = String(row.old_part_id || "").trim();
+      const customerQr = String(row.customer_qr || "").trim();
+      const oldKey = oldPart.toUpperCase();
+      const customerKey = customerQr.toUpperCase();
+      if (oldKey && customerQr && !acc[oldKey]) acc[oldKey] = customerQr;
+      if (customerKey && customerQr && !acc[customerKey]) acc[customerKey] = customerQr;
+      return acc;
+    }, {});
+    const catalogOldPartByPartId = catalogMappings.reduce((acc, row) => {
+      const oldPart = String(row.old_part_id || "").trim();
+      const customerQr = String(row.customer_qr || "").trim();
+      const oldKey = oldPart.toUpperCase();
+      const customerKey = customerQr.toUpperCase();
+      if (oldKey && oldPart && !acc[oldKey]) acc[oldKey] = oldPart;
+      if (customerKey && oldPart && !acc[customerKey]) acc[customerKey] = oldPart;
+      return acc;
+    }, {});
     const logRows = await OperationLog.findAll({
       where: {
         part_id: { [Op.in]: partIds },
@@ -3268,10 +3315,19 @@ exports.getPartCatalog = async (req, res) => {
       .map((part) => {
         const latest = latestByPart.get(part.part_id);
         const machine = latest ? machineMap[latest.machine_id] || null : null;
+        const rawPartId = String(part.part_id || "").trim();
+        const mappedCustomerQr = catalogCustomerQrByPartId[rawPartId.toUpperCase()] || "";
+        const mappedOldPart = catalogOldPartByPartId[rawPartId.toUpperCase()] || "";
+        const isCustomerQrOnly = String(part.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ||
+          Boolean(mappedOldPart && mappedCustomerQr && mappedOldPart.toUpperCase() === mappedCustomerQr.toUpperCase());
+        const displayPartId = isCustomerQrOnly ? "" : (mappedOldPart || rawPartId);
         return {
-          partId: part.part_id,
-          displayPartId: part.part_id,
-          isCustomerQrOnly: String(part.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT,
+          partId: rawPartId,
+          traceabilityPartId: rawPartId,
+          displayPartId,
+          mappedPartId: mappedOldPart || null,
+          customerQrCode: mappedCustomerQr || null,
+          isCustomerQrOnly,
           status: part.status,
           currentStation: part.current_station,
           currentOperation: part.current_operation,
@@ -3291,6 +3347,9 @@ exports.getPartCatalog = async (req, res) => {
         };
       })
       .filter((row) => {
+        if (statusFilter === "OTHER") {
+          return row.isCustomerQrOnly === true;
+        }
         if (shiftCodeFilter && row.latestAt) {
           return resolveShiftCodeForDate(row.latestAt, shifts) === shiftCodeFilter;
         }
@@ -6274,8 +6333,19 @@ exports.getDashboardReport = async (req, res) => {
       if (customerKey && customerValue && !acc[customerKey]) acc[customerKey] = customerValue;
       return acc;
     }, {});
+    const mappedOldPartByPartId = dashboardPartCodeMappings.reduce((acc, row) => {
+      const oldPart = String(row.old_part_id || "").trim();
+      const customerQr = String(row.customer_qr || "").trim();
+      const oldKey = oldPart.toUpperCase();
+      const customerKey = customerQr.toUpperCase();
+      if (oldKey && oldPart && !acc[oldKey]) acc[oldKey] = oldPart;
+      if (customerKey && oldPart && !acc[customerKey]) acc[customerKey] = oldPart;
+      return acc;
+    }, {});
     const getMappedCustomerQrForPart = (partIdValue) =>
       customerQrByPartId[String(partIdValue || "").trim().toUpperCase()] || null;
+    const getMappedOldPartForPart = (partIdValue) =>
+      mappedOldPartByPartId[String(partIdValue || "").trim().toUpperCase()] || null;
     const getEffectiveProductionStatus = (row) => {
       const mappedCustomerQr = getMappedCustomerQrForPart(row?.part_id);
       const plcStatus = String(row?.plc_status || "").trim().toUpperCase();
@@ -6890,12 +6960,20 @@ exports.getDashboardReport = async (req, res) => {
         cycleTime = leakTestReading.cycleTime;
       }
 
-      const shotKey = normalizeShotToken(row.shot_number || row.shotNumber || "");
+      const mappedOldPart = getMappedOldPartForPart(row.part_id);
+      const isCustomerQrOnlyRow = Boolean(
+        mappedOldPart &&
+        mappedCustomerQr &&
+        String(mappedOldPart).trim().toUpperCase() === String(mappedCustomerQr).trim().toUpperCase()
+      );
+      const displayPartId = isCustomerQrOnlyRow ? "" : (mappedOldPart || String(row.part_id || "").trim());
+      const shotSourcePartId = displayPartId || String(row.part_id || "").trim();
+      const shotKey = normalizeShotToken(row.shot_number || row.shotNumber || "") || normalizeShotToken(extractShotSuffix(shotSourcePartId));
       const fullPartId = String(row.part_id || "").trim();
-      const compactQrKey = parseCompactQrPartId(fullPartId)?.key || "";
-      const fromPartIdTs = extractYymmddhhmmss(fullPartId);
-      const fromPartIdShot = normalizeShotToken(extractShotSuffix(fullPartId));
-      const allPartDigitGroups = (fullPartId.match(/\d+/g) || []).map((g) => normalizeShotToken(g)).filter(Boolean);
+      const compactQrKey = parseCompactQrPartId(shotSourcePartId)?.key || parseCompactQrPartId(fullPartId)?.key || "";
+      const fromPartIdTs = extractYymmddhhmmss(shotSourcePartId) || extractYymmddhhmmss(fullPartId);
+      const fromPartIdShot = normalizeShotToken(extractShotSuffix(shotSourcePartId)) || normalizeShotToken(extractShotSuffix(fullPartId));
+      const allPartDigitGroups = (shotSourcePartId.match(/\d+/g) || fullPartId.match(/\d+/g) || []).map((g) => normalizeShotToken(g)).filter(Boolean);
       const plcReadingRaw = (compactQrKey && plcReadingByCompactQr.get(compactQrKey))
         || (fullPartId && plcReadingByUid.get(fullPartId))
         || (shotKey && plcReadingByShot.get(shotKey))
@@ -6907,7 +6985,8 @@ exports.getDashboardReport = async (req, res) => {
 
       return {
         id: row.id,
-        partId: row.part_id,
+        partId: displayPartId,
+        traceabilityPartId: row.part_id,
         customerQrCode: mappedCustomerQr,
         partName: row.Part?.part_name || row.Part?.name || null,
         machineId: row.machine_id,
@@ -7302,6 +7381,15 @@ async function getDashboardExportRows(filters) {
     if (customerKey && customerQr && !acc[customerKey]) acc[customerKey] = customerQr;
     return acc;
   }, {});
+  const oldPartByPartId = partCodeRows.reduce((acc, row) => {
+    const oldPart = String(row.old_part_id || "").trim();
+    const customerQr = String(row.customer_qr || "").trim();
+    const oldKey = oldPart.toUpperCase();
+    const customerKey = customerQr.toUpperCase();
+    if (oldKey && oldPart && !acc[oldKey]) acc[oldKey] = oldPart;
+    if (customerKey && oldPart && !acc[customerKey]) acc[customerKey] = oldPart;
+    return acc;
+  }, {});
   const qrFormatNames = uniqueStages(partRows.map((row) => String(row.qr_format_name || "").trim()).filter(Boolean));
   const qrRuleRows = qrFormatNames.length
     ? await QrFormatRule.findAll({
@@ -7320,9 +7408,11 @@ async function getDashboardExportRows(filters) {
     const part = partMap[row.part_id] || {};
     const qrFormatName = String(part.qr_format_name || "").trim();
     const customerQrCode = customerQrByPartId[String(row.part_id || "").trim().toUpperCase()] || "";
+    const mappedOldPartId = oldPartByPartId[String(row.part_id || "").trim().toUpperCase()] || "";
     const isCustomerQrOnlyRow =
       qrFormatName.toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ||
-      Boolean(customerQrCode && String(customerQrCode).trim().toUpperCase() === String(row.part_id || "").trim().toUpperCase());
+      Boolean(customerQrCode && mappedOldPartId && String(customerQrCode).trim().toUpperCase() === String(mappedOldPartId).trim().toUpperCase());
+    const displayPartId = isCustomerQrOnlyRow ? "" : (mappedOldPartId || String(row.part_id || "").trim());
     const modelCode = modelByFormat[qrFormatName] || "";
     const status = deriveOperationStatus(row);
     const result = normalizeResultToken(row.result);
@@ -7341,7 +7431,8 @@ async function getDashboardExportRows(filters) {
       : null;
 
     return {
-      partId: row.part_id || customerQrCode || "",
+      partId: displayPartId,
+      traceabilityPartId: row.part_id || customerQrCode || "",
       customerQrCode,
       modelCode,
       qrFormatName,
