@@ -20,6 +20,7 @@ const DEFAULT_FEATURES = {
   customerQrRequiredConfigured: false,
   validateCustomerCode: false,
   allowCustomerQrOnlyStart: false,
+  allowCustomerQrOnlyStartConfigured: false,
   customerCodePattern: "",
   finalPacking: false,
 };
@@ -108,6 +109,7 @@ async function getStationFeatureConfig(stationNo, scopeInput = {}) {
       Object.prototype.hasOwnProperty.call(config, "customerQrRequiredForCompletion"),
     validateCustomerCode: config.validateCustomerCode === true,
     allowCustomerQrOnlyStart: config.allowCustomerQrOnlyStart === true,
+    allowCustomerQrOnlyStartConfigured: Object.prototype.hasOwnProperty.call(config, "allowCustomerQrOnlyStart"),
     customerCodePattern: String(config.customerCodePattern || ""),
     finalPacking: row.final_packing_enabled === true,
   };
