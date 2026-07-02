@@ -4,6 +4,7 @@ const OperationLog = require("../models/OperationLog");
 const ProductionLog = require("../models/ProductionLog");
 const Part         = require("../models/Part");
 const PartCodeMapping = require("../models/PartCodeMapping");
+const { Op } = require("sequelize");
 
 const NON_QUALITY_AUDIT_REASONS = new Set([
   "DUPLICATE_SCAN",
@@ -56,24 +57,51 @@ async function getPartJourney(req, res) {
       raw: true,
     });
 
-    // 2. Get all OperationLogs for this part (contains QR, PLC, and rejection state)
+    const initialMappings = await PartCodeMapping.findAll({
+      where: {
+        is_active: true,
+        [Op.or]: [
+          { old_part_id: partId },
+          { customer_qr: partId },
+        ],
+      },
+      attributes: ["old_part_id", "customer_qr", "station_no", "machine_id"],
+      raw: true,
+    });
+    const linkedPartIds = [
+      partId,
+      ...initialMappings.flatMap((row) => [row.old_part_id, row.customer_qr]),
+    ]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    const uniqueLinkedPartIds = [...new Set(linkedPartIds)];
+
+    // 2. Get all OperationLogs for this traceability identity pair.
     const opLogs = await OperationLog.findAll({
-      where: { part_id: partId },
+      where: { part_id: { [Op.in]: uniqueLinkedPartIds } },
       order: [["createdAt", "ASC"]],
       raw: true,
     });
 
-    // 3. Get all ProductionLogs for this part (final OK/NG verdict per machine)
+    // 3. Get all ProductionLogs for this traceability identity pair.
     const prodLogs = await ProductionLog.findAll({
-      where: { part_id: partId },
+      where: { part_id: { [Op.in]: uniqueLinkedPartIds } },
       order: [["createdAt", "DESC"]],
       raw: true,
     });
     const customerMappings = await PartCodeMapping.findAll({
-      where: { old_part_id: partId, is_active: true },
-      attributes: ["station_no", "machine_id", "customer_qr"],
+      where: {
+        is_active: true,
+        [Op.or]: [
+          { old_part_id: { [Op.in]: uniqueLinkedPartIds } },
+          { customer_qr: { [Op.in]: uniqueLinkedPartIds } },
+        ],
+      },
+      attributes: ["old_part_id", "station_no", "machine_id", "customer_qr"],
       raw: true,
     });
+    const mappedCustomerQr = String(customerMappings.find((row) => String(row.customer_qr || "").trim())?.customer_qr || "").trim();
+    const mappedPartId = String(customerMappings.find((row) => String(row.old_part_id || "").trim())?.old_part_id || "").trim();
     const mappedCustomerQrMachines = new Set(
       customerMappings
         .filter((row) => String(row.customer_qr || "").trim())
@@ -222,6 +250,8 @@ async function getPartJourney(req, res) {
 
     res.json({
       partId,
+      customerQrCode: mappedCustomerQr || null,
+      mappedPartId: mappedPartId || null,
       overallStatus,
       totalStations: allMachines.length,
       stations: visibleStations,

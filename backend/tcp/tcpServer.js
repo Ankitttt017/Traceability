@@ -830,11 +830,16 @@ async function promoteTraceabilityIdentityToCustomerQr({ partId, customerQrCode,
     await customerPart.save();
   }
 
-  const sequence = await getActiveStationSequence().catch(() => []);
+  const sequenceData = await getActiveMachineSequenceData().catch(() => ({ machines: [], sequence: [] }));
+  const sequence = Array.isArray(sequenceData?.sequence) ? sequenceData.sequence : [];
   const currentStationIndex = sequence.indexOf(station);
   const stationsToPromote = currentStationIndex >= 0
     ? sequence.slice(0, currentStationIndex + 1)
     : [station];
+  const machineIdsToPromote = (sequenceData?.machines || [])
+    .filter((candidate) => stationsToPromote.includes(normalizeStation(candidate.operation_no)))
+    .map((candidate) => Number(candidate.id || 0))
+    .filter((id) => Number.isFinite(id) && id > 0);
 
   await OperationLog.update(
     { part_id: customerQr },
@@ -851,7 +856,9 @@ async function promoteTraceabilityIdentityToCustomerQr({ partId, customerQrCode,
     {
       where: {
         part_id: dotPinPartId,
-        machine_id: machine.id,
+        ...(machineIdsToPromote.length
+          ? { machine_id: { [Op.in]: machineIdsToPromote } }
+          : { machine_id: machine.id }),
       },
     }
   );
@@ -1586,7 +1593,7 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
     status: finalized.finalized ? "ENDED_OK" : "SCANNED",
     plcStatus: finalized.finalized ? "ENDED_OK" : "WAITING_PLC",
     customerQrMapped: true,
-    closePopup: finalized.finalized === true,
+    closePopup: false,
     reason: existingSamePartMapping ? "CUSTOMER_QR_ALREADY_MAPPED_SAME_PART" : "CUSTOMER_QR_MAPPED",
     message: existingSamePartMapping
       ? "Customer QR already mapped to this part. Operation confirmed."
@@ -1849,7 +1856,7 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
       response.status = "ENDED_OK";
       response.message = "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station.";
     }
-    response.closePopup = finalized?.finalized === true;
+    response.closePopup = false;
   }
 
 
