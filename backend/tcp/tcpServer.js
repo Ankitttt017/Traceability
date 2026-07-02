@@ -1691,15 +1691,19 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
   const resolvedCode = await resolveMappedPartId(partId);
   const normalizedPartId = resolvedCode.resolvedPartId;
   const isMappedCustomerQrScan = Boolean(resolvedCode.customerQrCode) && resolvedCode.customerQrCode === partId;
+  const isMappedTraceabilityScan = Boolean(resolvedCode.customerQrCode);
   const isCustomerQrOnlyStart = flowContext.flowType === "CUSTOMER_QR_ONLY";
   const existingWorkflowState = getWorkflowState(workflowKey);
   const repeatedPendingStartQr =
-    !isMappedCustomerQrScan &&
+    !isMappedTraceabilityScan &&
     !isCustomerQrOnlyStart &&
     flowContext.flowType === "NORMAL" &&
     flowContext.qrType === "START_QR" &&
     existingWorkflowState?.waitingForCustomerQr === true &&
-    String(existingWorkflowState.activePartId || "").trim() === String(normalizedPartId || partId || "").trim();
+    (
+      String(existingWorkflowState.activePartId || "").trim() === String(normalizedPartId || partId || "").trim() ||
+      String(existingWorkflowState.activePartId || "").trim() === String(partId || "").trim()
+    );
 
   if (repeatedPendingStartQr) {
     const message = `QR already accepted at ${stationNo}. Waiting for Customer QR.`;
@@ -1742,7 +1746,7 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
   }
 
 
-  if (!isMappedCustomerQrScan && !isCustomerQrOnlyStart && await shouldBlockUnknownQrAfterLaser({ code: partId, stationNo })) {
+  if (!isMappedTraceabilityScan && !isCustomerQrOnlyStart && await shouldBlockUnknownQrAfterLaser({ code: partId, stationNo })) {
     const message = await unknownQrAfterLaserMessage(stationNo);
     emitRealtime("scan_event", {
       sourceEvent: "scan_event",
@@ -1859,11 +1863,11 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
 
 
   const scanPartId = isCustomerQrOnlyStart ? partId : normalizedPartId;
-  const displayMappedPartId = isMappedCustomerQrScan
+  const displayMappedPartId = isMappedTraceabilityScan
     ? (resolvedCode.mappedPartId || scanPartId)
     : scanPartId;
   const isCustomerQrOnlyTrace = isCustomerQrOnlyStart || await isCustomerQrOnlyTracePart(scanPartId, resolvedCode.customerQrCode || (isCustomerQrOnlyStart ? scanPartId : ""));
-  if (isMappedCustomerQrScan && resolvedCode.mappedPartId && resolvedCode.customerQrCode) {
+  if (isMappedTraceabilityScan && resolvedCode.mappedPartId && resolvedCode.customerQrCode) {
     await promoteTraceabilityIdentityToCustomerQr({
       partId: resolvedCode.mappedPartId,
       customerQrCode: resolvedCode.customerQrCode,
@@ -1874,9 +1878,10 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
   const response = await saveScan(scanPartId, stationNo, "OK", machine.id, null, {
     resultSource: isCustomerQrOnlyStart ? "CUSTOMER_QR_ONLY_START" : "TCP_PUSH_SCANNER",
     resultInput: "OK",
-    skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart,
-    skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyTrace,
-    skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart,
+    shotValidationPartId: isMappedTraceabilityScan ? (resolvedCode.mappedPartId || partId) : partId,
+    skipQrFormatValidation: isMappedTraceabilityScan || isCustomerQrOnlyStart,
+    skipShotValidation: isMappedTraceabilityScan || isCustomerQrOnlyTrace,
+    skipCustomerCodeValidation: isMappedTraceabilityScan || isCustomerQrOnlyStart,
     skipSequenceValidation: isCustomerQrOnlyStart,
   });
 

@@ -506,9 +506,10 @@ async function hasRealCompletedOperationBefore(partId, currentStation, sequence)
   if (!partId || stationIndex <= 0) return false;
 
   const previousStations = sequence.slice(0, stationIndex);
+  const linkedPartIds = await getLinkedTraceabilityPartIds(partId);
   const rows = await OperationLog.findAll({
     where: {
-      part_id: partId,
+      part_id: { [Op.in]: linkedPartIds },
       station_no: { [Op.in]: previousStations },
     },
     attributes: ["id", "plc_status", "result", "is_bypassed"],
@@ -520,7 +521,7 @@ async function hasRealCompletedOperationBefore(partId, currentStation, sequence)
     return true;
   }
 
-  const leaktestState = await getLeaktestSequenceStateForPart(partId, sequence);
+  const leaktestState = await getLeaktestSequenceStateForPartIds(linkedPartIds, sequence);
   return previousStations.includes(LEAKTEST_OPERATION) && leaktestState?.state === "PASSED";
 }
 
@@ -561,6 +562,29 @@ function isSuccessfulOperationLog(log) {
   if (TERMINAL_SUCCESS_PLC_STATUSES.has(plcStatus)) return true;
   if (TERMINAL_FAILURE_PLC_STATUSES.has(plcStatus) || NON_TERMINAL_PLC_STATUSES.has(plcStatus)) return false;
   return ["OK", "PASS", "PASSED"].includes(result);
+}
+
+async function getLinkedTraceabilityPartIds(partId) {
+  const normalizedPartId = String(partId || "").trim();
+  if (!normalizedPartId) return [];
+  const rows = await PartCodeMapping.findAll({
+    where: {
+      is_active: true,
+      [Op.or]: [
+        { old_part_id: normalizedPartId },
+        { customer_qr: normalizedPartId },
+      ],
+    },
+    attributes: ["old_part_id", "customer_qr"],
+    raw: true,
+  }).catch(() => []);
+  const values = [
+    normalizedPartId,
+    ...rows.flatMap((row) => [row.old_part_id, row.customer_qr]),
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return [...new Set(values)];
 }
 
 function normalizeResultSource(value) {
@@ -772,6 +796,15 @@ async function getLeaktestSequenceStateForPart(partId, sequence) {
   };
 }
 
+async function getLeaktestSequenceStateForPartIds(partIds, sequence) {
+  const ids = Array.isArray(partIds) ? partIds : [partIds];
+  for (const partId of ids) {
+    const state = await getLeaktestSequenceStateForPart(partId, sequence);
+    if (state) return state;
+  }
+  return null;
+}
+
 async function autoPassSkippedStationsBefore({
   part,
   partId,
@@ -973,8 +1006,9 @@ async function deriveSequenceStateFromHistory(partId, sequence) {
     return { expectedStation: null, lastCompletedStation: null };
   }
 
+  const linkedPartIds = await getLinkedTraceabilityPartIds(partId);
   const logs = await OperationLog.findAll({
-    where: { part_id: partId },
+    where: { part_id: { [Op.in]: linkedPartIds } },
     attributes: ["station_no", "operation_no", "plc_status", "result", "createdAt"],
     order: [["createdAt", "DESC"]],
     limit: 400,
@@ -990,7 +1024,7 @@ async function deriveSequenceStateFromHistory(partId, sequence) {
     }
   }
 
-  const leaktestState = await getLeaktestSequenceStateForPart(partId, sequence);
+  const leaktestState = await getLeaktestSequenceStateForPartIds(linkedPartIds, sequence);
   if (leaktestState?.state === "PASSED") {
     completedStations.add(LEAKTEST_OPERATION);
   }
@@ -1297,9 +1331,10 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     // 1. DUPLICATE VALIDATION
     // Once a station has a real success for this part, any later attempt is a duplicate
     // unless the part is explicitly in rework.
+    const linkedPartIdsForValidation = await getLinkedTraceabilityPartIds(normalizedPartId);
     const stationLogs = await OperationLog.findAll({
       where: {
-        part_id: normalizedPartId,
+        part_id: { [Op.in]: linkedPartIdsForValidation },
         station_no: station,
       },
       order: [["createdAt", "DESC"]],

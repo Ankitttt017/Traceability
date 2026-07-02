@@ -8,7 +8,7 @@ const { runIndustrialExport, fetchProductionData, getPlcReadingColumns, fetchPlc
 const { calculateProductionMetrics } = require("../services/report/reportMetricsService");
 const Shift = require("../models/Shift");
 
-const REPORT_CACHE_TTL_MS = Math.max(Number(process.env.REPORT_CACHE_TTL_MS || 15000), 1000);
+const REPORT_CACHE_TTL_MS = Math.max(Number(process.env.REPORT_CACHE_TTL_MS || 3000), 1000);
 const reportDataCache = new Map();
 const reportDataInFlight = new Map();
 
