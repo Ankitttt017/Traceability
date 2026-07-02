@@ -16,6 +16,8 @@ const DEFAULT_FEATURES = {
   validateShotNumber: true,
   validatePreviousStation: true,
   validateDuplicateBarcode: true,
+  customerQrRequired: false,
+  customerQrRequiredConfigured: false,
   validateCustomerCode: false,
   allowCustomerQrOnlyStart: false,
   customerCodePattern: "",
@@ -98,6 +100,12 @@ async function getStationFeatureConfig(stationNo, scopeInput = {}) {
     validateShotNumber: config.validateShotNumber !== false,
     validatePreviousStation: config.validatePreviousStation !== false,
     validateDuplicateBarcode: config.validateDuplicateBarcode !== false,
+    customerQrRequired: config.customerQrRequired === true ||
+      config.requiresCustomerQr === true ||
+      config.customerQrRequiredForCompletion === true,
+    customerQrRequiredConfigured: Object.prototype.hasOwnProperty.call(config, "customerQrRequired") ||
+      Object.prototype.hasOwnProperty.call(config, "requiresCustomerQr") ||
+      Object.prototype.hasOwnProperty.call(config, "customerQrRequiredForCompletion"),
     validateCustomerCode: config.validateCustomerCode === true,
     allowCustomerQrOnlyStart: config.allowCustomerQrOnlyStart === true,
     customerCodePattern: String(config.customerCodePattern || ""),

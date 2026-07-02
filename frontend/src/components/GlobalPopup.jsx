@@ -1,4 +1,4 @@
-// UPGRADE COMPLETE - GlobalPopup (v4.1 - Enhanced Visibility & Timer)
+// UPGRADE COMPLETE - GlobalPopup (v4.2 - Tablet-Optimized Layout)
 import React, { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
@@ -320,7 +320,7 @@ export const StatusBadge = ({ status }) => {
   const theme = statusMap[status] || statusMap.IDLE;
 
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold ${theme.bg} ${theme.text}`}>
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] md:text-[11px] font-bold ${theme.bg} ${theme.text}`}>
       <span className={`w-1.5 h-1.5 rounded-full ${theme.dot}`} />
       {theme.label}
     </span>
@@ -346,15 +346,15 @@ const StationCard = ({ station, isLast, isCurrentStation }) => {
   const timeStr = dateObj?.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) || "";
 
   return (
-    <div className="flex gap-2 group">
+    <div className="flex gap-2.5 group">
       <div className="flex flex-col items-center">
         <div className={`w-2.5 h-2.5 rounded-full mt-4 ${dotClass}`} />
         {!isLast && <div className="w-px flex-1 bg-border/40 my-0.5 min-h-[16px]" />}
       </div>
-      <div className={`flex-1 rounded-lg border p-3 mb-3 transition-all ${cardClass}`}>
+      <div className={`flex-1 rounded-xl border p-3 md:p-4 mb-3 transition-all ${cardClass}`}>
         <div className="flex justify-between items-center flex-wrap gap-1 mb-2">
           <div className="flex items-center gap-2">
-            <h3 className={`text-xs font-bold ${titleColor}`}>
+            <h3 className={`text-xs md:text-sm font-bold ${titleColor}`}>
               {station.stationName || station.stationNo}
             </h3>
             {(isInProgress || isLiveCurrent) && (
@@ -365,33 +365,33 @@ const StationCard = ({ station, isLast, isCurrentStation }) => {
         </div>
 
         {!isPending && (
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap gap-1.5 md:gap-2">
             {station.features?.qr && (
-              <div className="flex items-center justify-between gap-1 bg-white/5 rounded px-2 py-1.5 min-w-[80px]">
+              <div className="flex items-center justify-between gap-1 bg-white/5 rounded-lg px-2 py-1.5 min-w-[80px] md:min-w-[96px]">
                 <span className="text-[9px] font-medium text-text-muted uppercase">{t("globalPopup.qr", "QR")}</span>
                 <StatusBadge status={station.qrVerification || "WAIT"} />
               </div>
             )}
             {station.features?.operation && (
-              <div className="flex items-center justify-between gap-1 bg-white/5 rounded px-2 py-1.5 min-w-[80px]">
+              <div className="flex items-center justify-between gap-1 bg-white/5 rounded-lg px-2 py-1.5 min-w-[80px] md:min-w-[96px]">
                 <span className="text-[9px] font-medium text-text-muted uppercase">{t("globalPopup.operation", "Op")}</span>
                 <StatusBadge status={station.operation || "WAIT"} />
               </div>
             )}
             {station.features?.qualityCheck && (
-              <div className="flex items-center justify-between gap-1 bg-white/5 rounded px-2 py-1.5 min-w-[80px]">
+              <div className="flex items-center justify-between gap-1 bg-white/5 rounded-lg px-2 py-1.5 min-w-[80px] md:min-w-[96px]">
                 <span className="text-[9px] font-medium text-text-muted uppercase">{t("globalPopup.qc", "QC")}</span>
                 <StatusBadge status={station.qualityCheck || "WAIT"} />
               </div>
             )}
             {(station.features?.manualResult || station.features?.camera || station.features?.torque) && !station.features?.qualityCheck && (
-              <div className="flex items-center justify-between gap-1 bg-white/5 rounded px-2 py-1.5 min-w-[80px]">
+              <div className="flex items-center justify-between gap-1 bg-white/5 rounded-lg px-2 py-1.5 min-w-[80px] md:min-w-[96px]">
                 <span className="text-[9px] font-medium text-text-muted uppercase">{t("globalPopup.qcValue", "QC Val")}</span>
                 <StatusBadge status={station.qualityCheck || "WAIT"} />
               </div>
             )}
             {station.features?.rejectionBin && (
-              <div className="flex items-center justify-between gap-1 bg-white/5 rounded px-2 py-1.5 min-w-[80px]">
+              <div className="flex items-center justify-between gap-1 bg-white/5 rounded-lg px-2 py-1.5 min-w-[80px] md:min-w-[96px]">
                 <span className="text-[9px] font-medium text-text-muted uppercase">{t("globalPopup.rejectionShort", "Rej")}</span>
                 <StatusBadge status={station.rejectionConfirmation || "PENDING"} />
               </div>
@@ -401,9 +401,9 @@ const StationCard = ({ station, isLast, isCurrentStation }) => {
 
         {/* Show NG Reason if available */}
         {(station.reason || station.remarks) && (isFailed || station.qualityCheck === "FAIL" || station.operation === "FAIL") && (
-          <div className="mt-2 px-2 py-1.5 bg-danger/10 border border-danger/20 rounded">
+          <div className="mt-2 px-2.5 py-1.5 bg-danger/10 border border-danger/20 rounded-lg">
             <span className="text-[9px] font-bold text-danger uppercase tracking-wider">{t("globalPopup.defectReason", "Defect Reason:")}</span>
-            <p className="text-[11px] font-semibold text-danger/90 mt-0.5">{station.reason || station.remarks}</p>
+            <p className="text-[11px] md:text-xs font-semibold text-danger/90 mt-0.5">{station.reason || station.remarks}</p>
           </div>
         )}
       </div>
@@ -412,8 +412,8 @@ const StationCard = ({ station, isLast, isCurrentStation }) => {
 };
 
 const InfoRow = ({ label, children }) => (
-  <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2">
-    <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</span>
+  <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 md:px-3.5 md:py-2.5">
+    <span className="text-[11px] md:text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</span>
     <div className="min-w-0">{children}</div>
   </div>
 );
@@ -1383,12 +1383,14 @@ const GlobalPopup = ({
 
       if (event.key === "Backspace") {
         usbScanBufferRef.current = usbScanBufferRef.current.slice(0, -1);
+        setManualQrCode(usbScanBufferRef.current);
         return;
       }
 
       if (event.key.length === 1) {
         if (/[\u0000-\u001F\u007F]/.test(event.key)) return;
         usbScanBufferRef.current += event.key;
+        setManualQrCode(usbScanBufferRef.current);
         event.preventDefault();
       }
     };
@@ -1457,18 +1459,18 @@ const GlobalPopup = ({
 
     return (
       <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-        <div className="w-full max-w-sm bg-bg-card rounded-xl overflow-hidden shadow-2xl animate-in zoom-in duration-200">
-          <div className={`relative p-4 flex items-center gap-2 text-white ${simpleTheme}`}>
+        <div className="w-full max-w-sm md:max-w-md bg-bg-card rounded-2xl overflow-hidden shadow-2xl animate-in zoom-in duration-200">
+          <div className={`relative p-4 md:p-5 flex items-center gap-2.5 text-white ${simpleTheme}`}>
             {typeof onClose === "function" && (
               <button onClick={onClose} className="absolute right-2 top-2 w-7 h-7 rounded-full flex items-center justify-center bg-black/20 hover:bg-black/30">
                 <X size={12} />
               </button>
             )}
             <SimpleIcon size={18} />
-            <h2 className="text-sm font-bold">{popup.title || type}</h2>
+            <h2 className="text-sm md:text-base font-bold">{popup.title || type}</h2>
           </div>
-          <div className="p-4">
-            <p className="text-sm text-text-main">{popup.message || "Update received."}</p>
+          <div className="p-4 md:p-5">
+            <p className="text-sm md:text-base text-text-main">{popup.message || "Update received."}</p>
           </div>
         </div>
       </div>
@@ -1779,37 +1781,37 @@ const GlobalPopup = ({
 
   return (
     <>
-    <div className={`fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-2 transition-opacity duration-200 sm:p-3 ${isClosingSmoothly ? "opacity-0" : "opacity-100"}`}>
+    <div className={`fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-2 transition-opacity duration-200 sm:p-4 md:p-6 ${isClosingSmoothly ? "opacity-0" : "opacity-100"}`}>
       <div className={`w-full bg-bg-card shadow-2xl flex flex-col transition-all duration-200 ${isFullscreen
         ? "fixed inset-0 z-[1000] w-screen h-screen max-w-full max-h-screen rounded-none m-0 animate-none"
-        : `max-w-[44rem] rounded-xl max-h-[94vh] ${isClosingSmoothly ? "scale-[0.98]" : "animate-in zoom-in duration-200"}`
+        : `max-w-[44rem] md:max-w-[54rem] lg:max-w-[60rem] rounded-2xl max-h-[94vh] md:max-h-[90vh] ${isClosingSmoothly ? "scale-[0.98]" : "animate-in zoom-in duration-200"}`
         }`}>
         {/* Header - Compact */}
-        <div className="px-3 py-2.5 flex-shrink-0 border-b border-border/50 sm:px-4" style={{ background: "#1e293b" }}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="p-1.5 rounded-lg" style={{ background: "#0f172a" }}>
+        <div className="px-3 py-2.5 flex-shrink-0 border-b border-border/50 sm:px-4 md:px-6 md:py-4" style={{ background: "#1e293b" }}>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 md:gap-3">
+              <div className="p-1.5 md:p-2 rounded-lg" style={{ background: "#0f172a" }}>
                 <Layout className="text-amber-400" size={18} />
               </div>
               <div>
-                <h3 className="text-white text-sm font-bold">Part Journey</h3>
-                <p className="text-amber-400 text-[9px] font-medium uppercase">Traceability</p>
+                <h3 className="text-white text-sm md:text-base font-bold">Part Journey</h3>
+                <p className="text-amber-400 text-[9px] md:text-[10px] font-medium uppercase tracking-wider">Traceability</p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 md:gap-3">
               {displayedScanCode && (
-                <div className="px-2.5 py-1.5 rounded-lg border border-amber-500/20 max-w-[320px] min-w-[140px]" style={{ background: "#0f172a" }} title={displayedScanCode}>
-                  <p className="text-[8px] font-bold uppercase tracking-wider text-slate-400">{displayedScanLabel}</p>
+                <div className="px-2.5 py-1.5 md:px-3.5 md:py-2 rounded-lg border border-amber-500/20 max-w-[320px] md:max-w-[380px] min-w-[140px]" style={{ background: "#0f172a" }} title={displayedScanCode}>
+                  <p className="text-[8px] md:text-[9px] font-bold uppercase tracking-wider text-slate-400">{displayedScanLabel}</p>
                   <p className="font-mono text-xs font-black text-amber-400 break-all leading-tight sm:text-sm">{displayedScanCode}</p>
                 </div>
               )}
               <button
                 onClick={() => setIsFullscreen(!isFullscreen)}
                 title={isFullscreen ? "Minimize" : "Maximize Screen"}
-                className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/10 text-black hover:text-white transition-colors"
+                className="w-7 h-7 md:w-9 md:h-9 rounded-lg flex items-center justify-center hover:bg-white/10 text-black hover:text-white transition-colors"
                 style={{ background: "#f59e0b" }}
               >
-                {isFullscreen ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+                {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
               </button>
               {typeof onClose === "function" && (
                 <button
@@ -1820,7 +1822,7 @@ const GlobalPopup = ({
                     onClose?.();
                   }}
                   aria-label="Close popup"
-                  className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-rose-500 transition-colors"
+                  className="w-8 h-8 md:w-9 md:h-9 rounded-lg flex items-center justify-center hover:bg-rose-500 transition-colors"
                   style={{ background: "#dc2626" }}
                 >
                   <X size={14} className="text-white" />
@@ -1830,22 +1832,22 @@ const GlobalPopup = ({
           </div>
 
           {/* Compact Stats */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2.5">
-            <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
-              <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">Machine</p>
-              <p className="text-white text-xs font-bold truncate sm:text-sm">{popup?.machineName || "N/A"}</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3 mt-2.5 md:mt-4">
+            <div className="rounded-lg md:rounded-xl p-2 md:p-3" style={{ background: "#0f172a" }}>
+              <p className="text-amber-400 text-[9px] md:text-[10px] font-medium uppercase mb-0.5 tracking-wide">Machine</p>
+              <p className="text-white text-xs font-bold truncate sm:text-sm md:text-base">{popup?.machineName || "N/A"}</p>
             </div>
-            <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
-              <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">Station</p>
-              <p className="text-white text-xs font-bold truncate sm:text-sm">{currentStationName}</p>
+            <div className="rounded-lg md:rounded-xl p-2 md:p-3" style={{ background: "#0f172a" }}>
+              <p className="text-amber-400 text-[9px] md:text-[10px] font-medium uppercase mb-0.5 tracking-wide">Station</p>
+              <p className="text-white text-xs font-bold truncate sm:text-sm md:text-base">{currentStationName}</p>
             </div>
-            <div className="rounded-lg p-2" style={{ background: "#0f172a" }}>
-              <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5">Shift</p>
-              <p className="text-white text-xs font-bold sm:text-sm">{shiftText}</p>
+            <div className="rounded-lg md:rounded-xl p-2 md:p-3" style={{ background: "#0f172a" }}>
+              <p className="text-amber-400 text-[9px] md:text-[10px] font-medium uppercase mb-0.5 tracking-wide">Shift</p>
+              <p className="text-white text-xs font-bold sm:text-sm md:text-base">{shiftText}</p>
             </div>
-            <div className="rounded-lg p-2" style={allPassed ? { background: "#064e3b" } : { background: "#0f172a" }}>
-              <p className="text-amber-400 text-[9px] font-medium uppercase mb-0.5" >Pass</p>
-              <p className="text-xs font-bold sm:text-sm" style={{ color: allPassed ? "#4ade80" : "#fff" }}>{passCount}/{totalCount}</p>
+            <div className="rounded-lg md:rounded-xl p-2 md:p-3" style={allPassed ? { background: "#064e3b" } : { background: "#0f172a" }}>
+              <p className="text-amber-400 text-[9px] md:text-[10px] font-medium uppercase mb-0.5 tracking-wide" >Pass</p>
+              <p className="text-xs font-bold sm:text-sm md:text-base" style={{ color: allPassed ? "#4ade80" : "#fff" }}>{passCount}/{totalCount}</p>
             </div>
           </div>
 
@@ -1867,39 +1869,39 @@ const GlobalPopup = ({
         </div>
 
         {/* Timeline Body - Single source of truth */}
-        <div className="flex-1 overflow-y-auto px-3 py-2 bg-bg-card font-medium sm:px-4">
+        <div className="flex-1 overflow-y-auto px-3 py-2 bg-bg-card font-medium sm:px-4 md:px-6 md:py-4">
           {displayedScanCode && !isNextPartState && (
-            <div className={`mb-2 px-2.5 py-1.5 rounded-lg border shadow-sm flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2.5 ${qrStripTheme.container}`}>
-              <span className={`text-[12px] font-bold uppercase tracking-wider whitespace-nowrap ${qrStripTheme.label}`}>
+            <div className={`mb-2 md:mb-3 px-2.5 py-1.5 md:px-3.5 md:py-2.5 rounded-lg md:rounded-xl border shadow-sm flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2.5 ${qrStripTheme.container}`}>
+              <span className={`text-[12px] md:text-sm font-bold uppercase tracking-wider whitespace-nowrap ${qrStripTheme.label}`}>
                 {displayedScanLabel}
               </span>
               <div className="flex-1 min-w-0 text-center overflow-hidden">
-                <span className={`font-bold text-xs tracking-wide text-black break-all sm:text-sm ${qrStripTheme.value}`}>
+                <span className={`font-bold text-xs tracking-wide text-black break-all sm:text-sm md:text-base ${qrStripTheme.value}`}>
                   {displayedScanCode}
                 </span>
               </div>
-              <span className={`inline-flex items-center justify-center px-2 py-0.5 rounded-md text-[11px] font-bold border whitespace-nowrap ${qrStripTheme.badge}`}>
+              <span className={`inline-flex items-center justify-center px-2 md:px-3 py-0.5 md:py-1 rounded-md text-[11px] md:text-xs font-bold border whitespace-nowrap ${qrStripTheme.badge}`}>
                 {qrStripTheme.badgeText}
               </span>
             </div>
           )}
 
           {plcReadingPreview && (
-            <div className="mb-3 rounded-lg border border-sky-500/30 bg-sky-950/20 p-3">
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <p className="text-[10px] font-bold text-sky-200 uppercase tracking-widest">
+            <div className="mb-3 md:mb-4 rounded-lg md:rounded-xl border border-sky-500/30 bg-sky-950/20 p-3 md:p-4">
+              <div className="flex items-center justify-between gap-2 mb-2 md:mb-3">
+                <p className="text-[10px] md:text-xs font-bold text-sky-200 uppercase tracking-widest">
                   {plcReadingPreview?.Result ? "Leak Test Reading" : t("globalPopup.plcReading", "PLC Reading")}
                 </p>
-                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${plcOnline ? "bg-emerald-500/20 text-emerald-200" : "bg-rose-500/20 text-rose-200"}`}>
+                <span className={`text-[10px] md:text-xs px-2 py-0.5 rounded-full font-bold ${plcOnline ? "bg-emerald-500/20 text-emerald-200" : "bg-rose-500/20 text-rose-200"}`}>
                   {plcOnline ? t("operatorView.online", "Online") : t("operatorView.offline", "Offline")}
                 </span>
               </div>
               {plcReadingPreview?.Result ? (
-                <div className="grid grid-cols-1 gap-2 rounded-md bg-slate-900/70 p-2 md:grid-cols-2">
+                <div className="grid grid-cols-1 gap-2 md:gap-2.5 rounded-md md:rounded-lg bg-slate-900/70 p-2 md:p-3 md:grid-cols-2 lg:grid-cols-3">
                   {LEAK_TEST_PREVIEW_FIELDS.map(([label, key]) => (
-                    <div key={key} className="rounded border border-slate-800/80 bg-slate-950/60 px-2 py-1.5">
-                      <p className="text-[9px] font-bold uppercase tracking-wider text-sky-200">{label}</p>
-                      <p className="mt-0.5 break-all text-[11px] font-semibold text-slate-100">
+                    <div key={key} className="rounded border border-slate-800/80 bg-slate-950/60 px-2 py-1.5 md:px-3 md:py-2">
+                      <p className="text-[9px] md:text-[10px] font-bold uppercase tracking-wider text-sky-200">{label}</p>
+                      <p className="mt-0.5 break-all text-[11px] md:text-xs font-semibold text-slate-100">
                         {formatLeakPreviewValue(plcReadingPreview, key)}
                       </p>
                     </div>
@@ -1914,16 +1916,16 @@ const GlobalPopup = ({
           )}
 
           {effectivePartId && (
-          <div className="mb-3 grid grid-cols-1 gap-2.5 md:grid-cols-2">
-              <div className={`rounded-2xl border p-4 shadow-sm ${
+          <div className="mb-3 md:mb-4 grid grid-cols-1 gap-2.5 md:gap-3 md:grid-cols-2">
+              <div className={`rounded-2xl border p-4 md:p-5 shadow-sm ${
                 previousStation ? (previousStationPassed ? "border-emerald-200 bg-emerald-50/80" : "border-rose-200 bg-rose-50/80") : "border-slate-200 bg-white"
               }`}>
-                <p className="mb-3 text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">{t("globalPopup.previousStation", "Previous Station")}</p>
+                <p className="mb-3 text-[11px] md:text-xs font-bold uppercase tracking-[0.2em] text-slate-500">{t("globalPopup.previousStation", "Previous Station")}</p>
                 {previousStation ? (
-                  <div className="space-y-2">
+                  <div className="space-y-2 md:space-y-2.5">
                     <div className="flex items-center justify-between gap-2">
-                      <p className="text-sm font-bold text-slate-900">{previousStation.stationName || previousStation.stationNo || "-"}</p>
-                      <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${previousStationPassed ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+                      <p className="text-sm md:text-base font-bold text-slate-900">{previousStation.stationName || previousStation.stationNo || "-"}</p>
+                      <span className={`rounded-full px-2.5 py-1 text-[10px] md:text-[11px] font-bold ${previousStationPassed ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
                         {previousStationPassed ? t("globalPopup.passed", "PASSED") : t("globalPopup.notPassed", "NOT PASSED")}
                       </span>
                     </div>
@@ -1939,15 +1941,15 @@ const GlobalPopup = ({
                 )}
               </div>
 
-              <div className={`rounded-2xl border p-3 shadow-sm sm:p-4 ${
+              <div className={`rounded-2xl border p-3 md:p-5 shadow-sm sm:p-4 ${
                 currentStationPassed ? "border-emerald-200 bg-emerald-50/80" : "border-sky-200 bg-sky-50/80"
               }`}>
-                <p className="mb-3 text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">{t("globalPopup.currentStation", "Current Station")}</p>
+                <p className="mb-3 text-[11px] md:text-xs font-bold uppercase tracking-[0.2em] text-slate-500">{t("globalPopup.currentStation", "Current Station")}</p>
                 {currentStationCard ? (
-                  <div className="space-y-2">
+                  <div className="space-y-2 md:space-y-2.5">
                     <div className="flex items-center justify-between gap-2">
-                      <p className="text-sm font-bold text-slate-900">{currentStationCard.stationName || currentStationCard.stationNo || currentStationName}</p>
-                      <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${currentStationPassed ? "bg-emerald-100 text-emerald-700" : "bg-sky-100 text-sky-700"}`}>
+                      <p className="text-sm md:text-base font-bold text-slate-900">{currentStationCard.stationName || currentStationCard.stationNo || currentStationName}</p>
+                      <span className={`rounded-full px-2.5 py-1 text-[10px] md:text-[11px] font-bold ${currentStationPassed ? "bg-emerald-100 text-emerald-700" : "bg-sky-100 text-sky-700"}`}>
                         {currentStationPassed ? t("globalPopup.passed", "PASSED") : t("globalPopup.inProcess", "IN PROCESS")}
                       </span>
                     </div>
@@ -1967,8 +1969,8 @@ const GlobalPopup = ({
 
           {/* QR Input: visible in simulation/USB/manual scan modes */}
           {showScanInputPanel && (
-            <div className="w-full bg-slate-900/80 border border-slate-700/80 rounded-xl p-5 space-y-4 mb-5">
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-300">
+            <div className="w-full bg-slate-900/80 border border-slate-700/80 rounded-xl md:rounded-2xl p-4 md:p-5 space-y-3 md:space-y-4 mb-4 md:mb-5">
+              <label className="block text-xs md:text-sm font-bold uppercase tracking-wider text-slate-300">
                 {t("operatorView.scanManualInput", "Scan / Manual QR Input")}
               </label>
               <div className="flex flex-col sm:flex-row gap-3">
@@ -1984,7 +1986,7 @@ const GlobalPopup = ({
                   autoCorrect="off"
                   autoCapitalize="off"
                   spellCheck={false}
-                  className="flex-1 min-w-0 bg-slate-950 border border-slate-600 rounded-lg px-4 py-2 font-bold text-sm text-slate-400 placeholder:text-slate-400 outline-none focus:border-amber-500 transition-colors font-mono"
+                  className="flex-1 min-w-0 bg-slate-950 border border-slate-600 rounded-lg px-4 py-2.5 md:py-3 font-bold text-sm md:text-base text-slate-400 placeholder:text-slate-400 outline-none focus:border-amber-500 transition-colors font-mono"
                   style={{ caretColor: isUsbScannerMode ? "transparent" : undefined }}
                   tabIndex={isUsbScannerMode ? -1 : 0}
                   onFocus={() => {}}
@@ -2006,7 +2008,7 @@ const GlobalPopup = ({
                   type="button"
                   onClick={handleValidateQr}
                   disabled={validatingQr || !manualQrCode.trim() || scanLocked}
-                  className="w-full sm:w-auto justify-center bg-amber-500 hover:bg-amber-400 disabled:bg-slate-700 disabled:text-slate-400 text-slate-950 font-bold px-5 py-2 rounded-lg text-sm transition-colors flex items-center gap-2"
+                  className="w-full sm:w-auto justify-center bg-amber-500 hover:bg-amber-400 disabled:bg-slate-700 disabled:text-slate-400 text-slate-950 font-bold px-6 py-2.5 md:py-3 rounded-lg text-sm md:text-base transition-colors flex items-center gap-2"
                 >
                   {validatingQr ? (
                     <RefreshCw size={14} className="animate-spin" />
@@ -2018,29 +2020,29 @@ const GlobalPopup = ({
             </div>
           )}
           {showJourney && displayStations.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-8 text-text-muted space-y-4">
+            <div className="flex flex-col items-center justify-center py-8 md:py-10 text-text-muted space-y-4">
               <StationIcon />
               <div className="text-center">
-                <p className="text-sm font-bold text-white">{t("globalPopup.waiting", "Waiting")}</p>
-                <p className="text-xs text-text-muted mt-1">{t("globalPopup.timelineAfterFirstScan", "Timeline appears after first scan")}</p>
+                <p className="text-sm md:text-base font-bold text-white">{t("globalPopup.waiting", "Waiting")}</p>
+                <p className="text-xs md:text-sm text-text-muted mt-1">{t("globalPopup.timelineAfterFirstScan", "Timeline appears after first scan")}</p>
               </div>
             </div>
           ) : null}
         </div>
 
         {/* Message & Footer */}
-        <div className="px-3 py-2 bg-bg-card border-t border-border/50 flex-shrink-0 space-y-2 sm:px-4">
+        <div className="px-3 py-2 bg-bg-card border-t border-border/50 flex-shrink-0 space-y-2 sm:px-4 md:px-6 md:py-3">
           {showManualVerificationPanel && (
-            <div className="mb-3 space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
+            <div className="mb-3 space-y-4 rounded-2xl border border-slate-200 bg-white p-4 md:p-5 shadow-[0_12px_32px_rgba(15,23,42,0.08)]">
               <div className="flex items-center gap-3 border-b border-slate-200 pb-3">
                 <div className="h-2.5 w-2.5 rounded-full bg-amber-500" />
-                <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-slate-700">{t("globalPopup.submitQualityVerification", "Manual Quality Inspection")}</h3>
+                <h3 className="text-sm md:text-base font-bold uppercase tracking-[0.2em] text-slate-700">{t("globalPopup.submitQualityVerification", "Manual Quality Inspection")}</h3>
               </div>
 
               {displayedScanCode && (
-                <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 px-3 py-2.5 text-center shadow-sm">
+                <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 px-3 py-2.5 md:px-4 md:py-3 text-center shadow-sm">
                   <p className="text-[10px] font-black uppercase tracking-[0.2em] text-amber-700">{displayedScanLabel}</p>
-                  <p className="mt-1 break-all font-mono text-base font-black text-slate-950 sm:text-lg">
+                  <p className="mt-1 break-all font-mono text-base font-black text-slate-950 sm:text-lg md:text-xl">
                     {displayedScanCode}
                   </p>
                   {hasMappedCustomerQr && effectivePartId && effectivePartId !== displayedScanCode && (
@@ -2055,7 +2057,7 @@ const GlobalPopup = ({
                 </div>
               )}
 
-              <div className="flex flex-col sm:flex-row gap-5">
+              <div className="grid grid-cols-2 gap-4 md:gap-5">
                 <button
                   type="button"
                   onClick={() => {
@@ -2063,13 +2065,13 @@ const GlobalPopup = ({
                     setManualReason("");
                     setManualReasonQuery("");
                   }}
-                  className={`flex-1 flex flex-col items-center justify-center p-5 rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${manualSelection === "OK"
+                  className={`flex flex-col items-center justify-center p-5 md:p-6 rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${manualSelection === "OK"
                     ? "bg-emerald-500 border-emerald-300 text-white shadow-lg shadow-emerald-500/25 scale-[1.02]"
                     : "bg-slate-50 border-slate-200 text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50"
                     }`}
                 >
                   <CheckCircle size={28} className={manualSelection === "OK" ? "text-white" : "text-emerald-600"} />
-                  <span className="mt-2 text-base font-black uppercase tracking-wider">{t("common.ok", "OK")} ({t("operatorView.pass", "Pass")})</span>
+                  <span className="mt-2 text-sm md:text-base font-black uppercase tracking-wider text-center">{t("common.ok", "OK")} ({t("operatorView.pass", "Pass")})</span>
                 </button>
 
                 <button
@@ -2086,24 +2088,24 @@ const GlobalPopup = ({
                     setShowReasonDropdown(false);
                     setShowNgReasonModal(true);
                   }}
-                  className={`flex-1 flex flex-col items-center justify-center p-5 rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${manualSelection === "NG"
+                  className={`flex flex-col items-center justify-center p-5 md:p-6 rounded-xl border-2 transition-all duration-200 active:scale-[0.98] ${manualSelection === "NG"
                     ? "bg-rose-500 border-rose-300 text-white shadow-lg shadow-rose-500/25 scale-[1.02]"
                     : "bg-slate-50 border-slate-200 text-rose-700 hover:border-rose-300 hover:bg-rose-50"
                     }`}
                 >
                   <AlertTriangle size={28} className={manualSelection === "NG" ? "text-white" : "text-rose-600"} />
-                  <span className="mt-2 text-base font-black uppercase tracking-wider">{t("common.ng", "NG")} ({t("operatorView.fail", "Fail")})</span>
+                  <span className="mt-2 text-sm md:text-base font-black uppercase tracking-wider text-center">{t("common.ng", "NG")} ({t("operatorView.fail", "Fail")})</span>
                 </button>
               </div>
 
               {manualSelection === "NG" && (
-                <div className="animate-in slide-in-from-top-2 duration-150 rounded-2xl border border-rose-200 bg-rose-50/80 p-4">
+                <div className="animate-in slide-in-from-top-2 duration-150 rounded-2xl border border-rose-200 bg-rose-50/80 p-4 md:p-5">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                       <p className="text-xs font-black uppercase tracking-[0.18em] text-rose-700">
                         {t("globalPopup.rejectionReason", "Rejection Reason")}
                       </p>
-                      <p className="mt-1 text-sm font-bold text-slate-800">
+                      <p className="mt-1 text-sm md:text-base font-bold text-slate-800">
                         {manualReason
                           ? [
                             getNgCategoryDisplayName(selectedDynamicCategory),
@@ -2138,7 +2140,7 @@ const GlobalPopup = ({
                 type="button"
                 onClick={handleSubmitManualResult}
                 disabled={submittingManual || !manualSelection || (manualSelection === "NG" && (!manualReason || !isValidNgReason))}
-                className={`w-full py-4 rounded-xl text-base font-black uppercase tracking-widest text-white transition-all duration-200 ${submittingManual || !manualSelection || (manualSelection === "NG" && (!manualReason || !isValidNgReason))
+                className={`w-full py-4 md:py-4.5 rounded-xl text-base font-black uppercase tracking-widest text-white transition-all duration-200 ${submittingManual || !manualSelection || (manualSelection === "NG" && (!manualReason || !isValidNgReason))
                   ? "bg-slate-200 border-slate-200 text-slate-500 cursor-not-allowed opacity-70"
                   : manualSelection === "OK"
                     ? "bg-emerald-500 hover:bg-emerald-400 border border-emerald-300 shadow-lg shadow-emerald-500/20 active:scale-[0.99] text-slate-950 font-black"
@@ -2158,7 +2160,7 @@ const GlobalPopup = ({
           )}
 
           {(validationError || validationInfo || popup.message) && (
-            <div className={`p-5 rounded-2xl border-2 flex gap-4 items-start text-base shadow-sm transition-colors duration-300 ${validationError ? "bg-rose-50 border-rose-300 text-rose-700" : !duplicateLike && (liveOperationState === "FAIL" || liveQrState === "FAIL" || popup.type === "ERROR" || popup.gate === "FORMAT" || popup.gate === "PLC_MATCH") ? "bg-rose-50 border-rose-300 text-rose-700" :
+            <div className={`p-4 md:p-5 rounded-2xl border-2 flex gap-3 md:gap-4 items-start text-base shadow-sm transition-colors duration-300 ${validationError ? "bg-rose-50 border-rose-300 text-rose-700" : !duplicateLike && (liveOperationState === "FAIL" || liveQrState === "FAIL" || popup.type === "ERROR" || popup.gate === "FORMAT" || popup.gate === "PLC_MATCH") ? "bg-rose-50 border-rose-300 text-rose-700" :
               liveOperationState === "COMM" || popup.type === "WARNING" || popup.reason === "PREVIOUS_STATION_NOT_COMPLETED" ? "bg-amber-50 border-amber-300 text-amber-800" :
                 popup.type === "SUCCESS" || popup.type === "INFO" ? "bg-emerald-50 border-emerald-300 text-emerald-800" :
                   "bg-white border-slate-300 text-slate-800"
@@ -2191,26 +2193,26 @@ const GlobalPopup = ({
           {resetError && <p className="text-sm font-semibold text-red-500">{resetError}</p>}
 
           {canReset && showResetConfirm && (
-            <div className="rounded-2xl border border-red-300 bg-red-50/90 p-4 space-y-3">
-              <p className="text-sm font-semibold text-red-700">
+            <div className="rounded-2xl border border-red-300 bg-red-50/90 p-4 md:p-5 space-y-3">
+              <p className="text-sm md:text-base font-semibold text-red-700">
                 {t("globalPopup.confirmResetQuestion", "Reset operation for part")} <span className="font-mono">{partId}</span> at {stationNo}?
               </p>
               <div className="flex flex-col sm:flex-row gap-3">
-                <button onClick={() => setShowResetConfirm(false)} className="flex-1 rounded-xl border border-red-300 bg-white py-2 text-sm font-bold text-red-700 hover:bg-red-50">
+                <button onClick={() => setShowResetConfirm(false)} className="flex-1 rounded-xl border border-red-300 bg-white py-2.5 md:py-3 text-sm md:text-base font-bold text-red-700 hover:bg-red-50">
                   {t("globalPopup.cancel", "Cancel")}
                 </button>
-                <button onClick={handleReset} disabled={isResetting} className="flex-1 rounded-xl bg-red-600 py-2 text-sm font-bold text-white hover:bg-red-700">
+                <button onClick={handleReset} disabled={isResetting} className="flex-1 rounded-xl bg-red-600 py-2.5 md:py-3 text-sm md:text-base font-bold text-white hover:bg-red-700">
                   {isResetting ? "..." : t("globalPopup.confirm", "Confirm")}
                 </button>
               </div>
             </div>
           )}
 
-          <div className="flex gap-4 mt-2">
+          <div className="flex gap-3 md:gap-4 mt-2">
             {allowBottomClose && (showAcknowledge || typeof onClose === "function") && (
               <button
                 onClick={onClose}
-                className="flex-1 bg-white hover:bg-slate-50 active:scale-[0.98] text-slate-700 font-black py-4 px-6 rounded-xl text-sm uppercase tracking-widest border border-slate-300 shadow-sm transition-all duration-150"
+                className="flex-1 bg-white hover:bg-slate-50 active:scale-[0.98] text-slate-700 font-black py-3.5 md:py-4 px-6 rounded-xl text-sm uppercase tracking-widest border border-slate-300 shadow-sm transition-all duration-150"
               >
                 {t("globalPopup.close", "Close")}
               </button>
@@ -2219,7 +2221,7 @@ const GlobalPopup = ({
               <button
                 onClick={() => setShowResetConfirm(true)}
                 disabled={isResetting}
-                className="flex-1 bg-rose-600 hover:bg-rose-500 active:scale-[0.98] text-white font-black py-4 px-6 rounded-xl text-sm uppercase tracking-widest border border-rose-500 shadow-lg shadow-rose-600/25 flex items-center justify-center gap-2 transition-all duration-150"
+                className="flex-1 bg-rose-600 hover:bg-rose-500 active:scale-[0.98] text-white font-black py-3.5 md:py-4 px-6 rounded-xl text-sm uppercase tracking-widest border border-rose-500 shadow-lg shadow-rose-600/25 flex items-center justify-center gap-2 transition-all duration-150"
               >
                 <RefreshCw size={16} className={isResetting ? "animate-spin" : ""} />
                 {isResetting ? "..." : t("globalPopup.resetOperation", "RESET OPERATION")}
@@ -2231,11 +2233,11 @@ const GlobalPopup = ({
       </div>
     </div>
     {showNgReasonModal && manualSelection === "NG" && (
-      <div className={`fixed inset-0 z-[1100] flex items-center justify-center bg-black/80 p-2 backdrop-blur-md transition-opacity duration-200 sm:p-4 ${isClosingSmoothly ? "opacity-0" : "opacity-100"}`}>
+      <div className={`fixed inset-0 z-[1100] flex items-center justify-center bg-black/80 p-2 backdrop-blur-md transition-opacity duration-200 sm:p-4 md:p-6 ${isClosingSmoothly ? "opacity-0" : "opacity-100"}`}>
         <div className={`flex h-[calc(100dvh-1rem)] max-h-[900px] w-full max-w-[min(1180px,98vw)] flex-col overflow-hidden rounded-xl border border-border bg-bg-card text-text-main shadow-[0_30px_90px_rgba(0,0,0,0.6)] transition-transform duration-200 sm:h-auto sm:max-h-[96dvh] sm:rounded-2xl ${isClosingSmoothly ? "scale-[0.98]" : "scale-100"}`}>
-          <div className="flex items-center justify-between gap-3 border-b border-slate-700 px-4 py-3 sm:px-6" style={{ background: "#1e293b" }}>
+          <div className="flex items-center justify-between gap-3 border-b border-slate-700 px-4 py-3 sm:px-6 md:py-4" style={{ background: "#1e293b" }}>
             <div className="min-w-0">
-              <h2 className="truncate text-lg font-black text-white sm:text-xl">
+              <h2 className="truncate text-lg font-black text-white sm:text-xl md:text-2xl">
                 {t("globalPopup.selectRejectionReason", "Select rejection reason")}
               </h2>
               <p className="hidden">
@@ -2246,7 +2248,7 @@ const GlobalPopup = ({
               <button
                 type="button"
                 onClick={() => setShowNgReasonModal(false)}
-                className="rounded-xl border border-slate-600 bg-slate-900 p-2 text-slate-200 transition hover:bg-slate-700"
+                className="rounded-xl border border-slate-600 bg-slate-900 p-2 md:p-2.5 text-slate-200 transition hover:bg-slate-700"
                 aria-label="Close rejection reason popup"
               >
                 <X size={18} />
@@ -2254,28 +2256,28 @@ const GlobalPopup = ({
             </div>
           </div>
 
-          <div className="border-b border-danger/30 bg-danger/10 px-4 py-3 sm:px-6">
+          <div className="border-b border-danger/30 bg-danger/10 px-4 py-3 sm:px-6 md:py-4">
             <div className="flex items-start gap-3 text-danger">
               <AlertTriangle size={22} className="mt-0.5 flex-shrink-0 text-rose-600" />
-              <p className="text-base font-black sm:text-[17px]">
+              <p className="text-base font-black sm:text-[17px] md:text-lg">
                 {t("globalPopup.partMarkedNgChooseReason", "Part marked NG — choose defect category and exact reason below.")}
               </p>
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto bg-bg-elevated p-3 sm:p-5">
-            <div className="mx-auto max-w-5xl space-y-4">
-              <div className="sticky top-0 z-40 grid grid-cols-4 gap-1 rounded-xl bg-bg-elevated/95 pb-2 backdrop-blur sm:gap-2">
+          <div className="min-h-0 flex-1 overflow-y-auto bg-bg-elevated p-3 sm:p-5 md:p-6">
+            <div className="mx-auto max-w-5xl space-y-4 md:space-y-5">
+              <div className="sticky top-0 z-40 grid grid-cols-4 gap-1.5 md:gap-2 rounded-xl bg-bg-elevated/95 pb-2 backdrop-blur sm:gap-2">
                 {(needsSubZoneSelection ? ["View", "Zone", "Sub Zone", "Category", "Reason"] : ["View", "Zone", "Category", "Reason"]).map((label, index) => {
                   const step = index + 1;
-                  return <div key={label} className={`rounded-lg border px-1 py-2 text-center text-[9px] font-black uppercase sm:px-2 sm:text-xs ${
+                  return <div key={label} className={`rounded-lg border px-1 py-2 md:py-2.5 text-center text-[9px] font-black uppercase sm:px-2 sm:text-xs md:text-sm ${
                     ngWizardStep === step ? "border-primary bg-primary text-white" : ngWizardStep > step ? "border-green-600 bg-green-500 text-white" : "border-border bg-bg-card text-text-muted"
                   }`}>{step}. {label}</div>;
                 })}
               </div>
               {ngWizardStep === 1 && (
                 <div>
-                  <h3 className="mb-3 text-lg font-black text-text-main sm:text-xl">Select Part View</h3>
+                  <h3 className="mb-3 text-lg font-black text-text-main sm:text-xl md:text-2xl">Select Part View</h3>
                   {loadingRejectionConfig ? (
                     <div className="flex min-h-40 items-center justify-center rounded-xl border border-border bg-bg-card">
                       <RefreshCw size={22} className="mr-3 animate-spin text-primary" />
@@ -2285,7 +2287,7 @@ const GlobalPopup = ({
                     <div className="rounded-xl border border-amber-400/50 bg-amber-500/10 p-4 text-sm font-bold text-amber-700">
                       No saved rejection views were found for this component.
                     </div>
-                  ) : <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
+                  ) : <div className="grid grid-cols-2 gap-3 md:gap-4 md:grid-cols-3 lg:grid-cols-4">
                     {dynamicViews.map((view) => (
                       <button key={view.id} type="button" onClick={() => {
                         setManualRejectionView(view);
@@ -2296,7 +2298,7 @@ const GlobalPopup = ({
                         setManualReasonQuery("");
                       }} className="overflow-hidden rounded-xl border-2 border-border bg-bg-card transition hover:border-primary active:scale-[0.99]">
                         <div className="aspect-video bg-bg-dark">{view.imageUrl ? <img src={view.imageUrl} alt={view.name} className="h-full w-full object-contain" /> : <div className="flex h-full items-center justify-center text-xs font-black text-text-muted">No Image</div>}</div>
-                        <div className="border-t border-border px-3 py-2 text-center text-sm font-black text-text-main">{view.name}</div>
+                        <div className="border-t border-border px-3 py-2 md:py-2.5 text-center text-sm md:text-base font-black text-text-main">{view.name}</div>
                       </button>
                     ))}
                   </div>}
@@ -2306,7 +2308,7 @@ const GlobalPopup = ({
               {ngWizardStep === 2 && manualRejectionView && (
                 <div>
                   <div className="mb-3 flex items-center justify-between gap-3">
-                    <h3 className="text-lg font-black text-text-main sm:text-xl">Select Zone - {manualRejectionView.name}</h3>
+                    <h3 className="text-lg font-black text-text-main sm:text-xl md:text-2xl">Select Zone - {manualRejectionView.name}</h3>
                     <button type="button" onClick={() => setManualRejectionView(null)} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
                   </div>
                   <div className="mx-auto w-full max-w-4xl">
@@ -2338,7 +2340,7 @@ const GlobalPopup = ({
               {ngWizardStep === 3 && needsSubZoneSelection && manualRejectionView && manualRejectionZone && (
                 <div>
                   <div className="mb-3 flex items-center justify-between gap-3">
-                    <h3 className="text-lg font-black text-text-main sm:text-xl">Select Sub Zone - {manualRejectionZone.name || manualRejectionZone.code}</h3>
+                    <h3 className="text-lg font-black text-text-main sm:text-xl md:text-2xl">Select Sub Zone - {manualRejectionZone.name || manualRejectionZone.code}</h3>
                     <button type="button" onClick={() => { setManualRejectionZone(null); setManualRejectionSubZone(null); }} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
                   </div>
                   <div className="mx-auto w-full max-w-4xl">
@@ -2370,14 +2372,14 @@ const GlobalPopup = ({
               {ngWizardStep === (needsSubZoneSelection ? 4 : 3) && (
                 <div>
                   <div className="mb-3 flex items-center justify-between gap-3">
-                    <h3 className="text-lg font-black text-text-main sm:text-xl">Select Rejection Category</h3>
+                    <h3 className="text-lg font-black text-text-main sm:text-xl md:text-2xl">Select Rejection Category</h3>
                     <button type="button" onClick={() => needsSubZoneSelection ? setManualRejectionSubZone(null) : setManualRejectionZone(null)} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
                   </div>
                   {enabledNgReasonCategories.length === 0 ? (
                     <div className="rounded-xl border border-amber-400/50 bg-amber-500/10 p-4 text-sm font-bold text-amber-700">
                       No rejection category is enabled for this station. Enable CR, CRAM, or MR in Station Control.
                     </div>
-                  ) : <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  ) : <div className="grid grid-cols-1 gap-3 md:gap-4 sm:grid-cols-2 lg:grid-cols-3">
                     {enabledNgReasonCategories.map((category) => {
                       const categoryKey = String(category.key || category.code || category.id);
                       const count = dynamicCategories.length ? (category.reasons || []).length : getNgReasonsByCategory(category.key).length;
@@ -2385,9 +2387,9 @@ const GlobalPopup = ({
                         setManualReasonCategory(categoryKey);
                         setManualReason("");
                         setManualReasonQuery("");
-                      }} className="min-h-24 rounded-xl border-2 border-border bg-bg-card p-4 text-left transition hover:border-primary active:scale-[0.99]">
-                        <p className="text-lg font-black text-text-main">{getNgCategoryDisplayName(category)}</p>
-                        <p className="mt-2 text-xs font-bold text-text-muted">{count} rejection reasons</p>
+                      }} className="min-h-24 rounded-xl border-2 border-border bg-bg-card p-4 md:p-5 text-left transition hover:border-primary active:scale-[0.99]">
+                        <p className="text-lg md:text-xl font-black text-text-main">{getNgCategoryDisplayName(category)}</p>
+                        <p className="mt-2 text-xs md:text-sm font-bold text-text-muted">{count} rejection reasons</p>
                       </button>;
                     })}
                   </div>}
@@ -2398,8 +2400,8 @@ const GlobalPopup = ({
                 <div>
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div className="min-w-0">
-                      <h3 className="text-lg font-black text-text-main sm:text-xl">Select Rejection Reason</h3>
-                      <p className="mt-1 truncate text-xs font-bold text-text-muted">{manualRejectionView?.name} / {manualRejectionZone?.name || manualRejectionZone?.code}{manualRejectionSubZone ? ` / ${manualRejectionSubZone.name || manualRejectionSubZone.code}` : ""} / {getNgCategoryDisplayName(selectedDynamicCategory) || manualReasonCategory}</p>
+                      <h3 className="text-lg font-black text-text-main sm:text-xl md:text-2xl">Select Rejection Reason</h3>
+                      <p className="mt-1 truncate text-xs md:text-sm font-bold text-text-muted">{manualRejectionView?.name} / {manualRejectionZone?.name || manualRejectionZone?.code}{manualRejectionSubZone ? ` / ${manualRejectionSubZone.name || manualRejectionSubZone.code}` : ""} / {getNgCategoryDisplayName(selectedDynamicCategory) || manualReasonCategory}</p>
                     </div>
                     <button type="button" onClick={() => { setManualReasonCategory(""); setManualReason(""); }} className="rounded-lg border border-border bg-bg-card px-3 py-2 text-xs font-black text-text-main">Back</button>
                   </div>
@@ -2407,7 +2409,7 @@ const GlobalPopup = ({
                     <div className="rounded-xl border border-amber-400/50 bg-amber-500/10 p-4 text-sm font-bold text-amber-700">
                       No rejection reason is mapped for this selection. Check Rejection Configuration mapping for this view, zone, sub-zone, and category.
                     </div>
-                  ) : <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  ) : <div className="grid grid-cols-2 gap-2 md:gap-3 lg:grid-cols-3">
                     {filteredNgReasonOptions.map((reason) => <button key={reason} type="button" onClick={() => {
                       setManualReason(reason);
                       setManualReasonQuery(reason);
@@ -2637,11 +2639,11 @@ const GlobalPopup = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 border-t border-border bg-bg-card p-3 sm:grid-cols-[0.65fr_1fr] sm:p-4">
+          <div className="grid grid-cols-1 gap-3 border-t border-border bg-bg-card p-3 sm:grid-cols-[0.65fr_1fr] sm:p-4 md:p-5">
             <button
               type="button"
               onClick={() => setShowNgReasonModal(false)}
-              className="rounded-xl border-2 border-border bg-bg-elevated py-3 text-base font-black text-text-main transition hover:border-primary"
+              className="rounded-xl border-2 border-border bg-bg-elevated py-3 md:py-3.5 text-base font-black text-text-main transition hover:border-primary"
             >
               {t("globalPopup.cancel", "Cancel")}
             </button>
@@ -2649,7 +2651,7 @@ const GlobalPopup = ({
               type="button"
               disabled={!manualReason || (dynamicCategories.length > 0 && (!manualRejectionView || !manualRejectionZone))}
               onClick={() => setShowNgReasonModal(false)}
-              className={`rounded-xl py-3 text-base font-black uppercase tracking-widest transition ${
+              className={`rounded-xl py-3 md:py-3.5 text-base font-black uppercase tracking-widest transition ${
                 manualReason && (dynamicCategories.length === 0 || (manualRejectionView && manualRejectionZone))
                   ? "border-2 border-green-700 bg-green-600 text-white shadow-lg shadow-green-600/20 hover:bg-green-500"
                   : "cursor-not-allowed border-2 border-border bg-bg-elevated text-text-muted"
@@ -2671,6 +2673,3 @@ const GlobalPopup = ({
 };
 
 export default React.memo(GlobalPopup);
-
-
-

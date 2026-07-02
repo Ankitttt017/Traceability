@@ -153,6 +153,7 @@ const FEATURE_COLS = [
   { key: "validateShotNumber", label: "Shot", desc: "Verify shot number from PLC/DB mapping", color: "sky", type: "toggle" },
   { key: "validatePreviousStation", label: "Prev", desc: "Validate previous station completion", color: "violet", type: "toggle" },
   { key: "validateDuplicateBarcode", label: "Dup", desc: "Block duplicate barcode scans", color: "rose", type: "toggle" },
+  { key: "customerQrRequired", label: "Cust QR", desc: "Wait for Customer QR mapping before station completion", color: "teal", type: "toggle" },
   { key: "allowCustomerQrOnlyStart", label: "QR Only", desc: "Allow unknown Customer QR to start journey without shot lookup", color: "violet", type: "toggle" },
   { key: "validateCustomerCode", label: "Cust", desc: "Enable customer code validation rule", color: "teal", type: "toggle" },
   { key: "qualityCheck", label: "QC", desc: "Enable quality validation steps", color: "teal", type: "toggle" },

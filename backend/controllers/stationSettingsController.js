@@ -67,6 +67,7 @@ function normalizeInputMap(rawSettings = {}) {
       validateShotNumber: rawValue.validateShotNumber !== false,
       validatePreviousStation: rawValue.validatePreviousStation !== false,
       validateDuplicateBarcode: rawValue.validateDuplicateBarcode !== false,
+      customerQrRequired: rawValue.customerQrRequired === true,
       validateCustomerCode: rawValue.validateCustomerCode === true,
       allowCustomerQrOnlyStart: rawValue.allowCustomerQrOnlyStart === true,
       customerCodePattern: String(rawValue.customerCodePattern || ""),
@@ -113,6 +114,9 @@ function rowsToMap(rows = []) {
       validateShotNumber: config.validateShotNumber !== false,
       validatePreviousStation: config.validatePreviousStation !== false,
       validateDuplicateBarcode: config.validateDuplicateBarcode !== false,
+      customerQrRequired: config.customerQrRequired === true ||
+        config.requiresCustomerQr === true ||
+        config.customerQrRequiredForCompletion === true,
       validateCustomerCode: config.validateCustomerCode === true,
       allowCustomerQrOnlyStart: config.allowCustomerQrOnlyStart === true,
       customerCodePattern: String(config.customerCodePattern || ""),
