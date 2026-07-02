@@ -878,7 +878,10 @@ async function resolveSharedCustomerQrTargets({ scanners, partId }) {
     return targets;
   }
 
-  for (const scanner of scanners) {
+  const customerRoleScanners = scanners.filter((scanner) => String(scanner.scanner_role || "").trim().toUpperCase() === "CUSTOMER_QR");
+  const candidates = customerRoleScanners.length ? customerRoleScanners : scanners;
+
+  for (const scanner of candidates) {
     const machine = await Machine.findByPk(scanner.mapped_machine_id);
     const stationNo = String(machine?.operation_no || "").trim().toUpperCase();
     if (!machine || machine.is_active === false || !stationNo || !(await stationRequiresCustomerQrForCompletion(machine, stationNo))) {
@@ -905,7 +908,10 @@ async function resolveCustomerQrOnlyStartTargets({ scanners, partId }) {
     return targets;
   }
 
-  for (const scanner of scanners) {
+  const customerRoleScanners = scanners.filter((scanner) => String(scanner.scanner_role || "").trim().toUpperCase() === "CUSTOMER_QR");
+  const candidates = customerRoleScanners.length ? customerRoleScanners : scanners;
+
+  for (const scanner of candidates) {
     const machine = await Machine.findByPk(scanner.mapped_machine_id);
     const stationNo = String(machine?.operation_no || "").trim().toUpperCase();
     if (!machine || machine.is_active === false || !stationNo) {
@@ -1171,7 +1177,10 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
   const activePartId = await resolveActivePartIdForMachine(machine, stationNo);
   if (!activePartId) {
     resetWorkflowState(workflowKey, { reason: "NO_ACTIVE_START_QR" });
-    if (flowContext.flowType === "CUSTOMER_QR_ONLY") {
+    if (
+      flowContext.flowType === "CUSTOMER_QR_ONLY" ||
+      await canStartCustomerQrOnlyPart({ code: partId, stationNo, machine })
+    ) {
       await processCustomerQrOnlyStart({ scanner, scannerIp, partId, stationNo, machine, scannerRole, rawPacket });
       return;
     }

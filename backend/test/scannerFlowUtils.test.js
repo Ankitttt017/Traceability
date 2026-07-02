@@ -30,3 +30,9 @@ test('validateScannerPayload no longer rejects short but valid QR payloads', () 
   assert.equal(result.isValid, true);
   assert.equal(result.sanitizedPayload, 'A1');
 });
+
+test('validateScannerPayload accepts printable customer QR payloads outside ASCII', () => {
+  const result = validateScannerPayload({ payload: 'CUS-ग्राहक-123', scannerRole: 'CUSTOMER_QR' });
+  assert.equal(result.isValid, true);
+  assert.equal(result.reason, null);
+});
