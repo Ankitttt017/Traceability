@@ -543,6 +543,8 @@ async function canStartCustomerQrOnlyPart({ code, stationNo, machine }) {
   const raw = String(code || "").trim();
   const station = normalizeStation(stationNo);
   if (!raw || !station || !machine || !requiresCustomerQrForCompletion(machine)) return false;
+  const minCustomerQrLength = Math.max(Number(process.env.TCP_CUSTOMER_QR_MIN_LENGTH || 2), 2);
+  if (raw.length < minCustomerQrLength) return false;
   const features = await getStationFeatureConfig(station, {
     plantId: machine.plantId || machine.plant_id,
     lineId: machine.lineId || machine.line_id,
@@ -565,10 +567,14 @@ async function resolveScannerFlow({ code, stationNo, machine, qrType = "UNKNOWN"
     };
   }
 
-  if (normalizedScannerRole === "CUSTOMER_QR" || qrType === "CUSTOMER_QR") {
+  const workflowKey = buildWorkflowKey(machine.id, station);
+  const workflowState = getWorkflowState(workflowKey);
+  const hasActiveLaserStart = Boolean(workflowState?.waitingForCustomerQr && workflowState.activePartId);
+
+  if ((normalizedScannerRole === "CUSTOMER_QR" || qrType === "CUSTOMER_QR") && hasActiveLaserStart) {
     return {
       flowType: "CUSTOMER_QR",
-      reason: "CUSTOMER_QR_DETECTED",
+      reason: "CUSTOMER_QR_DETECTED_FOR_ACTIVE_START",
       resolvedPartId: raw,
       customerQrCode: raw,
       qrType: "CUSTOMER_QR",
@@ -576,24 +582,16 @@ async function resolveScannerFlow({ code, stationNo, machine, qrType = "UNKNOWN"
   }
 
   const resolved = await resolveMappedPartId(raw);
-  if (resolved.customerQrCode) {
-    return {
-      flowType: "NORMAL",
-      reason: "MAPPED_CUSTOMER_QR",
-      resolvedPartId: resolved.resolvedPartId,
-      customerQrCode: resolved.customerQrCode,
-      qrType: "CUSTOMER_QR",
-    };
-  }
-
   const knownPartOrMapped = await isKnownPartOrMappedCustomerQr(raw);
   if (knownPartOrMapped) {
     return {
       flowType: "NORMAL",
-      reason: "KNOWN_PART_OR_MAPPED_QR",
+      reason: normalizedScannerRole === "CUSTOMER_QR"
+        ? "KNOWN_PART_START_QR_ON_CUSTOMER_SCANNER"
+        : "KNOWN_PART_OR_MAPPED_QR",
       resolvedPartId: resolved.resolvedPartId,
       customerQrCode: resolved.customerQrCode || "",
-      qrType: "START_QR",
+      qrType: resolved.customerQrCode ? "CUSTOMER_QR" : "START_QR",
     };
   }
 
@@ -605,6 +603,26 @@ async function resolveScannerFlow({ code, stationNo, machine, qrType = "UNKNOWN"
       resolvedPartId: raw,
       customerQrCode: raw,
       qrType: "CUSTOMER_QR_ONLY",
+    };
+  }
+
+  if (normalizedScannerRole === "CUSTOMER_QR" || qrType === "CUSTOMER_QR") {
+    return {
+      flowType: "CUSTOMER_QR",
+      reason: "NO_ACTIVE_START_QR",
+      resolvedPartId: raw,
+      customerQrCode: raw,
+      qrType: "CUSTOMER_QR",
+    };
+  }
+
+  if (resolved.customerQrCode) {
+    return {
+      flowType: "NORMAL",
+      reason: "MAPPED_CUSTOMER_QR",
+      resolvedPartId: resolved.resolvedPartId,
+      customerQrCode: resolved.customerQrCode,
+      qrType: "CUSTOMER_QR",
     };
   }
 
@@ -997,7 +1015,8 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
     machineId: scanner.mapped_machine_id || null,
   });
 
-  const qrType = detectQrType({ rawPayload: partId, scannerRole: effectiveScannerRole, stationNo: null });
+  const qrDetection = detectQrType({ rawPayload: partId, scannerRole: effectiveScannerRole, stationNo: null });
+  const qrType = qrDetection.qrType || "UNKNOWN";
   const machine = await Machine.findByPk(scanner.mapped_machine_id);
   const stationNo = String(machine?.operation_no || "").trim().toUpperCase();
   const flowContext = await resolveScannerFlow({
@@ -1420,7 +1439,11 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
     skipSequenceValidation: isCustomerQrOnlyStart,
   });
 
-  const customerQrPending = scannerRole === "START_QR" && requiresCustomerQrForCompletion(machine) && !isCustomerQrOnlyStart;
+  const customerQrPending =
+    flowContext.flowType === "NORMAL" &&
+    flowContext.qrType === "START_QR" &&
+    requiresCustomerQrForCompletion(machine) &&
+    !isCustomerQrOnlyStart;
   if (response?.decision === "ALLOW" && customerQrPending) {
     beginWorkflow(workflowKey, { machineId: machine.id, stationNo, partId: scanPartId });
     response.operationStatus = "WAITING_CUSTOMER_QR";
@@ -1752,4 +1775,3 @@ module.exports = {
   startTcpServer,
   shutdownTcpServer,
 };
-
