@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { reportApi, machineApi, organizationApi, shiftApi } from '../../api/services';
 import { toDatetimeLocal } from '../../utils/time';
 import { loadReportConfig } from '../../utils/reportConfig';
@@ -87,39 +87,40 @@ const getLeakTestStatus = (reading) => {
   if (!reading) return "";
   return "IN_PROGRESS";
 };
-const getLeakTestValue = (reading, key) => {
-  if (!reading) return "-";
-  if (key === "Dry_Wey_Both") {
-    const isTruthy = (value) => value === true || String(value ?? "").trim().toUpperCase() === "TRUE" || String(value ?? "").trim() === "1";
-    if (isTruthy(reading.Both)) return "Both";
-    if (isTruthy(reading.Dry)) return "Dry";
-    if (isTruthy(reading.Wey) || isTruthy(reading.Way)) return "Wey";
-    return "-";
-  }
-  if (key === "Machine") {
-    return reading.Machine || reading.machineName || reading.matchedMachineName || "-";
-  }
-  if (key === "Cycle_End_Time") {
-    const raw = reading.Cycle_End_Time || reading.cycleEndTime || "";
-    if (!raw) return "-";
-    const parsed = new Date(raw);
-    return Number.isNaN(parsed.getTime()) ? String(raw) : parsed.toLocaleString("en-IN");
-  }
-  const value = reading[key];
-  if (key === "Running_Mode") {
-    const normalizedMode = String(value ?? "").trim();
-    if (!normalizedMode) return "-";
-    const upper = normalizedMode.toUpperCase();
-    if (upper === "MANUAL") return "Manual";
-    if (upper === "AUTO" || upper === "AUTOMATIC") return "Auto";
-    return normalizedMode;
-  }
-  if (typeof value === "boolean") return value ? key : "-";
-  const normalized = String(value ?? "").trim();
-  if (["TRUE", "FALSE"].includes(normalized.toUpperCase())) {
-    return normalized.toUpperCase() === "TRUE" ? key : "-";
-  }
-  return value ?? "-";
+const getLeakTestValue = (readings, key) => {
+  if (!readings) return "-";
+  const readingsArray = Array.isArray(readings) ? readings : [readings];
+  if (readingsArray.length === 0) return "-";
+
+  return readingsArray.map(reading => {
+    if (!reading) return "-";
+    if (key === "Dry_Wey_Both") {
+      const isTruthy = (value) => value === true || String(value ?? "").trim().toUpperCase() === "TRUE" || String(value ?? "").trim() === "1";
+      if (isTruthy(reading.Both)) return "Both";
+      if (isTruthy(reading.Dry)) return "Dry";
+      if (isTruthy(reading.Wey) || isTruthy(reading.Way)) return "Wey";
+      return "-";
+    }
+    if (key === "Machine") {
+      return reading.Machine || reading.machineName || reading.matchedMachineName || "-";
+    }
+    if (key === "Cycle_End_Time") {
+      const raw = reading.Cycle_End_Time || reading.cycleEndTime || "";
+      if (!raw) return "-";
+      const parsed = new Date(raw);
+      return Number.isNaN(parsed.getTime()) ? String(raw) : parsed.toLocaleString("en-IN");
+    }
+    const value = reading[key];
+    if (key === "Running_Mode") {
+      const normalizedMode = String(value ?? "").trim();
+      if (!normalizedMode) return "-";
+      const upper = normalizedMode.toUpperCase();
+      if (upper === "MANUAL") return "Manual";
+      if (upper === "AUTO" || upper === "AUTOMATIC") return "Auto";
+      return normalizedMode;
+    }
+    return value !== undefined && value !== null && value !== "" ? value : "-";
+  }).join(" | ");
 };
 
 const normResult = (v, reason = "", row = null) => {
@@ -504,7 +505,7 @@ const ReportsPage = () => {
       entries.forEach((row) => {
         const stationOp = String(row.operationNo || row.stationNo || "").trim();
         const stationKey = stationOp ? stationOp.toUpperCase() : "";
-        const rowLeakData = row.leakTestReading && typeof row.leakTestReading === "object" ? row.leakTestReading : null;
+        const rowLeakData = row.leakTestReadings?.length > 0 ? row.leakTestReadings : (row.leakTestReading && typeof row.leakTestReading === "object" ? row.leakTestReading : null);
         if (!leakData && rowLeakData) {
           leakData = rowLeakData;
         }

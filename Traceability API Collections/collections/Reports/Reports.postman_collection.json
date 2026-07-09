@@ -1,0 +1,680 @@
+{
+  "info": {
+    "name": "Reports",
+    "description": "Step 2 — All Report APIs.\n\nRun Login.postman_collection.json FIRST to populate {{TOKEN}}.\n\nFolders inside:\n  1. Get Report Data   — view paginated data with filters\n  2. Export Full       — download Full Excel report\n  3. Export NG         — download NG-only Excel report\n  4. Export Parts      — download Parts Excel report\n  5. Export Audit      — download Audit Excel report\n\nDate-range filter variables:\n  {{DATE_FROM}}  e.g. 2026-07-01\n  {{DATE_TO}}    e.g. 2026-07-09",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+
+  "variable": [
+    {
+      "key": "BASE_URL",
+      "value": "http://localhost:4000/api/v1",
+      "description": "Server base URL — change for DEV / UAT / PROD"
+    },
+    {
+      "key": "TOKEN",
+      "value": "",
+      "description": "Paste your JWT token here OR run Login collection first to auto-fill"
+    },
+    {
+      "key": "DATE_FROM",
+      "value": "2026-07-01",
+      "description": "Start date for report filter — format YYYY-MM-DD"
+    },
+    {
+      "key": "DATE_TO",
+      "value": "2026-07-09",
+      "description": "End date for report filter — format YYYY-MM-DD"
+    },
+    {
+      "key": "MACHINE_ID",
+      "value": "1",
+      "description": "Machine ID to filter by (optional — delete param to get all machines)"
+    },
+    {
+      "key": "LINE_NAME",
+      "value": "LINE-1",
+      "description": "Production line name to filter by (optional)"
+    },
+    {
+      "key": "SHIFT_CODE",
+      "value": "SHIFT_A",
+      "description": "Shift code to filter by — e.g. SHIFT_A, SHIFT_B, SHIFT_C (optional)"
+    },
+    {
+      "key": "STATUS",
+      "value": "OK",
+      "description": "Part status filter: OK | NG  (optional — remove param to get all)"
+    },
+    {
+      "key": "BARCODE",
+      "value": "PART-0001",
+      "description": "Exact barcode / part ID to search (optional)"
+    },
+    {
+      "key": "USER_ID",
+      "value": "1",
+      "description": "User ID for audit report filter (optional)"
+    }
+  ],
+
+  "item": [
+
+    {
+      "name": "1. Get Report Data",
+      "description": "GET /reports/report/data\n\nReturns paginated production rows + metrics + shift list.\nUse query params to filter the data.\n\nRequired: dateFrom, dateTo\nOptional: machineId, lineName, shiftCode, status, barcode, page, pageSize",
+      "item": [
+
+        {
+          "name": "Get Report Data — Date Range Only",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}",
+              "host": ["{{BASE_URL}}"],
+              "path": ["reports", "report", "data"],
+              "query": [
+                { "key": "dateFrom", "value": "{{DATE_FROM}}", "description": "Start date (YYYY-MM-DD) — REQUIRED" },
+                { "key": "dateTo",   "value": "{{DATE_TO}}",   "description": "End date   (YYYY-MM-DD) — REQUIRED" }
+              ]
+            },
+            "description": "Simplest call — returns all production data for the date range with no extra filters."
+          },
+          "response": [
+            {
+              "name": "200 Success",
+              "originalRequest": {
+                "method": "GET",
+                "header": [{ "key": "Authorization", "value": "Bearer {{TOKEN}}" }],
+                "url": {
+                  "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}",
+                  "host": ["{{BASE_URL}}"],
+                  "path": ["reports", "report", "data"],
+                  "query": [
+                    { "key": "dateFrom", "value": "{{DATE_FROM}}" },
+                    { "key": "dateTo",   "value": "{{DATE_TO}}" }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "cookie": [],
+              "body": "{\n  \"rows\": [],\n  \"metrics\": {\n    \"totalParts\": 120,\n    \"okCount\": 110,\n    \"ngCount\": 10,\n    \"plcShotSummary\": { \"totalProduction\": 120, \"okShot\": 110, \"warmUpShot\": 5, \"offShot\": 5 }\n  },\n  \"pagination\": {\n    \"page\": 1,\n    \"pageSize\": 50,\n    \"totalRows\": 120,\n    \"totalPages\": 3,\n    \"hasNextPage\": true,\n    \"hasPrevPage\": false\n  },\n  \"availableShifts\": []\n}"
+            }
+          ]
+        },
+
+        {
+          "name": "Get Report Data — With All Filters",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&machineId={{MACHINE_ID}}&lineName={{LINE_NAME}}&shiftCode={{SHIFT_CODE}}&status={{STATUS}}&barcode={{BARCODE}}&page=1&pageSize=50",
+              "host": ["{{BASE_URL}}"],
+              "path": ["reports", "report", "data"],
+              "query": [
+                { "key": "dateFrom",  "value": "{{DATE_FROM}}",  "description": "Start date (YYYY-MM-DD) — REQUIRED" },
+                { "key": "dateTo",    "value": "{{DATE_TO}}",    "description": "End date   (YYYY-MM-DD) — REQUIRED" },
+                { "key": "machineId", "value": "{{MACHINE_ID}}", "description": "Filter by machine ID (optional)" },
+                { "key": "lineName",  "value": "{{LINE_NAME}}",  "description": "Filter by line name, e.g. LINE-1 (optional)" },
+                { "key": "shiftCode", "value": "{{SHIFT_CODE}}", "description": "Filter by shift code, e.g. SHIFT_A (optional)" },
+                { "key": "status",    "value": "{{STATUS}}",     "description": "Filter by part status: OK | NG (optional)" },
+                { "key": "barcode",   "value": "{{BARCODE}}",    "description": "Filter by exact barcode / part ID (optional)" },
+                { "key": "page",      "value": "1",              "description": "Page number (default: 1)" },
+                { "key": "pageSize",  "value": "50",             "description": "Rows per page — min 10, max 200 (default: 50)" }
+              ]
+            },
+            "description": "Full filtered call — uses all available filters.\nDisable any query param (uncheck in Postman) to remove that filter.\n\nResponse includes:\n  rows[]           — production records\n  metrics          — OK/NG counts, PLC summary\n  pagination       — page / totalRows / totalPages\n  availableShifts  — shift definitions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has rows array',      () => pm.expect(pm.response.json()).to.have.property('rows'));",
+                  "pm.test('Has pagination info', () => pm.expect(pm.response.json()).to.have.property('pagination'));",
+                  "pm.test('Has metrics',         () => pm.expect(pm.response.json()).to.have.property('metrics'));"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 Success",
+              "originalRequest": {
+                "method": "GET",
+                "header": [{ "key": "Authorization", "value": "Bearer {{TOKEN}}" }],
+                "url": {
+                  "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&machineId={{MACHINE_ID}}&lineName={{LINE_NAME}}&shiftCode={{SHIFT_CODE}}&status={{STATUS}}&barcode={{BARCODE}}&page=1&pageSize=50",
+                  "host": ["{{BASE_URL}}"],
+                  "path": ["reports", "report", "data"],
+                  "query": [
+                    { "key": "dateFrom",  "value": "{{DATE_FROM}}"  },
+                    { "key": "dateTo",    "value": "{{DATE_TO}}"    },
+                    { "key": "machineId", "value": "{{MACHINE_ID}}" },
+                    { "key": "lineName",  "value": "{{LINE_NAME}}"  },
+                    { "key": "shiftCode", "value": "{{SHIFT_CODE}}" },
+                    { "key": "status",    "value": "{{STATUS}}"     },
+                    { "key": "barcode",   "value": "{{BARCODE}}"    },
+                    { "key": "page",      "value": "1"              },
+                    { "key": "pageSize",  "value": "50"             }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "cookie": [],
+              "body": "{\n  \"rows\": [],\n  \"metrics\": {\n    \"totalParts\": 0,\n    \"okCount\": 0,\n    \"ngCount\": 0,\n    \"plcShotSummary\": { \"totalProduction\": 0, \"okShot\": 0, \"warmUpShot\": 0, \"offShot\": 0 },\n    \"plcShotSummarySource\": \"REPORT_ROWS\"\n  },\n  \"pagination\": {\n    \"page\": 1,\n    \"pageSize\": 50,\n    \"totalRows\": 0,\n    \"totalPages\": 1,\n    \"hasNextPage\": false,\n    \"hasPrevPage\": false\n  },\n  \"plcColumns\": [],\n  \"availableShifts\": []\n}"
+            }
+          ]
+        }
+
+      ]
+    },
+
+    {
+      "name": "2. Export Full Report",
+      "description": "POST /reports/report/export-full\n\nDownloads an Excel (.xlsx) workbook with ALL production records for the date range.\n\nRequired body fields: filters.dateFrom, filters.dateTo\nOptional body fields: filters.machineId, lineName, shiftCode, status, barcode",
+      "item": [
+
+        {
+          "name": "Export Full Report — Date Range Only",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/reports/report/export-full",
+              "host": ["{{BASE_URL}}"],
+              "path": ["reports", "report", "export-full"]
+            },
+            "description": "Simplest export — all data for the date range, no extra filters.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filters\": {\n    \"dateFrom\": \"{{DATE_FROM}}\",\n    \"dateTo\":   \"{{DATE_TO}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "response": [
+            {
+              "name": "200 — Excel file download",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type",  "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/reports/report/export-full",
+                  "host": ["{{BASE_URL}}"],
+                  "path": ["reports", "report", "export-full"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"filters\": {\n    \"dateFrom\": \"{{DATE_FROM}}\",\n    \"dateTo\":   \"{{DATE_TO}}\"\n  }\n}",
+                  "options": { "raw": { "language": "json" } }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "text",
+              "header": [
+                { "key": "Content-Type",        "value": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+                { "key": "Content-Disposition", "value": "attachment; filename=\"full_report.xlsx\"" }
+              ],
+              "cookie": [],
+              "body": "<binary Excel file>"
+            }
+          ]
+        },
+
+        {
+          "name": "Export Full Report — With All Filters",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/reports/report/export-full",
+              "host": ["{{BASE_URL}}"],
+              "path": ["reports", "report", "export-full"]
+            },
+            "description": "Full filtered export.\nRemove any filter key you don't need — all fields except dateFrom/dateTo are optional.\n\nreportConfig controls the Excel header/branding — safe to leave as-is.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filters\": {\n    \"dateFrom\":  \"{{DATE_FROM}}\",\n    \"dateTo\":    \"{{DATE_TO}}\",\n    \"machineId\": \"{{MACHINE_ID}}\",\n    \"lineName\":  \"{{LINE_NAME}}\",\n    \"shiftCode\": \"{{SHIFT_CODE}}\",\n    \"status\":    \"{{STATUS}}\",\n    \"barcode\":   \"{{BARCODE}}\"\n  },\n  \"reportConfig\": {\n    \"companyName\":  \"BMW Group\",\n    \"plantName\":    \"Gen-6 Bawal Plant\",\n    \"reportTitle\":  \"Full Production Report\",\n    \"showLogo\":     true,\n    \"showDate\":     true,\n    \"showShift\":    true,\n    \"showMachine\":  true\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Response is Excel or JSON', () => {",
+                  "  const ct = pm.response.headers.get('Content-Type') || '';",
+                  "  pm.expect(ct.includes('spreadsheetml') || ct.includes('octet-stream') || ct.includes('json')).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 — Excel file download",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type",  "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/reports/report/export-full",
+                  "host": ["{{BASE_URL}}"],
+                  "path": ["reports", "report", "export-full"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"filters\": {\n    \"dateFrom\":  \"{{DATE_FROM}}\",\n    \"dateTo\":    \"{{DATE_TO}}\",\n    \"machineId\": \"{{MACHINE_ID}}\",\n    \"lineName\":  \"{{LINE_NAME}}\",\n    \"shiftCode\": \"{{SHIFT_CODE}}\",\n    \"status\":    \"{{STATUS}}\",\n    \"barcode\":   \"{{BARCODE}}\"\n  }\n}",
+                  "options": { "raw": { "language": "json" } }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "text",
+              "header": [
+                { "key": "Content-Type",        "value": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+                { "key": "Content-Disposition", "value": "attachment; filename=\"full_report.xlsx\"" }
+              ],
+              "cookie": [],
+              "body": "<binary Excel file>"
+            }
+          ]
+        }
+
+      ]
+    },
+
+    {
+      "name": "3. Export NG Report",
+      "description": "POST /reports/report/export-ng\n\nDownloads an Excel (.xlsx) workbook with ONLY NG (failed) parts.\nThe backend automatically sets resultType = NG — you do not need to pass status.\n\nRequired: filters.dateFrom, filters.dateTo\nOptional: filters.machineId, lineName, shiftCode, barcode",
+      "item": [
+
+        {
+          "name": "Export NG Report — Date Range Only",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/reports/report/export-ng",
+              "host": ["{{BASE_URL}}"],
+              "path": ["reports", "report", "export-ng"]
+            },
+            "description": "All NG parts for the date range — no extra filters.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filters\": {\n    \"dateFrom\": \"{{DATE_FROM}}\",\n    \"dateTo\":   \"{{DATE_TO}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "response": [
+            {
+              "name": "200 — Excel file download",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type",  "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/reports/report/export-ng",
+                  "host": ["{{BASE_URL}}"],
+                  "path": ["reports", "report", "export-ng"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"filters\": {\n    \"dateFrom\": \"{{DATE_FROM}}\",\n    \"dateTo\":   \"{{DATE_TO}}\"\n  }\n}",
+                  "options": { "raw": { "language": "json" } }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "text",
+              "header": [
+                { "key": "Content-Type",        "value": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+                { "key": "Content-Disposition", "value": "attachment; filename=\"ng_report.xlsx\"" }
+              ],
+              "cookie": [],
+              "body": "<binary Excel file>"
+            }
+          ]
+        },
+
+        {
+          "name": "Export NG Report — With Filters",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/reports/report/export-ng",
+              "host": ["{{BASE_URL}}"],
+              "path": ["reports", "report", "export-ng"]
+            },
+            "description": "NG parts filtered by machine and date range.\nAll keys except dateFrom/dateTo are optional — remove what you don't need.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filters\": {\n    \"dateFrom\":  \"{{DATE_FROM}}\",\n    \"dateTo\":    \"{{DATE_TO}}\",\n    \"machineId\": \"{{MACHINE_ID}}\",\n    \"lineName\":  \"{{LINE_NAME}}\",\n    \"shiftCode\": \"{{SHIFT_CODE}}\"\n  },\n  \"reportConfig\": {\n    \"companyName\":  \"BMW Group\",\n    \"plantName\":    \"Gen-6 Bawal Plant\",\n    \"reportTitle\":  \"NG Parts Report\",\n    \"showLogo\":     true,\n    \"showDate\":     true,\n    \"showShift\":    true,\n    \"showMachine\":  true\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "response": [
+            {
+              "name": "200 — Excel file download",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type",  "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/reports/report/export-ng",
+                  "host": ["{{BASE_URL}}"],
+                  "path": ["reports", "report", "export-ng"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"filters\": {\n    \"dateFrom\":  \"{{DATE_FROM}}\",\n    \"dateTo\":    \"{{DATE_TO}}\",\n    \"machineId\": \"{{MACHINE_ID}}\"\n  }\n}",
+                  "options": { "raw": { "language": "json" } }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "text",
+              "header": [
+                { "key": "Content-Type",        "value": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+                { "key": "Content-Disposition", "value": "attachment; filename=\"ng_report.xlsx\"" }
+              ],
+              "cookie": [],
+              "body": "<binary Excel file>"
+            }
+          ]
+        }
+
+      ]
+    },
+
+    {
+      "name": "4. Export Parts Report",
+      "description": "POST /reports/report/export-parts\n\nDownloads an Excel (.xlsx) workbook of individual part records for the date range.\n\nRequired: filters.dateFrom, filters.dateTo\nOptional: filters.machineId, barcode (to find one specific part)",
+      "item": [
+
+        {
+          "name": "Export Parts Report — Date Range Only",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/reports/report/export-parts",
+              "host": ["{{BASE_URL}}"],
+              "path": ["reports", "report", "export-parts"]
+            },
+            "description": "All parts for the date range — no extra filters.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filters\": {\n    \"dateFrom\": \"{{DATE_FROM}}\",\n    \"dateTo\":   \"{{DATE_TO}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "response": [
+            {
+              "name": "200 — Excel file download",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type",  "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/reports/report/export-parts",
+                  "host": ["{{BASE_URL}}"],
+                  "path": ["reports", "report", "export-parts"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"filters\": {\n    \"dateFrom\": \"{{DATE_FROM}}\",\n    \"dateTo\":   \"{{DATE_TO}}\"\n  }\n}",
+                  "options": { "raw": { "language": "json" } }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "text",
+              "header": [
+                { "key": "Content-Type",        "value": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+                { "key": "Content-Disposition", "value": "attachment; filename=\"parts_report.xlsx\"" }
+              ],
+              "cookie": [],
+              "body": "<binary Excel file>"
+            }
+          ]
+        },
+
+        {
+          "name": "Export Parts Report — Filter by Barcode",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/reports/report/export-parts",
+              "host": ["{{BASE_URL}}"],
+              "path": ["reports", "report", "export-parts"]
+            },
+            "description": "Export for a specific part barcode within the date range.\nChange {{BARCODE}} variable to the part you want.\nAll keys except dateFrom/dateTo are optional.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filters\": {\n    \"dateFrom\":  \"{{DATE_FROM}}\",\n    \"dateTo\":    \"{{DATE_TO}}\",\n    \"machineId\": \"{{MACHINE_ID}}\",\n    \"barcode\":   \"{{BARCODE}}\"\n  },\n  \"reportConfig\": {\n    \"companyName\":  \"BMW Group\",\n    \"plantName\":    \"Gen-6 Bawal Plant\",\n    \"reportTitle\":  \"Parts Report\",\n    \"showLogo\":     true,\n    \"showDate\":     true,\n    \"showShift\":    true,\n    \"showMachine\":  true\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "response": [
+            {
+              "name": "200 — Excel file download",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type",  "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/reports/report/export-parts",
+                  "host": ["{{BASE_URL}}"],
+                  "path": ["reports", "report", "export-parts"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"filters\": {\n    \"dateFrom\":  \"{{DATE_FROM}}\",\n    \"dateTo\":    \"{{DATE_TO}}\",\n    \"machineId\": \"{{MACHINE_ID}}\",\n    \"barcode\":   \"{{BARCODE}}\"\n  }\n}",
+                  "options": { "raw": { "language": "json" } }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "text",
+              "header": [
+                { "key": "Content-Type",        "value": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+                { "key": "Content-Disposition", "value": "attachment; filename=\"parts_report.xlsx\"" }
+              ],
+              "cookie": [],
+              "body": "<binary Excel file>"
+            }
+          ]
+        }
+
+      ]
+    },
+
+    {
+      "name": "5. Export Audit Report",
+      "description": "POST /reports/report/export-audit\n\nDownloads an Excel (.xlsx) workbook showing user activity / audit trail.\n\nRequired: filters.dateFrom, filters.dateTo\nOptional: filters.userId  (to see one specific user's activity)",
+      "item": [
+
+        {
+          "name": "Export Audit Report — Date Range Only",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/reports/report/export-audit",
+              "host": ["{{BASE_URL}}"],
+              "path": ["reports", "report", "export-audit"]
+            },
+            "description": "All user activity for the date range — no user filter.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filters\": {\n    \"dateFrom\": \"{{DATE_FROM}}\",\n    \"dateTo\":   \"{{DATE_TO}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "response": [
+            {
+              "name": "200 — Excel file download",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type",  "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/reports/report/export-audit",
+                  "host": ["{{BASE_URL}}"],
+                  "path": ["reports", "report", "export-audit"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"filters\": {\n    \"dateFrom\": \"{{DATE_FROM}}\",\n    \"dateTo\":   \"{{DATE_TO}}\"\n  }\n}",
+                  "options": { "raw": { "language": "json" } }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "text",
+              "header": [
+                { "key": "Content-Type",        "value": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+                { "key": "Content-Disposition", "value": "attachment; filename=\"audit_report.xlsx\"" }
+              ],
+              "cookie": [],
+              "body": "<binary Excel file>"
+            }
+          ]
+        },
+
+        {
+          "name": "Export Audit Report — Filter by User",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+            ],
+            "url": {
+              "raw": "{{BASE_URL}}/reports/report/export-audit",
+              "host": ["{{BASE_URL}}"],
+              "path": ["reports", "report", "export-audit"]
+            },
+            "description": "Audit trail for a specific user within the date range.\nChange {{USER_ID}} variable to the user you want to audit.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filters\": {\n    \"dateFrom\": \"{{DATE_FROM}}\",\n    \"dateTo\":   \"{{DATE_TO}}\",\n    \"userId\":   \"{{USER_ID}}\"\n  },\n  \"reportConfig\": {\n    \"companyName\":  \"BMW Group\",\n    \"plantName\":    \"Gen-6 Bawal Plant\",\n    \"reportTitle\":  \"Audit Report\",\n    \"showLogo\":     true,\n    \"showDate\":     true,\n    \"showShift\":    true,\n    \"showMachine\":  true\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Response is Excel or JSON', () => {",
+                  "  const ct = pm.response.headers.get('Content-Type') || '';",
+                  "  pm.expect(ct.includes('spreadsheetml') || ct.includes('octet-stream') || ct.includes('json')).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 — Excel file download",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type",  "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{TOKEN}}"  }
+                ],
+                "url": {
+                  "raw": "{{BASE_URL}}/reports/report/export-audit",
+                  "host": ["{{BASE_URL}}"],
+                  "path": ["reports", "report", "export-audit"]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"filters\": {\n    \"dateFrom\": \"{{DATE_FROM}}\",\n    \"dateTo\":   \"{{DATE_TO}}\",\n    \"userId\":   \"{{USER_ID}}\"\n  }\n}",
+                  "options": { "raw": { "language": "json" } }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "text",
+              "header": [
+                { "key": "Content-Type",        "value": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+                { "key": "Content-Disposition", "value": "attachment; filename=\"audit_report.xlsx\"" }
+              ],
+              "cookie": [],
+              "body": "<binary Excel file>"
+            }
+          ]
+        }
+
+      ]
+    }
+
+  ]
+}

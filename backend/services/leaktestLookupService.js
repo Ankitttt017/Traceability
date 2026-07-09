@@ -126,7 +126,7 @@ async function fetchLeaktestRowsByQrAndIp({ qrCodes = [], machineIps = [] } = {}
 async function buildLeaktestIndex({ partIds = [], customerQrByPartId = {}, machines = [] } = {}) {
   const leakMachines = (machines || []).filter((machine) => isLeaktestMachine(machine));
   if (!leakMachines.length) {
-    return { byPartAndStation: {}, leakMachineRows: [] };
+    return { byPartAndStation: {}, byPartAndIp: {}, leakMachineRows: [] };
   }
 
   const qrCodes = [];
@@ -160,11 +160,14 @@ async function buildLeaktestIndex({ partIds = [], customerQrByPartId = {}, machi
     return acc;
   }, {});
 
+  // byPartAndStation — backward-compat aggregate (one best row per station, used for pass/fail gate)
   const byPartAndStation = {};
+  // byPartAndIp — one slot per physical machine IP so Leak Test 1/2/3 never overwrite each other
+  const byPartAndIp = {};
 
   for (const row of rows) {
     const partQrCode = normalizeText(row.Part_QR_Code);
-    const plcIp = normalizeText(row.PLC_IP);
+    const plcIp     = normalizeText(row.PLC_IP);
     const machineEntries = machineIpLookup[plcIp] || [];
     if (!partQrCode || !machineEntries.length) continue;
 
@@ -176,29 +179,76 @@ async function buildLeaktestIndex({ partIds = [], customerQrByPartId = {}, machi
 
       const partKey = normalizeUpper(normalizedPartId);
       if (!byPartAndStation[partKey]) byPartAndStation[partKey] = {};
+      if (!byPartAndIp[partKey])      byPartAndIp[partKey]      = {};
 
       for (const machineEntry of machineEntries) {
         const stationKey = normalizeUpper(machineEntry.stationNo || LEAKTEST_OPERATION);
-        const current = byPartAndStation[partKey][stationKey];
         const next = {
           ...row,
-          __matchedMachineId: machineEntry.machineId,
+          __matchedMachineId:   machineEntry.machineId,
           __matchedMachineName: machineEntry.machineName,
-          __matchedStationNo: stationKey,
+          __matchedStationNo:   stationKey,
+          __matchedIp:          plcIp,
         };
-        byPartAndStation[partKey][stationKey] = pickBetterLeaktestRow(current, next);
+
+        // ── Aggregate (best row per station) ──────────────────────
+        byPartAndStation[partKey][stationKey] =
+          pickBetterLeaktestRow(byPartAndStation[partKey][stationKey], next);
+
+        // ── Per-machine (best row per physical IP) ────────────────
+        // Key = "OP150__192.168.119.40"  — unique per physical machine
+        const ipKey = `${stationKey}__${plcIp}`;
+        byPartAndIp[partKey][ipKey] =
+          pickBetterLeaktestRow(byPartAndIp[partKey][ipKey], next);
       }
     }
   }
 
-  return { byPartAndStation, leakMachineRows: leakMachines };
+  return { byPartAndStation, byPartAndIp, leakMachineRows: leakMachines };
 }
 
 function getLeaktestReadingForPartStation(index, partId, stationNo) {
-  const partKey = normalizeUpper(partId);
+  const partKey    = normalizeUpper(partId);
   const stationKey = normalizeUpper(stationNo || LEAKTEST_OPERATION);
   const row = index?.[partKey]?.[stationKey] || null;
   return normalizeLeaktestRow(row);
+}
+
+/**
+ * getAllLeaktestReadingsForPart
+ * Returns an array of normalized readings — one per physical machine IP — for
+ * the given part and station.  This is how Leak Test 1, 2 and 3 are surfaced
+ * separately even though they all share the same operation_no (OP150).
+ *
+ * @param {object} byPartAndIp   — the byPartAndIp map from buildLeaktestIndex()
+ * @param {string} partId
+ * @param {string} [stationNo]   — defaults to LEAKTEST_OPERATION
+ * @returns {Array<object>}      — sorted by IP address, empty if none found
+ */
+function getAllLeaktestReadingsForPart(byPartAndIp, partId, stationNo) {
+  const partKey    = normalizeUpper(partId);
+  const stationKey = normalizeUpper(stationNo || LEAKTEST_OPERATION);
+  const ipMap      = byPartAndIp?.[partKey] || {};
+
+  return Object.entries(ipMap)
+    .filter(([ipKey]) => ipKey.startsWith(stationKey + "__"))
+    .sort(([a], [b]) => a.localeCompare(b))           // stable order by IP
+    .map(([, row]) => normalizeLeaktestRow(row))
+    .filter(Boolean);
+}
+
+/**
+ * getLeaktestStageStateFromReadings
+ * Determines the aggregate pass/fail state from ALL physical machines:
+ *   - Any NG  → FAILED
+ *   - All OK  → PASSED
+ *   - Otherwise → PENDING (at least one machine hasn't reported yet)
+ */
+function getLeaktestStageStateFromReadings(readings = []) {
+  if (!readings.length) return "PENDING";
+  if (readings.some((r) => normalizeUpper(r?.result) === "NG"))  return "FAILED";
+  if (readings.every((r) => normalizeUpper(r?.result) === "OK")) return "PASSED";
+  return "PENDING";
 }
 
 function getLeaktestStageState(reading) {
@@ -213,7 +263,9 @@ module.exports = {
   LEAKTEST_VISIBLE_FIELDS,
   buildLeaktestIndex,
   getLeaktestReadingForPartStation,
+  getAllLeaktestReadingsForPart,
   getLeaktestStageState,
+  getLeaktestStageStateFromReadings,
   getMachineIpCandidates,
   isLeaktestMachine,
   normalizeLeaktestRow,

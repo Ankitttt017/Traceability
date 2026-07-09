@@ -1,4 +1,4 @@
-﻿/**
+/**
  * reportExportService.js
  * Main entry point for the reporting system.
  * Orchestrates database queries, metrics calculation, and file generation.
@@ -22,6 +22,7 @@ const {
   LEAKTEST_OPERATION,
   buildLeaktestIndex,
   getLeaktestReadingForPartStation,
+  getAllLeaktestReadingsForPart,
   getLeaktestStageState,
 } = require("../leaktestLookupService");
 const PLC_READING_TABLE = "PlcCycleReadings";
@@ -1069,7 +1070,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       customerQrByPartId: partCodeMap,
       machines: leakLookupMachines,
     })
-  ).byPartAndStation;
+  );
 
   const qrRules = await QrFormatRule.findAll({ attributes: ["format_name", "model_code"], raw: true });
   const qrMap = qrRules.reduce((acc, q) => {
@@ -1160,7 +1161,8 @@ async function fetchProductionData(filters = {}, options = {}) {
     const mappedOldPartId = String(oldPartMap[normalizeKey(partIdValue)] || "").trim();
     const recoveryCompletedByCustomerQr = shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr);
     const stationNo = String(log.operation_no || log.station_no || "").trim().toUpperCase();
-    const leakTestReading = getLeaktestReadingForPartStation(leaktestIndex, partIdValue, LEAKTEST_OPERATION);
+    const leakTestReadings = getAllLeaktestReadingsForPart(leaktestIndex.byPartAndIp, partIdValue, LEAKTEST_OPERATION);
+    const leakTestReading = leakTestReadings[leakTestReadings.length - 1] || getLeaktestReadingForPartStation(leaktestIndex.byPartAndStation, partIdValue, LEAKTEST_OPERATION);
     const leakStageState = stationNo === LEAKTEST_OPERATION && leakTestReading
       ? getLeaktestStageState(leakTestReading)
       : null;
@@ -1264,6 +1266,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       rejectionRemark: log.rejection_remark || "",
       plcReading: plcReadingFromDb,
       leakTestReading,
+      leakTestReadings,
     };
   }));
 

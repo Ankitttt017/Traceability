@@ -1,0 +1,126 @@
+{
+  "info": {
+    "name": "Login",
+    "description": "Step 1 — Run this first.\nLogs in and saves the JWT token to {{TOKEN}} automatically.\nAfter login, switch to the Reports collection.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+
+  "variable": [
+    {
+      "key": "BASE_URL",
+      "value": "http://192.168.100.136:9090/api/v1",
+      "description": "Change this to your server URL (DEV / UAT / PROD)"
+    },
+    {
+      "key": "TOKEN",
+      "value": "",
+      "description": "Auto-filled after Login succeeds — do not edit manually"
+    }
+  ],
+
+  "item": [
+    {
+      "name": "Login",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{BASE_URL}}/auth/login",
+          "host": ["{{BASE_URL}}"],
+          "path": ["auth", "login"]
+        },
+        "description": "POST /auth/login\n\nSend username + password.\nOn success the test script automatically saves the JWT to {{TOKEN}}.\nAll Report requests use this token.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"admin@123\"\n}",
+          "options": {
+            "raw": { "language": "json" }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// ── Auto-save JWT token ──────────────────────────────",
+              "const body = pm.response.json();",
+              "",
+              "const token =",
+              "  body.token ||",
+              "  (body.data && body.data.token) ||",
+              "  body.accessToken ||",
+              "  null;",
+              "",
+              "if (token) {",
+              "  pm.collectionVariables.set('TOKEN', token);",
+              "  pm.environment.set('TOKEN', token);",
+              "  console.log('✅ Token saved:', token.substring(0, 30) + '...');",
+              "} else {",
+              "  console.warn('⚠️  No token found in response');",
+              "}",
+              "",
+              "// ── Basic assertions ─────────────────────────────────",
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('Token is present', () => pm.expect(token).to.be.a('string').and.have.length.above(10));"
+            ]
+          }
+        }
+      ],
+      "response": [
+        {
+          "name": "200 Success",
+          "originalRequest": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": {
+              "raw": "{{BASE_URL}}/auth/login",
+              "host": ["{{BASE_URL}}"],
+              "path": ["auth", "login"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"admin@123\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": "json",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "cookie": [],
+          "body": "{\n  \"success\": true,\n  \"message\": \"Login executed successfully\",\n  \"token\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\"\n}"
+        },
+        {
+          "name": "401 Wrong Credentials",
+          "originalRequest": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": {
+              "raw": "{{BASE_URL}}/auth/login",
+              "host": ["{{BASE_URL}}"],
+              "path": ["auth", "login"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"wrong\",\n  \"password\": \"wrong\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "status": "Unauthorized",
+          "code": 401,
+          "_postman_previewlanguage": "json",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "cookie": [],
+          "body": "{\n  \"success\": false,\n  \"message\": \"Invalid credentials\"\n}"
+        }
+      ]
+    }
+  ]
+}

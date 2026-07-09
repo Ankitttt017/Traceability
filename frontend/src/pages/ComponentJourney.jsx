@@ -1438,7 +1438,7 @@ const ComponentJourney = () => {
                 const effectiveStageState = getJourneyStationState(station, qrMeta, settings);
                 const meta     = getStationMeta(effectiveStageState);
                 const sColor   = STATUS[meta.variant]||STATUS.idle;
-                const leakMeta = station.leakTestReading ? getLeakResultMeta(station.leakTestReading) : null;
+                // leakMeta is dynamically extracted during map
                 const isReset  = resettingStation===station.stationNo;
                 const bypassed = isStationBypassed(station);
                 const modules  = [
@@ -1506,15 +1506,18 @@ const ComponentJourney = () => {
                               </span>
                             </div>
                           )}
-                          {station.leakTestReading && (
-                            <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap",alignItems:"center"}}>
-                              <span style={{fontSize:10,fontWeight:800,color:C.steel(),
-                                background:C.steel(0.12),padding:"2px 6px",borderRadius:5}}>
-                                Leak Machine: {station.leakTestReading.matchedMachineName || station.leakTestReading.Machine || "—"}
-                              </span>
-                              {leakMeta && <Badge variant={leakMeta.variant} label={leakMeta.label} />}
-                            </div>
-                          )}
+                          {(station.leakTestReadings?.length > 0 ? station.leakTestReadings : (station.leakTestReading ? [station.leakTestReading] : [])).map((reading, rIdx) => {
+                            const lMeta = getLeakResultMeta(reading);
+                            return (
+                              <div key={rIdx} style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap",alignItems:"center"}}>
+                                <span style={{fontSize:10,fontWeight:800,color:C.steel(),
+                                  background:C.steel(0.12),padding:"2px 6px",borderRadius:5}}>
+                                  Leak Machine: {reading.matchedMachineName || reading.Machine || "—"}
+                                </span>
+                                {lMeta && <Badge variant={lMeta.variant} label={lMeta.label} />}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
 
@@ -1586,23 +1589,23 @@ const ComponentJourney = () => {
                         </span>
                       </div>
                     )}
-                    {station.leakTestReading && (
-                      <div style={{marginTop:8,borderRadius:8,padding:"10px 12px",background:C.info(0.08),border:`1px solid ${C.info(0.25)}`}}>
+                    {(station.leakTestReadings?.length > 0 ? station.leakTestReadings : (station.leakTestReading ? [station.leakTestReading] : [])).map((reading, rIdx) => (
+                      <div key={rIdx} style={{marginTop:8,borderRadius:8,padding:"10px 12px",background:C.info(0.08),border:`1px solid ${C.info(0.25)}`}}>
                         <p style={{fontSize:10,fontWeight:800,color:C.info(),textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>
-                          Leak Test Details
+                          Leak Test Details — {reading.matchedMachineName || reading.Machine || "—"}
                         </p>
                         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:8}}>
                           {LEAK_TEST_FIELDS.map(([label, key]) => (
                             <div key={key} style={{display:"flex",flexDirection:"column",gap:2}}>
                               <span style={{fontSize:10,color:C.txt("muted"),fontWeight:700}}>{label}</span>
                               <span style={{fontSize:11,color:C.txt("primary"),fontWeight:700,wordBreak:"break-word"}}>
-                                {formatLeakFieldValue(station.leakTestReading, key)}
+                                {formatLeakFieldValue(reading, key)}
                               </span>
                             </div>
                           ))}
                         </div>
                       </div>
-                    )}
+                    ))}
                   </div>
                 );
               })}
