@@ -17,7 +17,9 @@ const {
   LEAKTEST_OPERATION,
   buildLeaktestIndex,
   getLeaktestReadingForPartStation,
+  getAllLeaktestReadingsForPart,
   getLeaktestStageState,
+  getLeaktestStageStateFromReadings,
 } = require("../services/leaktestLookupService");
 const { getPlcCircuitSnapshot } = require("../services/plcCommunicationService");
 const plcHandshakeEngine = require("../services/plcHandshakeEngine");
@@ -2939,13 +2941,16 @@ exports.getPartJourney = async (req, res) => {
 
     const stationTimeline = knownStations.map((stationNo, idx) => {
       const stationMeta = stationMachineMeta[stationNo] || null;
-      const leakTestReading = stationNo === LEAKTEST_OPERATION
+      const leakTestReadings = stationNo === LEAKTEST_OPERATION
         ? (
           traceabilityPartIds
-            .map((candidatePartId) => getLeaktestReadingForPartStation(leaktestIndex, candidatePartId, stationNo))
-            .find(Boolean) || null
+            .map((candidatePartId) => getAllLeaktestReadingsForPart(leaktestIndex.byPartAndIp, candidatePartId, stationNo))
+            .find((readings) => readings && readings.length > 0) || []
         )
-        : null;
+        : [];
+      
+      // Preserve single reading for backwards compatibility in UI components that expect it
+      const leakTestReading = leakTestReadings[leakTestReadings.length - 1] || null;
       let attempts = (logsByStation[stationNo] || []).map((row) => ({
         id: row.id,
         plcStatus: row.plcStatus,
@@ -3003,8 +3008,10 @@ exports.getPartJourney = async (req, res) => {
       const representativeAttempt = productionAttempt || latestAttempt;
 
       let stageState = "PENDING";
+      const hasGlobalCustomerQr = customerMappings.some(m => String(m.customer_qr || "").trim() !== "");
       const waitingForCustomerQr = Boolean(
         stationMeta?.requiresCustomerQr &&
+        !hasGlobalCustomerQr &&
         !customerMappingByStation[stationNo]?.customerQrCode
       );
 
@@ -3063,6 +3070,7 @@ exports.getPartJourney = async (req, res) => {
         cycleDurationSec,
         attempts,
         leakTestReading,
+        leakTestReadings,
         customerQrCode: customerMappingByStation[stationNo]?.customerQrCode || null,
         customerQrMappedAt: customerMappingByStation[stationNo]?.customerQrMappedAt || null,
         customerQrMachineId: customerMappingByStation[stationNo]?.customerQrMachineId || null,
@@ -6800,21 +6808,26 @@ exports.getDashboardReport = async (req, res) => {
     }, {});
 
     const partIdsForCustomerQr = [...new Set(partHistory.slice(0, 3000).map((row) => String(row.part_id || "").trim()).filter(Boolean))];
-    const leaktestIndex = (
-      await buildLeaktestIndex({
+    const leaktestIndex = await buildLeaktestIndex({
         partIds: partIdsForCustomerQr,
         customerQrByPartId,
         machines: machineRows,
-      })
-    ).byPartAndStation;
+      });
     const getLeakReadingForPart = (partIdValue) => getLeaktestReadingForPartStation(
-      leaktestIndex,
+      leaktestIndex.byPartAndStation,
+      String(partIdValue || "").trim(),
+      LEAKTEST_OPERATION
+    );
+    
+    const getAllLeakReadingsForPart = (partIdValue) => getAllLeaktestReadingsForPart(
+      leaktestIndex.byPartAndIp,
       String(partIdValue || "").trim(),
       LEAKTEST_OPERATION
     );
     const mapDashboardRowWithLeak = (row) => {
       const stationNo = normalizeStation(row.station_no || row.operation_no);
       const leakTestReading = getLeakReadingForPart(row.part_id);
+      const leakTestReadings = getAllLeakReadingsForPart(row.part_id);
       if (stationNo === LEAKTEST_OPERATION && leakTestReading) {
         const leakResult = String(leakTestReading.result || leakTestReading.Result || "").trim().toUpperCase();
         return {
@@ -6823,11 +6836,13 @@ exports.getDashboardReport = async (req, res) => {
           plc_status: leakResult === "OK" ? "ENDED_OK" : leakResult === "NG" ? "ENDED_NG" : row.plc_status,
           interlock_reason: null,
           leakTestReading,
+          leakTestReadings,
         };
       }
       return {
         ...row,
         leakTestReading,
+        leakTestReadings,
       };
     };
 

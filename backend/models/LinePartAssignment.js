@@ -18,6 +18,14 @@ const LinePartAssignment = sequelize.define("LinePartAssignment", {
     type: DataTypes.STRING,
     allowNull: true,
   },
+  ip_address: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  port: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
   part_name: {
     type: DataTypes.STRING,
     allowNull: false,

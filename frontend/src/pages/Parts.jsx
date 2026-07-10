@@ -4,7 +4,7 @@ import toast from "react-hot-toast";
 import { organizationApi } from "../api/services";
 import PlantLineSelector from "../components/PlantLineSelector";
 
-const emptyForm = { plantId: "", lineId: "", lineName: "", partName: "", dieName: "", dieCastingMachine: "", status: "ACTIVE" };
+const emptyForm = { plantId: "", lineId: "", lineName: "", partName: "", dieName: "", dieCastingMachine: "", ipAddress: "", port: "", status: "ACTIVE" };
 const C = { card: "#fff", muted: "#f1f5f9", border: "#e2e8f0", text: "#0f172a", sec: "#475569", hint: "#94a3b8", blue: "#185FA5", blueLt: "#dbeafe", green: "#15803d", greenLt: "#dcfce7", red: "#dc2626", redLt: "#fee2e2" };
 const inputStyle = { width: "100%", height: 36, boxSizing: "border-box", border: `1px solid ${C.border}`, borderRadius: 6, background: C.card, padding: "0 10px", fontSize: 12, fontWeight: 600, color: C.text, outline: "none" };
 const labelStyle = { margin: "0 0 5px", fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.07em", color: C.hint };
@@ -74,6 +74,8 @@ export default function Parts() {
       partName: part.partName || "",
       dieName: part.dieName || "",
       dieCastingMachine: part.dieCastingMachine || "",
+      ipAddress: part.ipAddress || "",
+      port: part.port !== undefined && part.port !== null ? String(part.port) : "",
       status: part.status || "ACTIVE",
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -83,7 +85,14 @@ export default function Parts() {
     event.preventDefault();
     setSaving(true);
     try {
-      const payload = { ...form, partName: norm(form.partName), dieName: norm(form.dieName), dieCastingMachine: norm(form.dieCastingMachine) };
+      const payload = {
+        ...form,
+        partName: norm(form.partName),
+        dieName: norm(form.dieName),
+        dieCastingMachine: norm(form.dieCastingMachine),
+        ipAddress: String(form.ipAddress || "").trim(),
+        port: form.port !== "" ? Number(form.port) : null
+      };
       if (editingId) await organizationApi.updatePart(editingId, payload);
       else await organizationApi.createPart(payload);
       toast.success(editingId ? "Part assignment updated" : "Part assignment created");
@@ -142,6 +151,8 @@ export default function Parts() {
           <label><Label>Part Name</Label><input required style={{ ...inputStyle, fontFamily: "ui-monospace,monospace" }} value={form.partName} onChange={(e) => setForm((p) => ({ ...p, partName: e.target.value.toUpperCase() }))} placeholder="OPK12" /></label>
           <label><Label>Die Name</Label><input style={{ ...inputStyle, fontFamily: "ui-monospace,monospace" }} value={form.dieName} onChange={(e) => setForm((p) => ({ ...p, dieName: e.target.value.toUpperCase() }))} placeholder="S16" /></label>
           <label><Label>Die Casting Machine</Label><input required style={{ ...inputStyle, fontFamily: "ui-monospace,monospace" }} value={form.dieCastingMachine} onChange={(e) => setForm((p) => ({ ...p, dieCastingMachine: e.target.value.toUpperCase() }))} placeholder="UBE 850T-02" /></label>
+          <label><Label>IP Address</Label><input style={{ ...inputStyle, fontFamily: "ui-monospace,monospace" }} value={form.ipAddress} onChange={(e) => setForm((p) => ({ ...p, ipAddress: e.target.value }))} placeholder="192.168.100.10" /></label>
+          <label><Label>Port</Label><input type="number" style={{ ...inputStyle, fontFamily: "ui-monospace,monospace" }} value={form.port} onChange={(e) => setForm((p) => ({ ...p, port: e.target.value }))} placeholder="5002" /></label>
           <label><Label>Status</Label><select style={inputStyle} value={form.status} onChange={(e) => setForm((p) => ({ ...p, status: e.target.value }))}><option value="ACTIVE">Active</option><option value="INACTIVE">Inactive</option></select></label>
           <button disabled={saving} style={{ height: 36, border: "none", borderRadius: 7, background: saving ? C.hint : C.text, color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7, fontSize: 12, fontWeight: 800, cursor: saving ? "not-allowed" : "pointer" }}>{editingId ? <Save size={14} /> : <Plus size={14} />} {saving ? "Saving..." : editingId ? "Update" : "Create"}</button>
         </div>
@@ -158,10 +169,10 @@ export default function Parts() {
         </div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 980 }}>
-            <thead><tr style={{ background: C.muted, borderBottom: `1px solid ${C.border}` }}>{["Part", "Die", "Plant", "Line", "Die Casting Machine", "Status", ""].map((h) => <th key={h} style={{ padding: "9px 14px", textAlign: h === "" ? "right" : "left", fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.09em", color: C.hint }}>{h}</th>)}</tr></thead>
+            <thead><tr style={{ background: C.muted, borderBottom: `1px solid ${C.border}` }}>{["Part", "Die", "Plant", "Line", "Die Casting Machine", "IP Address", "Port", "Status", ""].map((h) => <th key={h} style={{ padding: "9px 14px", textAlign: h === "" ? "right" : "left", fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.09em", color: C.hint }}>{h}</th>)}</tr></thead>
             <tbody>
-              {loading ? <tr><td colSpan={7} style={{ padding: 48, textAlign: "center", color: C.hint, fontWeight: 700 }}>Loading parts...</td></tr> :
-                visibleParts.length === 0 ? <tr><td colSpan={7} style={{ padding: 48, textAlign: "center", color: C.hint, fontWeight: 700 }}>No part assignments found.</td></tr> :
+              {loading ? <tr><td colSpan={9} style={{ padding: 48, textAlign: "center", color: C.hint, fontWeight: 700 }}>Loading parts...</td></tr> :
+                visibleParts.length === 0 ? <tr><td colSpan={9} style={{ padding: 48, textAlign: "center", color: C.hint, fontWeight: 700 }}>No part assignments found.</td></tr> :
                 visibleParts.map((part, idx) => (
                   <tr key={part.id} style={{ borderBottom: `1px solid ${C.border}`, background: idx % 2 ? C.muted : C.card }}>
                     <td style={{ padding: "11px 14px", fontFamily: "ui-monospace,monospace", color: C.text, fontWeight: 900 }}>{part.partName}</td>
@@ -169,6 +180,8 @@ export default function Parts() {
                     <td style={{ padding: "11px 14px", color: C.sec }}>{part.plantName || "-"}</td>
                     <td style={{ padding: "11px 14px", color: C.sec }}>{part.lineName || "-"}</td>
                     <td style={{ padding: "11px 14px", fontFamily: "ui-monospace,monospace", color: C.sec, fontWeight: 800 }}>{part.dieCastingMachine || "-"}</td>
+                    <td style={{ padding: "11px 14px", fontFamily: "ui-monospace,monospace", color: C.sec }}>{part.ipAddress || "-"}</td>
+                    <td style={{ padding: "11px 14px", fontFamily: "ui-monospace,monospace", color: C.sec }}>{part.port || "-"}</td>
                     <td style={{ padding: "11px 14px" }}><StatusBadge status={part.status} /></td>
                     <td style={{ padding: "11px 14px", textAlign: "right" }}><div style={{ display: "flex", justifyContent: "flex-end", gap: 4 }}><IconBtn icon={Edit} title="Edit" onClick={() => edit(part)} color={C.blue} bg={C.blueLt} /><IconBtn icon={Trash2} title="Delete" onClick={() => remove(part)} color={C.red} bg={C.redLt} /></div></td>
                   </tr>

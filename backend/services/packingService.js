@@ -167,8 +167,10 @@ async function packPart({ boxNumber, partId, capacity }) {
   if (!part) {
     throw new Error("Part not found");
   }
-  if (part.status !== "COMPLETED") {
-    throw new Error("Only COMPLETED parts can be packed");
+  const partStatusUpper = String(part.status || "").trim().toUpperCase();
+  const isCompletedPart = ["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(partStatusUpper);
+  if (!isCompletedPart) {
+    throw new Error("Only COMPLETED/PASSED parts can be packed");
   }
 
   const finalPackingStations = await getFinalPackingStations();

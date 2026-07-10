@@ -90,7 +90,8 @@ apiClient.interceptors.response.use(
     } else if (
       !isAuthEndpointReq &&
       status !== 401 &&
-      status !== 403
+      status !== 403 &&
+      error?.config?.suppressGlobalError !== true
     ) {
       const rawMessage = String(
         error?.response?.data?.error ||

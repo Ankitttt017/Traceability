@@ -691,7 +691,41 @@ exports.getMachines = async (req, res) => {
     const lineId = toInt(req.query.lineId ?? req.query.line_id);
     if (plantId) where.plant_id = plantId;
     if (lineId) where.line_id = lineId;
-    const rows = await Machine.findAll({ where, order: [["sequence_no", "ASC"], ["id", "ASC"]] });
+    const compact = String(req.query.compact || req.query.mode || "").trim().toLowerCase();
+    const isCompact = compact === "1" || compact === "true" || compact === "compact";
+    const rows = await Machine.findAll({
+      where,
+      ...(isCompact ? {
+        attributes: [
+          "id",
+          "machine_number",
+          "machine_name",
+          "plant_id",
+          "line_id",
+          "line_name",
+          "sequence_no",
+          "operation_no",
+          "status",
+          "is_active",
+        ],
+      } : {}),
+      order: [["sequence_no", "ASC"], ["id", "ASC"]],
+      raw: isCompact,
+    });
+    if (isCompact) {
+      return res.json(rows.map((row) => ({
+        id: row.id,
+        machineNumber: row.machine_number,
+        machineName: row.machine_name,
+        plantId: row.plant_id || null,
+        lineId: row.line_id || null,
+        lineName: row.line_name,
+        sequenceNo: row.sequence_no,
+        operationNo: row.operation_no,
+        status: row.status || "ACTIVE",
+        isActive: row.is_active !== false,
+      })));
+    }
     res.json(rows.map((row) => toMachineResponse(row)));
   } catch (error) {
     res.status(500).json({ error: error.message });

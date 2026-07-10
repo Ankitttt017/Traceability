@@ -95,35 +95,36 @@ function getLeakTestStatus(reading) {
   if (result === "NG") return "NG";
   return "-";
 }
-function getLeakTestValue(reading, key) {
-  if (!reading) return "-";
-  if (key === "Dry_Wey_Both") {
-    const isTruthy = (value) => value === true || String(value ?? "").trim().toUpperCase() === "TRUE" || String(value ?? "").trim() === "1";
-    if (isTruthy(reading.Both)) return "Both";
-    if (isTruthy(reading.Dry)) return "Dry";
-    if (isTruthy(reading.Wey) || isTruthy(reading.Way)) return "Wey";
-    return "-";
-  }
-  if (key === "Machine") return reading.Machine || reading.machineName || reading.matchedMachineName || "-";
-  if (key === "Cycle_End_Time") {
-    const raw = reading.Cycle_End_Time || reading.cycleEndTime || "";
-    return raw ? formatIndustrialTimestamp(raw) : "-";
-  }
-  const value = reading[key];
-  if (key === "Running_Mode") {
-    const normalizedMode = String(value ?? "").trim();
-    if (!normalizedMode) return "-";
-    const upper = normalizedMode.toUpperCase();
-    if (upper === "MANUAL") return "Manual";
-    if (upper === "AUTO" || upper === "AUTOMATIC") return "Auto";
-    return normalizedMode;
-  }
-  if (typeof value === "boolean") return value ? key : "-";
-  const normalized = String(value ?? "").trim();
-  if (["TRUE", "FALSE"].includes(normalized.toUpperCase())) {
-    return normalized.toUpperCase() === "TRUE" ? key : "-";
-  }
-  return value === undefined || value === null || value === "" ? "-" : value;
+function getLeakTestValue(readings, key) {
+  if (!readings) return "-";
+  const readingsArray = Array.isArray(readings) ? readings : [readings];
+  if (readingsArray.length === 0) return "-";
+
+  return readingsArray.map(reading => {
+    if (!reading) return "-";
+    if (key === "Dry_Wey_Both") {
+      const isTruthy = (value) => value === true || String(value ?? "").trim().toUpperCase() === "TRUE" || String(value ?? "").trim() === "1";
+      if (isTruthy(reading.Both)) return "Both";
+      if (isTruthy(reading.Dry)) return "Dry";
+      if (isTruthy(reading.Wey) || isTruthy(reading.Way)) return "Wey";
+      return "-";
+    }
+    if (key === "Machine") return reading.Machine || reading.machineName || reading.matchedMachineName || "-";
+    if (key === "Cycle_End_Time") {
+      const raw = reading.Cycle_End_Time || reading.cycleEndTime || "";
+      return raw ? formatIndustrialTimestamp(raw) : "-";
+    }
+    const value = reading[key];
+    if (key === "Running_Mode") {
+      const normalizedMode = String(value ?? "").trim();
+      if (!normalizedMode) return "-";
+      const upper = normalizedMode.toUpperCase();
+      if (upper === "MANUAL") return "Manual";
+      if (upper === "AUTO" || upper === "AUTOMATIC") return "Auto";
+      return normalizedMode;
+    }
+    return value !== undefined && value !== null && value !== "" ? value : "-";
+  }).join(" | ");
 }
 
 function getCustomerQrFromRow(row = {}) {
@@ -322,6 +323,9 @@ async function generateIndustrialExcel(res, {
         bucket.plcReading[key] = nextPlcReading[key];
       }
     });
+    if (!bucket.leakTestReadings && row.leakTestReadings) {
+      bucket.leakTestReadings = row.leakTestReadings;
+    }
     if (!bucket.leakTestReading && row.leakTestReading) {
       bucket.leakTestReading = row.leakTestReading;
     }
@@ -493,7 +497,7 @@ async function generateIndustrialExcel(res, {
         const v = plc[c.key];
         return v === undefined || v === null || v === "" ? "-" : v;
       }),
-      ...LEAK_TEST_COLUMNS.map((column) => getLeakTestValue(row.leakTestReading, column.key)),
+      ...LEAK_TEST_COLUMNS.map((column) => getLeakTestValue(row.leakTestReadings?.length > 0 ? row.leakTestReadings : row.leakTestReading, column.key)),
       row.reason,
     ];
 
