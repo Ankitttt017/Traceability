@@ -75,6 +75,7 @@ const {
   ensureRoleAccessSchema,
   ensureUserRoleSchema,
   ensureRejectionSchema,
+  ensureDatabasePerformanceIndexes,
 } = require("./services/machineSchemaService");
 const { runStartupRecovery } = require("./services/startupRecoveryService");
 const {
@@ -98,6 +99,8 @@ require("./models/Alarm");    // UPGRADE 6 — auto-sync Alarms table
 
 const app = express();
 const server = http.createServer(app);
+server.timeout = 180000; // 3 min — allow large date-range report queries to complete
+server.keepAliveTimeout = 65000;
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -458,6 +461,7 @@ async function startServer() {
       await runStartupDbTask("ensureRoleAccessSchema", () => ensureRoleAccessSchema());
       await runStartupDbTask("ensureUserRoleSchema", () => ensureUserRoleSchema());
       await runStartupDbTask("ensureRejectionSchema", () => ensureRejectionSchema());
+      await runStartupDbTask("ensureDatabasePerformanceIndexes", () => ensureDatabasePerformanceIndexes());
       await runStartupDbTask("ensureDefaultOrganization", () => ensureDefaultOrganization());
       await runStartupDbTask("ensureLinePartAssignmentSchema", () => ensureLinePartAssignmentSchema());
       await runStartupDbTask("ensureMachineQrScannerUniqueness", () => ensureMachineQrScannerUniqueness());

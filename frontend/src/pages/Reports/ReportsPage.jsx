@@ -81,10 +81,11 @@ const PLC_COLUMN_UNITS = {
 };
 const withUnit = (label, unit) => unit ? `${label} (${unit})` : label;
 const getLeakTestStatus = (reading) => {
-  const result = String(reading?.Result || reading?.result || "").trim().toUpperCase();
+  const r = Array.isArray(reading) ? reading[reading.length - 1] : reading;
+  const result = String(r?.Result || r?.result || "").trim().toUpperCase();
   if (result === "OK") return "OK";
   if (result === "NG") return "NG";
-  if (!reading) return "";
+  if (!r) return "";
   return "IN_PROGRESS";
 };
 const getLeakTestValue = (readings, key) => {
@@ -267,6 +268,7 @@ const ReportsPage = () => {
       operationNo: ''
     };
   });
+  const [appliedFilters, setAppliedFilters] = useState(filters);
   const [quickRange, setQuickRange] = useState("today");
   const filterControlCls = "h-9 min-w-0 rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10";
 
@@ -302,7 +304,7 @@ const ReportsPage = () => {
     reportAbortRef.current?.abort();
     const controller = new AbortController();
     reportAbortRef.current = controller;
-    const requestPayload = { ...filters, page: reportPage, pageSize: reportPageSize };
+    const requestPayload = { ...appliedFilters, page: reportPage, pageSize: reportPageSize };
     setLoading(true);
     try {
       const response = await reportApi.getData(requestPayload, { signal: controller.signal });
@@ -323,39 +325,51 @@ const ReportsPage = () => {
         reportAbortRef.current = null;
       }
     }
-  }, [filters, reportPage, reportPageSize]);
+  }, [appliedFilters, reportPage, reportPageSize]);
 
   const refreshReportData = useCallback(() => {
     fetchData();
   }, [fetchData]);
 
+  const applyReportFilters = useCallback(() => {
+    setReportPage(1);
+    setAppliedFilters(filters);
+  }, [filters]);
+
   useEffect(() => {
     setReportPage(1);
   }, [
-    filters.dateFrom,
-    filters.dateTo,
-    filters.plantId,
-    filters.lineId,
-    filters.machineId,
-    filters.partName,
-    filters.dieName,
-    filters.dieCastingMachine,
-    filters.lineName,
-    filters.shiftCode,
-    filters.status,
-    filters.station,
-    filters.barcode,
-    filters.customerCode,
-    filters.operatorId,
-    filters.resultType,
-    filters.modelCode,
-    filters.operationNo,
+    appliedFilters.dateFrom,
+    appliedFilters.dateTo,
+    appliedFilters.plantId,
+    appliedFilters.lineId,
+    appliedFilters.machineId,
+    appliedFilters.partName,
+    appliedFilters.dieName,
+    appliedFilters.dieCastingMachine,
+    appliedFilters.lineName,
+    appliedFilters.shiftCode,
+    appliedFilters.status,
+    appliedFilters.station,
+    appliedFilters.barcode,
+    appliedFilters.customerCode,
+    appliedFilters.operatorId,
+    appliedFilters.resultType,
+    appliedFilters.modelCode,
+    appliedFilters.operationNo,
   ]);
 
   useEffect(() => {
-    machineApi.list().then(setMachines).catch(console.error);
-    organizationApi.context().then((org) => setOrganization({ plants: org?.plants || [], lines: org?.lines || [], parts: org?.parts || [] })).catch(() => {});
-    shiftApi.list().then(setAvailableShifts).catch(() => []);
+    const metadataConfig = { timeout: 45000, suppressGlobalError: true };
+    machineApi.list({ ...metadataConfig, params: { compact: 1 } })
+      .then((rows) => setMachines(Array.isArray(rows) ? rows : []))
+      .catch(() => setMachines([]));
+    organizationApi.context(metadataConfig)
+      .then((org) => setOrganization({ plants: org?.plants || [], lines: org?.lines || [], parts: org?.parts || [] }))
+      .catch(() => {});
+    shiftApi.list(undefined, metadataConfig)
+      .then((rows) => setAvailableShifts(Array.isArray(rows) ? rows : []))
+      .catch(() => []);
     try { setReportConfig(loadReportConfig()); } catch (err) { void err; }
   }, []);
 
@@ -539,8 +553,9 @@ const ReportsPage = () => {
         });
       });
       if (leakData) {
+        const actualLeakData = Array.isArray(leakData) ? leakData[leakData.length - 1] : leakData;
         const leakStatus = getLeakTestStatus(leakData);
-        const leakMachineName = String(leakData.matchedMachineName || leakData.Machine || leakData.machineName || "").trim();
+        const leakMachineName = String(actualLeakData?.matchedMachineName || actualLeakData?.Machine || actualLeakData?.machineName || "").trim();
         stationResults[LEAK_TEST_SHARED_KEY] = pickPreferredResult(stationResults[LEAK_TEST_SHARED_KEY], leakStatus);
         stationDisplayValues[LEAK_TEST_SHARED_KEY] = leakMachineName
           ? `${leakMachineName} ${leakStatus || "-"}`.trim()
@@ -580,13 +595,22 @@ const ReportsPage = () => {
         cycleTimeValue: stationPairs.length ? (stationCycleTimes[stationPairs[stationPairs.length - 1].key] || "-") : "-",
       };
       stationPairs.forEach((s) => {
-        shaped[`station_${s.key}`] = s.sharedLeakOperation
-          ? ({
-              machineName: String(leakData?.matchedMachineName || leakData?.Machine || leakData?.machineName || "").trim(),
-              status: String(getLeakTestStatus(leakData) || "").trim().toUpperCase() || "-",
-              text: stationDisplayValues[s.key] || "-",
-            })
-          : (normResult(stationResults[s.key]) || "-");
+        if (s.sharedLeakOperation) {
+          const leakArr = Array.isArray(leakData) ? leakData : (leakData ? [leakData] : []);
+          const allMachineNames = [...new Set(
+            leakArr
+              .map((r) => String(r?.matchedMachineName || r?.Machine || r?.machineName || "").trim())
+              .filter(Boolean)
+          )];
+          const leakStatus = getLeakTestStatus(leakData);
+          shaped[`station_${s.key}`] = {
+            machineName: allMachineNames.join(" + ") || "",
+            status: String(leakStatus || "").trim().toUpperCase() || "-",
+            text: stationDisplayValues[s.key] || "-",
+          };
+        } else {
+          shaped[`station_${s.key}`] = normResult(stationResults[s.key]) || "-";
+        }
         shaped[`cycle_${s.key}`] = stationCycleTimes[s.key] || "-";
       });
       plcColumns.forEach(({ key }) => {
@@ -803,6 +827,7 @@ const ReportsPage = () => {
           <option value="">{t("reports.allStatus", "All Status")}</option>
           <option value="OK">{t("reports.passed", "PASSED")}</option>
           <option value="NG">{t("reports.failed", "FAILED")}</option>
+          <option value="IN_PROGRESS">{t("reports.inProgress", "IN PROGRESS")}</option>
           <option value="OTHER">{t("reports.otherParts", "Other Parts")}</option>
         </select>
         <select
@@ -818,19 +843,25 @@ const ReportsPage = () => {
           ))}
         </select>
         <button
-          onClick={() => setFilters({
-            dateFrom: toDatetimeLocal(getMesDayRange().start),
-            dateTo: toDatetimeLocal(getMesDayRange().end),
-            plantId: '', lineId: '', machineId: '', partName: '', dieName: '', dieCastingMachine: '', lineName: '', shiftCode: '', status: '', station: '', barcode: '', customerCode: '',
-            operatorId: '', resultType: '', modelCode: '', operationNo: ''
-          })}
+          onClick={() => {
+            const nextFilters = {
+              dateFrom: toDatetimeLocal(getMesDayRange().start),
+              dateTo: toDatetimeLocal(getMesDayRange().end),
+              plantId: '', lineId: '', machineId: '', partName: '', dieName: '', dieCastingMachine: '', lineName: '', shiftCode: '', status: '', station: '', barcode: '', customerCode: '',
+              operatorId: '', resultType: '', modelCode: '', operationNo: ''
+            };
+            setQuickRange("today");
+            setFilters(nextFilters);
+            setReportPage(1);
+            setAppliedFilters(nextFilters);
+          }}
           className="h-9 rounded-md border border-red-200 bg-red-50 px-3 text-xs font-bold text-red-600 transition-all hover:border-red-300"
         >
           {t("reports.clear", "Clear")}
         </button>
         <button
           disabled={loading}
-          onClick={refreshReportData}
+          onClick={applyReportFilters}
           className="h-9 rounded-md border px-3 text-xs font-bold inline-flex items-center justify-center gap-2 disabled:opacity-60"
           style={{ background: "rgba(84,119,146,0.10)", borderColor: "rgba(84,119,146,0.30)", color: "rgb(84,119,146)" }}
         >

@@ -166,8 +166,8 @@ export const userApi = {
 };
 
 export const shiftApi = {
-  list: async (params = {}) => {
-    const { data } = await apiClient.get(ENDPOINTS.shifts, { params });
+  list: async (params = {}, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.shifts, { ...config, params });
     return data;
   },
   create: async (payload) => {
@@ -707,7 +707,7 @@ export const reportApi = {
     const cleanParams = normalizeReportFilters(params);
     const { data } = await apiClient.get(ENDPOINTS.reports.data, {
       params: cleanParams,
-      timeout: 60000,
+      timeout: 180000,
       ...config,
     });
     return data;

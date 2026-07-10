@@ -594,6 +594,54 @@ async function ensureRejectionSchema() {
   }
 }
 
+async function ensureDatabasePerformanceIndexes() {
+  const isMssql = typeof sequelize.getDialect === "function" && sequelize.getDialect() === "mssql";
+  if (!isMssql) return;
+
+  const opLogIndexes = [
+    { name: "IX_OperationLogs_CreatedAt", table: "OperationLogs", columns: "[createdAt]" },
+    { name: "IX_OperationLogs_PartId", table: "OperationLogs", columns: "[part_id]" },
+    { name: "IX_OperationLogs_OperationNo", table: "OperationLogs", columns: "[operation_no]" },
+    { name: "IX_OperationLogs_MachineId", table: "OperationLogs", columns: "[machine_id]" },
+    { name: "IX_OperationLogs_PlcStatus", table: "OperationLogs", columns: "[plc_status]" }
+  ];
+
+  for (const idx of opLogIndexes) {
+    await sequelize.query(`
+      IF OBJECT_ID('dbo.${idx.table}', 'U') IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM sys.indexes 
+          WHERE object_id = OBJECT_ID('dbo.${idx.table}') 
+            AND name = '${idx.name}'
+        )
+      BEGIN
+        CREATE NONCLUSTERED INDEX [${idx.name}] ON [dbo].[${idx.table}](${idx.columns});
+      END;
+    `);
+  }
+
+  const plcIndexes = [
+    { name: "IX_PlcCycleReadings_RecordedAt", table: "PlcCycleReadings", columns: "[recorded_at]" },
+    { name: "IX_PlcCycleReadings_MachineName", table: "PlcCycleReadings", columns: "[machine_name]" },
+    { name: "IX_PlcCycleReadings_PartName", table: "PlcCycleReadings", columns: "[part_name]" },
+    { name: "IX_PlcCycleReadings_ShotNumber", table: "PlcCycleReadings", columns: "[shot_number]" }
+  ];
+
+  for (const idx of plcIndexes) {
+    await sequelize.query(`
+      IF OBJECT_ID('dbo.${idx.table}', 'U') IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM sys.indexes 
+          WHERE object_id = OBJECT_ID('dbo.${idx.table}') 
+            AND name = '${idx.name}'
+        )
+      BEGIN
+        CREATE NONCLUSTERED INDEX [${idx.name}] ON [dbo].[${idx.table}](${idx.columns});
+      END;
+    `);
+  }
+}
+
 module.exports = {
   ensureMachineQrScannerUniqueness,
   ensurePerformanceColumnsExist,
@@ -604,5 +652,6 @@ module.exports = {
   ensureRoleAccessSchema,
   ensureUserRoleSchema,
   ensureRejectionSchema,
+  ensureDatabasePerformanceIndexes,
   FILTERED_QR_SCANNER_INDEX,
 };

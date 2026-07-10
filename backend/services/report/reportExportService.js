@@ -211,7 +211,9 @@ function parseCompactQrPartId(partId) {
   const raw = String(partId || "").trim();
   const machineCompact = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
   const legacyCompact = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<shot>\d{1,6})$/);
-  const groups = machineCompact?.groups || legacyCompact?.groups;
+  const digits = raw.replace(/\D/g, "");
+  const standardQr = digits.match(/^(?<year>\d{2})(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<second>\d{2})(?<shot>\d{1,8})$/);
+  const groups = machineCompact?.groups || legacyCompact?.groups || standardQr?.groups;
   if (!groups) return null;
   const month = Number(groups.month);
   const day = Number(groups.day);
@@ -394,12 +396,9 @@ async function applyPlcShiftWhere(whereParts, replacements, shiftCode) {
 
 async function fetchPlcShotSummary(filters = {}) {
   const { safeFrom, safeTo } = normalizeReportDateRange(filters);
-  const whereParts = [`
-    (
-      recorded_at BETWEEN :dateFrom AND :dateTo
-      OR DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at) BETWEEN :dateFromIst AND :dateToIst
-    )
-  `];
+  const whereParts = [
+    `(recorded_at >= :dateFrom AND recorded_at <= :dateTo)`
+  ];
   const replacements = {
     dateFrom: safeFrom,
     dateTo: safeTo,
@@ -418,7 +417,7 @@ async function fetchPlcShotSummary(filters = {}) {
   try {
     assignmentRows = await LinePartAssignment.findAll({
       where: assignmentWhere,
-      attributes: ["part_name", "die_name", "die_casting_machine"],
+      attributes: ["part_name", "die_name", "die_casting_machine", "ip_address"],
       raw: true,
     });
   } catch (error) {
@@ -466,7 +465,8 @@ async function fetchPlcShotSummary(filters = {}) {
       const rowPart = normalizePartToken(row.part_name);
       const rowDie = normalizePartToken(row.die_name);
       const rowMachine = String(row.die_casting_machine || "").trim().toUpperCase();
-      if (!rowPart && !rowMachine) return;
+      const rowIp = String(row.ip_address || "").trim();
+      if (!rowPart && !rowMachine && !rowIp) return;
       const parts = [];
       if (rowPart) {
         const key = `assignmentPart${index}`;
@@ -477,6 +477,11 @@ async function fetchPlcShotSummary(filters = {}) {
         const key = `assignmentMachine${index}`;
         replacements[key] = rowMachine;
         parts.push(`UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))) = :${key}`);
+      }
+      if (rowIp) {
+        const key = `assignmentIp${index}`;
+        replacements[key] = rowIp;
+        parts.push(`LTRIM(RTRIM(CAST(plc_ip AS NVARCHAR(255)))) = :${key}`);
       }
       if (parts.length) clauses.push(`(${parts.join(" AND ")})`);
     });
@@ -511,9 +516,15 @@ async function fetchPlcShotSummary(filters = {}) {
   try {
     const [rows] = await sequelize.query(
       `
+        WITH DistinctShots AS (
+          SELECT shot_status,
+                 ROW_NUMBER() OVER(PARTITION BY machine_name, plc_ip, shot_number ORDER BY recorded_at DESC) as rn
+          FROM ${PLC_READING_TABLE}
+          WHERE ${whereParts.join(" AND ")}
+        )
         SELECT shot_status, COUNT(*) AS count
-        FROM ${PLC_READING_TABLE}
-        WHERE ${whereParts.join(" AND ")}
+        FROM DistinctShots
+        WHERE rn = 1
         GROUP BY shot_status
       `,
       { replacements }
@@ -774,6 +785,9 @@ async function runIndustrialExport(res, { filters, reportConfig, type = "full" }
  */
 async function fetchProductionData(filters = {}, options = {}) {
   const includePlcReadings = options.includePlcReadings !== false;
+  const includeLeaktest = options.includeLeaktest !== false;
+  const maxAnchorParts = Number(options.maxAnchorParts || 0) > 0 ? Number(options.maxAnchorParts) : null;
+  const maxBaseLogs = Number(options.maxBaseLogs || 0) > 0 ? Number(options.maxBaseLogs) : null;
   let plcColumns = new Set();
   const normalizeOptionalFilter = (value) => {
     const token = String(value || "").trim();
@@ -842,7 +856,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     return nextWhere;
   };
 
-  const runLogQuery = async (where) => findAllWithRetry(() =>
+  const runLogQuery = async (where, queryOptions = {}) => findAllWithRetry(() =>
     OperationLog.findAll({
       where,
       include: [
@@ -853,12 +867,13 @@ async function fetchProductionData(filters = {}, options = {}) {
       ],
       order: [["createdAt", "DESC"]],
       raw: true,
-      nest: true
+      nest: true,
+      ...(queryOptions.limit ? { limit: queryOptions.limit } : {}),
     }), 1, 1500
   );
 
   const baseWhere = await buildWhere({ includeDateRange: true });
-  const logs = await runLogQuery(baseWhere);
+  const logs = await runLogQuery(baseWhere, { limit: maxBaseLogs });
 
   // Keep only production-relevant rows. Validation-noise attempts
   // (duplicate/sequence/format/config blocks) are excluded from reports.
@@ -976,11 +991,18 @@ async function fetchProductionData(filters = {}, options = {}) {
     });
   };
 
-  const anchorPartIds = [...new Set(
+  const allAnchorPartIds = [...new Set(
     productionLogs
       .map((log) => String(log.part_id || "").trim())
       .filter(Boolean)
   )];
+  const anchorPartIds = maxAnchorParts
+    ? allAnchorPartIds.slice(0, maxAnchorParts)
+    : allAnchorPartIds;
+  if (maxAnchorParts && anchorPartIds.length < allAnchorPartIds.length) {
+    const anchorSet = new Set(anchorPartIds);
+    productionLogs = productionLogs.filter((log) => anchorSet.has(String(log.part_id || "").trim()));
+  }
 
   if (!anchorPartIds.length) {
     return fetchPartStatusFallbackRows();
@@ -1055,22 +1077,24 @@ async function fetchProductionData(filters = {}, options = {}) {
     if (customerKey && oldPart && !acc[customerKey]) acc[customerKey] = oldPart;
     return acc;
   }, {});
-  const leakLookupMachines = await MachineModel.findAll({
-    where: {
-      is_active: true,
-      ...(plantId ? { plant_id: plantId } : {}),
-      ...(lineId ? { line_id: lineId } : (lineName ? { line_name: lineName } : {})),
-    },
-    attributes: ["id", "machine_name", "operation_no", "plc_ip", "qr_scanner_ip", "machine_ip"],
-    raw: true,
-  });
-  const leaktestIndex = (
-    await buildLeaktestIndex({
-      partIds,
-      customerQrByPartId: partCodeMap,
-      machines: leakLookupMachines,
-    })
-  );
+  const leaktestIndex = includeLeaktest
+    ? await (async () => {
+        const leakLookupMachines = await MachineModel.findAll({
+          where: {
+            is_active: true,
+            ...(plantId ? { plant_id: plantId } : {}),
+            ...(lineId ? { line_id: lineId } : (lineName ? { line_name: lineName } : {})),
+          },
+          attributes: ["id", "machine_name", "operation_no", "plc_ip", "qr_scanner_ip", "machine_ip"],
+          raw: true,
+        });
+        return buildLeaktestIndex({
+          partIds,
+          customerQrByPartId: partCodeMap,
+          machines: leakLookupMachines,
+        });
+      })()
+    : { byPartAndIp: new Map(), byPartAndStation: new Map() };
 
   const qrRules = await QrFormatRule.findAll({ attributes: ["format_name", "model_code"], raw: true });
   const qrMap = qrRules.reduce((acc, q) => {
@@ -1118,7 +1142,7 @@ async function fetchProductionData(filters = {}, options = {}) {
   if (includePlcReadings) {
     // Attach PLC cycle readings from DB table (PlcCycleReadings):
     // 1) Prefer part-id style columns (if available in current schema)
-    // 2) Fallback to shot_number style columns
+    // 2) Fallback to compact QR / shot_number style columns
     plcColumns = await getPlcReadingColumns();
     const partLookupColumn = pickFirstAvailableColumn(plcColumns, PLC_PART_ID_CANDIDATE_COLUMNS);
     const partIdsForPlcLookup = [...new Set(
@@ -1126,13 +1150,21 @@ async function fetchProductionData(filters = {}, options = {}) {
         .map((log) => String(log.part_id || "").trim())
         .filter(Boolean)
     )];
+    // Also include oldPartMap IDs (e.g. compact QR strings like 0710034724950)
+    // so fetchLatestPlcReadingsByCompactQr can match them via shot_month/day/hour/minute/shot_number
+    const oldPartIdsForPlcLookup = [...new Set(
+      partIdsForPlcLookup
+        .map((pid) => oldPartMap[normalizeKey(pid)])
+        .filter(Boolean)
+    )];
+    const allPartIdsForCompactQrLookup = [...new Set([...partIdsForPlcLookup, ...oldPartIdsForPlcLookup])];
     plcByPartId = partLookupColumn
       ? await fetchLatestPlcReadingsByColumn(partLookupColumn, partIdsForPlcLookup)
       : new Map();
     plcByUid = plcColumns.has("shot_uid")
       ? await fetchLatestPlcReadingsByColumn("shot_uid", partIdsForPlcLookup)
       : new Map();
-    plcByCompactQr = await fetchLatestPlcReadingsByCompactQr(partIdsForPlcLookup);
+    plcByCompactQr = await fetchLatestPlcReadingsByCompactQr(allPartIdsForCompactQrLookup);
     plcByShot = plcColumns.has("shot_number")
       ? await fetchLatestPlcReadingsByShotTokens(
           deduplicatedLogs.flatMap((log) => deriveShotCandidates(log))
@@ -1198,7 +1230,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       : (mappedOldPartId || mappedCustomerQr || partIdValue);
     const shotLookupPartId = displayPartId || partIdValue;
     const partLookupKey = normalizeKey(shotLookupPartId);
-    const compactQrKey = parseCompactQrPartId(shotLookupPartId)?.key || parseCompactQrPartId(partIdValue)?.key || "";
+    const compactQrKey = parseCompactQrPartId(shotLookupPartId)?.key || parseCompactQrPartId(partIdValue)?.key || parseCompactQrPartId(mappedOldPartId)?.key || "";
     const shotSourceLog = { ...log, part_id: shotLookupPartId };
     const shotCandidates = deriveShotCandidates(shotSourceLog).map((s) => normalizeShotToken(s) || normalizeKey(s));
     const shouldLookupPlcReading = includePlcReadings && (!customerQrOnlyPart || compactQrKey || shotCandidates.length);
@@ -1299,6 +1331,23 @@ async function fetchProductionData(filters = {}, options = {}) {
       filtered = filtered.filter((row) => String(row.statusLabel || "").toUpperCase() === "UNKNOWN");
     } else if (normalizedStatus === "OTHER") {
       filtered = filtered.filter((row) => row.isCustomerQrOnly === true || !String(row.displayPartId || row.partId || "").trim());
+    } else if (normalizedStatus === "OK" || normalizedStatus === "PASSED") {
+      filtered = filtered.filter((row) => {
+        const s = String(row.partStatus || "").trim().toUpperCase();
+        return ["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(s);
+      });
+    } else if (normalizedStatus === "IN_PROGRESS" || normalizedStatus === "IN PROGRESS") {
+      filtered = filtered.filter((row) => {
+        const s = String(row.partStatus || "").trim().toUpperCase();
+        const isPassed = ["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(s);
+        const isNg = ["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(s);
+        return !isPassed && !isNg;
+      });
+    } else if (normalizedStatus === "NG" || normalizedStatus === "FAILED") {
+      filtered = filtered.filter((row) => {
+        const s = String(row.partStatus || "").trim().toUpperCase();
+        return ["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(s);
+      });
     } else {
       filtered = filtered.filter((row) => String(row.industrialResult || "").toUpperCase() === normalizedStatus);
     }

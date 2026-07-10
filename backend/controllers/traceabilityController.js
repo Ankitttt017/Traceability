@@ -17,7 +17,9 @@ const {
   LEAKTEST_OPERATION,
   buildLeaktestIndex,
   getLeaktestReadingForPartStation,
+  getAllLeaktestReadingsForPart,
   getLeaktestStageState,
+  getLeaktestStageStateFromReadings,
 } = require("../services/leaktestLookupService");
 const { getPlcCircuitSnapshot } = require("../services/plcCommunicationService");
 const plcHandshakeEngine = require("../services/plcHandshakeEngine");
@@ -3006,8 +3008,10 @@ exports.getPartJourney = async (req, res) => {
       const representativeAttempt = productionAttempt || latestAttempt;
 
       let stageState = "PENDING";
+      const hasGlobalCustomerQr = customerMappings.some(m => String(m.customer_qr || "").trim() !== "");
       const waitingForCustomerQr = Boolean(
         stationMeta?.requiresCustomerQr &&
+        !hasGlobalCustomerQr &&
         !customerMappingByStation[stationNo]?.customerQrCode
       );
 
@@ -6804,15 +6808,13 @@ exports.getDashboardReport = async (req, res) => {
     }, {});
 
     const partIdsForCustomerQr = [...new Set(partHistory.slice(0, 3000).map((row) => String(row.part_id || "").trim()).filter(Boolean))];
-    const leaktestIndex = (
-      await buildLeaktestIndex({
+    const leaktestIndex = await buildLeaktestIndex({
         partIds: partIdsForCustomerQr,
         customerQrByPartId,
         machines: machineRows,
-      })
-    ).byPartAndStation;
+      });
     const getLeakReadingForPart = (partIdValue) => getLeaktestReadingForPartStation(
-      leaktestIndex.byPartAndStation, // explicitly use the aggregate for legacy dashboard
+      leaktestIndex.byPartAndStation,
       String(partIdValue || "").trim(),
       LEAKTEST_OPERATION
     );

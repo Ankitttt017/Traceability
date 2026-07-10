@@ -8,31 +8,64 @@ const { runIndustrialExport, fetchProductionData, getPlcReadingColumns, fetchPlc
 const { calculateProductionMetrics } = require("../services/report/reportMetricsService");
 const Shift = require("../models/Shift");
 
-const REPORT_CACHE_TTL_MS = Math.max(Number(process.env.REPORT_CACHE_TTL_MS || 3000), 1000);
+const REPORT_CACHE_TTL_MS = Math.max(Number(process.env.REPORT_CACHE_TTL_MS || 60000), 1000);
 const reportDataCache = new Map();
 const reportDataInFlight = new Map();
 
-function reportCacheKey(filters = {}) {
-  return JSON.stringify(Object.keys(filters).sort().reduce((acc, key) => {
-    const value = filters[key];
+function reportCacheKey(filters = {}, options = {}) {
+  const source = {
+    ...filters,
+    __includePlcReadings: options.includePlcReadings !== false,
+    __includePlcSummary: options.includePlcSummary !== false,
+    __includeLeaktest: options.includeLeaktest !== false,
+    __maxAnchorParts: options.maxAnchorParts || "",
+    __maxBaseLogs: options.maxBaseLogs || "",
+  };
+  return JSON.stringify(Object.keys(source).sort().reduce((acc, key) => {
+    const value = source[key];
     if (value !== undefined && value !== null && String(value).trim() !== "") acc[key] = value;
     return acc;
   }, {}));
 }
 
-async function getCachedReportRows(filters = {}) {
-  const key = reportCacheKey(stripPaginationFilters(filters));
+async function getCachedReportBundle(filters = {}, options = {}) {
+  const cleanFilters = stripReportControlFilters(filters);
+  const key = reportCacheKey(cleanFilters, options);
   const cached = reportDataCache.get(key);
-  if (cached && Date.now() - cached.savedAt < REPORT_CACHE_TTL_MS) return cached.rows;
+  if (cached && Date.now() - cached.savedAt < REPORT_CACHE_TTL_MS) return cached.bundle;
   if (reportDataInFlight.has(key)) return reportDataInFlight.get(key);
-  const request = fetchProductionData(stripPaginationFilters(filters))
-    .then((rows) => {
-      reportDataCache.set(key, { rows, savedAt: Date.now() });
+  const request = Promise.all([
+    fetchProductionData(cleanFilters, {
+      includePlcReadings: options.includePlcReadings !== false,
+      includeLeaktest: options.includeLeaktest !== false,
+      maxAnchorParts: options.maxAnchorParts,
+      maxBaseLogs: options.maxBaseLogs,
+    }),
+    Shift.findAll({
+      where: { is_active: true },
+      attributes: ["id", "shift_name", "shift_code", "start_time", "end_time"],
+      order: [["start_time", "ASC"]],
+      raw: true,
+    }),
+    options.includePlcReadings === false ? Promise.resolve(new Set()) : getPlcReadingColumns(),
+    options.includePlcSummary === false ? Promise.resolve(null) : fetchPlcShotSummary(cleanFilters),
+  ])
+    .then(([rows, shifts, plcColumnSet, plcShotSummary]) => {
+      const metrics = calculateProductionMetrics(rows);
+      const rowShotSummary = derivePlcShotSummaryFromRows(rows);
+      metrics.plcShotSummary = options.includePlcSummary !== false && Number(plcShotSummary?.totalProduction || 0) > 0
+        ? plcShotSummary
+        : rowShotSummary;
+      metrics.plcShotSummarySource = options.includePlcSummary === false
+        ? "SKIPPED_FAST"
+        : (Number(plcShotSummary?.totalProduction || 0) > 0 ? "PLC_SUMMARY" : "REPORT_ROWS");
+      const bundle = { rows, shifts, plcColumnSet, metrics };
+      reportDataCache.set(key, { bundle, savedAt: Date.now() });
       if (reportDataCache.size > 40) {
         const oldestKey = reportDataCache.keys().next().value;
         reportDataCache.delete(oldestKey);
       }
-      return rows;
+      return bundle;
     })
     .finally(() => reportDataInFlight.delete(key));
   reportDataInFlight.set(key, request);
@@ -43,6 +76,46 @@ function stripPaginationFilters(filters = {}) {
   const { page, pageSize, limit, offset, ...rest } = filters || {};
   void page; void pageSize; void limit; void offset;
   return rest;
+}
+
+function stripReportControlFilters(filters = {}) {
+  const {
+    page,
+    pageSize,
+    limit,
+    offset,
+    fast,
+    quick,
+    includePlcReadings,
+    includePlcSummary,
+    includeLeaktest,
+    ...rest
+  } = filters || {};
+  void page; void pageSize; void limit; void offset; void fast; void quick; void includePlcReadings; void includePlcSummary;
+  return rest;
+}
+
+function isTruthyToken(value) {
+  return ["1", "TRUE", "YES", "Y", "FAST"].includes(String(value || "").trim().toUpperCase());
+}
+
+function isFalseToken(value) {
+  return ["0", "FALSE", "NO", "N"].includes(String(value || "").trim().toUpperCase());
+}
+
+function getReportOptions(query = {}) {
+  const hasFocusedPartSearch = Boolean(String(query.barcode || query.customerCode || query.partId || "").trim());
+  const fast = isTruthyToken(query.fast || query.quick) && !hasFocusedPartSearch;
+  const pageSize = Math.min(Math.max(Number.parseInt(query.pageSize || query.limit, 10) || 50, 10), 200);
+  const fastAnchorLimit = Math.min(Math.max(pageSize * 8, 100), 500);
+  return {
+    fast,
+    includePlcReadings: fast ? false : !isFalseToken(query.includePlcReadings),
+    includePlcSummary: fast ? false : !isFalseToken(query.includePlcSummary),
+    includeLeaktest: fast ? false : !isFalseToken(query.includeLeaktest),
+    maxAnchorParts: fast ? fastAnchorLimit : null,
+    maxBaseLogs: fast ? Math.min(Math.max(fastAnchorLimit * 6, 600), 3000) : null,
+  };
 }
 
 function getPagination(query = {}) {
@@ -162,25 +235,10 @@ const DEFAULT_REPORT_CONFIG = {
 
 exports.getReportData = async (req, res) => {
   try {
-    const filters = stripPaginationFilters(req.query || {});
+    const options = getReportOptions(req.query || {});
+    const filters = stripReportControlFilters(req.query || {});
     const pagination = getPagination(req.query || {});
-    const [rows, shifts, plcColumnSet, plcShotSummary] = await Promise.all([
-      getCachedReportRows(filters),
-      Shift.findAll({
-        where: { is_active: true },
-        attributes: ["id", "shift_name", "shift_code", "start_time", "end_time"],
-        order: [["start_time", "ASC"]],
-        raw: true,
-      }),
-      getPlcReadingColumns(),
-      fetchPlcShotSummary(filters),
-    ]);
-    const metrics = calculateProductionMetrics(rows);
-    const rowShotSummary = derivePlcShotSummaryFromRows(rows);
-    metrics.plcShotSummary = Number(plcShotSummary?.totalProduction || 0) > 0
-      ? plcShotSummary
-      : rowShotSummary;
-    metrics.plcShotSummarySource = Number(plcShotSummary?.totalProduction || 0) > 0 ? "PLC_SUMMARY" : "REPORT_ROWS";
+    const { rows, shifts, plcColumnSet, metrics } = await getCachedReportBundle(filters, options);
     const paged = paginateReportRowsByPart(rows, pagination);
     
     res.json({
@@ -188,6 +246,7 @@ exports.getReportData = async (req, res) => {
       metrics,
       pagination: paged.pagination,
       plcColumns: [...plcColumnSet],
+      reportMode: options.fast ? "FAST" : "FULL",
       availableShifts: shifts.map((shift) => ({
         id: shift.id,
         shiftName: shift.shift_name,

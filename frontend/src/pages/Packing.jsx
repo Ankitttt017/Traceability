@@ -328,6 +328,7 @@ const Packing=()=>{
   const[loadingOv,   setLoadingOv]   =useState(true);
   const[loadingSess, setLoadingSess] =useState(false);
   const[hoveredSlot, setHoveredSlot] =useState(null);
+  const[tooltipPos,  setTooltipPos]  =useState({x:0,y:0});
   const[view,        setView]        =useState("grid");
   const[scanFlash,   setScanFlash]   =useState(false);
   const[scanResult,  setScanResult]  =useState(null);
@@ -357,6 +358,18 @@ const Packing=()=>{
     displayItems.forEach(it=>m.set(Number(it.slotNo),it));
     return m;
   },[displayItems]);
+  const tooltipItem=hoveredSlot?filledMap.get(Number(hoveredSlot)):null;
+  const tooltipSlot=tooltipItem?hoveredSlot:null;
+  const tooltipFlips=typeof window!=="undefined"&&tooltipPos.x>window.innerWidth-280;
+
+  const updateTooltipPosition=useCallback((event)=>{
+    setTooltipPos({x:event.clientX,y:event.clientY});
+  },[]);
+
+  const handleSlotMouseEnter=useCallback((slotId,event)=>{
+    setHoveredSlot(slotId);
+    setTooltipPos({x:event.clientX,y:event.clientY});
+  },[]);
 
   const loadSession=useCallback(async(boxNumber)=>{
     const n=String(boxNumber||"").trim().toUpperCase();
@@ -828,7 +841,8 @@ const Packing=()=>{
                     const isHov=hoveredSlot===slotId;
                     return(
                       <div key={slotId}
-                        onMouseEnter={()=>setHoveredSlot(slotId)}
+                        onMouseEnter={(event)=>handleSlotMouseEnter(slotId,event)}
+                        onMouseMove={updateTooltipPosition}
                         onMouseLeave={()=>setHoveredSlot(null)}
                         style={{
                           position:"relative",
@@ -978,23 +992,119 @@ const Packing=()=>{
                 ))}
                </tr></thead>
               <tbody>
-                {displayItems.map((item,i)=>(
+                {displayItems.map((item,i)=>{
+                  const isSame = String(item.partId).trim() === String(item.customerQrCode).trim();
+                  const dPartId = (!isSame && item.customerQrCode) ? item.partId : "";
+                  const dCustQr = item.customerQrCode || item.partId;
+                  return (
                   <tr key={i} style={{borderBottom:`1px solid ${C.bdr()}`,
-                    background:i%2===1?C.bg("surf"):"transparent"}}>
-                    <td style={{padding:"8px 12px",color:C.txt("muted"),fontSize:9,fontFamily:"'DM Mono',monospace"}}>{i+1}</td>
-                    <td style={{padding:"8px 12px"}}><div style={{display:"inline-flex",alignItems:"center",justifyContent:"center",width:28,height:28,borderRadius:6,background:C.ok(0.1),border:`1px solid ${C.ok(0.3)}`,fontSize:11,fontWeight:800,color:C.ok()}}>{item.slotNo||"—"}</div></td>
-                    <td style={{padding:"8px 12px",fontFamily:"'DM Mono',monospace",fontSize:11,fontWeight:700,color:C.txt("pri")}}>{item.partId||"—"}</td>
-                    <td style={{padding:"8px 12px",fontFamily:"'DM Mono',monospace",fontSize:10,color:C.txt("sec")}}>{item.customerQrCode||"-"}</td>
-                    <td style={{padding:"8px 12px",fontSize:10,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>{item.stationNo||item.operationNo||item.currentStation||"-"}</td>
-                    <td style={{padding:"8px 12px",fontSize:10,color:C.txt("pri")}}>{item.machineName||"-"}</td>
-                    <td style={{padding:"8px 12px",fontSize:9,color:C.txt("muted"),fontFamily:"'DM Mono',monospace",whiteSpace:"nowrap"}}>{fmtTime(item.packedAt||item.createdAt)}</td>
+                    background:i%2===1?C.bg("surf"):"transparent",transition:"background .1s"}}>
+                    <td style={{padding:"12px 16px",color:C.txt("muted"),fontSize:11}}>{i+1}</td>
+                    <td style={{padding:"12px 16px"}}>
+                      <div style={{display:"inline-flex",alignItems:"center",justifyContent:"center",
+                        width:26,height:26,borderRadius:4,background:C.ok(0.12),
+                        border:`1px solid ${C.ok(0.35)}`,fontSize:12,fontWeight:600,color:C.ok()}}>
+                        {item.slotNo||"—"}
+                      </div>
+                    </td>
+                    <td style={{padding:"12px 16px",fontSize:13,fontWeight:500,color:C.txt("pri")}}>
+                      {dPartId}
+                    </td>
+                    <td style={{padding:"12px 16px",fontSize:13,fontWeight:500,color:C.txt("sec")}}>
+                      {dCustQr}
+                    </td>
+                    <td style={{padding:"12px 16px",fontSize:12,color:C.txt("sec")}}>{item.stationNo||item.operationNo||item.currentStation||"-"}</td>
+                    <td style={{padding:"12px 16px",fontSize:12,color:C.txt("pri")}}>{item.machineName||"-"}</td>
+                    <td style={{padding:"12px 16px",fontSize:12,color:C.txt("muted"),whiteSpace:"nowrap"}}>{fmtTime(item.packedAt||item.createdAt)}</td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
       </Card>
+      {/* ══ FIXED FLOATING TOOLTIP ─────────────────────────────── */}
+      {tooltipItem && tooltipSlot && (() => {
+        const isSame = String(tooltipItem.partId).trim() === String(tooltipItem.customerQrCode).trim();
+        const dPartId = (!isSame && tooltipItem.customerQrCode) ? tooltipItem.partId : "";
+        const dCustQr = tooltipItem.customerQrCode || tooltipItem.partId;
+        return (
+        <div style={{
+          position:"fixed",
+          left: tooltipPos.x + 16,
+          top: tooltipPos.y - 10,
+          zIndex:9999,
+          pointerEvents:"none",
+          transform: tooltipFlips ? "translateX(calc(-100% - 32px))" : "none",
+        }}>
+          <div style={{
+            background:C.bg("card"),
+            border:`1.5px solid ${C.ok(0.45)}`,
+            borderRadius:14,
+            boxShadow:`0 8px 32px rgba(0,0,0,0.28),0 2px 8px rgba(0,0,0,0.15),0 0 0 1px ${C.ok(0.15)}`,
+            overflow:"hidden",
+            minWidth:260,
+            animation:"pkFadeIn .1s ease",
+          }}>
+            {/* Header strip */}
+            <div style={{
+              background:`linear-gradient(90deg,${C.ok(0.18)},${C.ok(0.06)})`,
+              borderBottom:`1px solid ${C.ok(0.2)}`,
+              padding:"8px 14px",
+              display:"flex",alignItems:"center",gap:8,
+            }}>
+              <div style={{width:20,height:20,borderRadius:5,background:C.ok(0.2),
+                border:`1px solid ${C.ok(0.4)}`,display:"flex",alignItems:"center",
+                justifyContent:"center"}}>
+                <span style={{fontSize:9,fontWeight:900,color:C.ok()}}>✓</span>
+              </div>
+              <div>
+                <span style={{fontSize:8,fontWeight:800,textTransform:"uppercase",
+                  letterSpacing:"0.1em",color:C.ok()}}>Slot {tooltipSlot} · Packed</span>
+              </div>
+            </div>
+            {/* Body */}
+            <div style={{padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}}>
+              {/* Part ID */}
+              <div>
+                <p style={{fontSize:8,fontWeight:800,textTransform:"uppercase",
+                  letterSpacing:"0.09em",color:C.txt("muted"),marginBottom:4,
+                  display:"flex",alignItems:"center",gap:4}}>
+                  <span style={{display:"inline-block",width:4,height:4,borderRadius:"50%",
+                    background:C.navy()}}/>
+                  Part Serial No.
+                </p>
+                <p style={{fontSize:13,fontWeight:600,
+                  color:C.txt("pri"),wordBreak:"break-all"}}>
+                  {dPartId || "—"}
+                </p>
+              </div>
+              {/* Customer QR */}
+              <div style={{borderTop:`1px solid ${C.bdr(0.15)}`,paddingTop:10}}>
+                <p style={{fontSize:8,fontWeight:800,textTransform:"uppercase",
+                  letterSpacing:"0.09em",color:C.txt("muted"),marginBottom:4,
+                  display:"flex",alignItems:"center",gap:4}}>
+                  <span style={{display:"inline-block",width:4,height:4,borderRadius:"50%",
+                    background:C.steel()}}/>
+                  Customer QR Code
+                </p>
+                <p style={{fontSize:13,fontWeight:600,
+                  color:C.steel(),wordBreak:"break-all"}}>
+                  {dCustQr}
+                </p>
+              </div>
+              {/* Time */}
+              <div style={{borderTop:`1px solid ${C.bdr(0.1)}`,paddingTop:8}}>
+                <p style={{fontSize:10,fontWeight:500,color:C.txt("muted")}}>
+                  {fmtDT(tooltipItem.packedAt||tooltipItem.createdAt)}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
     </div>
   );
 };

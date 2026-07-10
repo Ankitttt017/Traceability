@@ -100,10 +100,28 @@ async function ensureLinePartAssignmentSchema() {
       AND COL_LENGTH('dbo.LinePartAssignments', 'die_casting_machine') IS NULL
       ALTER TABLE [dbo].[LinePartAssignments] ADD [die_casting_machine] NVARCHAR(255) NULL;
   `);
+  await sequelize.query(`
+    IF OBJECT_ID('dbo.LinePartAssignments', 'U') IS NOT NULL
+      AND COL_LENGTH('dbo.LinePartAssignments', 'ip_address') IS NULL
+      ALTER TABLE [dbo].[LinePartAssignments] ADD [ip_address] NVARCHAR(255) NULL;
+  `);
+  await sequelize.query(`
+    IF OBJECT_ID('dbo.LinePartAssignments', 'U') IS NOT NULL
+      AND COL_LENGTH('dbo.LinePartAssignments', 'port') IS NULL
+      ALTER TABLE [dbo].[LinePartAssignments] ADD [port] INT NULL;
+  `);
   await LinePartAssignment.sync();
   await sequelize.query(`
     IF COL_LENGTH('dbo.LinePartAssignments', 'die_casting_machine') IS NULL
       ALTER TABLE [dbo].[LinePartAssignments] ADD [die_casting_machine] NVARCHAR(255) NULL;
+  `);
+  await sequelize.query(`
+    IF COL_LENGTH('dbo.LinePartAssignments', 'ip_address') IS NULL
+      ALTER TABLE [dbo].[LinePartAssignments] ADD [ip_address] NVARCHAR(255) NULL;
+  `);
+  await sequelize.query(`
+    IF COL_LENGTH('dbo.LinePartAssignments', 'port') IS NULL
+      ALTER TABLE [dbo].[LinePartAssignments] ADD [port] INT NULL;
   `);
 }
 

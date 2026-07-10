@@ -218,6 +218,9 @@ function getStationDisplayLabel(station) {
   const stationNo = String(station?.stationNo || station?.operationNo || "").trim();
   const machineName = String(station?.machineName || station?.stationName || station?.matchedMachineName || "").trim();
   const operationNo = String(station?.operationNo || stationNo || "").trim();
+  if (operationNo.toUpperCase() === "OP150") {
+    return "Leak Test + OP150";
+  }
   if (machineName && operationNo) return `${machineName} + ${operationNo}`;
   if (machineName) return machineName;
   return stationNo || "Station";
