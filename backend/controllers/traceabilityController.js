@@ -917,14 +917,19 @@ const JOURNEY_NOISE_REASONS = new Set([
   "ALREADY_SCANNED",
 ]);
 
-const CUSTOMER_QR_WAITING_OPERATIONS = new Set(["LASER", "LASER_MARKING", "LASER MARKING", "OP_LASER", "OP110", "OP160", "OP170"]);
+const CUSTOMER_QR_WAITING_MACHINE_TYPES = new Set(["LASER"]);
+const CUSTOMER_QR_WAITING_EXCLUDED_TOKENS = ["FINAL_INSPECTION", "FINAL INSPECTION", "FINAL STATION", "PDI", "PACKING", "PACKAGING", "DISPATCH"];
 
 function requiresCustomerQrForCompletion(machine = {}) {
+  const machineType = String(getModelValue(machine, "machine_type") || getModelValue(machine, "machineType") || "").trim().toUpperCase();
   const tokens = [
     getModelValue(machine, "operation_no"),
     getModelValue(machine, "machine_name"),
   ].map((value) => String(value || "").trim().toUpperCase());
-  return tokens.some((token) => CUSTOMER_QR_WAITING_OPERATIONS.has(token) || token.includes("LASER"));
+  if (tokens.some((token) => CUSTOMER_QR_WAITING_EXCLUDED_TOKENS.some((excluded) => token === excluded || token.includes(excluded)))) {
+    return false;
+  }
+  return CUSTOMER_QR_WAITING_MACHINE_TYPES.has(machineType);
 }
 
 async function getStationBypassMetaForJourney(stationNo, machines = []) {
@@ -1138,6 +1143,22 @@ function getQualitySummaryFromOperationLogs(rows, getMappedCustomerQr = null) {
 function isInProgressPlcStatus(value) {
   const normalized = toUpper(value);
   return normalized === "STARTED" || normalized === "PENDING";
+}
+
+function isJourneyPassedAttempt(attempt = {}) {
+  const plcStatus = toUpper(attempt.plcStatus || attempt.plc_status);
+  const result = toUpper(attempt.result);
+  return (
+    ["ENDED_OK", "COMPLETED_OK", "PASSED"].includes(plcStatus) ||
+    (plcStatus === "OK" && (!result || ["OK", "PASS", "PASSED"].includes(result))) ||
+    (["OK", "PASS", "PASSED"].includes(result) && !["ENDED_NG", "COMPLETED_NG", "NG", "FAILED"].includes(plcStatus))
+  );
+}
+
+function isJourneyFailedAttempt(attempt = {}) {
+  const plcStatus = toUpper(attempt.plcStatus || attempt.plc_status);
+  const result = toUpper(attempt.result);
+  return ["ENDED_NG", "COMPLETED_NG", "NG", "FAILED"].includes(plcStatus) || ["NG", "FAIL", "FAILED"].includes(result);
 }
 
 function resolveCurrentOperationForMachine(logs, machine) {
@@ -2831,7 +2852,7 @@ exports.getPartJourney = async (req, res) => {
       machineIds.length > 0
         ? await Machine.findAll({
           where: { id: { [Op.in]: machineIds } },
-          attributes: ["id", "machine_name", "operation_no", "sequence_no"],
+          attributes: ["id", "machine_name", "machine_type", "operation_no", "sequence_no"],
         })
         : [];
 
@@ -2840,6 +2861,7 @@ exports.getPartJourney = async (req, res) => {
       acc[machineId] = {
         id: machineId,
         machineName: getModelValue(machine, "machine_name"),
+        machineType: getModelValue(machine, "machine_type"),
         stationNo: getMachineOperationStage(machine),
         sequenceNo: getModelValue(machine, "sequence_no"),
       };
@@ -2851,6 +2873,7 @@ exports.getPartJourney = async (req, res) => {
       acc[station] = {
         machineId: getModelValue(machine, "id"),
         machineName: getModelValue(machine, "machine_name"),
+        machineType: getModelValue(machine, "machine_type"),
         stationNo: station,
         sequenceNo: getModelValue(machine, "sequence_no"),
         requiresCustomerQr: requiresCustomerQrForCompletion(machine),
@@ -2893,6 +2916,8 @@ exports.getPartJourney = async (req, res) => {
       order: [["updatedAt", "DESC"]],
       raw: true,
     });
+    const allCustomerMappings = [...initialCustomerMappings, ...customerMappings];
+    const hasGlobalCustomerQr = allCustomerMappings.some((row) => String(row.customer_qr || "").trim() !== "");
     const customerMappingByStation = customerMappings.reduce((acc, row) => {
       const key = normalizeStation(row.station_no);
       if (!key || acc[key]) return acc;
@@ -2915,13 +2940,11 @@ exports.getPartJourney = async (req, res) => {
       }
       return acc;
     }, {});
-    const leaktestIndex = (
-      await buildLeaktestIndex({
-        partIds: traceabilityPartIds,
-        customerQrByPartId,
-        machines: Array.isArray(sequenceData?.machines) ? sequenceData.machines : [],
-      })
-    ).byPartAndStation;
+    const leaktestIndex = await buildLeaktestIndex({
+      partIds: traceabilityPartIds,
+      customerQrByPartId,
+      machines: Array.isArray(sequenceData?.machines) ? sequenceData.machines : [],
+    });
     const bypassMetaByStation = {};
     await Promise.all(knownStations.map(async (stationNo) => {
       bypassMetaByStation[stationNo] = await getStationBypassMetaForJourney(
@@ -3000,15 +3023,14 @@ exports.getPartJourney = async (req, res) => {
 
       // ── Bug fix: ENDED_OK / ENDED_NG ALWAYS win as terminal state.
       // A duplicate-scan INTERLOCKED log must NOT override a completed station.
-      const endedOkAttempt  = attempts.find(a => a.plcStatus === "ENDED_OK");
-      const endedNgAttempt  = attempts.find(a => a.plcStatus === "ENDED_NG");
+      const endedOkAttempt  = attempts.find(isJourneyPassedAttempt);
+      const endedNgAttempt  = attempts.find(isJourneyFailedAttempt);
       // Best attempt for display: prefer the actual production outcome
       const productionAttempt = endedOkAttempt || endedNgAttempt || null;
       // The attempt whose values we surface as "latest" (hide duplicate/interlocked noise)
       const representativeAttempt = productionAttempt || latestAttempt;
 
       let stageState = "PENDING";
-      const hasGlobalCustomerQr = customerMappings.some(m => String(m.customer_qr || "").trim() !== "");
       const waitingForCustomerQr = Boolean(
         stationMeta?.requiresCustomerQr &&
         !hasGlobalCustomerQr &&

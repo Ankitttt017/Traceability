@@ -256,27 +256,39 @@ function uniqueStages(values) {
 }
 
 
-const CUSTOMER_QR_WAITING_OPERATIONS = new Set(["LASER", "LASER_MARKING", "LASER MARKING", "OP_LASER", "OP110", "OP160", "OP170"]);
+const CUSTOMER_QR_WAITING_MACHINE_TYPES = new Set(["LASER"]);
+const CUSTOMER_QR_WAITING_EXCLUDED_TOKENS = ["FINAL_INSPECTION", "FINAL INSPECTION", "FINAL STATION", "PDI", "PACKING", "PACKAGING", "DISPATCH"];
 
 
 function requiresCustomerQrForCompletion(machine = {}) {
+  const machineType = String(machine.machine_type || machine.machineType || "").trim().toUpperCase();
   const tokens = [
     machine.operation_no,
     machine.machine_name,
   ].map((value) => String(value || "").trim().toUpperCase());
-  return tokens.some((token) => CUSTOMER_QR_WAITING_OPERATIONS.has(token) || token.includes("LASER"));
+  if (tokens.some((token) => CUSTOMER_QR_WAITING_EXCLUDED_TOKENS.some((excluded) => token === excluded || token.includes(excluded)))) {
+    return false;
+  }
+  return CUSTOMER_QR_WAITING_MACHINE_TYPES.has(machineType);
 }
 
 
 async function stationRequiresCustomerQrForCompletion(machine = {}, stationNo = "") {
   const station = normalizeStation(stationNo || machine?.operation_no);
   if (!machine || !station) return false;
+  const tokens = [
+    machine.operation_no,
+    machine.machine_name,
+  ].map((value) => String(value || "").trim().toUpperCase());
+  if (tokens.some((token) => CUSTOMER_QR_WAITING_EXCLUDED_TOKENS.some((excluded) => token === excluded || token.includes(excluded)))) {
+    return false;
+  }
   const features = await getStationFeatureConfig(station, {
     plantId: machine.plantId || machine.plant_id,
     lineId: machine.lineId || machine.line_id,
   }).catch(() => null);
   if (features?.customerQrRequiredConfigured === true) {
-    return features.customerQrRequired === true;
+    return features.customerQrRequired === true && requiresCustomerQrForCompletion(machine);
   }
   return requiresCustomerQrForCompletion(machine);
 }
@@ -296,7 +308,7 @@ async function getActiveStationSequence() {
 async function getActiveMachineSequenceData() {
   const machines = await Machine.findAll({
     where: { is_active: true },
-    attributes: ["id", "operation_no", "machine_name"],
+    attributes: ["id", "operation_no", "machine_name", "machine_type"],
     order: [["sequence_no", "ASC"], ["id", "ASC"]],
     raw: true,
   });
