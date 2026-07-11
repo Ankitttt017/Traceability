@@ -18,7 +18,8 @@ const NON_QUALITY_AUDIT_REASONS = new Set([
   "INVALID_INPUT",
 ]);
 
-const CUSTOMER_QR_WAITING_OPERATIONS = new Set(["LASER", "LASER_MARKING", "LASER MARKING", "OP_LASER", "OP110", "OP160", "OP170"]);
+const CUSTOMER_QR_WAITING_MACHINE_TYPES = new Set(["LASER"]);
+const CUSTOMER_QR_WAITING_EXCLUDED_TOKENS = ["FINAL_INSPECTION", "FINAL INSPECTION", "FINAL STATION", "PDI", "PACKING", "PACKAGING", "DISPATCH"];
 
 function toUpper(value) {
   return String(value || "").trim().toUpperCase();
@@ -29,12 +30,32 @@ function isQualityOutcomeLog(log) {
   return !NON_QUALITY_AUDIT_REASONS.has(reason);
 }
 
+function isPassedOperationLog(log = {}) {
+  const plcStatus = toUpper(log.plc_status || log.plcStatus);
+  const result = toUpper(log.result);
+  return (
+    ["ENDED_OK", "COMPLETED_OK", "PASSED"].includes(plcStatus) ||
+    (plcStatus === "OK" && (!result || ["OK", "PASS", "PASSED"].includes(result))) ||
+    (["OK", "PASS", "PASSED"].includes(result) && !["ENDED_NG", "COMPLETED_NG", "NG", "FAILED"].includes(plcStatus))
+  );
+}
+
+function isFailedOperationLog(log = {}) {
+  const plcStatus = toUpper(log.plc_status || log.plcStatus);
+  const result = toUpper(log.result);
+  return ["ENDED_NG", "COMPLETED_NG", "NG", "FAILED"].includes(plcStatus) || ["NG", "FAIL", "FAILED"].includes(result);
+}
+
 function requiresCustomerQrForCompletion(machine = {}) {
+  const machineType = String(machine.machine_type || machine.machineType || "").trim().toUpperCase();
   const tokens = [
     machine.operation_no,
     machine.machine_name,
   ].map((value) => String(value || "").trim().toUpperCase());
-  return tokens.some((token) => CUSTOMER_QR_WAITING_OPERATIONS.has(token) || token.includes("LASER"));
+  if (tokens.some((token) => CUSTOMER_QR_WAITING_EXCLUDED_TOKENS.some((excluded) => token === excluded || token.includes(excluded)))) {
+    return false;
+  }
+  return CUSTOMER_QR_WAITING_MACHINE_TYPES.has(machineType);
 }
 
 /**
@@ -53,7 +74,7 @@ async function getPartJourney(req, res) {
     const allMachines = await Machine.findAll({
       where: { is_active: true },
       order: [["sequence_no", "ASC"]],
-      attributes: ["id", "machine_name", "operation_no", "sequence_no", "line_name"],
+      attributes: ["id", "machine_name", "machine_type", "operation_no", "sequence_no", "line_name"],
       raw: true,
     });
 
@@ -138,6 +159,7 @@ async function getPartJourney(req, res) {
       const prod = prodByMachine.get(machine.id) || null;
       const hasActivity = activeMachineIds.has(machine.id);
       const waitingForCustomerQr = requiresCustomerQrForCompletion(machine)
+        && !mappedCustomerQr
         && !mappedCustomerQrMachines.has(Number(machine.id))
         && !mappedCustomerQrStations.has(toUpper(machine.operation_no));
 
@@ -155,8 +177,8 @@ async function getPartJourney(req, res) {
         const qrSuccessLog = qualityLogs.find(l => ["PASS", "OK", "ALLOW"].includes(toUpper(l.result)));
         const qrNgLog = qualityLogs.find(l => ["FAIL", "NG"].includes(toUpper(l.result)));
         
-        const opSuccessLog = qualityLogs.find(l => ["ENDED_OK", "PASSED", "OK", "COMPLETED_OK"].includes(toUpper(l.plc_status)));
-        const opNgLog = qualityLogs.find(l => ["ENDED_NG", "NG", "FAILED", "COMPLETED_NG"].includes(toUpper(l.plc_status)));
+        const opSuccessLog = qualityLogs.find(isPassedOperationLog);
+        const opNgLog = qualityLogs.find(isFailedOperationLog);
         
         const latest = ops[ops.length - 1];
         const latestPlcSt = toUpper(latest.plc_status);

@@ -808,7 +808,7 @@ const GlobalPopup = ({
   const effectivePartId = localValidatedPartIdRef.current || partId || lastScannedCode;
   const customerQrCode = String(popup?.customerQrCode || popup?.customer_qr || "").trim();
   const mappedPartId = sanitizeScannerCode(popup?.mappedPartId || popup?.mapped_part_id || popup?.dotPinPartId || popup?.dot_pin_part_id || "");
-  const scannedQr = sanitizeScannerCode(popup?.scannedQr || popup?.displayQr || popup?.rawQr || popup?.customerQrCode || popup?.customer_qr || popup?.partId || popup?.part_id || lastScannedCode);
+  const scannedQr = sanitizeScannerCode(popup?.scannedQr || popup?.displayQr || popup?.rawQr || popup?.customerQrCode || popup?.customer_qr || lastScannedCode || popup?.partId || popup?.part_id);
   const qrFormatName = String(popup?.qrFormatName || popup?.qr_format_name || "").trim().toUpperCase();
   const popupReason = String(popup?.reason || "").trim().toUpperCase();
   const reasonUpper = String(popup?.reason || popup?.qrReason || "").trim().toUpperCase();
@@ -838,9 +838,9 @@ const GlobalPopup = ({
       customerQrCode.toUpperCase() !== String(partId || effectivePartId || "").trim().toUpperCase() ||
       popupReason === "CUSTOMER_QR_MAPPED"
     );
-  const displayedScanCode = hasMappedCustomerQr ? (scannedQr || customerQrCode) : (scannedQr || effectivePartId || lastScannedCode);
+  const displayedScanCode = customerQrCode || scannedQr || effectivePartId || lastScannedCode;
   const displayInternalPartId = mappedPartId || effectivePartId || customerQrCode || displayedScanCode || "-";
-  const displayedScanLabel = hasMappedCustomerQr ? "Scanned Customer QR" : (scannedQr ? "Scanned QR" : "Scanned Part ID");
+  const displayedScanLabel = customerQrCode ? "Scanned Customer QR" : (scannedQr ? "Scanned QR" : "Scanned Part ID");
 
   useEffect(() => {
     let isActive = true;

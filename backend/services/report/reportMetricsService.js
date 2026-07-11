@@ -105,6 +105,13 @@ function calculateProductionMetrics(rows) {
       if (finalStatus === "PASSED" || finalStatus === "NG") return finalStatus;
       const values = requiredOperations.map((operation) => normalizeResult(operationResults[operation])).filter(Boolean);
       if (values.some((value) => value === "NG")) return "NG";
+      const terminalOperation = requiredOperations[requiredOperations.length - 1];
+      if (terminalOperation && normalizeResult(operationResults[terminalOperation]) === "OK") {
+        return "PASSED";
+      }
+      if (requiredOperations.length > 0 && values.length >= requiredOperations.length && values.every((value) => value === "OK")) {
+        return "PASSED";
+      }
       return "IN_PROGRESS";
     })();
 

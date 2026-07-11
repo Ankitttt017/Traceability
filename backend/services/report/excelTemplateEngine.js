@@ -444,6 +444,8 @@ async function generateIndustrialExcel(res, {
     });
     const overall = operationResults.includes("NG")
       ? "NG"
+      : (requiredOperations.length > 0 && operationResults[requiredOperations.length - 1] === "OK")
+        ? "PASSED"
       : (requiredOperations.length > 0 && requiredOperations.every((_, idx) => operationResults[idx] === "OK"))
         ? "PASSED"
         : "IN_PROGRESS";
