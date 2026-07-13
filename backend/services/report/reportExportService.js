@@ -45,6 +45,26 @@ function requiresCustomerQrForReportCompletion(machine = {}) {
   return CUSTOMER_QR_WAITING_MACHINE_TYPES.has(machineType);
 }
 
+function isCustomerQrFormatName(formatName) {
+  const name = String(formatName || "").trim().toUpperCase();
+  return name.includes("CUSTOMER") && name.includes("QR") && name !== CUSTOMER_QR_ONLY_FORMAT;
+}
+
+function matchesCustomerQrRule(code, rules = []) {
+  const raw = sanitizeCustomerQrValue(code);
+  if (!raw) return false;
+  return rules.some((rule) => {
+    if (!isCustomerQrFormatName(rule.format_name)) return false;
+    const pattern = String(rule.regex_pattern || "").trim();
+    if (!pattern) return false;
+    try {
+      return new RegExp(pattern, "i").test(raw);
+    } catch (_error) {
+      return false;
+    }
+  });
+}
+
 async function resolveReportPartSearchValues(input) {
   const raw = String(input || "").trim();
   if (!raw) return [];
@@ -1325,7 +1345,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       })()
     : { byPartAndIp: new Map(), byPartAndStation: new Map() };
 
-  const qrRules = await QrFormatRule.findAll({ attributes: ["format_name", "model_code"], raw: true });
+  const qrRules = await QrFormatRule.findAll({ attributes: ["format_name", "model_code", "regex_pattern"], raw: true });
   const qrMap = qrRules.reduce((acc, q) => {
     acc[q.format_name] = q.model_code;
     return acc;
@@ -1432,9 +1452,16 @@ async function fetchProductionData(filters = {}, options = {}) {
       plc_status: log.plc_status,
       interlock_reason: log.interlock_reason
     });
+    const invalidCustomerQrSelfMap = Boolean(
+      mappedCustomerQr &&
+      mappedOldPartId &&
+      normalizeKey(mappedCustomerQr) === normalizeKey(mappedOldPartId) &&
+      !isCustomerQrOnlyPart(partIdValue) &&
+      matchesCustomerQrRule(mappedCustomerQr, qrRules)
+    );
     const waitingForCustomerQr = Boolean(
       requiresCustomerQrForReportCompletion(log.Machine || {}) &&
-      !mappedCustomerQr
+      (!mappedCustomerQr || invalidCustomerQrSelfMap)
     );
     const industrialResult = waitingForCustomerQr
       ? "IN_PROGRESS"
@@ -1459,10 +1486,12 @@ async function fetchProductionData(filters = {}, options = {}) {
       ? ""
       : (structuredRejectionReason || log.interlock_reason || "");
 
-    const customerQrOnlyPart = isCustomerQrOnlyPart(partIdValue) ||
-      Boolean(mappedCustomerQr && mappedOldPartId && normalizeKey(mappedCustomerQr) === normalizeKey(mappedOldPartId));
-    const displayPartId = customerQrOnlyPart ? "" : (mappedOldPartId || partIdValue);
-    const reportGroupKey = customerQrOnlyPart
+    const customerQrOnlyPart = !invalidCustomerQrSelfMap && (
+      isCustomerQrOnlyPart(partIdValue) ||
+      Boolean(mappedCustomerQr && mappedOldPartId && normalizeKey(mappedCustomerQr) === normalizeKey(mappedOldPartId))
+    );
+    const displayPartId = (customerQrOnlyPart || invalidCustomerQrSelfMap) ? "" : (mappedOldPartId || partIdValue);
+    const reportGroupKey = (customerQrOnlyPart || invalidCustomerQrSelfMap)
       ? (mappedCustomerQr || partIdValue)
       : (mappedOldPartId || mappedCustomerQr || partIdValue);
     const shotLookupPartId = displayPartId || partIdValue;

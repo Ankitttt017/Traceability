@@ -683,7 +683,6 @@ async function isKnownPartOrMappedCustomerQr(code) {
   return Boolean(part || mapping);
 }
 
-
 async function canStartCustomerQrOnlyPart({ code, stationNo, machine }) {
   const raw = String(code || "").trim();
   const station = normalizeStation(stationNo);
