@@ -106,6 +106,11 @@ const io = new Server(server, {
     origin: "*",
   },
   path: "/socket.io/",
+  transports: ["websocket", "polling"],
+  allowEIO3: true,
+  pingTimeout: 30000,
+  pingInterval: 25000,
+  connectTimeout: 15000,
 });
 setSocketServer(io);
 

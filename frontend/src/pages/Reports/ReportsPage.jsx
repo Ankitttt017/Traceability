@@ -20,6 +20,7 @@ const DEFAULT_PLC_CYCLE_COLUMNS = [
   "fix_1_flow","fix_2_flow","fix_3_flow","mov_1_flow","mov_2_flow","mov_3_flow","vacuum_pressure_mmhg",
   "average_die_clamp_tonnage_count","time_for_stroke","stroke","shot_status"
 ];
+const REPORT_AUTO_APPLY_MS = 650;
 const LEAK_TEST_OPERATION = "OP150";
 const LEAK_TEST_SHARED_KEY = "__LEAK_TEST_OP150__";
 const LEAK_TEST_COLUMNS = [
@@ -80,6 +81,55 @@ const PLC_COLUMN_UNITS = {
   average_die_clamp_tonnage_count: "count",
 };
 const withUnit = (label, unit) => unit ? `${label} (${unit})` : label;
+const splitRejectionZone = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return { zone: "", subZone: "" };
+  const parts = raw.split(/\s*\/\s*/).map((part) => part.trim()).filter(Boolean);
+  let zone = "";
+  let subZone = "";
+  parts.forEach((part) => {
+    const subMatch = part.match(/^sub\s*zone\s*[:\-]?\s*(.+)$/i);
+    if (subMatch) {
+      subZone = subMatch[1].trim();
+      return;
+    }
+    const zoneMatch = part.match(/^zone\s*[:\-]?\s*(.+)$/i);
+    if (zoneMatch) {
+      zone = zoneMatch[1].trim();
+      return;
+    }
+    if (!zone) zone = part;
+  });
+  return { zone: zone || raw, subZone };
+};
+const readLabeledValue = (text, label) => {
+  const match = String(text || "").match(new RegExp(`(?:^|\\|)\\s*${label}\\s*:\\s*([^|]+)`, "i"));
+  return match ? match[1].trim() : "";
+};
+const resolveRejectionDetails = (entries = []) => {
+  const source = entries.find((row) => (
+    row?.rejectionCategory || row?.rejection_category ||
+    row?.rejectionReason || row?.rejection_reason ||
+    row?.rejectionView || row?.rejection_view ||
+    row?.rejectionZone || row?.rejection_zone ||
+    row?.rejectionSubZone || row?.rejection_sub_zone ||
+    String(row?.reason || row?.interlock_reason || "").includes("Category:")
+  )) || {};
+  const text = String(source.reason || source.interlock_reason || "").trim();
+  const category = String(source.rejectionCategory || source.rejection_category || readLabeledValue(text, "Category") || "").trim();
+  const rejection = String(source.rejectionReason || source.rejection_reason || readLabeledValue(text, "Reason") || "").trim();
+  const view = String(source.rejectionView || source.rejection_view || readLabeledValue(text, "View") || "").trim();
+  const zoneRaw = String(source.rejectionZone || source.rejection_zone || readLabeledValue(text, "Zone") || "").trim();
+  const zoneParts = splitRejectionZone(zoneRaw);
+  const subZone = String(source.rejectionSubZone || source.rejection_sub_zone || readLabeledValue(text, "Sub Zone") || zoneParts.subZone || "").trim();
+  return {
+    category,
+    rejection,
+    view,
+    zone: zoneParts.zone,
+    subZone,
+  };
+};
 const getLeakTestStatus = (reading) => {
   const r = Array.isArray(reading) ? reading[reading.length - 1] : reading;
   const result = String(r?.Result || r?.result || "").trim().toUpperCase();
@@ -207,6 +257,29 @@ const normalizeFinalPartStatus = (value) => {
   if (["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(status)) return "NG";
   return "IN_PROGRESS";
 };
+const INVALID_CUSTOMER_QR_VALUES = new Set([
+  "ERROR",
+  "ERR",
+  "FAILED",
+  "FAIL",
+  "NG",
+  "WAIT",
+  "WAITING",
+  "PENDING",
+  "IN_PROGRESS",
+  "RUNNING",
+  "PLC_COMM_ERROR",
+  "COMM_ERROR",
+  "TIMEOUT",
+  "NULL",
+  "UNDEFINED",
+]);
+const sanitizeCustomerQrValue = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "-") return "";
+  if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
+  return raw;
+};
 
 const ReportsPage = () => {
   const { t } = useLanguage();
@@ -221,7 +294,9 @@ const ReportsPage = () => {
   }, []);
 
   const [loading, setLoading] = useState(false);
+  const [loadProgress, setLoadProgress] = useState(0);
   const [exportLoading, setExportLoading] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
   const [machines, setMachines] = useState([]);
   const [organization, setOrganization] = useState({ plants: [], lines: [], parts: [] });
   const [availableShifts, setAvailableShifts] = useState([]);
@@ -230,10 +305,10 @@ const ReportsPage = () => {
     metrics: {},
     availableShifts: [],
     plcColumns: [],
-    pagination: { page: 1, pageSize: 200, totalRows: 0, totalPages: 1 },
+    pagination: { page: 1, pageSize: 100, totalRows: 0, totalPages: 1 },
   });
   const [reportPage, setReportPage] = useState(1);
-  const [reportPageSize, setReportPageSize] = useState(200);
+  const [reportPageSize, setReportPageSize] = useState(100);
   const [reportConfig, setReportConfig] = useState(() => loadReportConfig());
   const reportAbortRef = useRef(null);
   
@@ -304,10 +379,20 @@ const ReportsPage = () => {
     reportAbortRef.current?.abort();
     const controller = new AbortController();
     reportAbortRef.current = controller;
-    const requestPayload = { ...appliedFilters, page: reportPage, pageSize: reportPageSize };
+    const requestPayload = { ...appliedFilters, fast: "1", page: reportPage, pageSize: reportPageSize };
     setLoading(true);
+    setLoadProgress(8);
+    const progressTimer = window.setInterval(() => {
+      setLoadProgress((prev) => {
+        if (prev < 55) return prev + 7;
+        if (prev < 82) return prev + 3;
+        if (prev < 94) return prev + 1;
+        return prev;
+      });
+    }, 550);
     try {
       const response = await reportApi.getData(requestPayload, { signal: controller.signal });
+      setLoadProgress(100);
       setData({
         rows: response.rows || [], 
         metrics: response.metrics || {},
@@ -320,8 +405,12 @@ const ReportsPage = () => {
       console.error(e);
       toast.error(t("reports.failedLoad", "Failed to load production analytics"));
     } finally {
+      window.clearInterval(progressTimer);
       if (reportAbortRef.current === controller) {
-        setLoading(false);
+        window.setTimeout(() => {
+          setLoading(false);
+          setLoadProgress(0);
+        }, 250);
         reportAbortRef.current = null;
       }
     }
@@ -334,6 +423,14 @@ const ReportsPage = () => {
   const applyReportFilters = useCallback(() => {
     setReportPage(1);
     setAppliedFilters(filters);
+  }, [filters]);
+
+  useEffect(() => {
+    setReportPage(1);
+    const timer = window.setTimeout(() => {
+      setAppliedFilters(filters);
+    }, REPORT_AUTO_APPLY_MS);
+    return () => window.clearTimeout(timer);
   }, [filters]);
 
   useEffect(() => {
@@ -385,17 +482,28 @@ const ReportsPage = () => {
 
   const handleExport = async (type = "full") => {
     setExportLoading(true);
+    setExportProgress(8);
     const toastId = toast.loading(t("reports.preparingReport", "Preparing report..."));
+    const exportTimer = window.setInterval(() => {
+      setExportProgress((prev) => {
+        if (prev < 45) return prev + 6;
+        if (prev < 75) return prev + 3;
+        if (prev < 92) return prev + 1;
+        return prev;
+      });
+    }, 700);
     try {
       let blob;
+      const exportFilters = { ...appliedFilters, fast: "1", exportLimit: 3000 };
 
       // Pass filters and reportConfig as separate args â€” services.js builds the body correctly
-      if (type === 'full')  blob = await reportApi.exportFull(filters);
-      else if (type === 'ng')    blob = await reportApi.exportNG(filters);
-      else if (type === 'parts') blob = await reportApi.exportParts(filters);
-      else if (type === 'audit') blob = await reportApi.exportAudit(filters);
+      if (type === 'full')  blob = await reportApi.exportFull(exportFilters, reportConfig);
+      else if (type === 'ng')    blob = await reportApi.exportNG(exportFilters, reportConfig);
+      else if (type === 'parts') blob = await reportApi.exportParts(exportFilters, reportConfig);
+      else if (type === 'audit') blob = await reportApi.exportAudit(exportFilters, reportConfig);
 
       if (!blob) throw new Error("Empty response from export engine");
+      setExportProgress(100);
 
       const url  = window.URL.createObjectURL(new Blob([blob], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
       const link = document.createElement('a');
@@ -411,7 +519,11 @@ const ReportsPage = () => {
       console.error("Export failed:", e);
       toast.error(e?.response?.data?.error || t("reports.exportFailed", "Export failed — check console"), { id: toastId });
     } finally {
-      setExportLoading(false);
+      window.clearInterval(exportTimer);
+      window.setTimeout(() => {
+        setExportLoading(false);
+        setExportProgress(0);
+      }, 350);
     }
   };
 
@@ -495,9 +607,13 @@ const ReportsPage = () => {
         renderLeakOperation: Boolean(s.sharedLeakOperation),
       })),
       { key: "overallStatus", label: "Final Status" },
+      { key: "rejectionCategory", label: "Category" },
+      { key: "rejectionReason", label: "Rejection" },
+      { key: "rejectionView", label: "View" },
+      { key: "rejectionZone", label: "Zone" },
+      { key: "rejectionSubZone", label: "Sub Zone" },
       ...plcColumns.map((c) => ({ key: `plc_${c.key}`, label: c.label })),
       ...LEAK_TEST_COLUMNS.map((c) => ({ key: `leak_${c.key}`, label: withUnit(c.label, c.unit) })),
-      { key: "ngReason", label: "Reason / Remark" },
     ];
 
     const dynamicRows = Array.from(grouped.values()).map((entries, idx) => {
@@ -562,6 +678,7 @@ const ReportsPage = () => {
           : (leakStatus || "-");
         operationResults[LEAK_TEST_OPERATION] = pickPreferredOperationResult(operationResults[LEAK_TEST_OPERATION], leakStatus);
       }
+      const rejectionDetails = resolveRejectionDetails(entries);
       const plcPartDie = splitPartDie(plcData.part_name || first.partDieLabel || first.partName || "");
       const shaped = {
         reportGroupKey: partKey,
@@ -574,7 +691,7 @@ const ReportsPage = () => {
         partName: plcPartDie.partName || first.partName || first.modelName || first.componentName || "-",
         dieName: plcPartDie.dieName || first.dieName || "-",
         customerCode: entries
-          .map((row) => row.customerQrCode || row.customerCode || row.customer_qr || "")
+          .map((row) => sanitizeCustomerQrValue(row.customerQrCode || row.customerCode || row.customer_qr || ""))
           .find((value) => String(value || "").trim() && String(value).trim() !== "-") || "-",
         overallStatus: (() => {
           const finalStatus = normalizeFinalPartStatus(first.partStatus || first.part_status || first.status);
@@ -594,6 +711,11 @@ const ReportsPage = () => {
           }
           return rawReason;
         })(),
+        rejectionCategory: rejectionDetails.category || "-",
+        rejectionReason: rejectionDetails.rejection || "-",
+        rejectionView: rejectionDetails.view || "-",
+        rejectionZone: rejectionDetails.zone || "-",
+        rejectionSubZone: rejectionDetails.subZone || "-",
         cycleStartTime: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
         cycleTimeValue: stationPairs.length ? (stationCycleTimes[stationPairs[stationPairs.length - 1].key] || "-") : "-",
       };
@@ -737,9 +859,18 @@ const ReportsPage = () => {
           <button
             disabled={exportLoading}
             onClick={() => handleExport("full")}
-            className="inline-flex items-center gap-2 bg-primary text-on-primary px-4 py-2.5 rounded-lg text-xs font-bold shadow-lg shadow-primary/20 hover:brightness-110 active:scale-95 transition-all disabled:opacity-60"
+            className="relative inline-flex min-w-[172px] items-center justify-center gap-2 overflow-hidden bg-primary text-on-primary px-4 py-2.5 rounded-lg text-xs font-bold shadow-lg shadow-primary/20 hover:brightness-110 active:scale-95 transition-all disabled:opacity-75"
           >
-            <Download size={14} /> {exportLoading ? t("reports.downloading", "Downloading...") : t("reports.downloadReport", "Download Report")}
+            {exportLoading && (
+              <span
+                className="absolute inset-y-0 left-0 bg-white/20 transition-all duration-500"
+                style={{ width: `${Math.max(8, exportProgress)}%` }}
+              />
+            )}
+            <span className="relative inline-flex items-center gap-2">
+              {exportLoading ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
+              {exportLoading ? `Preparing ${exportProgress}%` : t("reports.downloadReport", "Download Report")}
+            </span>
           </button>
         </div>
       </div>
@@ -878,6 +1009,7 @@ const ReportsPage = () => {
         rows={reportTable.rows}
         columns={reportTable.columns}
         loading={loading}
+        progress={loadProgress}
         pagination={data.pagination}
         onPageChange={setReportPage}
         onPageSizeChange={(nextSize) => {

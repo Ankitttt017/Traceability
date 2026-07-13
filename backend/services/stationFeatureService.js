@@ -13,7 +13,7 @@ const DEFAULT_FEATURES = {
   manualResult: false,
   plcPartCount: 1,
   validateQrFormat: true,
-  validateShotNumber: true,
+  validateShotNumber: false,
   validatePreviousStation: true,
   validateDuplicateBarcode: true,
   customerQrRequired: false,
@@ -98,7 +98,7 @@ async function getStationFeatureConfig(stationNo, scopeInput = {}) {
     manualResult: row.manual_result_enabled === true,
     plcPartCount: normalizePlcPartCount(row.plc_part_count),
     validateQrFormat: config.validateQrFormat !== false,
-    validateShotNumber: config.validateShotNumber !== false,
+    validateShotNumber: config.validateShotNumber === true,
     validatePreviousStation: config.validatePreviousStation !== false,
     validateDuplicateBarcode: config.validateDuplicateBarcode !== false,
     customerQrRequired: config.customerQrRequired === true ||

@@ -104,6 +104,29 @@ const STATUS = {
 
 // ── Unchanged utility functions ────────────────────────────────────────────
 function normalizePartId(v) { return String(v||"").trim(); }
+const INVALID_CUSTOMER_QR_VALUES = new Set([
+  "ERROR",
+  "ERR",
+  "FAILED",
+  "FAIL",
+  "NG",
+  "WAIT",
+  "WAITING",
+  "PENDING",
+  "IN_PROGRESS",
+  "RUNNING",
+  "PLC_COMM_ERROR",
+  "COMM_ERROR",
+  "TIMEOUT",
+  "NULL",
+  "UNDEFINED",
+]);
+function sanitizeCustomerQrValue(v) {
+  const raw = String(v || "").trim();
+  if (!raw || raw === "-") return "";
+  if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
+  return raw;
+}
 function extractQrDecision(payload={}) {
   const p=String(payload.qrResult||payload.decision||payload.outcome||payload.scanOutcome||payload.qrDecision||payload.qrStatus||"").trim().toUpperCase();
   if (p) return p;
@@ -149,6 +172,7 @@ function isStationBypassed(station={}) {
   return Array.isArray(station.attempts) && station.attempts.some((att) => att?.isBypassed === true);
 }
 function getJourneyStationState(station={}, qrMeta=null, settings={}) {
+  if (station.customerQrPending === true) return "IN_PROGRESS";
   if (isStationBypassed(station)) return "COMPLETED";
   const qrState = String(station.qrVerification || "").trim().toUpperCase();
   const liveQrLabel = String(qrMeta?.label || "").trim().toUpperCase();
@@ -556,7 +580,7 @@ const ComponentJourney = () => {
   );
   const stationTimeline = useMemo(()=>journeyData?.stationTimeline||[],[journeyData?.stationTimeline]);
   const selectedPartDisplayId = selectedPart?.displayPartId || journeyData?.part?.displayPartId || selectedPartId || "";
-  const selectedCustomerQrCode = selectedPart?.customerQrCode || journeyData?.part?.customerQrCode || "";
+  const selectedCustomerQrCode = sanitizeCustomerQrValue(selectedPart?.customerQrCode || journeyData?.part?.customerQrCode || "");
   const statusSummary   = useMemo(()=>stationTimeline.reduce((acc,st)=>{
     const s=String(getJourneyStationState(st, qrByStation[st.stationNo], getStationFeatures(st.stationNo, stationSettings))||"").toUpperCase();
     if (s==="PASSED" || s==="COMPLETED") acc.passed++;
@@ -634,7 +658,7 @@ const ComponentJourney = () => {
       :rStatus==="ENDED_NG" || rStatus==="COMPLETED_NG"?"NG":"";
     const rStation=String(payload.stationNo||payload.station_no||"").trim().toUpperCase();
     const rTimestamp=payload.timestamp||new Date().toISOString();
-    const customerQrCode=normalizePartId(payload.customerQrCode||payload.customer_qr);
+    const customerQrCode=sanitizeCustomerQrValue(payload.customerQrCode||payload.customer_qr);
     const mappedPartId=normalizePartId(payload.mappedPartId||payload.mapped_part_id||payload.dotPinPartId||payload.dot_pin_part_id);
     const isCustomerQrOnly=Boolean(customerQrCode&&mappedPartId&&customerQrCode===mappedPartId);
     const displayPartId=isCustomerQrOnly ? "" : mappedPartId;
@@ -1441,6 +1465,7 @@ const ComponentJourney = () => {
                 const effectiveStageState = getJourneyStationState(station, qrMeta, settings);
                 const meta     = getStationMeta(effectiveStageState);
                 const sColor   = STATUS[meta.variant]||STATUS.idle;
+                const stationCustomerQrCode = sanitizeCustomerQrValue(station.customerQrCode);
                 // leakMeta is dynamically extracted during map
                 const isReset  = resettingStation===station.stationNo;
                 const bypassed = isStationBypassed(station);
@@ -1498,14 +1523,22 @@ const ComponentJourney = () => {
                               )}
                             </div>
                           )}
-                          {station.customerQrCode && (
+                          {stationCustomerQrCode && (
                             <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap"}}>
                               <span style={{fontSize:10,fontWeight:800,color:C.info(),
                                 background:C.info(0.12),padding:"2px 6px",borderRadius:5}}>
-                                Customer QR: {station.customerQrCode}
+                                Customer QR: {stationCustomerQrCode}
                               </span>
                               <span style={{fontSize:10,color:C.txt("muted"),display:"flex",alignItems:"center",gap:3}}>
                                 <Clock3 size={10}/> Read: {formatTime(station.customerQrMappedAt)}
+                              </span>
+                            </div>
+                          )}
+                          {station.customerQrPending && (
+                            <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap"}}>
+                              <span style={{fontSize:10,fontWeight:800,color:C.amber(),
+                                background:C.amber(0.12),padding:"2px 6px",borderRadius:5}}>
+                                Waiting Customer QR
                               </span>
                             </div>
                           )}

@@ -67,13 +67,6 @@ const Header = ({ onMenuClick }) => {
         keywords: ["operator", "station"],
       },
       {
-        name: t("pages.production", "Production"),
-        path: APP_ROUTES.production,
-        moduleKey: "production",
-        description: "Production charts and reports",
-        keywords: ["charts", "report", "output"],
-      },
-      {
         name: t("pages.traceability", "Traceability"),
         path: APP_ROUTES.traceability,
         moduleKey: "traceability",

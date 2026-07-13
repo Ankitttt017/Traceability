@@ -1118,7 +1118,10 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
 
   try {
     const currentMachine = mId ? await Machine.findByPk(mId, { raw: true }) : null;
-    const stationFeatures = options?.stationFeatures || await getStationFeatureConfig(station);
+    const stationFeatures = options?.stationFeatures || await getStationFeatureConfig(station, {
+      plantId: currentMachine?.plant_id,
+      lineId: currentMachine?.line_id,
+    });
     const qrValidationEnabled = stationFeatures.qr !== false;
     skipQrFormatValidation = skipQrFormatValidation || !qrValidationEnabled || stationFeatures.validateQrFormat === false;
     skipShotValidation = skipShotValidation || stationFeatures.validateShotNumber === false;
@@ -1342,12 +1345,20 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     });
     const latestStationLog = stationLogs[0] || null;
     const latestStationStatus = String(latestStationLog?.plc_status || "").trim().toUpperCase();
-    const hasExistingSuccess =
+    const hasExistingTerminal =
       stationLogs.some((row) => isTerminalOperationLog(row)) ||
       ["ENDED_OK", "PASSED", "COMPLETED_OK", "ENDED_NG", "COMPLETED_NG"].includes(latestStationStatus);
+    const hasExistingSuccess = stationLogs.some((row) => isSuccessfulOperationLog(row));
+    const hasExistingFailure =
+      hasExistingTerminal &&
+      !hasExistingSuccess &&
+      stationLogs.some((row) => {
+        const { plcStatus, result: rowResult } = getNormalizedOperationState(row);
+        return TERMINAL_FAILURE_PLC_STATUSES.has(plcStatus) || ["NG", "FAIL", "FAILED"].includes(rowResult);
+      });
     const hasExistingInProgressAtStation =
       latestStationLog &&
-      !hasExistingSuccess &&
+      !hasExistingTerminal &&
       ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING", "WAITING_END"].includes(latestStationStatus);
 
     const scanAttemptType = hasExistingSuccess ? "RE-SCAN" : "INITIAL";
@@ -1387,7 +1398,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       };
     }
 
-    if (!skipDuplicateValidation && hasExistingSuccess && !part.is_rework) {
+    if (hasExistingTerminal && !part.is_rework) {
       const blockedLog = await OperationLog.create({
         part_id: normalizedPartId,
         machine_id: mId || null,
@@ -1397,9 +1408,9 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
         result: "BLOCK",
         scan_attempt_type: "RE-SCAN",
         validation_result: "DUPLICATE",
-        operation_result: "PASSED", // Show that previous was PASS
+        operation_result: hasExistingFailure ? "FAILED" : "PASSED",
         user_id: userId,
-        interlock_reason: "DUPLICATE_SCAN",
+        interlock_reason: hasExistingFailure ? "ALREADY_FAILED_AT_STATION" : "DUPLICATE_SCAN",
       });
       
       part.last_validation_result = "DUPLICATE";
@@ -1407,10 +1418,12 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
 
       return {
         decision: "BLOCK",
-        reason: "DUPLICATE_SCAN",
+        reason: hasExistingFailure ? "ALREADY_FAILED_AT_STATION" : "DUPLICATE_SCAN",
         qrStatus: "DUPLICATE",
-        operationStatus: "PASSED",
-        message: `Already passed at ${station}. ${nextStationAfterCurrent ? `Scan next at ${nextStationAfterCurrent}.` : "No next operation."}`,
+        operationStatus: hasExistingFailure ? "FAILED" : "PASSED",
+        message: hasExistingFailure
+          ? `Already failed at ${station}. Rework/reset is required before scanning again.`
+          : `Already passed at ${station}. ${nextStationAfterCurrent ? `Scan next at ${nextStationAfterCurrent}.` : "No next operation."}`,
         currentStatus: part.status,
         expectedStation: nextStationAfterCurrent,
         lastCompletedStation: station,

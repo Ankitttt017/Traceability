@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { io } from "socket.io-client";
 import { alarmApi } from "../api/services";
-import { SOCKET_URL } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 
 const NotificationContext = createContext();
 
@@ -61,8 +61,7 @@ export const NotificationProvider = ({ children }) => {
     fetchInitialAlarms();
 
     const socket = io(SOCKET_URL, {
-      path: "/socket.io/",
-      transports: ["polling"], upgrade: false,
+      ...SOCKET_OPTIONS,
       autoConnect: false,
     });
     const connectTimer = setTimeout(() => {

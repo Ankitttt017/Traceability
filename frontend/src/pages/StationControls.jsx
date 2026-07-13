@@ -10,6 +10,7 @@ import {
   normalizeStationKey,
   saveStationFeatureSettings,
 } from "../utils/stationSettings";
+import PageSkeleton from "../components/PageSkeleton";
 
 const T = {
   blue: "#3b82f6",
@@ -410,10 +411,7 @@ const StationControl = () => {
 
       {/* Table */}
       {loading ? (
-        <div className="industrial-card p-20 flex flex-col items-center justify-center text-slate-700/80">
-          <RefreshCw size={48} className="animate-spin mb-4" />
-          <p className="text-xs font-black uppercase tracking-widest">Loading station data...</p>
-        </div>
+        <PageSkeleton rows={6} columns={6} title="Station Control" />
       ) : (
         <div className="industrial-card p-0 overflow-hidden">
           <div className="px-6 py-2 border-b border-border bg-white flex items-center justify-between">

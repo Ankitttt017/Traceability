@@ -13,6 +13,7 @@ import {
 import toast from "react-hot-toast";
 import { scannerApi } from "../api/services";
 import PlantLineSelector from "../components/PlantLineSelector";
+import PageSkeleton from "../components/PageSkeleton";
 import { formatMachineLabel } from "../utils/machineFields";
 import { useLanguage } from "../context/LanguageContext";
 
@@ -572,10 +573,8 @@ const ScannerMonitor = () => {
         </div>
 
         {loading ? (
-          <div style={{ padding: "48px 24px", textAlign: "center" }}>
-            <RefreshCw size={22} color={C.txt("muted")}
-              style={{ margin: "0 auto 12px", animation: "scSpin .9s linear infinite" }}/>
-            <p style={{ fontSize: 12, color: C.txt("muted") }}>Loading scanner data…</p>
+          <div style={{ padding: 24 }}>
+            <PageSkeleton rows={5} columns={5} title="Scanners" />
           </div>
         ) : filteredRows.length === 0 ? (
           <div style={{ padding: "56px 24px", textAlign: "center" }}>
