@@ -4002,26 +4002,26 @@ exports.processScan = async (req, res) => {
         },
       });
       if (existingMapping && String(existingMapping.old_part_id || "").trim() === activePartId) {
-        emitOperatorPopup("WARNING", {
+        emitOperatorPopup("ERROR", {
           partId: activePartId,
           customerQrCode: scannedQrRaw,
           stationNo: normalizedStation,
           machineId: machine.id,
           machineName: machine.machine_name,
-          status: "DUPLICATE",
-          plcStatus: "WAITING_PLC",
+          status: "BLOCKED",
+          plcStatus: "BLOCKED",
           qrResult: "DUPLICATE",
-          operationStatus: "WAITING",
-          reason: "CUSTOMER_QR_ALREADY_MAPPED_SAME_PART",
-          message: "Customer QR already mapped to this part. Continue to next station.",
+          operationStatus: "BLOCKED",
+          reason: "DUPLICATE_SCAN",
+          message: "Customer QR already mapped/registered. Do not scan it again.",
         });
-        return res.status(200).json({
+        return res.status(409).json({
           status: "DUPLICATE",
-          decision: "ALLOW",
+          decision: "BLOCK",
           qrStatus: "DUPLICATE",
-          operationStatus: "WAITING",
-          reason: "CUSTOMER_QR_ALREADY_MAPPED_SAME_PART",
-          message: "Customer QR already mapped to this part. Continue to next station.",
+          operationStatus: "BLOCKED",
+          reason: "DUPLICATE_SCAN",
+          message: "Customer QR already mapped/registered. Do not scan it again.",
           mapped: true,
           duplicate: true,
           partId: activePartId,
@@ -4577,6 +4577,36 @@ exports.verifyScanForOperator = async (req, res) => {
       ) {
         return res.status(409).json({
           error: "Customer QR already mapped to another part",
+        });
+      }
+      if (
+        existingCustomerMapping &&
+        String(existingCustomerMapping.old_part_id || "").trim() === activePartIdForMachine
+      ) {
+        emitOperatorPopup("ERROR", {
+          partId: activePartIdForMachine,
+          stationNo,
+          machineId: machine.id,
+          machineName: machine.machine_name,
+          status: "BLOCKED",
+          plcStatus: "BLOCKED",
+          qrResult: "DUPLICATE",
+          operationStatus: "BLOCKED",
+          reason: "DUPLICATE_SCAN",
+          message: "Customer QR already mapped/registered. Do not scan it again.",
+          customerQrCode: scannedQrRaw,
+        });
+        return res.status(409).json({
+          status: "DUPLICATE",
+          decision: "BLOCK",
+          qrStatus: "DUPLICATE",
+          operationStatus: "BLOCKED",
+          reason: "DUPLICATE_SCAN",
+          message: "Customer QR already mapped/registered. Do not scan it again.",
+          mapped: true,
+          duplicate: true,
+          partId: activePartIdForMachine,
+          customerQrCode: scannedQrRaw,
         });
       }
 

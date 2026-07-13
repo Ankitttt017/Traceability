@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from "react";
-import { Activity } from "lucide-react";
+import React, { useMemo, useRef, useState } from "react";
+import { Activity, ChevronLeft, ChevronRight } from "lucide-react";
 import PageSkeleton from "../../components/PageSkeleton";
 
 const StatusChip = ({ status }) => {
@@ -38,6 +38,7 @@ const ReportTable = ({
 }) => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
+  const tableScrollRef = useRef(null);
   const serverPaged = Boolean(pagination && typeof onPageChange === "function");
   const effectivePageSize = serverPaged ? Number(pagination.pageSize || 50) : pageSize;
   const totalRows = serverPaged ? Number(pagination.totalRows || rows.length || 0) : rows.length;
@@ -65,6 +66,12 @@ const ReportTable = ({
       setPage(1);
     }
   };
+  const slideTable = (direction) => {
+    const node = tableScrollRef.current;
+    if (!node) return;
+    const amount = Math.max(320, Math.floor(node.clientWidth * 0.75));
+    node.scrollBy({ left: direction * amount, behavior: "smooth" });
+  };
 
   if (loading) {
     return <PageSkeleton rows={7} columns={6} progress={progress} title="Report" />;
@@ -87,7 +94,24 @@ const ReportTable = ({
   return (
     <div className="bg-bg-card border border-border rounded-xl shadow-sm overflow-hidden">
       <div className="h-1 w-full bg-gradient-to-r from-primary via-slate-400 to-emerald-500" />
-      <div className="overflow-auto max-h-[70vh]" style={{ scrollbarWidth: "thin" }}>
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => slideTable(-1)}
+          className="absolute left-2 top-1/2 z-20 hidden h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-border bg-bg-card/95 text-text-main shadow-lg backdrop-blur hover:bg-primary hover:text-on-primary md:flex"
+          aria-label="Scroll report table left"
+        >
+          <ChevronLeft size={18} />
+        </button>
+        <button
+          type="button"
+          onClick={() => slideTable(1)}
+          className="absolute right-2 top-1/2 z-20 hidden h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-border bg-bg-card/95 text-text-main shadow-lg backdrop-blur hover:bg-primary hover:text-on-primary md:flex"
+          aria-label="Scroll report table right"
+        >
+          <ChevronRight size={18} />
+        </button>
+      <div ref={tableScrollRef} className="overflow-auto max-h-[70vh] scroll-smooth" style={{ scrollbarWidth: "thin" }}>
         <table className="w-max min-w-full border-collapse text-[12px]">
           <thead className="sticky top-0 z-10">
             <tr className="border-b border-border backdrop-blur" style={{ background: "linear-gradient(90deg,#10254d,#1a3a7c,#2d5ea7)" }}>
@@ -195,6 +219,7 @@ const ReportTable = ({
             ))}
           </tbody>
         </table>
+      </div>
       </div>
       <div className="px-6 py-3 bg-bg-dark/20 border-t border-border flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-2 text-[11px] text-text-muted">
