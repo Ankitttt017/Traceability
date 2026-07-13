@@ -79,6 +79,50 @@ const PLC_COLUMN_UNITS = {
 };
 const withUnit = (label, unit) => unit ? `${label} (${unit})` : label;
 
+function splitRejectionZone(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return { zone: "", subZone: "" };
+  const parts = raw.split(/\s*\/\s*/).map((part) => part.trim()).filter(Boolean);
+  let zone = "";
+  let subZone = "";
+  parts.forEach((part) => {
+    const subMatch = part.match(/^sub\s*zone\s*[:\-]?\s*(.+)$/i);
+    if (subMatch) {
+      subZone = subMatch[1].trim();
+      return;
+    }
+    const zoneMatch = part.match(/^zone\s*[:\-]?\s*(.+)$/i);
+    if (zoneMatch) {
+      zone = zoneMatch[1].trim();
+      return;
+    }
+    if (!zone) zone = part;
+  });
+  return { zone: zone || raw, subZone };
+}
+
+function readLabeledValue(text, label) {
+  const match = String(text || "").match(new RegExp(`(?:^|\\|)\\s*${label}\\s*:\\s*([^|]+)`, "i"));
+  return match ? match[1].trim() : "";
+}
+
+function resolveRejectionDetails(row = {}) {
+  const text = String(row.reason || row.interlock_reason || "").trim();
+  const category = String(row.rejectionCategory || row.rejection_category || readLabeledValue(text, "Category") || "").trim();
+  const rejection = String(row.rejectionReason || row.rejection_reason || readLabeledValue(text, "Reason") || "").trim();
+  const view = String(row.rejectionView || row.rejection_view || readLabeledValue(text, "View") || "").trim();
+  const zoneRaw = String(row.rejectionZone || row.rejection_zone || readLabeledValue(text, "Zone") || "").trim();
+  const zoneParts = splitRejectionZone(zoneRaw);
+  const subZone = String(row.rejectionSubZone || row.rejection_sub_zone || readLabeledValue(text, "Sub Zone") || zoneParts.subZone || "").trim();
+  return {
+    category,
+    rejection,
+    view,
+    zone: zoneParts.zone,
+    subZone,
+  };
+}
+
 function stationResultRank(value) {
   const normalized = String(value || "").trim().toUpperCase();
   if (normalized === "NG") return 3;
@@ -282,6 +326,7 @@ async function generateIndustrialExcel(res, {
   const grouped = new Map();
   rows.forEach((row) => {
     const partSerial = row.part_id || row.partId || "-";
+    const rejectionDetails = resolveRejectionDetails(row);
     if (!grouped.has(partSerial)) {
       grouped.set(partSerial, {
         partSerial,
@@ -298,6 +343,11 @@ async function generateIndustrialExcel(res, {
         status: row.statusLabel || row.industrialResult || row.result || "-",
         shotDate: row.shot_date || row.shotDate || "-",
         reason: row.interlock_reason || row.reason || "-",
+        rejectionCategory: rejectionDetails.category,
+        rejectionReason: rejectionDetails.rejection,
+        rejectionView: rejectionDetails.view,
+        rejectionZone: rejectionDetails.zone,
+        rejectionSubZone: rejectionDetails.subZone,
         stationResults: {},
         plcReading: {},
         leakTestReading: row.leakTestReading || null,
@@ -308,6 +358,11 @@ async function generateIndustrialExcel(res, {
     if ((!bucket.customerQrCode || bucket.customerQrCode === "-") && rowCustomerQr) {
       bucket.customerQrCode = rowCustomerQr;
     }
+    if (!bucket.rejectionCategory && rejectionDetails.category) bucket.rejectionCategory = rejectionDetails.category;
+    if (!bucket.rejectionReason && rejectionDetails.rejection) bucket.rejectionReason = rejectionDetails.rejection;
+    if (!bucket.rejectionView && rejectionDetails.view) bucket.rejectionView = rejectionDetails.view;
+    if (!bucket.rejectionZone && rejectionDetails.zone) bucket.rejectionZone = rejectionDetails.zone;
+    if (!bucket.rejectionSubZone && rejectionDetails.subZone) bucket.rejectionSubZone = rejectionDetails.subZone;
     const machineName = String(row.machineName || row.machine_name || row?.Machine?.machine_name || "").trim();
     const op = String(row.operation_no || row.operationNo || row.stationNo || "").trim();
     const stationKey = machineName && op ? `${machineName}__${op}` : "";
@@ -387,6 +442,13 @@ async function generateIndustrialExcel(res, {
   ];
   const stationColumns = stationPairsFinal.map((s) => ({ header: s.label, width: 24 }));
   const finalColumn = [{ header: "Final Status", width: 16 }];
+  const rejectionColumns = [
+    { header: "Category", width: 18 },
+    { header: "Rejection", width: 24 },
+    { header: "View", width: 18 },
+    { header: "Zone", width: 16 },
+    { header: "Sub Zone", width: 16 },
+  ];
   const plcKeys = ["shot_datetime", ...DEFAULT_PLC_CYCLE_COLUMNS.filter((key) => !["machine_name", "shot_number", "shot_date", "shot_time"].includes(key))];
   const formatPlcHeader = (key) => {
     const raw = String(key || "").trim().toLowerCase();
@@ -418,9 +480,8 @@ async function generateIndustrialExcel(res, {
       ...column,
       header: withUnit(column.header, column.unit),
     })),
-    { header: "Reason / Remark", width: 34 },
   ];
-  const columns = [...baseColumns, ...stationColumns, ...finalColumn, ...plcColumns, ...tailColumns];
+  const columns = [...baseColumns, ...stationColumns, ...finalColumn, ...rejectionColumns, ...plcColumns, ...tailColumns];
 
   columns.forEach((col, i) => {
     worksheet.getColumn(i + 1).width = col.width;
@@ -461,6 +522,11 @@ async function generateIndustrialExcel(res, {
       row.cycleStart,
       ...stationResults,
       overall,
+      row.rejectionCategory || "-",
+      row.rejectionReason || "-",
+      row.rejectionView || "-",
+      row.rejectionZone || "-",
+      row.rejectionSubZone || "-",
       ...plcColumns.map((c) => {
         if (c.key === "shot_datetime") {
           const y = plc.shot_year;
@@ -500,7 +566,6 @@ async function generateIndustrialExcel(res, {
         return v === undefined || v === null || v === "" ? "-" : v;
       }),
       ...LEAK_TEST_COLUMNS.map((column) => getLeakTestValue(row.leakTestReadings?.length > 0 ? row.leakTestReadings : row.leakTestReading, column.key)),
-      row.reason,
     ];
 
     const rowIndex = tableHeaderRow + 1 + i;

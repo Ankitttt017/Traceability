@@ -7,7 +7,7 @@
  */
 import { useEffect } from "react";
 import { io } from "socket.io-client";
-import { SOCKET_URL } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 import toast from "react-hot-toast";
 import IndustrialToast from "../components/IndustrialToast";
 
@@ -44,8 +44,7 @@ function alarmToast({ icon, title, detail, type = "error" }) {
 export function useAlarmToasts() {
   useEffect(() => {
     const socket = io(SOCKET_URL, {
-      path: "/socket.io/",
-      transports: ["polling"], upgrade: false,
+      ...SOCKET_OPTIONS,
       autoConnect: false,
       reconnectionAttempts: 5,
     });

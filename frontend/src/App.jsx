@@ -5,7 +5,6 @@ import { LanguageProvider } from "./context/LanguageContext";
 import MainLayout from "./layouts/MainLayout";
 import LoginPage from "./pages/LoginPage";
 import Dashboard from "./pages/Dashboard";
-import ProductionCharts from "./pages/ProductionCharts";
 import Traceability from "./pages/Traceability";
 import Machine from "./pages/Machine";
 import UsersPage from "./pages/Users";
@@ -73,7 +72,6 @@ const MODULE_REDIRECT_ORDER = [
   { moduleKey: "operator_view", path: APP_ROUTES.operatorView },
   { moduleKey: "packing", path: APP_ROUTES.packing },
   { moduleKey: "packing_management", path: APP_ROUTES.packingManagement },
-  { moduleKey: "production", path: APP_ROUTES.production },
   { moduleKey: "reports", path: APP_ROUTES.reports },
   { moduleKey: "traceability", path: APP_ROUTES.traceability },
   { moduleKey: "io_monitor", path: APP_ROUTES.ioMonitor },
@@ -264,14 +262,6 @@ function App() {
             />
 
             
-            <Route
-              path={APP_ROUTES.production.slice(1)}
-              element={
-                <ModuleRoute moduleKey="production">
-                  <ProductionCharts />
-                </ModuleRoute>
-              }
-            />
             <Route
               path={APP_ROUTES.reports.slice(1)}
               element={

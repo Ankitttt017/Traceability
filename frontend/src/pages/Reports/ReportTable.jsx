@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { Activity } from "lucide-react";
+import PageSkeleton from "../../components/PageSkeleton";
 
 const StatusChip = ({ status }) => {
   const normalized = String(status || "").trim().toUpperCase();
@@ -30,12 +31,13 @@ const ReportTable = ({
   rows = [],
   columns = [],
   loading,
+  progress = 0,
   pagination = null,
   onPageChange,
   onPageSizeChange,
 }) => {
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(200);
+  const [pageSize, setPageSize] = useState(100);
   const serverPaged = Boolean(pagination && typeof onPageChange === "function");
   const effectivePageSize = serverPaged ? Number(pagination.pageSize || 50) : pageSize;
   const totalRows = serverPaged ? Number(pagination.totalRows || rows.length || 0) : rows.length;
@@ -65,12 +67,7 @@ const ReportTable = ({
   };
 
   if (loading) {
-    return (
-      <div className="bg-bg-card border border-border rounded-xl p-20 flex flex-col items-center justify-center space-y-4">
-        <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
-        <p className="text-xs font-bold text-text-muted uppercase tracking-widest">Preparing Report Dataset...</p>
-      </div>
-    );
+    return <PageSkeleton rows={7} columns={6} progress={progress} title="Report" />;
   }
 
   if (!rows.length) {
@@ -163,6 +160,17 @@ const ReportTable = ({
                     return (
                       <td key={column.key} className="px-3 py-3 text-[11px] text-red-600/90 min-w-[220px] max-w-[420px] text-left whitespace-normal break-words leading-relaxed" title={reasonText || undefined}>
                         {reasonText || "-"}
+                      </td>
+                    );
+                  }
+                  if (column.key.startsWith("rejection")) {
+                    return (
+                      <td
+                        key={column.key}
+                        className="px-3 py-3 text-[11px] text-[#111827] text-center font-medium min-w-[120px] max-w-[220px] whitespace-normal break-words leading-relaxed"
+                        title={text !== "-" ? text : undefined}
+                      >
+                        {text}
                       </td>
                     );
                   }

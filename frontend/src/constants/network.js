@@ -23,4 +23,14 @@ export function redirectLegacyHost() {
 }
 
 export const SOCKET_URL = String(import.meta.env.VITE_SOCKET_URL || "").trim() || getCanonicalOrigin();
+export const SOCKET_OPTIONS = Object.freeze({
+  path: "/socket.io/",
+  transports: ["websocket", "polling"],
+  upgrade: true,
+  timeout: 8000,
+  reconnection: true,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  randomizationFactor: 0.5,
+});
 export const SCANNER_CONNECTION_GRACE_MS = 20000;

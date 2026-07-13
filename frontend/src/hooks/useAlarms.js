@@ -5,7 +5,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
-import { SOCKET_URL } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 
 
 const MAX_ALARMS = 10;
@@ -15,7 +15,7 @@ export function useAlarms() {
   const idRef = useRef(0);
 
   useEffect(() => {
-    const socket = io(SOCKET_URL, { path: "/socket.io/", transports: ["polling"], upgrade: false });
+    const socket = io(SOCKET_URL, SOCKET_OPTIONS);
 
     const push = (type) => (data) => {
       const _id = ++idRef.current;

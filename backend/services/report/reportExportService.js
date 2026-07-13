@@ -169,6 +169,50 @@ function shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr) {
 function normalizeKey(value) {
   return String(value || "").trim().toUpperCase();
 }
+const INVALID_CUSTOMER_QR_VALUES = new Set([
+  "ERROR",
+  "ERR",
+  "FAILED",
+  "FAIL",
+  "NG",
+  "WAIT",
+  "WAITING",
+  "PENDING",
+  "IN_PROGRESS",
+  "RUNNING",
+  "PLC_COMM_ERROR",
+  "COMM_ERROR",
+  "TIMEOUT",
+  "NULL",
+  "UNDEFINED",
+]);
+function sanitizeCustomerQrValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "-") return "";
+  if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
+  return raw;
+}
+function splitRejectionZone(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return { zone: "", subZone: "" };
+  const parts = raw.split(/\s*\/\s*/).map((part) => part.trim()).filter(Boolean);
+  let zone = "";
+  let subZone = "";
+  parts.forEach((part) => {
+    const subMatch = part.match(/^sub\s*zone\s*[:\-]?\s*(.+)$/i);
+    if (subMatch) {
+      subZone = subMatch[1].trim();
+      return;
+    }
+    const zoneMatch = part.match(/^zone\s*[:\-]?\s*(.+)$/i);
+    if (zoneMatch) {
+      zone = zoneMatch[1].trim();
+      return;
+    }
+    if (!zone) zone = part;
+  });
+  return { zone: zone || raw, subZone };
+}
 function normalizePartToken(value) {
   return String(value || "").trim().toUpperCase();
 }
@@ -744,9 +788,9 @@ async function findAllWithRetry(queryFn, retries = 1, waitMs = 1200) {
   throw lastErr;
 }
 
-async function runIndustrialExport(res, { filters, reportConfig, type = "full" }) {
+async function runIndustrialExport(res, { filters, reportConfig, type = "full", options = {} }) {
   // 1. Resolve Data
-  const rows = await fetchProductionData(filters);
+  const rows = await fetchProductionData(filters, options);
   const machineWhere = {};
   if (filters?.machineId) machineWhere.id = filters.machineId;
   if (filters?.plantId) machineWhere.plant_id = filters.plantId;
@@ -778,6 +822,143 @@ async function runIndustrialExport(res, { filters, reportConfig, type = "full" }
     sheetName: type === "ng" ? "NG Report" : "Production Report",
     filePrefix: type === "ng" ? "NG_REPORT" : "FULL_REPORT"
   });
+}
+
+async function buildProductionCountScope(filters = {}) {
+  const now = new Date();
+  const from = filters.dateFrom ? new Date(filters.dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const to = filters.dateTo ? new Date(filters.dateTo) : now;
+  const safeFrom = Number.isNaN(from.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : from;
+  const safeTo = Number.isNaN(to.getTime()) ? now : to;
+  const whereParts = [
+    "ol.createdAt >= :dateFrom",
+    "ol.createdAt <= :dateTo",
+    "NULLIF(LTRIM(RTRIM(CAST(ol.part_id AS NVARCHAR(255)))), '') IS NOT NULL",
+    "(ol.plc_status IS NULL OR ol.plc_status NOT IN ('RESET', 'VALIDATION_ONLY'))",
+    "(ol.validation_result IS NULL OR ol.validation_result NOT IN ('FAILED', 'DUPLICATE', 'BLOCKED'))",
+    "(ol.result IS NULL OR ol.result <> 'BLOCK')",
+  ];
+  const replacements = { dateFrom: safeFrom, dateTo: safeTo };
+  const joins = [];
+
+  if (filters.machineId) {
+    whereParts.push("ol.machine_id = :machineId");
+    replacements.machineId = filters.machineId;
+  }
+  if (filters.operationNo) {
+    whereParts.push("ol.operation_no = :operationNo");
+    replacements.operationNo = String(filters.operationNo).trim().toUpperCase();
+  }
+  if (filters.operatorId) {
+    whereParts.push("ol.user_id = :operatorId");
+    replacements.operatorId = filters.operatorId;
+  }
+  if (filters.station) {
+    whereParts.push("(ol.operation_no = :station OR ol.station_no = :station)");
+    replacements.station = String(filters.station).trim().toUpperCase();
+  }
+  if (filters.plantId || filters.lineId || filters.lineName) {
+    joins.push("INNER JOIN Machines m ON m.id = ol.machine_id");
+    if (filters.plantId) {
+      whereParts.push("m.plant_id = :plantId");
+      replacements.plantId = filters.plantId;
+    }
+    if (filters.lineId) {
+      whereParts.push("m.line_id = :lineId");
+      replacements.lineId = filters.lineId;
+    } else if (filters.lineName) {
+      whereParts.push("m.line_name = :lineName");
+      replacements.lineName = filters.lineName;
+    }
+  }
+
+  const searchToken = String(filters.barcode || filters.customerCode || "").trim();
+  if (searchToken) {
+    const searchValues = await resolveReportPartSearchValues(searchToken);
+    const values = searchValues.length ? searchValues : [searchToken];
+    const clauses = values.slice(0, 20).map((value, index) => {
+      replacements[`search${index}`] = `%${value}%`;
+      return `ol.part_id LIKE :search${index}`;
+    });
+    whereParts.push(`(${clauses.join(" OR ")})`);
+  }
+
+  const normalizedStatus = String(filters.status || filters.resultType || "").trim().toUpperCase();
+  if (["NG", "FAILED"].includes(normalizedStatus)) {
+    whereParts.push(`(
+      ol.plc_status IN ('ENDED_NG', 'INTERLOCKED')
+      OR ol.result IN ('NG', 'FAIL', 'FAILED', 'BLOCK')
+      OR ol.operation_result IN ('FAILED', 'INTERLOCKED')
+      OR ol.rejection_reason IS NOT NULL
+      OR ol.rejection_category IS NOT NULL
+    )`);
+  } else if (["OK", "PASSED"].includes(normalizedStatus)) {
+    whereParts.push(`(
+      ol.plc_status = 'ENDED_OK'
+      OR ol.result IN ('OK', 'PASS', 'PASSED')
+      OR ol.operation_result = 'PASSED'
+    )`);
+  } else if (normalizedStatus === "VALIDATION") {
+    whereParts.push("ol.validation_result IN ('FAILED', 'BLOCKED', 'DUPLICATE')");
+  } else if (normalizedStatus === "BYPASS") {
+    whereParts.push("ol.is_bypassed = 1");
+  }
+
+  return { whereParts, joins, replacements };
+}
+
+async function fetchProductionPartCount(filters = {}) {
+  const { whereParts, joins, replacements } = await buildProductionCountScope(filters);
+  const [rows] = await sequelize.query(
+    `
+      SELECT COUNT(DISTINCT ol.part_id) AS totalRows
+      FROM OperationLogs ol
+      ${joins.join("\n")}
+      WHERE ${whereParts.join("\n        AND ")}
+    `,
+    { replacements }
+  );
+  return Number(rows?.[0]?.totalRows || 0) || 0;
+}
+
+async function fetchProductionSummaryMetrics(filters = {}) {
+  const { whereParts, joins, replacements } = await buildProductionCountScope(filters);
+  const [rows] = await sequelize.query(
+    `
+      WITH FilteredParts AS (
+        SELECT ol.part_id, MAX(ol.createdAt) AS latestAt
+        FROM OperationLogs ol
+        ${joins.join("\n")}
+        WHERE ${whereParts.join("\n          AND ")}
+        GROUP BY ol.part_id
+      )
+      SELECT
+        COUNT(*) AS totalProduction,
+        SUM(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('OK', 'PASSED', 'PASS', 'COMPLETED', 'COMPLETED_OK', 'ENDED_OK') THEN 1 ELSE 0 END) AS totalOK,
+        SUM(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('NG', 'FAILED', 'FAIL', 'REJECTED', 'INTERLOCKED', 'COMPLETED_NG', 'ENDED_NG') THEN 1 ELSE 0 END) AS totalNG,
+        SUM(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) NOT IN ('OK', 'PASSED', 'PASS', 'COMPLETED', 'COMPLETED_OK', 'ENDED_OK', 'NG', 'FAILED', 'FAIL', 'REJECTED', 'INTERLOCKED', 'COMPLETED_NG', 'ENDED_NG') THEN 1 ELSE 0 END) AS inProgress
+      FROM FilteredParts fp
+      LEFT JOIN Parts p ON p.part_id = fp.part_id
+    `,
+    { replacements }
+  );
+  const first = rows?.[0] || {};
+  const totalProduction = Number(first.totalProduction || 0);
+  const totalOK = Number(first.totalOK || 0);
+  const totalNG = Number(first.totalNG || 0);
+  const inProgress = Number(first.inProgress || 0);
+  const productionBase = totalOK + totalNG;
+  return {
+    totalProduction,
+    totalOK,
+    totalNG,
+    inProgress,
+    validationRejects: totalNG,
+    passRate: productionBase > 0 ? Number(((totalOK / productionBase) * 100).toFixed(2)) : 0,
+    byMachine: {},
+    byShift: {},
+    byLine: {},
+  };
 }
 
 /**
@@ -817,6 +998,7 @@ async function fetchProductionData(filters = {}, options = {}) {
 
   const buildWhere = async ({ includeDateRange = true } = {}) => {
     const nextWhere = {};
+    const andConditions = [];
     if (includeDateRange) {
       nextWhere.createdAt = {
         [Op.gte]: safeFrom,
@@ -834,10 +1016,38 @@ async function fetchProductionData(filters = {}, options = {}) {
     }
     if (station) {
       const stationToken = String(station).trim().toUpperCase();
-      nextWhere[Op.or] = [
+      andConditions.push({
+        [Op.or]: [
         { operation_no: stationToken },
         { station_no: stationToken },
-      ];
+        ],
+      });
+    }
+    const normalizedStatusFilter = String(status || resultType || "").trim().toUpperCase();
+    if (normalizedStatusFilter) {
+      if (["NG", "FAILED"].includes(normalizedStatusFilter)) {
+        andConditions.push({
+          [Op.or]: [
+            { plc_status: { [Op.in]: ["ENDED_NG", "INTERLOCKED"] } },
+            { result: { [Op.in]: ["NG", "FAIL", "FAILED", "BLOCK"] } },
+            { operation_result: { [Op.in]: ["FAILED", "INTERLOCKED"] } },
+            { rejection_reason: { [Op.ne]: null } },
+            { rejection_category: { [Op.ne]: null } },
+          ],
+        });
+      } else if (["OK", "PASSED"].includes(normalizedStatusFilter)) {
+        andConditions.push({
+          [Op.or]: [
+            { plc_status: "ENDED_OK" },
+            { result: { [Op.in]: ["OK", "PASS", "PASSED"] } },
+            { operation_result: "PASSED" },
+          ],
+        });
+      } else if (normalizedStatusFilter === "VALIDATION") {
+        andConditions.push({ validation_result: { [Op.in]: ["FAILED", "BLOCKED", "DUPLICATE"] } });
+      } else if (normalizedStatusFilter === "BYPASS") {
+        nextWhere.is_bypassed = true;
+      }
     }
     if (plantId || lineId || lineName) {
       const machineWhere = {};
@@ -852,6 +1062,9 @@ async function fetchProductionData(filters = {}, options = {}) {
       } else {
         nextWhere.machine_id = { [Op.in]: ids };
       }
+    }
+    if (andConditions.length) {
+      nextWhere[Op.and] = andConditions;
     }
     return nextWhere;
   };
@@ -956,7 +1169,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     return scopedParts.map((part, index) => {
       const partId = String(part.part_id || "").trim();
       const partStatus = String(part.status || "IN_PROGRESS").trim().toUpperCase();
-      const mappedCustomerQr = customerQrByPartId[normalizeKey(partId)] || "-";
+      const mappedCustomerQr = sanitizeCustomerQrValue(customerQrByPartId[normalizeKey(partId)]);
       return {
         srNo: index + 1,
         partId,
@@ -967,8 +1180,8 @@ async function fetchProductionData(filters = {}, options = {}) {
         anchorLineName: "-",
         anchorShiftCode: shiftCode || "UNASSIGNED",
         isAnchorMachineRow: true,
-        customerCode: mappedCustomerQr,
-        customerQrCode: mappedCustomerQr,
+        customerCode: mappedCustomerQr || "-",
+        customerQrCode: mappedCustomerQr || "-",
         machineName: "-",
         lineName: "-",
         operationNo: "-",
@@ -1189,7 +1402,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     }
 
     const partIdValue = String(log.part_id || "").trim();
-    const mappedCustomerQr = String(partCodeMap[normalizeKey(partIdValue)] || "").trim();
+    const mappedCustomerQr = sanitizeCustomerQrValue(partCodeMap[normalizeKey(partIdValue)]);
     const mappedOldPartId = String(oldPartMap[normalizeKey(partIdValue)] || "").trim();
     const recoveryCompletedByCustomerQr = shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr);
     const stationNo = String(log.operation_no || log.station_no || "").trim().toUpperCase();
@@ -1211,10 +1424,12 @@ async function fetchProductionData(filters = {}, options = {}) {
           ? "OK"
           : industrialResultRaw;
     const category = recoveryCompletedByCustomerQr ? "PRODUCTION" : categoryRaw;
+    const rejectionZoneParts = splitRejectionZone(log.rejection_zone);
     const structuredRejectionReason = [
       log.rejection_category ? `Category: ${log.rejection_category}` : "",
       log.rejection_view ? `View: ${log.rejection_view}` : "",
-      log.rejection_zone ? `Zone: ${log.rejection_zone}` : "",
+      rejectionZoneParts.zone ? `Zone: ${rejectionZoneParts.zone}` : "",
+      rejectionZoneParts.subZone ? `Sub Zone: ${rejectionZoneParts.subZone}` : "",
       log.rejection_reason ? `Reason: ${log.rejection_reason}` : "",
       log.rejection_remark ? `Remark: ${log.rejection_remark}` : "",
     ].filter(Boolean).join(" | ");
@@ -1293,7 +1508,8 @@ async function fetchProductionData(filters = {}, options = {}) {
       reason: displayReason,
       rejectionCategory: log.rejection_category || "",
       rejectionView: log.rejection_view || "",
-      rejectionZone: log.rejection_zone || "",
+      rejectionZone: rejectionZoneParts.zone || "",
+      rejectionSubZone: rejectionZoneParts.subZone || "",
       rejectionReason: log.rejection_reason || "",
       rejectionRemark: log.rejection_remark || "",
       plcReading: plcReadingFromDb,
@@ -1359,6 +1575,8 @@ async function fetchProductionData(filters = {}, options = {}) {
 module.exports = {
   runIndustrialExport,
   fetchProductionData,
+  fetchProductionPartCount,
+  fetchProductionSummaryMetrics,
   getPlcReadingColumns,
   fetchPlcShotSummary,
 };

@@ -533,14 +533,16 @@ class PlcHandshakeEngine {
    * Signal Interlock to PLC (Rejected Scan)
    * Writes BLOCK/NG value to the mapped register to interlock the machine cycle.
    */
-  async signalInterlock(machineId, reason = "REJECTED_SCAN") {
+  async signalInterlock(machineId, reason = "REJECTED_SCAN", options = {}) {
     const id = Number(machineId || 0);
     if (!id) return;
+    const force = options?.force === true;
 
     // Suppression Check (Section 4)
     const cacheKey = `${id}:${reason}`;
     const now = Date.now();
-    if (suppressionCache.has(cacheKey) && (now - suppressionCache.get(cacheKey) < SUPPRESSION_WINDOW_MS)) {
+    if (!force && suppressionCache.has(cacheKey) && (now - suppressionCache.get(cacheKey) < SUPPRESSION_WINDOW_MS)) {
+      console.warn(`[PLC:INTERLOCK_SUPPRESSED] machineId=${id} reason=${reason}`);
       return; // Suppress repeated interlock for cooldown
     }
     suppressionCache.set(cacheKey, now);
@@ -549,39 +551,51 @@ class PlcHandshakeEngine {
       const Machine = require("../models/Machine");
       const machine = await Machine.findByPk(id);
       if (!machine) return;
+      let registerSnapshot = {};
+      try {
+        registerSnapshot = machine.plc_registers ? JSON.parse(machine.plc_registers) : {};
+      } catch (_error) {
+        registerSnapshot = {};
+      }
 
       const ip = machine.plc_ip || machine.machine_ip;
       const port = machine.plc_port || machine.machine_port;
-      const blockRegRaw = machine.plc_block_register;
-      const startRegRaw = machine.plc_start_register;
-      const statusRegRaw = machine.plc_status_register;
+      const blockRegRaw = registerSnapshot.blockRegister ?? machine.plc_block_register;
+      const startRegRaw = registerSnapshot.startRegister ?? machine.plc_start_register;
+      const statusRegRaw = registerSnapshot.statusRegister ?? registerSnapshot.runningRegister ?? machine.plc_status_register;
       
-      // Robust register resolution (v4.5) - Priority: Block > Start (Trigger)
-      // For this PLC, Start (Value 1) and Block (Value 2) share R2060.
-      let targetReg = (Number(blockRegRaw) > 0) 
-        ? Number(blockRegRaw) 
+      // Priority: configured Block/Interlock register, then Start register as a compatibility fallback.
+      const hasBlockRegister = Number(blockRegRaw) > 0;
+      let registerSource = hasBlockRegister ? "BLOCK_REGISTER" : "START_REGISTER_FALLBACK";
+      let targetReg = hasBlockRegister
+        ? Number(blockRegRaw)
         : (Number(startRegRaw) > 0 ? Number(startRegRaw) : null);
 
       // SAFETY: Never write interlocks to the status register (R2061) if they are distinct
       if (targetReg === Number(statusRegRaw) && Number(startRegRaw) > 0 && Number(startRegRaw) !== targetReg) {
           console.warn(`[PLC:MAP_OVERRIDE] Redirecting interlock from status (R${targetReg}) to start (R${startRegRaw})`);
           targetReg = Number(startRegRaw);
+          registerSource = "START_REGISTER_STATUS_OVERRIDE";
       }
 
-      const ngValue = Number(machine.plc_block_value || 2);
+      const blockValueRaw = registerSnapshot.blockValue ?? machine.plc_block_value ?? 2;
+      const ngValue = Number(blockValueRaw);
       const protocol = String(machine.plc_protocol || "TCP_TEXT").trim().toUpperCase();
       const plcPort = Number(port);
 
-      // Transition FSM to Industrial Blocked state (Section 3 & 6) - PRIOR to PLC Write
+      // Update FSM, but never let a repeated INTERLOCKED/BLOCKED state prevent the PLC block write.
       const state = reason.includes("DUPLICATE") ? plcStateMachineService.states.BLOCKED : plcStateMachineService.states.INTERLOCKED;
-      await plcStateMachineService.transition(id, state, { reason });
+      await this.transitionSafely(id, state, { reason }, { tag: "INTERLOCK_STATE_TRANSITION_FAILED" });
 
       if (!ip || !Number.isFinite(plcPort) || plcPort <= 0 || !targetReg) {
         console.error(`[PLC:CRITICAL_CONFIG_ERROR] machineId=${id} register mapping failed. targetReg=${targetReg}. LOGICAL BLOCK ONLY.`);
         return;
       }
 
-      console.log(`[PLC:INTERLOCK_SIGNAL] machineId=${id} reason=${reason} targetReg=R${targetReg} value=${ngValue}`);
+      if (!hasBlockRegister) {
+        console.warn(`[PLC:INTERLOCK_REGISTER_FALLBACK] machineId=${id} blockRegister missing; using start register R${targetReg}`);
+      }
+      console.log(`[PLC:INTERLOCK_SIGNAL] machineId=${id} reason=${reason} targetReg=R${targetReg} value=${ngValue} source=${registerSource}`);
 
       await plcConnectionManager.runExclusive({
         machineId: id,

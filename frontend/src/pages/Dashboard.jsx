@@ -34,6 +34,7 @@ const DS = `
   @keyframes dbFadeIn  { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
   @keyframes dbPulse   { 0%,100%{opacity:1} 50%{opacity:.45} }
   @keyframes dbPing    { 0%{transform:scale(1);opacity:.8} 100%{transform:scale(2.2);opacity:0} }
+  @keyframes dbShimmer { 100% { transform: translateX(100%); } }
   :root{
     --db-navy:  26,50,99;
     --db-steel: 84,119,146;
@@ -301,6 +302,67 @@ const Badge = ({ variant="idle", label }) => {
 };
 
 // —— KPI Card ——————————————————————————————————————————————————————————————————
+const DashboardSkeleton = () => {
+  const skeletonBase = {
+    position: "relative",
+    overflow: "hidden",
+    background: C.bdr(0.18),
+  };
+  const Skel = ({ style }) => (
+    <div className="db-skeleton-shimmer" style={{ ...skeletonBase, borderRadius: 8, ...style }} />
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, animation: "dbFadeIn 0.25s ease" }}>
+      <style>{`
+        .db-skeleton-shimmer::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          transform: translateX(-100%);
+          background: linear-gradient(90deg, transparent, rgba(255,255,255,.38), transparent);
+          animation: dbShimmer 1.35s infinite;
+        }
+      `}</style>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
+        {Array.from({ length: 5 }).map((_, idx) => (
+          <div key={idx} style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:"16px 18px",boxShadow:SHADOW}}>
+            <Skel style={{width:"58%",height:12,marginBottom:16}} />
+            <Skel style={{width:"42%",height:30,marginBottom:10}} />
+            <Skel style={{width:"72%",height:10}} />
+          </div>
+        ))}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:14}} className="db-tablet-grid-2">
+        <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:18,boxShadow:SHADOW}}>
+          <Skel style={{width:180,height:12,marginBottom:18}} />
+          <Skel style={{width:"100%",height:260}} />
+        </div>
+        <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:18,boxShadow:SHADOW}}>
+          <Skel style={{width:150,height:12,marginBottom:18}} />
+          {Array.from({ length: 6 }).map((_, idx) => (
+            <Skel key={idx} style={{width:`${92 - idx * 7}%`,height:28,marginBottom:10}} />
+          ))}
+        </div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12}}>
+        {Array.from({ length: 6 }).map((_, idx) => (
+          <div key={idx} style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:16,boxShadow:SHADOW}}>
+            <div style={{display:"flex",gap:12,alignItems:"center",marginBottom:14}}>
+              <Skel style={{width:54,height:54,borderRadius:"50%"}} />
+              <div style={{flex:1}}>
+                <Skel style={{width:"70%",height:14,marginBottom:8}} />
+                <Skel style={{width:"48%",height:10}} />
+              </div>
+            </div>
+            <Skel style={{width:"100%",height:46}} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const KpiCard = ({ label, value, icon:Icon, accent, sub }) => (
   <div style={{
     background:C.bg("card"),border:`1px solid ${C.bdr()}`,
@@ -1183,6 +1245,11 @@ const Dashboard = () => {
     if (filteredCards.length > 0) return filteredCards;
     return Array.isArray(oeeData) ? oeeData : [];
   }, [oeeData, report.machineCards]);
+  const isInitialDashboardLoading = loading &&
+    Number(summary?.machines?.total || 0) === 0 &&
+    !report.machineCards?.length &&
+    !report.stationCards?.length &&
+    !report.hourlyProduction?.length;
 
   // —— Tabs config ——
   const TABS = [
@@ -1501,6 +1568,10 @@ const Dashboard = () => {
       )}
 
       {/* —— KPI Row —————————————————————————————————————————————————————————————— */}
+      {isInitialDashboardLoading ? (
+        <DashboardSkeleton />
+      ) : (
+        <>
       <div style={{display:"grid",
         gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
         <KpiCard label={t("dashboard.totalQualityGates", "Total Quality Gates")}  value={summary.machines.active}         icon={Cpu}          accent={C.steel()}  sub={`${t("dashboard.outOf", "Out of")} ${summary.machines.total} ${t("dashboard.totalMachines", "total machines")}`}/>
@@ -2140,6 +2211,8 @@ const Dashboard = () => {
         </div>
       )}
 
+        </>
+      )}
     </div>
   );
 };

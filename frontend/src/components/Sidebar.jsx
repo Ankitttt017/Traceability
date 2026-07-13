@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
-  Factory,
   ChevronLeft,
   ChevronDown,
   ChevronRight,
@@ -101,12 +100,6 @@ const Sidebar = ({ onClose }) => {
         path: APP_ROUTES.operatorView,
         icon: UserCog,
         moduleKey: "operator_view",
-      },
-      {
-        name: t("pages.production", "Production"),
-        path: APP_ROUTES.production,
-        icon: Factory,
-        moduleKey: "production",
       },
       {
         name: t("pages.reports", "Reports"),
@@ -382,7 +375,7 @@ const Sidebar = ({ onClose }) => {
       <nav className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
         {renderSectionToggle(
           t("pages.traceability", "Traceability"),
-          Factory,
+          Route,
           traceOpen,
           () => setTraceOpen((prev) => !prev)
         )}
