@@ -28,6 +28,22 @@ const {
 const PLC_READING_TABLE = "PlcCycleReadings";
 const CUSTOMER_QR_ONLY_FORMAT = "CUSTOMER_QR_ONLY";
 const IST_OFFSET_MINUTES = 330;
+const CUSTOMER_QR_WAITING_MACHINE_TYPES = new Set(["LASER"]);
+const CUSTOMER_QR_WAITING_EXCLUDED_TOKENS = ["FINAL_INSPECTION", "FINAL INSPECTION", "FINAL STATION", "PDI", "PACKING", "PACKAGING", "DISPATCH"];
+
+function requiresCustomerQrForReportCompletion(machine = {}) {
+  const machineType = String(machine.machine_type || machine.machineType || "").trim().toUpperCase();
+  const tokens = [
+    machine.operation_no,
+    machine.operationNo,
+    machine.machine_name,
+    machine.machineName,
+  ].map((value) => String(value || "").trim().toUpperCase());
+  if (tokens.some((token) => CUSTOMER_QR_WAITING_EXCLUDED_TOKENS.some((excluded) => token === excluded || token.includes(excluded)))) {
+    return false;
+  }
+  return CUSTOMER_QR_WAITING_MACHINE_TYPES.has(machineType);
+}
 
 async function resolveReportPartSearchValues(input) {
   const raw = String(input || "").trim();
@@ -1075,7 +1091,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       include: [
         {
           model: Machine,
-          attributes: ["machine_name", "line_name", "operation_no"]
+          attributes: ["machine_name", "line_name", "operation_no", "machine_type"]
         }
       ],
       order: [["createdAt", "DESC"]],
@@ -1416,7 +1432,13 @@ async function fetchProductionData(filters = {}, options = {}) {
       plc_status: log.plc_status,
       interlock_reason: log.interlock_reason
     });
-    const industrialResult = leakStageState === "PASSED"
+    const waitingForCustomerQr = Boolean(
+      requiresCustomerQrForReportCompletion(log.Machine || {}) &&
+      !mappedCustomerQr
+    );
+    const industrialResult = waitingForCustomerQr
+      ? "IN_PROGRESS"
+      : leakStageState === "PASSED"
       ? "OK"
       : leakStageState === "FAILED"
         ? "NG"
@@ -1433,7 +1455,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       log.rejection_reason ? `Reason: ${log.rejection_reason}` : "",
       log.rejection_remark ? `Remark: ${log.rejection_remark}` : "",
     ].filter(Boolean).join(" | ");
-    const displayReason = (recoveryCompletedByCustomerQr || stationNo === LEAKTEST_OPERATION)
+    const displayReason = (recoveryCompletedByCustomerQr || waitingForCustomerQr || stationNo === LEAKTEST_OPERATION)
       ? ""
       : (structuredRejectionReason || log.interlock_reason || "");
 
@@ -1499,11 +1521,12 @@ async function fetchProductionData(filters = {}, options = {}) {
       partDieLabel: plcPartDie.label || "",
       shiftCode:    log.shift_code || "A",
       cycleStartTime: cycleStartTime ? new Date(cycleStartTime).toLocaleString() : "-",
-      cycleEndTime:   (leakTestReading?.cycleEndTime || cycleEndTime) ? new Date(leakTestReading?.cycleEndTime || cycleEndTime).toLocaleString()   : "-",
-      cycleTime:    stationNo === LEAKTEST_OPERATION && leakTestReading?.cycleTime != null ? String(leakTestReading.cycleTime) : (cycleTime ? Number(cycleTime).toFixed(2) : "0.00"),
+      cycleEndTime:   !waitingForCustomerQr && (leakTestReading?.cycleEndTime || cycleEndTime) ? new Date(leakTestReading?.cycleEndTime || cycleEndTime).toLocaleString()   : "-",
+      cycleTime:    waitingForCustomerQr ? "0.00" : (stationNo === LEAKTEST_OPERATION && leakTestReading?.cycleTime != null ? String(leakTestReading.cycleTime) : (cycleTime ? Number(cycleTime).toFixed(2) : "0.00")),
       industrialResult,
       category,
       statusLabel: industrialResult,
+      customerQrPending: waitingForCustomerQr,
       bypassStatus: Boolean(log.is_bypassed),
       reason: displayReason,
       rejectionCategory: log.rejection_category || "",

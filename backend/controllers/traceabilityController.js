@@ -151,6 +151,8 @@ async function canStartCustomerQrOnlyPart({ code, stationNo, machine, stationFea
   if (!raw || !station || !machine || !requiresCustomerQrForCompletion(machine)) return false;
   const features = stationFeatures || await getStationFeatureConfig(station).catch(() => null);
   if (features?.allowCustomerQrOnlyStart !== true) return false;
+  if (matchesConfiguredCustomerQrPattern(raw, features?.customerCodePattern)) return false;
+  if (await matchesActiveCustomerQrRule(raw)) return false;
   return !(await isKnownPartOrMappedCustomerQr(raw));
 }
 
@@ -1078,6 +1080,60 @@ function wrongCustomerQrAtStartMessage(stationNo) {
   return `Wrong QR scanned at ${normalizeStation(stationNo) || "this station"}. Scan Part Serial/Casting QR here. Customer QR is allowed only after Laser Marking.`;
 }
 
+function matchesConfiguredCustomerQrPattern(code, pattern) {
+  const raw = sanitizeCustomerQrValue(code);
+  const configuredPattern = String(pattern || "").trim();
+  if (!raw || !configuredPattern) return false;
+  try {
+    return new RegExp(configuredPattern, "i").test(raw);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function isCustomerQrFormatName(formatName) {
+  const name = String(formatName || "").trim().toUpperCase();
+  return name.includes("CUSTOMER") && name.includes("QR") && name !== CUSTOMER_QR_ONLY_FORMAT;
+}
+
+async function matchesActiveCustomerQrRule(code) {
+  const raw = sanitizeCustomerQrValue(code);
+  if (!raw) return false;
+  const rules = await QrFormatRule.findAll({
+    where: { is_active: true },
+    attributes: ["format_name", "regex_pattern"],
+    raw: true,
+  }).catch(() => []);
+
+  return rules.some((rule) => {
+    if (!isCustomerQrFormatName(rule.format_name)) return false;
+    const pattern = String(rule.regex_pattern || "").trim();
+    if (!pattern) return false;
+    try {
+      return new RegExp(pattern, "i").test(raw);
+    } catch (_error) {
+      return false;
+    }
+  });
+}
+
+async function getCustomerQrMappingStationMeta(sequenceData = null) {
+  const data = sequenceData || await getActiveMachineSequenceData();
+  const sequence = Array.isArray(data?.sequence) ? data.sequence : [];
+  for (const candidateStation of sequence) {
+    const machines = (data?.machines || []).filter((machine) => getMachineOperationStage(machine) === candidateStation);
+    const mappingMachine = machines.find((machine) => requiresCustomerQrForCompletion(machine));
+    if (!mappingMachine) continue;
+    const features = await getStationFeatureConfig(candidateStation, getMachineStationScope(mappingMachine)).catch(() => null);
+    return {
+      stationNo: candidateStation,
+      machine: mappingMachine,
+      customerCodePattern: String(features?.customerCodePattern || "").trim(),
+    };
+  }
+  return null;
+}
+
 async function isAfterCustomerQrMappingStation(stationNo) {
   const station = normalizeStation(stationNo);
   if (!station) return false;
@@ -1094,30 +1150,33 @@ async function isAfterCustomerQrMappingStation(stationNo) {
 async function shouldBlockUnknownQrAfterLaser({ code, stationNo }) {
   const raw = String(code || "").trim();
   if (!raw) return false;
-  const afterCustomerQrStation = await isAfterCustomerQrMappingStation(stationNo);
-  if (!afterCustomerQrStation) return false;
+  const station = normalizeStation(stationNo);
+  if (!station) return false;
+  const sequenceData = await getActiveMachineSequenceData();
+  const sequence = Array.isArray(sequenceData?.sequence) ? sequenceData.sequence : [];
+  const currentIndex = sequence.indexOf(station);
+  const customerQrMeta = await getCustomerQrMappingStationMeta(sequenceData);
+  const customerQrStationIndex = customerQrMeta?.stationNo ? sequence.indexOf(customerQrMeta.stationNo) : -1;
+  if (currentIndex < 0 || customerQrStationIndex < 0 || currentIndex <= customerQrStationIndex) return false;
 
-  const [mapping, successfulHistory] = await Promise.all([
-    PartCodeMapping.findOne({
-      where: { customer_qr: raw, is_active: true },
-      attributes: ["id"],
-      order: [["updatedAt", "DESC"]],
-    }),
-    OperationLog.findOne({
-      where: {
-        part_id: raw,
-        result: "OK",
-        plc_status: { [Op.in]: ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "ENDED_OK", "PASSED", "COMPLETED_OK"] },
-      },
-      attributes: ["id"],
-      order: [["createdAt", "DESC"]],
-    }),
-  ]);
-  if (mapping || successfulHistory) return false;
-  return true;
+  const mapping = await PartCodeMapping.findOne({
+    where: { customer_qr: raw, is_active: true },
+    attributes: ["id"],
+    order: [["updatedAt", "DESC"]],
+  });
+  if (mapping) return false;
+
+  return matchesConfiguredCustomerQrPattern(raw, customerQrMeta?.customerCodePattern) || await matchesActiveCustomerQrRule(raw);
 }
 
-async function unknownQrAfterLaserMessage(stationNo) {
+async function unknownQrAfterLaserMessage(stationNo, code = "") {
+  const customerQrMeta = await getCustomerQrMappingStationMeta().catch(() => null);
+  if (
+    matchesConfiguredCustomerQrPattern(code, customerQrMeta?.customerCodePattern) ||
+    await matchesActiveCustomerQrRule(code)
+  ) {
+    return `${normalizeStation(stationNo) || "This station"}: Customer QR is not mapped. Complete Customer QR mapping at ${customerQrMeta?.stationNo || "OP110"} first.`;
+  }
   const sequence = await getActiveStationSequence().catch(() => []);
   const firstStation = normalizeStation(sequence?.[0]);
   const currentStation = normalizeStation(stationNo) || "This station";
@@ -4079,7 +4138,7 @@ exports.processScan = async (req, res) => {
       code: scannedQrRaw,
       stationNo: normalizedStation,
     })) {
-      const message = await unknownQrAfterLaserMessage(normalizedStation);
+      const message = await unknownQrAfterLaserMessage(normalizedStation, scannedQrRaw);
       await sendRejectedScanInterlock({
         machine,
         stationNo: normalizedStation,
@@ -4612,7 +4671,7 @@ exports.verifyScanForOperator = async (req, res) => {
       code: scannedQrRaw,
       stationNo,
     })) {
-      const message = await unknownQrAfterLaserMessage(stationNo);
+      const message = await unknownQrAfterLaserMessage(stationNo, scannedQrRaw);
       await sendRejectedScanInterlock({
         machine,
         stationNo,

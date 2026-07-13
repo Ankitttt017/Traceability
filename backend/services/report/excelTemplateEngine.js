@@ -127,6 +127,7 @@ function stationResultRank(value) {
   const normalized = String(value || "").trim().toUpperCase();
   if (normalized === "NG") return 3;
   if (normalized === "OK") return 2;
+  if (normalized === "IN_PROGRESS") return 1;
   return 0;
 }
 
@@ -369,7 +370,7 @@ async function generateIndustrialExcel(res, {
     const resolved = row.industrialResult ? { status: row.industrialResult } : resolveIndustrialResult(row);
     const status = String(resolved.status || "").toUpperCase();
     if (stationKey && String(op || "").trim().toUpperCase() !== LEAK_TEST_OPERATION) {
-      const normalizedStatus = status === "OK" || status === "NG" ? status : "-";
+      const normalizedStatus = status === "OK" || status === "NG" || status === "IN_PROGRESS" ? status : "-";
       bucket.stationResults[stationKey] = pickPreferredStationResult(bucket.stationResults[stationKey], normalizedStatus);
     }
     const nextPlcReading = row.plcReading || {};
@@ -501,10 +502,13 @@ async function generateIndustrialExcel(res, {
         .map((station) => row.stationResults[station.key] || "-");
       if (operationStationResults.includes("NG")) return "NG";
       if (operationStationResults.includes("OK")) return "OK";
+      if (operationStationResults.includes("IN_PROGRESS")) return "IN_PROGRESS";
       return "-";
     });
     const overall = operationResults.includes("NG")
       ? "NG"
+      : operationResults.includes("IN_PROGRESS")
+        ? "IN_PROGRESS"
       : (requiredOperations.length > 0 && operationResults[requiredOperations.length - 1] === "OK")
         ? "PASSED"
       : (requiredOperations.length > 0 && requiredOperations.every((_, idx) => operationResults[idx] === "OK"))
