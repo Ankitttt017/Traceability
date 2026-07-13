@@ -40,9 +40,11 @@ const CUSTOMER_QR_ACTIVE_WINDOW_MS = Math.max(
   30 * 1000
 );
 const TCP_SCANNER_FLUSH_MS = Math.min(
-  Math.max(Number(process.env.TCP_SCANNER_FLUSH_MS || 250), 30),
-  500
+  Math.max(Number(process.env.TCP_SCANNER_FLUSH_MS || 900), 100),
+  2000
 );
+const TCP_SCANNER_MIN_FRAME_LENGTH = Math.max(Number(process.env.TCP_QR_MIN_PAYLOAD_LENGTH || 4), 1);
+const TCP_SCANNER_MAX_FRAME_WAIT_MS = Math.max(Number(process.env.TCP_SCANNER_MAX_FRAME_WAIT_MS || 3000), TCP_SCANNER_FLUSH_MS);
 const TCP_SCANNER_DUPLICATE_DEBOUNCE_MS = Math.max(
   Number(process.env.TCP_SCANNER_DUPLICATE_DEBOUNCE_MS || 600),
   100
@@ -954,6 +956,21 @@ async function processIncomingScannerPayload({ scannerIp, rawPacket }) {
 
 
   if (!validation.isValid) {
+    if (["QR_PAYLOAD_STATUS_TOKEN", "QR_PAYLOAD_TOO_SHORT"].includes(validation.reason)) {
+      logScannerTrace({
+        stage: validation.reason === "QR_PAYLOAD_STATUS_TOKEN"
+          ? "scanner_status_token_ignored"
+          : "scanner_short_payload_ignored",
+        scannerIp,
+        payload: sanitizedPayload,
+        rawPacket: packet.rawPacket,
+        reason: validation.reason,
+        status: "IGNORED",
+        durationMs: Date.now() - startedAt,
+      });
+      return;
+    }
+
     const targets = scanners.length ? scanners : [null];
     for (const scanner of targets) {
       const machine = scanner?.mapped_machine_id
@@ -2140,6 +2157,7 @@ function startTcpServer() {
 
     let pending = "";
     let flushTimer = null;
+    let pendingFirstAt = 0;
 
 
     const clearFlushTimer = () => {
@@ -2187,8 +2205,15 @@ function startTcpServer() {
       clearFlushTimer();
       flushTimer = setTimeout(() => {
         if (pending.trim()) {
+          const data = sanitizeScannerPayload(pending);
+          const waitedMs = pendingFirstAt ? Date.now() - pendingFirstAt : TCP_SCANNER_MAX_FRAME_WAIT_MS;
+          if (data.length < TCP_SCANNER_MIN_FRAME_LENGTH && waitedMs < TCP_SCANNER_MAX_FRAME_WAIT_MS) {
+            schedulePendingFlush();
+            return;
+          }
           consumeMessage(pending);
           pending = "";
+          pendingFirstAt = 0;
         }
       }, TCP_SCANNER_FLUSH_MS);
     };
@@ -2198,7 +2223,7 @@ function startTcpServer() {
       const chunk = buffer.toString("utf8");
       console.log(`[TCP] Raw chunk from ${remoteIp}: ${JSON.stringify(chunk)}`);
 
-
+      if (!pending) pendingFirstAt = Date.now();
       pending += chunk;
 
 
@@ -2209,6 +2234,7 @@ function startTcpServer() {
       for (const raw of parts) {
         consumeMessage(raw);
       }
+      if (!pending) pendingFirstAt = 0;
       schedulePendingFlush();
     });
 
@@ -2218,6 +2244,7 @@ function startTcpServer() {
       if (pending.trim()) {
         consumeMessage(pending);
       }
+      pendingFirstAt = 0;
       scannerConnectionService.markScannerDisconnected({ scannerIp: remoteIp });
       console.log(`[TCP] Client disconnected: ${remoteIp}`);
     });

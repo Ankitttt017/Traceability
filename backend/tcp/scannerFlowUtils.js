@@ -1,4 +1,5 @@
 const DEFAULT_MAX_QR_PAYLOAD_LENGTH = 128;
+const DEFAULT_MIN_QR_PAYLOAD_LENGTH = 4;
 const DEFAULT_DUPLICATE_DEBOUNCE_MS = 600;
 const VALID_QR_PAYLOAD_REGEX = /^[^\x00-\x1F\x7F]+$/u;
 const QR_TOKEN_SEPARATOR_REGEX = /[\s;,|]+/;
@@ -26,6 +27,11 @@ function sanitizeScannerPayload(value) {
   return String(value || "").replace(/[\x00-\x1F\x7F]/g, "").trim();
 }
 
+function sanitizeDisplayPayload(value) {
+  const payload = sanitizeScannerPayload(value);
+  return INVALID_SCANNER_STATUS_TOKENS.has(payload.toUpperCase()) ? "" : payload;
+}
+
 function normalizeStation(value) {
   return String(value || "").trim().toUpperCase();
 }
@@ -42,13 +48,13 @@ function parseScannerPacket(rawPacket = "") {
 }
 
 function buildScannerDisplayContext({ rawPacket = "", rawPayload = "", sanitizedPayload = "", partId = "", customerQrCode = "", mappedPartId = "" } = {}) {
-  const scannedPayload = sanitizeScannerPayload(rawPayload || sanitizedPayload || partId || customerQrCode || mappedPartId || rawPacket);
-  const sanitizedCustomerQr = sanitizeScannerPayload(customerQrCode);
-  const sanitizedMappedPartId = sanitizeScannerPayload(mappedPartId || partId);
+  const scannedPayload = sanitizeDisplayPayload(rawPayload || sanitizedPayload || partId || customerQrCode || mappedPartId || rawPacket);
+  const sanitizedCustomerQr = sanitizeDisplayPayload(customerQrCode);
+  const sanitizedMappedPartId = sanitizeDisplayPayload(mappedPartId || partId);
 
   return {
     rawPacket: String(rawPacket || ""),
-    rawPayload: sanitizeScannerPayload(rawPayload || rawPacket),
+    rawPayload: sanitizeDisplayPayload(rawPayload || rawPacket),
     sanitizedPayload: scannedPayload,
     scannedQr: scannedPayload,
     customerQrCode: sanitizedCustomerQr,
@@ -90,6 +96,7 @@ function validateScannerPayload({ payload, scannerRole = "", stationNo = "", pro
   const normalizedRole = String(scannerRole || "").trim().toUpperCase();
   const station = normalizeStation(stationNo);
   const maxLength = Number(process.env.TCP_QR_MAX_PAYLOAD_LENGTH || DEFAULT_MAX_QR_PAYLOAD_LENGTH);
+  const minLength = Math.max(Number(process.env.TCP_QR_MIN_PAYLOAD_LENGTH || DEFAULT_MIN_QR_PAYLOAD_LENGTH), 1);
   const minCustomerQrLength = Number(process.env.TCP_CUSTOMER_QR_MIN_LENGTH || 2);
 
   if (!sanitizedPayload) {
@@ -127,6 +134,18 @@ function validateScannerPayload({ payload, scannerRole = "", stationNo = "", pro
       severity: "RECOVERABLE",
       message: "QR payload contains invalid characters. Scan a valid QR code."
         + (normalizedRole === "CUSTOMER_QR" ? " Customer QR should contain only printable characters." : " Start QR should contain only printable characters."),
+      stationNo: station,
+    };
+  }
+
+  if (sanitizedPayload.length < minLength) {
+    return {
+      isValid: false,
+      sanitizedPayload,
+      reason: "QR_PAYLOAD_TOO_SHORT",
+      code: "QR008",
+      severity: "RECOVERABLE",
+      message: `Scanner payload is too short. Scan a complete QR code with at least ${minLength} characters.`,
       stationNo: station,
     };
   }

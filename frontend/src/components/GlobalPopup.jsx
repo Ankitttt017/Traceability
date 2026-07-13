@@ -40,7 +40,8 @@ function sanitizeScannerCode(value) {
     "NULL",
     "UNDEFINED",
   ]);
-  return invalidTokens.has(raw.toUpperCase()) ? "" : raw;
+  if (invalidTokens.has(raw.toUpperCase())) return "";
+  return raw.length > 0 && raw.length < 4 ? "" : raw;
 }
 const LEAK_TEST_PREVIEW_FIELDS = [
   ["Machine Name", "Machine"],
