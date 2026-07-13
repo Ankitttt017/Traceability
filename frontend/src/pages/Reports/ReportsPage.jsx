@@ -698,6 +698,7 @@ const ReportsPage = () => {
           if (finalStatus === "PASSED" || finalStatus === "NG") return finalStatus;
           const vals = requiredOperations.map((operation) => normResult(operationResults[operation])).filter(Boolean);
           if (vals.some((v) => v === "NG")) return "NG";
+          if (vals.some((v) => v === "IN_PROGRESS")) return "IN_PROGRESS";
           const terminalOperation = requiredOperations[requiredOperations.length - 1];
           if (terminalOperation && normResult(operationResults[terminalOperation]) === "OK") return "PASSED";
           if (requiredOperations.length > 0 && vals.length >= requiredOperations.length && vals.every((v) => v === "OK")) return "PASSED";
