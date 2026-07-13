@@ -4,6 +4,23 @@ const VALID_QR_PAYLOAD_REGEX = /^[^\x00-\x1F\x7F]+$/u;
 const QR_TOKEN_SEPARATOR_REGEX = /[\s;,|]+/;
 const PART_QR_FORMAT_REGEX = /^[A-Za-z0-9\-_/.:]{1,128}$/;
 const CUSTOMER_QR_PREFIX_REGEX = /^(CUS|CQR|CUST|CUSTOMER)/i;
+const INVALID_SCANNER_STATUS_TOKENS = new Set([
+  "ERROR",
+  "ERR",
+  "FAILED",
+  "FAIL",
+  "NG",
+  "WAIT",
+  "WAITING",
+  "PENDING",
+  "IN_PROGRESS",
+  "RUNNING",
+  "PLC_COMM_ERROR",
+  "COMM_ERROR",
+  "TIMEOUT",
+  "NULL",
+  "UNDEFINED",
+]);
 
 function sanitizeScannerPayload(value) {
   return String(value || "").replace(/[\x00-\x1F\x7F]/g, "").trim();
@@ -110,6 +127,20 @@ function validateScannerPayload({ payload, scannerRole = "", stationNo = "", pro
       severity: "RECOVERABLE",
       message: "QR payload contains invalid characters. Scan a valid QR code."
         + (normalizedRole === "CUSTOMER_QR" ? " Customer QR should contain only printable characters." : " Start QR should contain only printable characters."),
+      stationNo: station,
+    };
+  }
+
+  if (INVALID_SCANNER_STATUS_TOKENS.has(sanitizedPayload.toUpperCase())) {
+    return {
+      isValid: false,
+      sanitizedPayload,
+      reason: "QR_PAYLOAD_STATUS_TOKEN",
+      code: "QR007",
+      severity: "RECOVERABLE",
+      message: normalizedRole === "CUSTOMER_QR"
+        ? "Customer QR scanner returned a status word, not a QR code. Scan the actual Customer QR again."
+        : "Scanner returned a status word, not a QR code. Scan the actual Part QR again.",
       stationNo: station,
     };
   }

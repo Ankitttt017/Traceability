@@ -22,7 +22,25 @@ const StationIcon = React.memo(() => (
 ));
 
 function sanitizeScannerCode(value) {
-  return String(value || "").replace(/[\u0000-\u001F\u007F]/g, "").trim();
+  const raw = String(value || "").replace(/[\u0000-\u001F\u007F]/g, "").trim();
+  const invalidTokens = new Set([
+    "ERROR",
+    "ERR",
+    "FAILED",
+    "FAIL",
+    "NG",
+    "WAIT",
+    "WAITING",
+    "PENDING",
+    "IN_PROGRESS",
+    "RUNNING",
+    "PLC_COMM_ERROR",
+    "COMM_ERROR",
+    "TIMEOUT",
+    "NULL",
+    "UNDEFINED",
+  ]);
+  return invalidTokens.has(raw.toUpperCase()) ? "" : raw;
 }
 const LEAK_TEST_PREVIEW_FIELDS = [
   ["Machine Name", "Machine"],
@@ -252,6 +270,7 @@ function resolveOperationState(popup = {}) {
   if (["COMPLETED_NG"].includes(raw)) return "FAIL";
   if (["FAILED", "FAIL", "ENDED_NG", "NG"].includes(raw)) return "FAIL";
   if (["RUNNING", "STARTED", "IN_PROGRESS", "IN PROCESS"].includes(raw)) return "RUN";
+  if (["WAITING_CUSTOMER_QR", "CUSTOMER_QR_PENDING"].includes(raw)) return "RUN";
   if (["WAITING_MACHINE", "START_SENT", "WAITING_RUNNING", "WAITING_PLC"].includes(raw)) return "WAIT_OP";
   if (["WAITING", "OP_WAIT", "SCANNED", "VALIDATED", "PENDING"].includes(raw)) return "WAIT_OP";
   if (["PLC_TIMEOUT", "TIMEOUT", "COMM_ERROR", "PLC_COMM_ERROR"].includes(raw)) return "COMM";
@@ -806,7 +825,7 @@ const GlobalPopup = ({
 
   // Prefer locally validated QR immediately so strip/panel update without waiting socket partId
   const effectivePartId = localValidatedPartIdRef.current || partId || lastScannedCode;
-  const customerQrCode = String(popup?.customerQrCode || popup?.customer_qr || "").trim();
+  const customerQrCode = sanitizeScannerCode(popup?.customerQrCode || popup?.customer_qr || "");
   const mappedPartId = sanitizeScannerCode(popup?.mappedPartId || popup?.mapped_part_id || popup?.dotPinPartId || popup?.dot_pin_part_id || "");
   const scannedQr = sanitizeScannerCode(popup?.scannedQr || popup?.displayQr || popup?.rawQr || popup?.customerQrCode || popup?.customer_qr || lastScannedCode || popup?.partId || popup?.part_id);
   const qrFormatName = String(popup?.qrFormatName || popup?.qr_format_name || "").trim().toUpperCase();

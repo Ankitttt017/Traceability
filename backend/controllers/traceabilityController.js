@@ -151,8 +151,6 @@ async function canStartCustomerQrOnlyPart({ code, stationNo, machine, stationFea
   if (!raw || !station || !machine || !requiresCustomerQrForCompletion(machine)) return false;
   const features = stationFeatures || await getStationFeatureConfig(station).catch(() => null);
   if (features?.allowCustomerQrOnlyStart !== true) return false;
-  if (matchesConfiguredCustomerQrPattern(raw, features?.customerCodePattern)) return false;
-  if (await matchesActiveCustomerQrRule(raw)) return false;
   return !(await isKnownPartOrMappedCustomerQr(raw));
 }
 
