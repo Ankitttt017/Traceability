@@ -324,7 +324,7 @@ export const StatusBadge = ({ status }) => {
   const statusMap = {
     PASS: { bg: "bg-success/15", text: "text-success", dot: "bg-success", label: "PASSED ✓" },
     FAIL: { bg: "bg-danger/15", text: "text-danger", dot: "bg-danger", label: "FAILED ✗" },
-    DUPLICATE: { bg: "bg-amber-500/15", text: "text-amber-600", dot: "bg-amber-500", label: t("globalPopup.duplicate", "DUPLICATE") },
+    DUPLICATE: { bg: "bg-danger/15", text: "text-danger", dot: "bg-danger", label: t("globalPopup.duplicate", "DUPLICATE") },
     BLOCKED: { bg: "bg-slate-500/15", text: "text-slate-600", dot: "bg-slate-500", label: t("globalPopup.blocked", "BLOCKED") },
     RUN: { bg: "bg-warning/15", text: "text-warning", dot: "bg-warning animate-pulse", label: t("globalPopup.running", "RUNNING...") },
     WAIT_MACHINE: { bg: "bg-warning/10", text: "text-warning/80", dot: "bg-warning/60 animate-pulse", label: t("globalPopup.waitingMachine", "WAITING MACHINE...") },
@@ -858,9 +858,10 @@ const GlobalPopup = ({
       customerQrCode.toUpperCase() !== String(partId || effectivePartId || "").trim().toUpperCase() ||
       popupReason === "CUSTOMER_QR_MAPPED"
     );
-  const displayedScanCode = customerQrCode || scannedQr || effectivePartId || lastScannedCode;
+  const displayedScanCode = scannedQr || customerQrCode || effectivePartId || lastScannedCode;
   const displayInternalPartId = mappedPartId || effectivePartId || customerQrCode || displayedScanCode || "-";
-  const displayedScanLabel = customerQrCode ? "Scanned Customer QR" : (scannedQr ? "Scanned QR" : "Scanned Part ID");
+  const displayedScanIsCustomerQr = Boolean(customerQrCode && displayedScanCode && displayedScanCode.toUpperCase() === customerQrCode.toUpperCase());
+  const displayedScanLabel = displayedScanIsCustomerQr ? "Scanned Customer QR" : (scannedQr ? "Scanned QR" : "Scanned Part ID");
 
   useEffect(() => {
     let isActive = true;
@@ -1554,7 +1555,7 @@ const GlobalPopup = ({
         return {
           ...base,
           qrVerification: liveQrState,
-          operation: liveOperationState,
+          operation: customerQrPending && liveQrState === "PASS" ? "RUN" : liveOperationState,
           qualityCheck: liveOperationState === "PASS" ? "PASS" : liveOperationState === "FAIL" ? "FAIL" : s.qualityCheck,
           rejectionConfirmation: liveRejectionState,
           isCurrent: true,
@@ -1770,10 +1771,10 @@ const GlobalPopup = ({
           }
         : qrVisualState === "DUPLICATE"
           ? {
-              container: "bg-sky-900/40 border-sky-400/60 ring-1 ring-sky-400/20",
-              label: "text-black",
-              value: "text-black",
-              badge: "bg-sky-500/30 text-sky-100 border-sky-300/40",
+              container: "bg-rose-900/80 border-rose-400/60 ring-1 ring-rose-400/20",
+              label: "text-white",
+              value: "text-white",
+              badge: "bg-rose-400/30 text-rose-100 border-rose-300/40",
               badgeText: "DUPLICATE",
             }
           : {
@@ -2082,7 +2083,7 @@ const GlobalPopup = ({
                   {isCustomerQrOnlyScan && (
                     <p className="mt-1.5 text-[9px] font-bold text-slate-500">Part ID: <span className="font-mono">{displayInternalPartId}</span></p>
                   )}
-                  {!hasMappedCustomerQr && effectivePartId && !isCustomerQrOnlyScan && (
+                  {customerQrPending && !hasMappedCustomerQr && effectivePartId && !isCustomerQrOnlyScan && (
                     <p className="mt-1.5 text-[9px] font-bold text-slate-500">Customer QR: <span className="font-mono">Waiting</span></p>
                   )}
                 </div>

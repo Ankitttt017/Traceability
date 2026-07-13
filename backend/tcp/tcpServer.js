@@ -1618,7 +1618,7 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
     machine,
   });
   const traceabilityPartId = identity.traceabilityPartId || partId;
-  if (existingSamePartMapping && await hasTerminalStationLog(traceabilityPartId, stationNo)) {
+  if (existingSamePartMapping) {
     resetWorkflowState(workflowKey, { reason: "DUPLICATE_CUSTOMER_QR_AT_LASER" });
     emitCustomerQrScannerResult({
       type: "ERROR",
@@ -1632,13 +1632,13 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
       scannerIp,
       decision: "BLOCK",
       qrStatus: "DUPLICATE",
-      operationStatus: "PASSED",
+      operationStatus: "BLOCKED",
       status: "BLOCKED",
-      plcStatus: "ENDED_OK",
+      plcStatus: "BLOCKED",
       customerQrMapped: true,
       closePopup: false,
       reason: "DUPLICATE_SCAN",
-      message: `${stationNo}: Customer QR already passed. Continue to next station.`,
+      message: `${stationNo}: Customer QR already mapped/registered. Do not scan it again.`,
       timestamp: new Date().toISOString(),
     });
     logScannerTrace({
