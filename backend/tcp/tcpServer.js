@@ -37,7 +37,7 @@ const {
 } = require("../services/leaktestLookupService");
 const { Op } = require("sequelize");
 const CUSTOMER_QR_ACTIVE_WINDOW_MS = Math.max(
-  Number(process.env.CUSTOMER_QR_ACTIVE_WINDOW_MS || 10 * 60 * 1000),
+  Number(process.env.CUSTOMER_QR_ACTIVE_WINDOW_MS || 60 * 60 * 1000),
   30 * 1000
 );
 const TCP_SCANNER_FLUSH_MS = Math.min(
@@ -1005,13 +1005,31 @@ async function resolveScannerFlow({ code, stationNo, machine, qrType = "UNKNOWN"
 
   const workflowKey = buildWorkflowKey(machine.id, station);
   const workflowState = getWorkflowState(workflowKey);
-  const hasActiveLaserStart = Boolean(workflowState?.waitingForCustomerQr && workflowState.activePartId);
+  const activeLaserStartPartId = workflowState?.waitingForCustomerQr && workflowState.activePartId
+    ? String(workflowState.activePartId || "").trim()
+    : await resolveActivePartIdForMachine(machine, station);
+  const hasActiveLaserStart = Boolean(activeLaserStartPartId);
 
 
   if ((normalizedScannerRole === "CUSTOMER_QR" || qrType === "CUSTOMER_QR") && hasActiveLaserStart) {
     return {
       flowType: "CUSTOMER_QR",
       reason: "CUSTOMER_QR_DETECTED_FOR_ACTIVE_START",
+      resolvedPartId: raw,
+      customerQrCode: raw,
+      qrType: "CUSTOMER_QR",
+    };
+  }
+
+  if (
+    hasActiveLaserStart &&
+    raw &&
+    raw !== activeLaserStartPartId &&
+    await stationRequiresCustomerQrForCompletion(machine, station)
+  ) {
+    return {
+      flowType: "CUSTOMER_QR",
+      reason: "CUSTOMER_QR_FOR_DB_ACTIVE_START",
       resolvedPartId: raw,
       customerQrCode: raw,
       qrType: "CUSTOMER_QR",
