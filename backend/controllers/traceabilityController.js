@@ -6561,6 +6561,7 @@ exports.getDashboardReport = async (req, res) => {
     const lineNameFilter = normalizeLineName(req.query.lineName);
     const stationNoFilter = normalizeStation(req.query.stationNo);
     const operatorIdFilter = Number(req.query.operatorId || 0) || null;
+    const lightMode = ["1", "true", "yes"].includes(String(req.query.light || "").trim().toLowerCase());
     const page = Math.max(Number(req.query.page || 1), 1);
     const pageSize = Math.min(Math.max(Number(req.query.pageSize || 100), 1), 500);
 
@@ -7011,6 +7012,9 @@ exports.getDashboardReport = async (req, res) => {
     const plcReadingByCompactQr = new Map();
     const plcReadingColumns = [];
     try {
+      if (lightMode) {
+        throw new Error("LIGHT_MODE_SKIP_PLC_READING_JOIN");
+      }
       const sequelize = require("../config/db");
       const [columnRows] = await sequelize.query(`
         SELECT COLUMN_NAME
@@ -7125,7 +7129,7 @@ exports.getDashboardReport = async (req, res) => {
       // Keep dashboard report resilient even when PlcCycleReadings schema/table differs.
     }
     const partIdsHistory = [...new Set(partHistory.map((r) => String(r.part_id || "").trim()).filter(Boolean))];
-    const leakRowsHistory = partIdsHistory.length > 0
+    const leakRowsHistory = !lightMode && partIdsHistory.length > 0
       ? await LeakTestReading.findAll({
         where: { part_id: partIdsHistory },
         attributes: ["part_id", "payload_json", "createdAt"],
@@ -7144,8 +7148,8 @@ exports.getDashboardReport = async (req, res) => {
       return acc;
     }, {});
 
-    const partIdsForCustomerQr = [...new Set(partHistory.slice(0, 3000).map((row) => String(row.part_id || "").trim()).filter(Boolean))];
-    const leaktestIndex = await buildLeaktestIndex({
+    const partIdsForCustomerQr = lightMode ? [] : [...new Set(partHistory.slice(0, 3000).map((row) => String(row.part_id || "").trim()).filter(Boolean))];
+    const leaktestIndex = lightMode ? { byPartAndStation: new Map(), byPartAndIp: new Map() } : await buildLeaktestIndex({
         partIds: partIdsForCustomerQr,
         customerQrByPartId,
         machines: machineRows,
@@ -7253,7 +7257,7 @@ exports.getDashboardReport = async (req, res) => {
     };
 
     const partIdsForLeak = [...new Set(partHistory.slice(0, 3000).map((r) => String(r.part_id || "").trim()).filter(Boolean))];
-    const leakRows = partIdsForLeak.length > 0
+    const leakRows = !lightMode && partIdsForLeak.length > 0
       ? await LeakTestReading.findAll({
         where: { part_id: partIdsForLeak },
         attributes: ["part_id", "payload_json", "createdAt"],
@@ -7357,6 +7361,73 @@ exports.getDashboardReport = async (req, res) => {
         leakTestReading,
       };
     });
+
+    const requiredOperations = uniqueStages(
+      machineRows
+        .map((machine) => normalizeStation(machine.operation_no))
+        .filter(Boolean)
+    );
+    const traceabilityGroupMap = new Map();
+    for (const row of partHistory) {
+      const rawPartId = String(row.part_id || "").trim();
+      const mappedOldPart = getMappedOldPartForPart(rawPartId);
+      const mappedCustomerQr = getMappedCustomerQrForPart(rawPartId);
+      const groupKey = String(mappedOldPart || rawPartId || mappedCustomerQr || "").trim().toUpperCase();
+      if (!groupKey) continue;
+      if (!traceabilityGroupMap.has(groupKey)) {
+        traceabilityGroupMap.set(groupKey, {
+          latest: row,
+          latestTs: new Date(row.createdAt || 0).getTime() || 0,
+          operations: new Map(),
+          blocked: false,
+        });
+      }
+      const group = traceabilityGroupMap.get(groupKey);
+      const rowTs = new Date(row.createdAt || 0).getTime() || 0;
+      if (rowTs >= group.latestTs) {
+        group.latest = row;
+        group.latestTs = rowTs;
+      }
+
+      const station = normalizeStation(row.station_no || row.operation_no);
+      const mappedQr = mappedCustomerQr || getMappedCustomerQrForPart(row.part_id);
+      const plcStatus = String(row.plc_status || "").trim().toUpperCase();
+      const result = String(row.result || "").trim().toUpperCase();
+      let normalized = "IN_PROGRESS";
+      if (shouldTreatRecoveryPendingAsPassed(row, mappedQr)) {
+        normalized = "OK";
+      } else if (plcStatus === "ENDED_NG" || result === "NG") {
+        normalized = "NG";
+      } else if (plcStatus === "ENDED_OK" || result === "OK") {
+        normalized = "OK";
+      } else if (["INTERLOCKED", "BLOCKED", "PLC_COMM_ERROR"].includes(plcStatus)) {
+        group.blocked = true;
+      }
+      if (station) {
+        const current = group.operations.get(station);
+        const priority = normalized === "NG" ? 3 : normalized === "OK" ? 2 : 1;
+        const currentPriority = current === "NG" ? 3 : current === "OK" ? 2 : 1;
+        if (!current || priority >= currentPriority) {
+          group.operations.set(station, normalized);
+        }
+      }
+    }
+
+    const traceabilityCounts = { total: 0, passed: 0, failed: 0, blocked: 0, inProgress: 0 };
+    for (const group of traceabilityGroupMap.values()) {
+      traceabilityCounts.total += 1;
+      const values = requiredOperations.map((operation) => group.operations.get(operation)).filter(Boolean);
+      const latestPartStatus = String(group.latest?.status || "").trim().toUpperCase();
+      if (values.some((value) => value === "NG") || ["NG", "FAILED", "INTERLOCKED"].includes(latestPartStatus)) {
+        traceabilityCounts.failed += 1;
+      } else if (group.blocked) {
+        traceabilityCounts.blocked += 1;
+      } else if (requiredOperations.length > 0 && values.length >= requiredOperations.length && values.every((value) => value === "OK")) {
+        traceabilityCounts.passed += 1;
+      } else {
+        traceabilityCounts.inProgress += 1;
+      }
+    }
 
     const availableLines = uniqueStages(machineRows.map((row) => String(row.line_name || "").trim()).filter(Boolean));
 
@@ -7502,6 +7573,7 @@ exports.getDashboardReport = async (req, res) => {
         pageSize,
         total: historyTotal,
       },
+      traceabilityCounts,
       partsList,
       plcReadingColumns,
       availableLines,

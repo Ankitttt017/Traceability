@@ -1,6 +1,20 @@
 import React from 'react';
 import { CheckCircle2, XCircle, Activity, Clock3, Gauge, CircleSlash } from 'lucide-react';
 
+const SummaryCardSkeleton = () => (
+  <div className="relative min-h-[108px] overflow-hidden bg-bg-card border border-border rounded-lg p-3 shadow-sm">
+    <div className="absolute inset-0 -translate-x-full animate-[shimmer_1.4s_infinite] bg-gradient-to-r from-transparent via-white/60 to-transparent" />
+    <div className="flex items-start justify-between mb-3">
+      <div className="h-8 w-8 rounded-md bg-slate-200" />
+      <div className="h-5 w-24 rounded border border-slate-200 bg-slate-100" />
+    </div>
+    <div className="space-y-2.5">
+      <div className="h-3 w-32 rounded bg-slate-200" />
+      <div className="h-6 w-16 rounded bg-slate-200" />
+    </div>
+  </div>
+);
+
 const SummaryCard = ({ label, value, icon: Icon, colorClass, subValue }) => (
   <div className="bg-bg-card border border-border rounded-lg p-3 shadow-sm">
     <div className="flex items-start justify-between mb-2">
@@ -20,7 +34,7 @@ const SummaryCard = ({ label, value, icon: Icon, colorClass, subValue }) => (
   </div>
 );
 
-const ReportSummaryCards = ({ metrics = {} }) => {
+const ReportSummaryCards = ({ metrics = {}, loading = false }) => {
   const plc = metrics.plcShotSummary || {};
   const traceabilityCards = [
     {
@@ -86,12 +100,25 @@ const ReportSummaryCards = ({ metrics = {} }) => {
 
   return (
     <div className="space-y-3 mb-5">
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {shotCards.map((card, i) => <SummaryCard key={`shot-${i}`} {...card} />)}
-      </div>
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {traceabilityCards.map((card, i) => <SummaryCard key={`trace-${i}`} {...card} />)}
-      </div>
+      {loading ? (
+        <>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {shotCards.map((_, i) => <SummaryCardSkeleton key={`shot-skeleton-${i}`} />)}
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {traceabilityCards.map((_, i) => <SummaryCardSkeleton key={`trace-skeleton-${i}`} />)}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {shotCards.map((card, i) => <SummaryCard key={`shot-${i}`} {...card} />)}
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {traceabilityCards.map((card, i) => <SummaryCard key={`trace-${i}`} {...card} />)}
+          </div>
+        </>
+      )}
     </div>
   );
 };

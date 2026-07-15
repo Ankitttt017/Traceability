@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { io } from "socket.io-client";
-import { SOCKET_URL } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 import {
   AlertTriangle,
   CheckCircle,
@@ -54,7 +54,7 @@ const Traceability = () => {
   }, []);
 
   useEffect(() => {
-    const socket = io(SOCKET_URL, { path: "/socket.io/", transports: ["polling"], upgrade: false });
+    const socket = io(SOCKET_URL, SOCKET_OPTIONS);
     const pushFeed = (entry) => {
       setFeed((prev) => [{ id: `${Date.now()}-${Math.random()}`, timestamp: new Date().toISOString(), ...entry }, ...prev].slice(0, 25));
     };

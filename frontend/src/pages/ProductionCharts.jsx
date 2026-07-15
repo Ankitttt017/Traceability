@@ -25,7 +25,7 @@ import { dashboardApi, machineApi, reportApi } from "../api/services";
 import { CHART_COLORS, STATUS_COLORS } from "../constants/chartTheme";
 import SafeChart from "../components/charts/SafeChart";
 import PlantLineSelector from "../components/PlantLineSelector";
-import { SOCKET_URL } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 import { useLanguage } from "../context/LanguageContext";
 
 // -- Design tokens ----------------------------------------------------------
@@ -500,12 +500,9 @@ const ProductionCharts=()=>{
 
   useEffect(() => {
     const sock = io(SOCKET_URL, {
-      path: "/socket.io/",
-      transports: ["polling"], upgrade: false,
+      ...SOCKET_OPTIONS,
       reconnection: true,
       reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
       timeout: 10000,
     });
     sock.on("dashboard_refresh", () => scheduleRefresh(450));

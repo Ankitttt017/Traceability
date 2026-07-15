@@ -35,24 +35,34 @@ const ReportTable = ({
   pagination = null,
   onPageChange,
   onPageSizeChange,
+  disablePagination = false,
 }) => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
   const tableScrollRef = useRef(null);
-  const serverPaged = Boolean(pagination && typeof onPageChange === "function");
+  const serverPaged = !disablePagination && Boolean(pagination && typeof onPageChange === "function");
   const effectivePageSize = serverPaged ? Number(pagination.pageSize || 50) : pageSize;
-  const totalRows = serverPaged ? Number(pagination.totalRows || rows.length || 0) : rows.length;
+  const totalRows = disablePagination ? Number(pagination?.totalRows || rows.length || 0) : (serverPaged ? Number(pagination.totalRows || rows.length || 0) : rows.length);
   const totalPages = serverPaged
     ? Math.max(1, Number(pagination.totalPages || Math.ceil(totalRows / effectivePageSize) || 1))
+    : disablePagination
+    ? 1
     : Math.max(1, Math.ceil(rows.length / pageSize));
   const currentPage = serverPaged ? Number(pagination.page || 1) : Math.min(page, totalPages);
   const pagedRows = useMemo(() => {
+    if (disablePagination) return rows;
     if (serverPaged) return rows;
     const start = (currentPage - 1) * pageSize;
     return rows.slice(start, start + pageSize);
-  }, [rows, currentPage, pageSize, serverPaged]);
-  const rangeStart = totalRows > 0 ? ((currentPage - 1) * effectivePageSize) + 1 : 0;
-  const rangeEnd = totalRows > 0 ? Math.min(totalRows, rangeStart + pagedRows.length - 1) : 0;
+  }, [rows, currentPage, pageSize, serverPaged, disablePagination]);
+  const rangeStart = disablePagination ? (totalRows > 0 ? 1 : 0) : (totalRows > 0 ? ((currentPage - 1) * effectivePageSize) + 1 : 0);
+  const rangeEnd = disablePagination ? pagedRows.length : (totalRows > 0 ? Math.min(totalRows, rangeStart + pagedRows.length - 1) : 0);
+  const pageButtonClass = (disabled) =>
+    `px-3 py-1.5 text-xs font-bold border rounded-md transition-all ${
+      disabled
+        ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+        : "border-primary bg-primary text-on-primary shadow-sm hover:brightness-110 active:scale-95"
+    }`;
   const goToPage = (nextPage) => {
     const bounded = Math.min(totalPages, Math.max(1, nextPage));
     if (serverPaged) onPageChange(bounded);
@@ -222,24 +232,32 @@ const ReportTable = ({
       </div>
       </div>
       <div className="px-6 py-3 bg-bg-dark/20 border-t border-border flex items-center justify-between flex-wrap gap-3">
-        <div className="flex items-center gap-2 text-[11px] text-text-muted">
-          <span>Rows/page</span>
-          <select
-            value={effectivePageSize}
-            onChange={(e) => changePageSize(e.target.value)}
-            className="bg-bg-dark border border-border rounded px-2 py-1 text-text-main"
-          >
-            {[25, 50, 100, 200].map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => goToPage(currentPage - 1)} disabled={currentPage <= 1 || loading} className="px-3 py-1 text-xs border border-border rounded disabled:opacity-50">Prev</button>
-          <span className="px-3 py-1 rounded bg-primary text-on-primary text-xs font-bold">Page {currentPage}/{totalPages}</span>
-          <span className="hidden sm:inline text-[11px] text-text-muted">
-            Showing {rangeStart}-{rangeEnd}
+        {disablePagination ? (
+          <span className="text-[11px] font-bold text-text-muted">
+            Showing {rangeStart}-{rangeEnd} of {totalRows} filtered records
           </span>
-          <button onClick={() => goToPage(currentPage + 1)} disabled={currentPage >= totalPages || loading} className="px-3 py-1 text-xs border border-border rounded disabled:opacity-50">Next</button>
-        </div>
+        ) : (
+          <>
+            <div className="flex items-center gap-2 text-[11px] text-text-muted">
+              <span>Rows/page</span>
+              <select
+                value={effectivePageSize}
+                onChange={(e) => changePageSize(e.target.value)}
+                className="bg-bg-dark border border-border rounded px-2 py-1 text-text-main"
+              >
+                {[25, 50, 100, 200, 500, 1000].map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={() => goToPage(currentPage - 1)} disabled={currentPage <= 1 || loading} className={pageButtonClass(currentPage <= 1 || loading)}>Prev</button>
+              <span className="px-3 py-1 rounded bg-primary text-on-primary text-xs font-bold">Page {currentPage}/{totalPages}</span>
+              <span className="hidden sm:inline text-[11px] text-text-muted">
+                Showing {rangeStart}-{rangeEnd} of {totalRows}
+              </span>
+              <button onClick={() => goToPage(currentPage + 1)} disabled={currentPage >= totalPages || loading} className={pageButtonClass(currentPage >= totalPages || loading)}>Next</button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

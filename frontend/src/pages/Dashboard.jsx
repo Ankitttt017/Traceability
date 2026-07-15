@@ -7,7 +7,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useRef } from "react";
 import { io } from "socket.io-client";
-import { SOCKET_URL } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 import {
   RefreshCw, Filter, CheckCircle2, XCircle,
   AlertTriangle, Cpu, Activity, History, Clock,
@@ -654,10 +654,10 @@ const Dashboard = () => {
     try {
       setLoading(true);
       const [machinesResult, summaryResult, reportResult, oeeResult] = await Promise.allSettled([
-        machineApi.list({ timeout: 20000 }),
-        dashboardApi.summary(query, { timeout: 25000 }),
-        dashboardApi.report(query, { timeout: 30000 }),
-        dashboardApi.oee({ timeout: 20000 }),
+        machines.length ? Promise.resolve(machines) : machineApi.list({ timeout: 20000, suppressGlobalError: true }),
+        dashboardApi.summary(query, { timeout: 25000, suppressGlobalError: true }),
+        dashboardApi.report({ ...query, light: "1" }, { timeout: 45000, suppressGlobalError: true }),
+        dashboardApi.oee({ timeout: 20000, suppressGlobalError: true }),
       ]);
 
       if (machinesResult.status === "fulfilled") {
@@ -698,7 +698,7 @@ const Dashboard = () => {
         loadData();
       }
     }
-  },[query]);
+  },[query, machines]);
 
   const scheduleRefresh = useCallback((cooldownMs = 300) => {
     const elapsed = Date.now() - lastRefreshAtRef.current;
@@ -713,7 +713,7 @@ const Dashboard = () => {
 
   useEffect(()=>{
     scheduleRefresh(0);
-    const t=setInterval(()=>scheduleRefresh(200),15000);
+    const t=setInterval(()=>scheduleRefresh(500),30000);
     return()=>{
       clearInterval(t);
       if (refreshTimerRef.current) {
@@ -730,14 +730,9 @@ const Dashboard = () => {
     const connectTimer = setTimeout(() => {
       if (disposed) return;
       sock=io(SOCKET_URL,{
-        path:"/socket.io/",
-        transports: ["websocket", "polling"],
-        upgrade: true,
+        ...SOCKET_OPTIONS,
         reconnection:true,
         reconnectionAttempts:Infinity,
-        reconnectionDelay:1000,
-        reconnectionDelayMax:5000,
-        timeout:10000,
       });
       sock.on("dashboard_refresh",()=>scheduleRefresh(350));
       sock.on("plc_connection_event",d=>{
@@ -897,7 +892,7 @@ const Dashboard = () => {
     });
   }, [machines, report.partsList]);
 
-  const dashboardPartCounts = useMemo(() => {
+  const dashboardPartCountsFromJourney = useMemo(() => {
     return dashboardParts.reduce((acc, part) => {
       if (part.finalStatus === "PASSED") acc.passed += 1;
       else if (part.finalStatus === "FAILED") acc.failed += 1;
@@ -906,6 +901,19 @@ const Dashboard = () => {
       return acc;
     }, { passed: 0, failed: 0, blocked: 0, inProgress: 0 });
   }, [dashboardParts]);
+
+  const reportTraceabilityCounts = useMemo(() => {
+    const counts = report?.traceabilityCounts;
+    if (!counts || typeof counts !== "object") return null;
+    return {
+      passed: Number(counts.passed || 0),
+      failed: Number(counts.failed || 0),
+      blocked: Number(counts.blocked || 0),
+      inProgress: Number(counts.inProgress || 0),
+    };
+  }, [report?.traceabilityCounts]);
+
+  const dashboardPartCounts = reportTraceabilityCounts || dashboardPartCountsFromJourney;
 
   const dashboardMachineCards = useMemo(() => {
     const machineCountsFromParts = new Map();

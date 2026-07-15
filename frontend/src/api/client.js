@@ -1,7 +1,7 @@
 import axios from "axios";
 import toast from "react-hot-toast";
 import { clearAuthSession } from "../utils/authStorage";
-import { getCanonicalOrigin } from "../constants/network";
+import { getDefaultBackendOrigin, resolveBackendUrl } from "../constants/network";
 
 /*
 |--------------------------------------------------------------------------
@@ -12,13 +12,13 @@ import { getCanonicalOrigin } from "../constants/network";
 */
 
 const DEFAULT_SERVER_URL =
-  typeof window !== "undefined" ? getCanonicalOrigin() : "http://localhost:9090";
+  typeof window !== "undefined" ? getDefaultBackendOrigin() : "http://localhost:9090";
 
 // Production-safe default:
 // 1) Use VITE_API_BASE_URL when provided.
 // 2) Else call same-origin backend path (/api/v1), avoiding hardcoded LAN IP in live deploy.
 const ENV_API_BASE_URL = String(import.meta.env.VITE_API_BASE_URL || "").trim();
-const BASE_URL = ENV_API_BASE_URL || `${DEFAULT_SERVER_URL}/api/v1`;
+const BASE_URL = resolveBackendUrl(ENV_API_BASE_URL || `${DEFAULT_SERVER_URL}/api/v1`);
 
 // Live Production / LAN
 // const BASE_URL = "http://172.16.9.110:4000/api/v1";

@@ -719,7 +719,7 @@ export const reportApi = {
       reportConfig: reportConfig || loadReportConfig(),
     }, {
       responseType: "blob",
-      timeout: 300000,
+      timeout: 600000,
     });
     return data;
   },
@@ -730,7 +730,7 @@ export const reportApi = {
       reportConfig: reportConfig || loadReportConfig(),
     }, {
       responseType: "blob",
-      timeout: 300000,
+      timeout: 600000,
     });
     return data;
   },
@@ -741,7 +741,7 @@ export const reportApi = {
       reportConfig: reportConfig || loadReportConfig(),
     }, {
       responseType: "blob",
-      timeout: 300000,
+      timeout: 600000,
     });
     return data;
   },
@@ -752,7 +752,7 @@ export const reportApi = {
       reportConfig: reportConfig || loadReportConfig(),
     }, {
       responseType: "blob",
-      timeout: 300000,
+      timeout: 600000,
     });
     return data;
   },

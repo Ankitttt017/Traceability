@@ -9,6 +9,7 @@ const PartCodeMapping = require("../models/PartCodeMapping");
 const ProductionLog = require("../models/ProductionLog");
 const { saveScan } = require("../services/scanService");
 const { getStationFeatureConfig } = require("../services/stationFeatureService");
+const plcHandshakeEngine = require("../services/plcHandshakeEngine");
 const {
   buildWorkflowKey,
   getWorkflowState,
@@ -467,7 +468,246 @@ async function markOperationEndedOk({ operationLogId, partId, stationNo, machine
 
 
 function isPlcConfiguredForMachine(machine = {}) {
-  return Boolean(String(machine?.plc_ip || "").trim());
+  const ip = String(machine?.plc_ip || machine?.machine_ip || "").trim();
+  const port = Number(machine?.plc_port || machine?.machine_port);
+  const protocol = String(machine?.plc_protocol || "").trim().toUpperCase();
+  return Boolean(ip && ip !== "0.0.0.0" && protocol !== "DISABLED" && Number.isFinite(port) && port > 0);
+}
+
+async function getTcpStationPlcSettings(machine = {}, stationNo = "") {
+  const station = normalizeStation(stationNo || machine.operation_no);
+  const features = await getStationFeatureConfig(station, {
+    plantId: machine.plantId || machine.plant_id,
+    lineId: machine.lineId || machine.line_id,
+  }).catch(() => ({}));
+  return {
+    station,
+    features,
+    operationEnabled: features?.operation !== false,
+    manualResult: features?.manualResult === true,
+    plcCommunicationEnabled: features?.plcCommunication !== false,
+    machineBypassEnabled: isMachineBypassEnabled(machine.id) || machine.bypass_enabled === true,
+    plcConfigured: isPlcConfiguredForMachine(machine),
+  };
+}
+
+async function markTcpOperationStarted(operationLogId, machineId) {
+  if (!operationLogId) return null;
+  const opLog = await OperationLog.findByPk(operationLogId);
+  if (!opLog) return null;
+  await opLog.update({
+    plc_status: "STARTED",
+    machine_id: machineId,
+    operation_result: "RUNNING",
+    plc_start_time: new Date(),
+    plc_start_at: new Date(),
+  });
+  return opLog;
+}
+
+async function markTcpOperationEndedNg({ operationLogId, partId, stationNo, machineId, reason }) {
+  if (!operationLogId) return null;
+  const opLog = await OperationLog.findByPk(operationLogId);
+  if (!opLog) return null;
+  await opLog.update({
+    plc_status: "ENDED_NG",
+    result: "NG",
+    machine_id: machineId,
+    operation_result: "FAILED",
+    plc_end_time: new Date(),
+    plc_end_at: new Date(),
+    interlock_reason: reason || "PLC_END_NG",
+  });
+
+  const part = await Part.findOne({ where: { part_id: partId } });
+  if (part) {
+    part.current_station = normalizeStation(stationNo);
+    part.current_operation = normalizeStation(stationNo);
+    part.status = "NG";
+    part.is_interlocked = true;
+    part.interlock_reason = reason || "PLC_END_NG_INTERLOCK";
+    await part.save();
+  }
+
+  await ProductionLog.create({
+    part_id: partId,
+    machine_id: machineId,
+    user_id: null,
+    status: "NG",
+    ng_reason: reason || "PLC_END_NG",
+  });
+  return opLog;
+}
+
+async function markTcpOperationCommunicationError({ operationLogId, partId, stationNo, machineId, reason }) {
+  if (operationLogId) {
+    const opLog = await OperationLog.findByPk(operationLogId);
+    if (opLog) {
+      await opLog.update({
+        plc_status: "PLC_COMM_ERROR",
+        operation_result: "FAILED",
+        interlock_reason: reason || "PLC_COMMUNICATION_FAILED",
+        plc_end_time: new Date(),
+        plc_end_at: new Date(),
+      });
+    }
+  }
+
+  const part = await Part.findOne({ where: { part_id: partId } });
+  if (part) {
+    part.current_operation = normalizeStation(stationNo);
+    part.status = part.is_rework ? "REWORK" : "IN_PROGRESS";
+    part.is_interlocked = false;
+    part.interlock_reason = reason || "PLC_COMMUNICATION_FAILED";
+    await part.save();
+  }
+}
+
+async function startTcpPlcCycle({ response, machine, stationNo, partId }) {
+  if (!response?.operationLogId || !machine?.id) return;
+  console.log(`[TCP:PLC_START_REQUEST] machineId=${machine.id} station=${stationNo} partId=${partId} operationLogId=${response.operationLogId}`);
+  plcHandshakeEngine.executeCycle({
+    machine,
+    partId,
+    stationNo,
+    operationLogId: response.operationLogId,
+    onStarted: async () => {
+      await markTcpOperationStarted(response.operationLogId, machine.id);
+      emitRealtime("operator_popup", {
+        type: "INFO",
+        partId,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        qrStatus: "PASSED",
+        operationStatus: "RUNNING",
+        status: "RUNNING",
+        plcStatus: "STARTED",
+        message: "PLC cycle running",
+        timestamp: new Date().toISOString(),
+      });
+      emitRealtime("dashboard_refresh", { reason: "TCP_PLC_START_ACK", partId, stationNo, machineId: machine.id });
+    },
+    onEndedOk: async () => {
+      await markOperationEndedOk({
+        operationLogId: response.operationLogId,
+        partId,
+        stationNo,
+        machineId: machine.id,
+      });
+      emitRealtime("operator_popup", {
+        type: "SUCCESS",
+        partId,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        qrStatus: "PASSED",
+        operationStatus: "PASSED",
+        status: "ENDED_OK",
+        plcStatus: "ENDED_OK",
+        message: "Operation Passed",
+        closePopup: true,
+        timestamp: new Date().toISOString(),
+      });
+      emitRealtime("dashboard_refresh", { reason: "TCP_PLC_END_OK", partId, stationNo, machineId: machine.id });
+    },
+    onEndedNg: async () => {
+      await markTcpOperationEndedNg({
+        operationLogId: response.operationLogId,
+        partId,
+        stationNo,
+        machineId: machine.id,
+        reason: "PLC_END_NG",
+      });
+      emitRealtime("operator_popup", {
+        type: "ERROR",
+        partId,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        qrStatus: "PASSED",
+        operationStatus: "FAILED",
+        status: "ENDED_NG",
+        plcStatus: "ENDED_NG",
+        message: "Operation Failed (NG)",
+        timestamp: new Date().toISOString(),
+      });
+      emitRealtime("dashboard_refresh", { reason: "TCP_PLC_END_NG", partId, stationNo, machineId: machine.id });
+    },
+    onError: async (error) => {
+      const reason = `PLC_COMMUNICATION_FAILED_${String(error?.message || "").slice(0, 120)}`;
+      await markTcpOperationCommunicationError({
+        operationLogId: response.operationLogId,
+        partId,
+        stationNo,
+        machineId: machine.id,
+        reason,
+      });
+      emitRealtime("operator_popup", {
+        type: "WARNING",
+        partId,
+        stationNo,
+        machineId: machine.id,
+        machineName: machine.machine_name,
+        qrStatus: "PASSED",
+        operationStatus: "PLC_TIMEOUT",
+        status: "PLC_COMM_ERROR",
+        plcStatus: "PLC_COMM_ERROR",
+        message: "PLC communication issue. Use Reset Operation, then scan again.",
+        timestamp: new Date().toISOString(),
+      });
+      emitRealtime("dashboard_refresh", { reason: "TCP_PLC_COMM_ERROR", partId, stationNo, machineId: machine.id });
+    },
+  }).catch((error) => {
+    console.error(`[TCP:PLC_START_FAILED] machineId=${machine.id} station=${stationNo} partId=${partId}: ${error.message}`);
+  });
+  response.plcHandshake = "INITIATED";
+}
+
+async function handleTcpPlcAfterScan({ response, machine, stationNo, partId, customerQrPending = false }) {
+  if (!machine?.id) return;
+  const settings = await getTcpStationPlcSettings(machine, stationNo);
+
+  if (response?.decision !== "ALLOW") {
+    if (settings.plcConfigured && settings.plcCommunicationEnabled) {
+      console.log(`[TCP:PLC_INTERLOCK_REQUEST] machineId=${machine.id} station=${settings.station} reason=${response?.reason || "REJECTED_SCAN"}`);
+      await plcHandshakeEngine.signalInterlock(machine.id, response?.reason || "REJECTED_SCAN", { force: true })
+        .catch((error) => console.error("[TCP:PLC_INTERLOCK_FAILED]", error.message));
+    } else {
+      console.warn(`[TCP:PLC_INTERLOCK_SKIPPED] machineId=${machine.id} reason=${response?.reason || "REJECTED_SCAN"} plcConfigured=${settings.plcConfigured} plcCommunicationEnabled=${settings.plcCommunicationEnabled}`);
+    }
+    return;
+  }
+
+  if (!response?.operationLogId || customerQrPending) {
+    return;
+  }
+  const alreadyFinalized = ["ENDED_OK", "PASSED", "COMPLETED_OK"].includes(
+    String(response?.plcStatus || response?.operationStatus || response?.status || "").trim().toUpperCase()
+  );
+  if (alreadyFinalized) {
+    return;
+  }
+
+  if (!settings.operationEnabled || settings.manualResult || settings.machineBypassEnabled || !settings.plcConfigured || !settings.plcCommunicationEnabled) {
+    if (!settings.manualResult) {
+      await markOperationEndedOk({
+        operationLogId: response.operationLogId,
+        partId,
+        stationNo,
+        machineId: machine.id,
+      }).catch((error) => console.error("[TCP:PLC_BYPASS_AUTO_OK_FAILED]", error.message));
+      response.plcHandshake = "BYPASSED";
+      response.operationStatus = "PASSED";
+      response.plcStatus = "ENDED_OK";
+      response.status = "ENDED_OK";
+      response.message = "Operation completed directly (PLC communication bypassed/disabled).";
+      emitRealtime("dashboard_refresh", { reason: "TCP_PLC_BYPASSED", partId, stationNo, machineId: machine.id });
+    }
+    return;
+  }
+
+  await startTcpPlcCycle({ response, machine, stationNo, partId });
 }
 
 
@@ -637,13 +877,55 @@ async function resolveActivePartIdForMachine(machine, stationNo) {
   if (workflowState?.waitingForCustomerQr && workflowState.activePartId) {
     return workflowState.activePartId;
   }
-  return "";
+  if (!(await stationRequiresCustomerQrForCompletion(machine, targetStation))) {
+    return "";
+  }
+
+  const activeStatuses = ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING", "ENDED_OK"];
+  const freshCutoff = new Date(Date.now() - CUSTOMER_QR_ACTIVE_WINDOW_MS);
+  const candidateLogs = await OperationLog.findAll({
+    where: {
+      machine_id: machine.id,
+      ...(targetStation ? { station_no: targetStation } : {}),
+      plc_status: { [Op.in]: activeStatuses },
+      result: "OK",
+      updatedAt: { [Op.gte]: freshCutoff },
+    },
+    attributes: ["id", "part_id", "updatedAt"],
+    order: [["updatedAt", "DESC"]],
+    limit: 20,
+  });
+  const candidatePartIds = [...new Set(
+    candidateLogs
+      .map((log) => String(log.part_id || "").trim())
+      .filter(Boolean)
+  )];
+  if (!candidatePartIds.length) return "";
+
+  const existingMappings = await PartCodeMapping.findAll({
+    where: {
+      is_active: true,
+      old_part_id: { [Op.in]: candidatePartIds },
+    },
+    attributes: ["old_part_id"],
+    raw: true,
+  });
+  const mappedPartIds = new Set(
+    existingMappings
+      .map((row) => String(row.old_part_id || "").trim().toUpperCase())
+      .filter(Boolean)
+  );
+  const latestUnmapped = candidateLogs.find((log) => {
+    const candidatePartId = String(log.part_id || "").trim();
+    return candidatePartId && !mappedPartIds.has(candidatePartId.toUpperCase());
+  });
+  return latestUnmapped ? String(latestUnmapped.part_id || "").trim() : "";
 }
 
 
 async function resolveMappedPartId(inputCode) {
   const raw = String(inputCode || "").trim();
-  if (!raw) return { resolvedPartId: "", customerQrCode: null, mappedPartId: "" };
+  if (!raw) return { resolvedPartId: "", customerQrCode: null, mappedPartId: "", displayCustomerQrCode: "" };
   const row = await PartCodeMapping.findOne({
     where: {
       is_active: true,
@@ -655,13 +937,19 @@ async function resolveMappedPartId(inputCode) {
     order: [["updatedAt", "DESC"]],
   });
   if (!row) {
-    return { resolvedPartId: raw, customerQrCode: null, mappedPartId: "" };
+    return { resolvedPartId: raw, customerQrCode: null, mappedPartId: "", displayCustomerQrCode: "" };
   }
   const customerQrCode = String(row.customer_qr || raw).trim();
+  const oldPartId = String(row.old_part_id || "").trim();
+  const rawKey = raw.toUpperCase();
+  const customerKey = customerQrCode.toUpperCase();
+  const oldPartKey = oldPartId.toUpperCase();
+  const scannedCustomerQr = Boolean(customerQrCode && rawKey === customerKey);
   return {
-    resolvedPartId: customerQrCode || raw,
-    customerQrCode,
-    mappedPartId: String(row.old_part_id || "").trim(),
+    resolvedPartId: scannedCustomerQr ? (oldPartId || raw) : raw,
+    customerQrCode: scannedCustomerQr ? customerQrCode : null,
+    mappedPartId: scannedCustomerQr ? (oldPartId || raw) : (oldPartKey === rawKey ? oldPartId : ""),
+    displayCustomerQrCode: customerQrCode,
   };
 }
 
@@ -831,68 +1119,16 @@ async function promoteTraceabilityIdentityToCustomerQr({ partId, customerQrCode,
     return { traceabilityPartId: customerQr, dotPinPartId, customerQrCode: customerQr };
   }
 
-  const [dotPinPart, customerPart] = await Promise.all([
-    Part.findOne({ where: { part_id: dotPinPartId } }),
-    Part.findOne({ where: { part_id: customerQr } }),
-  ]);
-
-  if (!customerPart) {
-    await Part.create({
-      part_id: customerQr,
-      month: dotPinPart?.month || new Date().getMonth() + 1,
-      year: dotPinPart?.year || new Date().getFullYear(),
-      current_operation: station,
-      current_station: station,
-      status: "IN_PROGRESS",
-      is_interlocked: false,
-      interlock_reason: null,
-      qr_format_name: dotPinPart?.qr_format_name || "CUSTOMER_QR",
-      last_validation_result: dotPinPart?.last_validation_result || "PASSED",
-      is_rework: dotPinPart?.is_rework === true,
-    });
-  } else {
-    customerPart.current_operation = customerPart.current_operation || station;
-    customerPart.current_station = customerPart.current_station || station;
-    customerPart.status = customerPart.status || "IN_PROGRESS";
-    customerPart.last_validation_result = customerPart.last_validation_result || "PASSED";
-    if (!customerPart.qr_format_name) customerPart.qr_format_name = "CUSTOMER_QR";
-    await customerPart.save();
+  const dotPinPart = await Part.findOne({ where: { part_id: dotPinPartId } });
+  if (dotPinPart) {
+    dotPinPart.current_operation = dotPinPart.current_operation || station;
+    dotPinPart.current_station = dotPinPart.current_station || station;
+    dotPinPart.status = dotPinPart.status || "IN_PROGRESS";
+    dotPinPart.last_validation_result = dotPinPart.last_validation_result || "PASSED";
+    await dotPinPart.save();
   }
 
-  const sequenceData = await getActiveMachineSequenceData().catch(() => ({ machines: [], sequence: [] }));
-  const sequence = Array.isArray(sequenceData?.sequence) ? sequenceData.sequence : [];
-  const currentStationIndex = sequence.indexOf(station);
-  const stationsToPromote = currentStationIndex >= 0
-    ? sequence.slice(0, currentStationIndex + 1)
-    : [station];
-  const machineIdsToPromote = (sequenceData?.machines || [])
-    .filter((candidate) => stationsToPromote.includes(normalizeStation(candidate.operation_no)))
-    .map((candidate) => Number(candidate.id || 0))
-    .filter((id) => Number.isFinite(id) && id > 0);
-
-  await OperationLog.update(
-    { part_id: customerQr },
-    {
-      where: {
-        part_id: dotPinPartId,
-        station_no: { [Op.in]: stationsToPromote },
-      },
-    }
-  );
-
-  await ProductionLog.update(
-    { part_id: customerQr },
-    {
-      where: {
-        part_id: dotPinPartId,
-        ...(machineIdsToPromote.length
-          ? { machine_id: { [Op.in]: machineIdsToPromote } }
-          : { machine_id: machine.id }),
-      },
-    }
-  );
-
-  return { traceabilityPartId: customerQr, dotPinPartId, customerQrCode: customerQr };
+  return { traceabilityPartId: dotPinPartId, dotPinPartId, customerQrCode: customerQr };
 }
 
 
@@ -1722,6 +1958,56 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
   const isMappedTraceabilityScan = Boolean(resolvedCode.customerQrCode);
   const isCustomerQrOnlyStart = flowContext.flowType === "CUSTOMER_QR_ONLY";
   const existingWorkflowState = getWorkflowState(workflowKey);
+  const pendingDifferentStartQr =
+    !isMappedTraceabilityScan &&
+    !isCustomerQrOnlyStart &&
+    flowContext.flowType === "NORMAL" &&
+    flowContext.qrType === "START_QR" &&
+    existingWorkflowState?.waitingForCustomerQr === true &&
+    existingWorkflowState.activePartId &&
+    String(existingWorkflowState.activePartId || "").trim() !== String(normalizedPartId || partId || "").trim();
+
+  if (pendingDifferentStartQr) {
+    const activePartId = String(existingWorkflowState.activePartId || "").trim();
+    const message = `${stationNo}: Complete Customer QR mapping for active part ${activePartId} before scanning a new Start QR.`;
+    const payload = attachScannerDisplayMetadata({
+      partId: activePartId,
+      customerQrCode: "",
+      stationNo,
+      machineId: machine.id,
+      machineName: machine.machine_name,
+      scannerId: scanner.id,
+      scannerName: scanner.scanner_name,
+      scannerRole,
+      scannerIp,
+      qrStatus: "BLOCKED",
+      operationStatus: "WAITING_CUSTOMER_QR",
+      status: "WAITING",
+      plcStatus: "WAITING_PLC",
+      reason: "PENDING_CUSTOMER_QR_ACTIVE",
+      customerQrPending: true,
+      customerQrMapped: false,
+      message,
+      timestamp: new Date().toISOString(),
+    }, { rawPacket, rawPayload: rawPacket, partId: activePartId, customerQrCode: "", mappedPartId: activePartId });
+    emitRealtime("scan_event", { sourceEvent: "scan_event", decision: "BLOCK", ...payload });
+    emitRealtime("operator_popup", { type: "WARNING", ...payload });
+    logScannerTrace({
+      stage: "start_qr_blocked_pending_customer_qr",
+      scannerIp,
+      scannerName: scanner.scanner_name,
+      machineId: machine.id,
+      stationNo,
+      flowType: flowContext.flowType,
+      qrType,
+      payload: partId,
+      reason: "PENDING_CUSTOMER_QR_ACTIVE",
+      status: "BLOCKED",
+      durationMs: Date.now() - scanStartedAt,
+    });
+    return;
+  }
+
   const repeatedPendingStartQr =
     !isMappedTraceabilityScan &&
     !isCustomerQrOnlyStart &&
@@ -1894,6 +2180,10 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
   const displayMappedPartId = isMappedTraceabilityScan
     ? (resolvedCode.mappedPartId || scanPartId)
     : scanPartId;
+  const afterCustomerQrMappingStation = await isAfterCustomerQrMappingStation(stationNo);
+  const popupCustomerQrCode = isCustomerQrOnlyStart
+    ? scanPartId
+    : (resolvedCode.customerQrCode || (afterCustomerQrMappingStation ? (resolvedCode.displayCustomerQrCode || null) : null));
   const isCustomerQrOnlyTrace = isCustomerQrOnlyStart || await isCustomerQrOnlyTracePart(scanPartId, resolvedCode.customerQrCode || (isCustomerQrOnlyStart ? scanPartId : ""));
   if (isMappedTraceabilityScan && resolvedCode.mappedPartId && resolvedCode.customerQrCode) {
     await promoteTraceabilityIdentityToCustomerQr({
@@ -1956,11 +2246,19 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
     resetWorkflowState(workflowKey, { reason: "START_QR_NOT_ALLOWED" });
   }
 
+  await handleTcpPlcAfterScan({
+    response,
+    machine,
+    stationNo,
+    partId: scanPartId,
+    customerQrPending,
+  });
+
 
   emitRealtime("scan_event", attachScannerDisplayMetadata({
     sourceEvent: "scan_event",
     partId: scanPartId,
-    customerQrCode: isCustomerQrOnlyStart ? scanPartId : (resolvedCode.customerQrCode || null),
+    customerQrCode: popupCustomerQrCode,
     stationNo,
     machineId: machine.id,
     machineName: machine.machine_name,
@@ -1984,13 +2282,13 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
         ? `QR PASS - Waiting for Customer QR at ${stationNo}`
         : (response?.message || "")),
     timestamp: new Date().toISOString(),
-  }, { rawPacket, rawPayload: rawPacket, partId: scanPartId, customerQrCode: isCustomerQrOnlyStart ? scanPartId : (resolvedCode.customerQrCode || null), mappedPartId: displayMappedPartId }));
+  }, { rawPacket, rawPayload: rawPacket, partId: scanPartId, customerQrCode: popupCustomerQrCode, mappedPartId: displayMappedPartId }));
 
 
   emitRealtime("operator_popup", attachScannerDisplayMetadata({
     type: response?.decision === "ALLOW" ? "INFO" : "ERROR",
     partId: scanPartId,
-    customerQrCode: isCustomerQrOnlyStart ? scanPartId : (resolvedCode.customerQrCode || null),
+    customerQrCode: popupCustomerQrCode,
     stationNo,
     machineId: machine.id,
     machineName: machine.machine_name,
@@ -2014,7 +2312,7 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
         ? `QR PASS - Waiting for Customer QR at ${stationNo}`
         : (response?.message || "")),
     timestamp: new Date().toISOString(),
-  }, { rawPacket, rawPayload: rawPacket, partId: scanPartId, customerQrCode: isCustomerQrOnlyStart ? scanPartId : (resolvedCode.customerQrCode || null), mappedPartId: displayMappedPartId }));
+  }, { rawPacket, rawPayload: rawPacket, partId: scanPartId, customerQrCode: popupCustomerQrCode, mappedPartId: displayMappedPartId }));
 
 
   const processingDurationMs = Date.now() - scanStartedAt;
@@ -2067,6 +2365,13 @@ async function processCustomerQrOnlyStart({ scanner, scannerIp, partId, stationN
   if (!allowed) {
     resetWorkflowState(workflowKey, { reason: "QR_ONLY_START_BLOCKED" });
   }
+  await handleTcpPlcAfterScan({
+    response,
+    machine,
+    stationNo,
+    partId,
+    customerQrPending: false,
+  });
   const message = allowed
     ? (response?.message || "Customer QR accepted at Laser. Part passed and traceability started. Continue to next station.")
     : (response?.message || "Customer QR start blocked.");
@@ -2151,6 +2456,8 @@ function startTcpServer() {
 
   tcpServer = net.createServer((socket) => {
     const remoteIp = String(socket.remoteAddress || "").replace(/^::ffff:/, "");
+    socket.setKeepAlive(true, Math.max(Number(process.env.TCP_SCANNER_KEEPALIVE_DELAY_MS || 5000), 1000));
+    socket.setNoDelay(true);
     console.log(`[TCP] Client connected: ${remoteIp}:${socket.remotePort || "-"}`);
     scannerConnectionService.markScannerConnected({ scannerIp: remoteIp });
 

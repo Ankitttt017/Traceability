@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { io } from "socket.io-client";
-import { SOCKET_URL } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 import {
   RefreshCw, Route, ZoomIn, ZoomOut,
   ChevronRight, Cpu, CheckCircle, XCircle,
@@ -504,12 +504,9 @@ export default function ProcessFlow() {
   useEffect(() => {
     let refreshTimer = null;
     const socket = io(SOCKET_URL, {
-      path: "/socket.io/",
-      transports: ["polling"], upgrade: false,
+      ...SOCKET_OPTIONS,
       reconnection: true,
       reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
       timeout: 10000,
     });
     socket.on("dashboard_refresh", () => {

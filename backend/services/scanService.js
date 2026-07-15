@@ -525,6 +525,39 @@ async function hasRealCompletedOperationBefore(partId, currentStation, sequence)
   return previousStations.includes(LEAKTEST_OPERATION) && leaktestState?.state === "PASSED";
 }
 
+async function findPreviousTerminalFailureStation(partId, currentStation, sequence) {
+  const stationIndex = Array.isArray(sequence) ? sequence.indexOf(currentStation) : -1;
+  if (!partId || stationIndex <= 0) return null;
+
+  const previousStations = sequence.slice(0, stationIndex);
+  const linkedPartIds = await getLinkedTraceabilityPartIds(partId);
+  const rows = await OperationLog.findAll({
+    where: {
+      part_id: { [Op.in]: linkedPartIds },
+      station_no: { [Op.in]: previousStations },
+    },
+    attributes: ["station_no", "operation_no", "plc_status", "result", "createdAt"],
+    order: [["createdAt", "DESC"]],
+    limit: 400,
+  });
+
+  for (const log of rows) {
+    const station = normalizeStation(log.station_no || log.operation_no);
+    if (!station || !previousStations.includes(station)) continue;
+    const { plcStatus, result } = getNormalizedOperationState(log);
+    if (TERMINAL_FAILURE_PLC_STATUSES.has(plcStatus) || ["NG", "FAIL", "FAILED"].includes(result)) {
+      return station;
+    }
+  }
+
+  const leaktestState = await getLeaktestSequenceStateForPartIds(linkedPartIds, sequence);
+  if (leaktestState?.state === "FAILED" && previousStations.includes(LEAKTEST_OPERATION)) {
+    return LEAKTEST_OPERATION;
+  }
+
+  return null;
+}
+
 function normalizeResult(result) {
   return String(result || "OK").trim().toUpperCase() === "OK" ? "OK" : "NG";
 }
@@ -1001,6 +1034,37 @@ function getExpectedStation(part, sequence) {
   return sequence[currentIndex + 1];
 }
 
+async function getStationDisplayLabel(stationNo) {
+  const station = normalizeStation(stationNo);
+  if (!station) return "";
+
+  const machine = await Machine.findOne({
+    where: {
+      is_active: true,
+      operation_no: station,
+    },
+    attributes: ["machine_name", "operation_no"],
+    order: [["id", "ASC"]],
+    raw: true,
+  });
+
+  const machineName = String(machine?.machine_name || "").trim();
+  const operationNo = normalizeStation(machine?.operation_no || station);
+  return [machineName, operationNo].filter(Boolean).join(" + ") || station;
+}
+
+async function buildPreviousStationNotCompletedMessage(expectedStation, scannedStation) {
+  const expectedLabel = await getStationDisplayLabel(expectedStation);
+  const scannedLabel = await getStationDisplayLabel(scannedStation);
+  if (expectedLabel && scannedLabel) {
+    return `Previous station not completed. Scan ${expectedLabel} first, then ${scannedLabel}.`;
+  }
+  if (expectedLabel) {
+    return `Previous station not completed. Scan ${expectedLabel} first.`;
+  }
+  return "Previous station not completed. Scan previous station first.";
+}
+
 async function deriveSequenceStateFromHistory(partId, sequence) {
   if (!partId || !Array.isArray(sequence) || sequence.length === 0) {
     return { expectedStation: null, lastCompletedStation: null };
@@ -1137,6 +1201,44 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       isRuleApplicableToStation(rule, station) && isRuleApplicableToMachine(rule, currentMachine)
     );
     let matchedRule = null;
+    const validationPlan = await getStationValidationPlan();
+    const sequence = validationPlan.validationSequence;
+    if (!sequence.includes(station)) {
+      return {
+        decision: "BLOCK",
+        reason: "STATION_NOT_CONFIGURED",
+        message: validationPlan.physicalSequence.includes(station)
+          ? `Station ${station} is bypassed or scanner is inactive. Scan at the next active station.`
+          : `Station ${station} is not configured in active station sequence.`,
+        currentStatus: "UNKNOWN"
+      };
+    }
+    const firstValidationStation = sequence[0] || null;
+    const stationSequenceIndex = sequence.indexOf(station);
+    let part = null;
+
+    // Sequence mistakes should be reported before QR-format mistakes. Example:
+    // if an OP110 part is accidentally scanned at OP120, guide the operator back to OP110.
+    if (!skipSequenceValidation && stationSequenceIndex > 0 && sequence.length > 0) {
+      part = await Part.findOne({ where: { part_id: normalizedPartId } });
+      const earlySequenceState = await deriveSequenceStateFromHistory(normalizedPartId, sequence);
+      const expectedStation = earlySequenceState.expectedStation || (part ? getExpectedStation(part, sequence) : firstValidationStation);
+      const expectedIdx = sequence.indexOf(expectedStation);
+
+      if (expectedStation && expectedIdx >= 0 && expectedIdx < stationSequenceIndex && expectedStation !== station) {
+        return {
+          decision: "BLOCK",
+          reason: "PREVIOUS_STATION_NOT_COMPLETED",
+          qrStatus: "BLOCKED",
+          operationStatus: "INTERLOCKED",
+          message: await buildPreviousStationNotCompletedMessage(expectedStation, station),
+          expectedStation,
+          lastCompletedStation: earlySequenceState.lastCompletedStation || null,
+          scannedStation: station,
+          currentStatus: part?.status || "IN_PROGRESS",
+        };
+      }
+    }
 
     if (!skipQrFormatValidation && applicableRules.length === 0) {
       return {
@@ -1182,26 +1284,14 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       }
     }
 
-    const validationPlan = await getStationValidationPlan();
-    const sequence = validationPlan.validationSequence;
-    if (!sequence.includes(station)) {
-      return {
-        decision: "BLOCK",
-        reason: "STATION_NOT_CONFIGURED",
-        message: validationPlan.physicalSequence.includes(station)
-          ? `Station ${station} is bypassed or scanner is inactive. Scan at the next active station.`
-          : `Station ${station} is not configured in active station sequence.`,
-        currentStatus: "UNKNOWN"
-      };
-    }
-    const firstValidationStation = sequence[0] || null;
-    const stationSequenceIndex = sequence.indexOf(station);
     const hasPreviousRealCompletion = await hasRealCompletedOperationBefore(normalizedPartId, station, sequence);
     const shouldValidateShot =
       !skipShotValidation &&
       (station === firstValidationStation || stationSequenceIndex === 0 || !hasPreviousRealCompletion);
 
-    let part = await Part.findOne({ where: { part_id: normalizedPartId } });
+    if (!part) {
+      part = await Part.findOne({ where: { part_id: normalizedPartId } });
+    }
     if (!part) {
       part = await Part.create({
         part_id: normalizedPartId,
@@ -1211,6 +1301,26 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
         current_station: null,
         status: "IN_PROGRESS",
       });
+    }
+
+    const previousFailedStation = await findPreviousTerminalFailureStation(normalizedPartId, station, sequence);
+    if (!part.is_rework && previousFailedStation) {
+      part.status = "NG";
+      part.is_interlocked = true;
+      part.interlock_reason = previousFailedStation === LEAKTEST_OPERATION ? "LEAK_TEST_NG" : "PREVIOUS_STATION_NG";
+      part.last_validation_result = "FAILED";
+      await part.save();
+      return {
+        decision: "BLOCK",
+        reason: previousFailedStation === LEAKTEST_OPERATION ? "LEAK_TEST_NG" : "PREVIOUS_STATION_NG",
+        qrStatus: "FAILED",
+        operationStatus: "BLOCKED",
+        message: `${previousFailedStation} is NG. Further operations are not allowed.`,
+        currentStatus: part.status,
+        expectedStation: previousFailedStation,
+        lastCompletedStation: previousFailedStation,
+        forceNg: true,
+      };
     }
 
     await autoPassSkippedStationsBefore({
@@ -1480,7 +1590,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
             reason: "PREVIOUS_STATION_NOT_COMPLETED",
             qrStatus: "BLOCKED",
             operationStatus: "INTERLOCKED",
-            message: `Wrong station. Scan ${expectedStation} first, then ${station}.`,
+            message: await buildPreviousStationNotCompletedMessage(expectedStation, station),
             expectedStation,
             lastCompletedStation,
             scannedStation: station,

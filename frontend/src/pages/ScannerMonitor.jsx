@@ -5,7 +5,7 @@
 // ============================================================
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
-import { SOCKET_URL, SCANNER_CONNECTION_GRACE_MS } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL, SCANNER_CONNECTION_GRACE_MS } from "../constants/network";
 import {
   RefreshCw, ScanLine, Wifi, WifiOff, Activity,
   Clock, Globe, CheckCircle2, XCircle, Play, X,
@@ -341,12 +341,9 @@ const ScannerMonitor = () => {
 
   useEffect(() => {
     const socket = io(SOCKET_URL, {
-      path: "/socket.io/",
-      transports: ["polling"], upgrade: false,
+      ...SOCKET_OPTIONS,
       reconnection: true,
       reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
       timeout: 10000,
     });
     const sched = () => {

@@ -280,6 +280,8 @@ const sanitizeCustomerQrValue = (value) => {
   if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
   return raw;
 };
+const looksLikeCustomerQrValue = (value) => /^R[A-Z0-9-]{12,}$/i.test(String(value || "").trim());
+const REPORT_ALL_ROWS_LIMIT = 10000;
 
 const ReportsPage = () => {
   const { t } = useLanguage();
@@ -305,10 +307,10 @@ const ReportsPage = () => {
     metrics: {},
     availableShifts: [],
     plcColumns: [],
-    pagination: { page: 1, pageSize: 100, totalRows: 0, totalPages: 1 },
+    pagination: { page: 1, pageSize: REPORT_ALL_ROWS_LIMIT, totalRows: 0, totalPages: 1 },
   });
   const [reportPage, setReportPage] = useState(1);
-  const [reportPageSize, setReportPageSize] = useState(100);
+  const [reportPageSize, setReportPageSize] = useState(REPORT_ALL_ROWS_LIMIT);
   const [reportConfig, setReportConfig] = useState(() => loadReportConfig());
   const reportAbortRef = useRef(null);
   
@@ -334,6 +336,7 @@ const ReportsPage = () => {
       lineName: '',
       shiftCode: '',
       status: '',
+      partType: '',
       station: '',
       barcode: '',
       customerCode: '',
@@ -379,7 +382,7 @@ const ReportsPage = () => {
     reportAbortRef.current?.abort();
     const controller = new AbortController();
     reportAbortRef.current = controller;
-    const requestPayload = { ...appliedFilters, fast: "1", page: reportPage, pageSize: reportPageSize };
+    const requestPayload = { ...appliedFilters, fast: "1", page: 1, pageSize: REPORT_ALL_ROWS_LIMIT };
     setLoading(true);
     setLoadProgress(8);
     const progressTimer = window.setInterval(() => {
@@ -398,7 +401,7 @@ const ReportsPage = () => {
         metrics: response.metrics || {},
         availableShifts: response.availableShifts || [],
         plcColumns: response.plcColumns || [],
-        pagination: response.pagination || { page: reportPage, pageSize: reportPageSize, totalRows: response.rows?.length || 0, totalPages: 1 },
+        pagination: response.pagination || { page: 1, pageSize: REPORT_ALL_ROWS_LIMIT, totalRows: response.rows?.length || 0, totalPages: 1 },
       });
     } catch (e) {
       if (e?.code === "ERR_CANCELED" || e?.name === "CanceledError") return;
@@ -414,7 +417,7 @@ const ReportsPage = () => {
         reportAbortRef.current = null;
       }
     }
-  }, [appliedFilters, reportPage, reportPageSize]);
+  }, [appliedFilters]);
 
   const refreshReportData = useCallback(() => {
     fetchData();
@@ -447,6 +450,7 @@ const ReportsPage = () => {
     appliedFilters.lineName,
     appliedFilters.shiftCode,
     appliedFilters.status,
+    appliedFilters.partType,
     appliedFilters.station,
     appliedFilters.barcode,
     appliedFilters.customerCode,
@@ -488,15 +492,15 @@ const ReportsPage = () => {
       setExportProgress((prev) => {
         if (prev < 45) return prev + 6;
         if (prev < 75) return prev + 3;
-        if (prev < 92) return prev + 1;
+        if (prev < 98) return prev + 1;
         return prev;
       });
     }, 700);
     try {
       let blob;
-      const exportFilters = { ...appliedFilters, fast: "1", exportLimit: 3000 };
+      const exportFilters = { ...appliedFilters, fast: "1", includePlcSummary: "0", exportLimit: 10000 };
 
-      // Pass filters and reportConfig as separate args â€” services.js builds the body correctly
+      // Pass filters and reportConfig separately; services.js builds the body.
       if (type === 'full')  blob = await reportApi.exportFull(exportFilters, reportConfig);
       else if (type === 'ng')    blob = await reportApi.exportNG(exportFilters, reportConfig);
       else if (type === 'parts') blob = await reportApi.exportParts(exportFilters, reportConfig);
@@ -517,7 +521,14 @@ const ReportsPage = () => {
       toast.success(t("reports.reportDownloaded", "Report downloaded successfully"), { id: toastId });
     } catch (e) {
       console.error("Export failed:", e);
-      toast.error(e?.response?.data?.error || t("reports.exportFailed", "Export failed — check console"), { id: toastId });
+      const status = Number(e?.response?.status || 0);
+      const code = String(e?.code || "").toUpperCase();
+      const message = status === 504
+        ? "Export timed out at server/proxy. Try a shorter date range or increase nginx proxy timeout for large reports."
+        : code === "ECONNABORTED"
+        ? "Export timed out. Try a shorter date range or run again during low traffic."
+        : e?.response?.data?.error || t("reports.exportFailed", "Export failed - check console");
+      toast.error(message, { id: toastId, duration: 7000 });
     } finally {
       window.clearInterval(exportTimer);
       window.setTimeout(() => {
@@ -588,7 +599,7 @@ const ReportsPage = () => {
     })();
     const grouped = new Map();
     sourceRows.forEach((row, idx) => {
-      const partKey = String(row.reportGroupKey || row.report_group_key || row.traceabilityPartId || row.traceability_part_id || row.partId || row.part_id || row.barcode || row.shot_uid || `row_${idx}`).trim();
+      const partKey = String(row.__reportPageGroupKey || row.reportPageGroupKey || row.reportGroupKey || row.report_group_key || row.traceabilityPartId || row.traceability_part_id || row.partId || row.part_id || row.barcode || row.shot_uid || `row_${idx}`).trim();
       const key = partKey || `row_${idx}`;
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key).push(row);
@@ -618,7 +629,7 @@ const ReportsPage = () => {
 
     const dynamicRows = Array.from(grouped.values()).map((entries, idx) => {
       const first = entries[0] || {};
-      const partKey = String(first.reportGroupKey || first.report_group_key || first.traceabilityPartId || first.traceability_part_id || first.partId || first.part_id || first.barcode || first.shot_uid || `row_${idx}`).trim();
+      const partKey = String(first.__reportPageGroupKey || first.reportPageGroupKey || first.reportGroupKey || first.report_group_key || first.traceabilityPartId || first.traceability_part_id || first.partId || first.part_id || first.barcode || first.shot_uid || `row_${idx}`).trim();
       const displayPartId = String(first.displayPartId || first.display_part_id || "").trim();
       const stationResults = {};
       const stationDisplayValues = {};
@@ -680,19 +691,26 @@ const ReportsPage = () => {
       }
       const rejectionDetails = resolveRejectionDetails(entries);
       const plcPartDie = splitPartDie(plcData.part_name || first.partDieLabel || first.partName || "");
+      const mappedCustomerCode = entries
+        .map((row) => sanitizeCustomerQrValue(row.customerQrCode || row.customerCode || row.customer_qr || ""))
+        .find((value) => String(value || "").trim() && String(value).trim() !== "-") ||
+        (looksLikeCustomerQrValue(partKey) ? partKey : "");
       const shaped = {
         reportGroupKey: partKey,
         traceabilityPartId: partKey,
-        srNo: ((Number(data.pagination?.page || 1) - 1) * Number(data.pagination?.pageSize || sourceRows.length || 0)) + idx + 1,
+        srNo: Math.max(
+          1,
+          Number(data.pagination?.totalRows || sourceRows.length || 0) -
+            ((Number(data.pagination?.page || 1) - 1) * Number(data.pagination?.pageSize || sourceRows.length || 0)) -
+            idx
+        ),
         plc_shot_number: displayPartId ? (plcData.shot_number ?? first.shot_number ?? first.shotNumber ?? "-") : "-",
         barcode: displayPartId,
         plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
         partName: plcPartDie.partName || first.partName || first.modelName || first.componentName || "-",
         dieName: plcPartDie.dieName || first.dieName || "-",
-        customerCode: entries
-          .map((row) => sanitizeCustomerQrValue(row.customerQrCode || row.customerCode || row.customer_qr || ""))
-          .find((value) => String(value || "").trim() && String(value).trim() !== "-") || "-",
+        customerCode: mappedCustomerCode || "-",
         overallStatus: (() => {
           const finalStatus = normalizeFinalPartStatus(first.partStatus || first.part_status || first.status);
           if (finalStatus === "PASSED" || finalStatus === "NG") return finalStatus;
@@ -739,6 +757,23 @@ const ReportsPage = () => {
         }
         shaped[`cycle_${s.key}`] = stationCycleTimes[s.key] || "-";
       });
+      if (String(shaped.overallStatus || "").toUpperCase() === "IN_PROGRESS") {
+        const laserMarkingPendingStation = stationPairs.find((s) => {
+          if (s.sharedLeakOperation) return false;
+          const op = String(s.op || s.key || "").trim().toUpperCase();
+          const label = String(s.label || s.machineName || "").trim().toUpperCase();
+          const isLaserMarkingStation = op === "OP110" || label.includes("LASER");
+          if (!isLaserMarkingStation) return false;
+          const currentValue = shaped[`station_${s.key}`];
+          const normalized = normResult(
+            typeof currentValue === "object" ? currentValue?.status : currentValue
+          );
+          return !normalized || normalized === "-";
+        });
+        if (laserMarkingPendingStation) {
+          shaped[`station_${laserMarkingPendingStation.key}`] = "IN_PROGRESS";
+        }
+      }
       plcColumns.forEach(({ key }) => {
         if (key === "shot_datetime") {
           const y = plcData.shot_year ?? first.shot_year;
@@ -768,16 +803,40 @@ const ReportsPage = () => {
 
   const reportSummaryMetrics = useMemo(() => {
     const metrics = data.metrics || {};
+    const traceRows = Array.isArray(reportTable.rows) ? reportTable.rows : [];
+    const filteredTotal = Math.max(
+      Number(data.pagination?.totalRows || 0),
+      Number(traceRows.length || 0),
+      Number(metrics.totalProduction || 0)
+    );
+    const traceSummary = traceRows.reduce((acc, row) => {
+      const status = String(row.overallStatus || "").trim().toUpperCase();
+      acc.totalProduction += 1;
+      if (status === "PASSED" || status === "OK") acc.totalOK += 1;
+      else if (status === "NG" || status === "FAILED") acc.totalNG += 1;
+      else acc.inProgress += 1;
+      return acc;
+    }, {
+      totalProduction: 0,
+      totalOK: 0,
+      totalNG: 0,
+      inProgress: 0,
+    });
+    const missingFromClientRows = Math.max(0, filteredTotal - traceSummary.totalProduction);
+    const totalOK = traceSummary.totalOK;
+    const totalNG = traceSummary.totalNG;
+    const inProgress = traceSummary.inProgress + missingFromClientRows;
+    const productionBase = traceSummary.totalOK + traceSummary.totalNG;
     return {
-      totalProduction: Number(metrics.totalProduction || 0),
-      totalOK: Number(metrics.totalOK || 0),
-      totalNG: Number(metrics.totalNG || 0),
-      inProgress: Number(metrics.inProgress || 0),
-      validationRejects: Number(metrics.validationRejects || 0),
-      passRate: Number(metrics.passRate || 0),
+      totalProduction: filteredTotal,
+      totalOK,
+      totalNG,
+      inProgress,
+      validationRejects: totalNG,
+      passRate: productionBase > 0 ? Number(((totalOK / productionBase) * 100).toFixed(2)) : 0,
       plcShotSummary: metrics.plcShotSummary || {},
     };
-  }, [data.metrics]);
+  }, [data.metrics, data.pagination, reportTable.rows]);
   const scopedMachines = useMemo(
     () => (machines || []).filter((machine) => !filters.plantId || String(machine.plantId || "") === String(filters.plantId)),
     [machines, filters.plantId]
@@ -876,6 +935,87 @@ const ReportsPage = () => {
         </div>
       </div>
       <div className="bg-white border border-border rounded-lg p-4 shadow-sm grid gap-3 md:grid-cols-2 lg:grid-cols-5" style={{ boxShadow: "0 2px 12px rgba(26,50,99,.08),0 1px 3px rgba(26,50,99,.05)" }}>
+        <PlantLineSelector
+          value={filters}
+          onChange={(scope) => setFilters((prev) => ({ ...prev, ...scope, machineId: "", partName: "", dieName: "", dieCastingMachine: "" }))}
+          includeAll
+          compact
+          requirePlantForLine
+          hideLabels
+          className="grid grid-cols-1 gap-2 min-w-0 sm:grid-cols-2 xl:col-span-2"
+          inputClassName={filterControlCls}
+        />
+        <select
+          value={filters.partType === "OTHER" ? "__OTHER__" : (filters.partName || "")}
+          onChange={(e) => {
+            const value = e.target.value;
+            if (value === "__OTHER__") {
+              setFilters((prev) => ({ ...prev, partName: "", partType: "OTHER", dieName: "", dieCastingMachine: "" }));
+              return;
+            }
+            setFilters((prev) => ({ ...prev, partName: normalizePartToken(value), partType: prev.partType === "OTHER" ? "" : prev.partType, dieName: "", dieCastingMachine: "" }));
+          }}
+          className={filterControlCls}
+        >
+          <option value="">All Parts</option>
+          <option value="__OTHER__">Other Parts</option>
+          {availablePartNames.map((partName) => <option key={partName} value={partName}>{partName}</option>)}
+        </select>
+        <select
+          value={filters.dieName || ""}
+          onChange={(e) => setFilters((prev) => ({ ...prev, dieName: normalizePartToken(e.target.value), dieCastingMachine: "" }))}
+          className={filterControlCls}
+        >
+          <option value="">All Dies</option>
+          {availableDies.map((dieName) => <option key={dieName} value={dieName}>{dieName}</option>)}
+        </select>
+        <select
+          value={filters.dieCastingMachine || ""}
+          onChange={(e) => setFilters((prev) => ({ ...prev, dieCastingMachine: normalizePartToken(e.target.value) }))}
+          className={filterControlCls}
+        >
+          <option value="">All Die Casting Machines</option>
+          {availableDieCastingMachines.map((machineName) => <option key={machineName} value={machineName}>{machineName}</option>)}
+        </select>
+        <select
+          value={filters.machineId}
+          onChange={(e) => setFilters((prev) => ({ ...prev, machineId: e.target.value }))}
+          className={filterControlCls}
+        >
+          <option value="">All Quality Gates</option>
+          {scopedMachines
+            .filter((m) => !filters.lineId || String(m.line_id || m.lineId || "") === String(filters.lineId))
+            .filter((m) => !filters.lineName || String(m.line_name || m.lineName || "").trim() === filters.lineName)
+            .map((m) => <option key={m.id} value={m.id}>{m.machine_name || m.machineName}</option>)}
+        </select>
+        <input
+          value={filters.barcode || ""}
+          onChange={(e) => setFilters((prev) => ({ ...prev, barcode: e.target.value }))}
+          placeholder="Customer QR / Part ID / Shot Number"
+          className={filterControlCls}
+        />
+        <select
+          value={filters.status || ""}
+          onChange={(e) => setFilters((prev) => ({ ...prev, status: e.target.value }))}
+          className={filterControlCls}
+        >
+          <option value="">{t("reports.allStatus", "All Status")}</option>
+          <option value="OK">{t("reports.passed", "PASSED")}</option>
+          <option value="NG">{t("reports.failed", "FAILED")}</option>
+          <option value="IN_PROGRESS">{t("reports.inProgress", "IN PROGRESS")}</option>
+        </select>
+        <select
+          value={filters.shiftCode || ""}
+          onChange={(e) => setFilters((prev) => ({ ...prev, shiftCode: e.target.value }))}
+          className={filterControlCls}
+        >
+          <option value="">{t("reports.allShifts", "All Shifts")}</option>
+          {((data.availableShifts && data.availableShifts.length) ? data.availableShifts : availableShifts).map((shift) => (
+            <option key={shift.shiftCode || shift.shift_code} value={shift.shiftCode || shift.shift_code}>
+              {shift.shiftName || shift.shift_name || shift.shiftCode || shift.shift_code}
+            </option>
+          ))}
+        </select>
         <select
           value={quickRange}
           onChange={(e) => {
@@ -903,86 +1043,12 @@ const ReportsPage = () => {
           onChange={(e) => setFilters((prev) => ({ ...prev, dateTo: e.target.value }))}
           className={filterControlCls}
         />
-        <PlantLineSelector
-          value={filters}
-          onChange={(scope) => setFilters((prev) => ({ ...prev, ...scope, machineId: "", partName: "", dieName: "", dieCastingMachine: "" }))}
-          includeAll
-          compact
-          requirePlantForLine
-          hideLabels
-          className="grid grid-cols-1 gap-2 min-w-0 sm:grid-cols-2 xl:col-span-2"
-          inputClassName={filterControlCls}
-        />
-        <select
-          value={filters.partName || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, partName: normalizePartToken(e.target.value), dieName: "", dieCastingMachine: "" }))}
-          className={filterControlCls}
-        >
-          <option value="">All Parts</option>
-          {availablePartNames.map((partName) => <option key={partName} value={partName}>{partName}</option>)}
-        </select>
-        <select
-          value={filters.dieName || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, dieName: normalizePartToken(e.target.value), dieCastingMachine: "" }))}
-          className={filterControlCls}
-        >
-          <option value="">All Dies</option>
-          {availableDies.map((dieName) => <option key={dieName} value={dieName}>{dieName}</option>)}
-        </select>
-        <select
-          value={filters.dieCastingMachine || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, dieCastingMachine: normalizePartToken(e.target.value) }))}
-          className={filterControlCls}
-        >
-          <option value="">All Die Casting Machines</option>
-          {availableDieCastingMachines.map((machineName) => <option key={machineName} value={machineName}>{machineName}</option>)}
-        </select>
-        <select
-          value={filters.machineId}
-          onChange={(e) => setFilters((prev) => ({ ...prev, machineId: e.target.value }))}
-          className={filterControlCls}
-        >
-          <option value="">{t("reports.allMachines", "All Machines")}</option>
-          {scopedMachines
-            .filter((m) => !filters.lineId || String(m.line_id || m.lineId || "") === String(filters.lineId))
-            .filter((m) => !filters.lineName || String(m.line_name || m.lineName || "").trim() === filters.lineName)
-            .map((m) => <option key={m.id} value={m.id}>{m.machine_name || m.machineName}</option>)}
-        </select>
-        <input
-          value={filters.barcode || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, barcode: e.target.value }))}
-          placeholder="Customer QR / Part ID / Shot Number"
-          className={filterControlCls}
-        />
-        <select
-          value={filters.status || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, status: e.target.value }))}
-          className={filterControlCls}
-        >
-          <option value="">{t("reports.allStatus", "All Status")}</option>
-          <option value="OK">{t("reports.passed", "PASSED")}</option>
-          <option value="NG">{t("reports.failed", "FAILED")}</option>
-          <option value="IN_PROGRESS">{t("reports.inProgress", "IN PROGRESS")}</option>
-          <option value="OTHER">{t("reports.otherParts", "Other Parts")}</option>
-        </select>
-        <select
-          value={filters.shiftCode || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, shiftCode: e.target.value }))}
-          className={filterControlCls}
-        >
-          <option value="">{t("reports.allShifts", "All Shifts")}</option>
-          {((data.availableShifts && data.availableShifts.length) ? data.availableShifts : availableShifts).map((shift) => (
-            <option key={shift.shiftCode || shift.shift_code} value={shift.shiftCode || shift.shift_code}>
-              {shift.shiftName || shift.shift_name || shift.shiftCode || shift.shift_code}
-            </option>
-          ))}
-        </select>
         <button
           onClick={() => {
             const nextFilters = {
               dateFrom: toDatetimeLocal(getMesDayRange().start),
               dateTo: toDatetimeLocal(getMesDayRange().end),
-              plantId: '', lineId: '', machineId: '', partName: '', dieName: '', dieCastingMachine: '', lineName: '', shiftCode: '', status: '', station: '', barcode: '', customerCode: '',
+              plantId: '', lineId: '', machineId: '', partName: '', dieName: '', dieCastingMachine: '', lineName: '', shiftCode: '', status: '', partType: '', station: '', barcode: '', customerCode: '',
               operatorId: '', resultType: '', modelCode: '', operationNo: ''
             };
             setQuickRange("today");
@@ -1004,7 +1070,7 @@ const ReportsPage = () => {
         </button>
       </div>
 
-      <ReportSummaryCards metrics={reportSummaryMetrics} />
+      <ReportSummaryCards metrics={reportSummaryMetrics} loading={loading} />
 
       <ReportTable
         rows={reportTable.rows}
@@ -1012,11 +1078,7 @@ const ReportsPage = () => {
         loading={loading}
         progress={loadProgress}
         pagination={data.pagination}
-        onPageChange={setReportPage}
-        onPageSizeChange={(nextSize) => {
-          setReportPageSize(nextSize);
-          setReportPage(1);
-        }}
+        disablePagination
       />
     </div>
   );

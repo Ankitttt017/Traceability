@@ -17,7 +17,7 @@ import {
   MapPin, Zap, Package, QrCode, Trash2, Eye, EyeOff, Download,
 } from "lucide-react";
 import { machineApi, shiftApi, stationSettingsApi, traceabilityApi } from "../api/services";
-import { SOCKET_URL } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 import PlantLineSelector from "../components/PlantLineSelector";
 import {
   getStationFeatureSettings, getStationFeatures, saveStationFeatureSettings,
@@ -921,7 +921,7 @@ const ComponentJourney = () => {
   useEffect(()=>{ refreshJourneyNow(true); },[selectedPartId,refreshJourneyNow]);
 
   useEffect(()=>{
-    const socket=io(SOCKET_URL,{path:"/socket.io/",transports: ["polling"], upgrade: false,reconnectionDelay:200,reconnectionDelayMax:1200,timeout:10000});
+    const socket=io(SOCKET_URL,{...SOCKET_OPTIONS,reconnectionDelay:500,reconnectionDelayMax:2000,timeout:10000});
     socketRef.current=socket;
     socket.on("journey_update",(p={})=>{
       patchPartFromRealtime(p);
@@ -1503,16 +1503,16 @@ const ComponentJourney = () => {
                           </p>
                           <p style={{fontSize:11,color:C.txt("muted"),marginTop:2,
                             fontFamily:"'DM Mono',monospace"}}>
-                            {bypassed ? "Bypassed / auto passed" : station.latestAt ? `Last: ${formatTime(station.latestAt)}` : "Not started"}
+                            {bypassed ? "Bypassed / auto passed" : station.latestAt ? `Last: ${formatDate(station.latestAt)}` : "Not started"}
                           </p>
                           {station.cycleStartTime && (
                             <div style={{display:"flex",gap:8,marginTop:4}}>
                               <p style={{fontSize:10,color:C.txt("muted"),display:"flex",alignItems:"center",gap:3}}>
-                                <Clock3 size={10}/> Start: {formatTime(station.cycleStartTime)}
+                                <Clock3 size={10}/> Start: {formatDate(station.cycleStartTime)}
                               </p>
                               {station.cycleEndTime && (
                                 <p style={{fontSize:10,color:C.ok(),fontWeight:700,display:"flex",alignItems:"center",gap:3}}>
-                                  <CheckCircle2 size={10}/> End: {formatTime(station.cycleEndTime)}
+                                  <CheckCircle2 size={10}/> End: {formatDate(station.cycleEndTime)}
                                 </p>
                               )}
                               {station.cycleDurationSec > 0 && (
@@ -1530,7 +1530,7 @@ const ComponentJourney = () => {
                                 Customer QR: {stationCustomerQrCode}
                               </span>
                               <span style={{fontSize:10,color:C.txt("muted"),display:"flex",alignItems:"center",gap:3}}>
-                                <Clock3 size={10}/> Read: {formatTime(station.customerQrMappedAt)}
+                                <Clock3 size={10}/> Read: {formatDate(station.customerQrMappedAt)}
                               </span>
                             </div>
                           )}
@@ -1606,7 +1606,7 @@ const ComponentJourney = () => {
                                   border:`1px solid ${STATUS[am.variant]?.border||C.border()}`,
                                   color:STATUS[am.variant]?.fg||C.txt("muted")}}>
                                 <span style={{fontFamily:"monospace"}}>#{ai+1}</span>
-                                <span style={{opacity:0.8}}>{formatTime(att.createdAt)}</span>
+                                <span style={{opacity:0.8}}>{formatDate(att.createdAt)}</span>
                               </div>
                             );
                           })}

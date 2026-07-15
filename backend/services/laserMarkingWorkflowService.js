@@ -109,10 +109,14 @@ function beginWorkflow(key, { machineId, stationNo, partId }) {
 
   if (hadDifferentPendingPart) {
     console.warn(
-      `[LASER_WORKFLOW] Overwriting pending workflow at ${key}: previous part ` +
+      `[LASER_WORKFLOW] Blocking new Start QR at ${key}: previous part ` +
       `"${state.activePartId}" was still WAITING_CUSTOMER_QR when new Start QR ` +
-      `"${incomingPartId}" arrived. Previous part's Customer QR mapping window is now lost.`
+      `"${incomingPartId}" arrived. Complete Customer QR mapping first.`
     );
+    state.lastError = "PENDING_CUSTOMER_QR_ACTIVE";
+    state.rejectedStartQr = incomingPartId;
+    state.lastUpdatedAt = Date.now();
+    return state;
   }
 
   state.machineId = machineId || state.machineId;
@@ -122,6 +126,7 @@ function beginWorkflow(key, { machineId, stationNo, partId }) {
   state.lastStartQr = state.activePartId;
   state.lastCustomerQr = "";
   state.lastError = hadDifferentPendingPart ? "OVERWRITTEN_PENDING_START_QR" : "";
+  state.rejectedStartQr = "";
   state.pendingCustomerQr = null;
   state.status = "IDLE";
   if (state.activePartId) {
