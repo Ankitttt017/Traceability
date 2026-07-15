@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
-import { SOCKET_URL } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 import {
   AlertTriangle, CheckCircle2, Clock3, Factory,
   Gauge, RefreshCw, ShieldCheck, Wrench,
@@ -1445,8 +1445,7 @@ const OperatorView = () => {
 
   useEffect(() => {
     const socket = io(SOCKET_URL, {
-      path: "/socket.io/",
-      transports: ["websocket", "polling"],
+      ...SOCKET_OPTIONS,
       autoConnect: false,
     });
     const connectTimer = setTimeout(() => {
@@ -1503,7 +1502,7 @@ const OperatorView = () => {
         setSuppressReadyPopup(false);
       }
       if (p.closePopup === true || p.close_popup === true) {
-        setPopup(null);
+        mergePopupPayload({ ...p, closePopup: false, close_popup: false });
         if (hasQrDecision(p)) {
           const sig = toQrSignal(p, t);
           setQrSignal(sig);

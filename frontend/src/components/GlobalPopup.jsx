@@ -858,10 +858,17 @@ const GlobalPopup = ({
       customerQrCode.toUpperCase() !== String(partId || effectivePartId || "").trim().toUpperCase() ||
       popupReason === "CUSTOMER_QR_MAPPED"
     );
-  const displayedScanCode = scannedQr || customerQrCode || effectivePartId || lastScannedCode;
+  const preferredMappedCustomerQr = hasMappedCustomerQr && !customerQrPending ? customerQrCode : "";
+  const displayedScanCode = preferredMappedCustomerQr || scannedQr || customerQrCode || effectivePartId || lastScannedCode;
   const displayInternalPartId = mappedPartId || effectivePartId || customerQrCode || displayedScanCode || "-";
+  const headerTraceabilityCode = displayInternalPartId && displayInternalPartId !== "-"
+    ? displayInternalPartId
+    : displayedScanCode;
   const displayedScanIsCustomerQr = Boolean(customerQrCode && displayedScanCode && displayedScanCode.toUpperCase() === customerQrCode.toUpperCase());
   const displayedScanLabel = displayedScanIsCustomerQr ? "Scanned Customer QR" : (scannedQr ? "Scanned QR" : "Scanned Part ID");
+  const headerTraceabilityLabel = hasMappedCustomerQr && headerTraceabilityCode !== displayedScanCode
+    ? "Internal Part ID"
+    : "Traceability ID";
 
   useEffect(() => {
     let isActive = true;
@@ -1826,10 +1833,10 @@ const GlobalPopup = ({
               </div>
             </div>
             <div className="flex items-center gap-2 md:gap-3">
-              {displayedScanCode && (
-                <div className="px-2.5 py-1.5 md:px-3 md:py-2 rounded-lg border border-amber-500/20 max-w-[260px] md:max-w-[340px] min-w-[120px]" style={{ background: "#0f172a" }} title={displayedScanCode}>
-                  <p className="text-[8px] md:text-[9px] font-bold uppercase tracking-wider text-slate-400">{displayedScanLabel}</p>
-                  <p className="font-mono text-[11px] font-black text-amber-400 break-all leading-tight sm:text-xs md:text-sm">{displayedScanCode}</p>
+              {headerTraceabilityCode && (
+                <div className="px-2.5 py-1.5 md:px-3 md:py-2 rounded-lg border border-amber-500/20 max-w-[260px] md:max-w-[340px] min-w-[120px]" style={{ background: "#0f172a" }} title={headerTraceabilityCode}>
+                  <p className="text-[8px] md:text-[9px] font-bold uppercase tracking-wider text-slate-400">{headerTraceabilityLabel}</p>
+                  <p className="font-mono text-[11px] font-black text-amber-400 break-all leading-tight sm:text-xs md:text-sm">{headerTraceabilityCode}</p>
                 </div>
               )}
               <button

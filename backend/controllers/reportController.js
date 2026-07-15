@@ -4,7 +4,12 @@
  * Uses the new modular report system in services/report/
  */
 
-const { runIndustrialExport, fetchProductionData, fetchProductionPartCount, fetchProductionSummaryMetrics, getPlcReadingColumns, fetchPlcShotSummary } = require("../services/report/reportExportService");
+const {
+  runIndustrialExport,
+  fetchProductionData,
+  getPlcReadingColumns,
+  fetchPlcShotSummary,
+} = require("../services/report/reportExportService");
 const { calculateProductionMetrics } = require("../services/report/reportMetricsService");
 const Shift = require("../models/Shift");
 
@@ -109,15 +114,15 @@ function getReportOptions(query = {}) {
   const fastDisabled = fullRequested || isFalseToken(query.fast || query.quick);
   const fast = !fastDisabled && !hasFocusedPartSearch;
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
-  const pageSize = Math.min(Math.max(Number.parseInt(query.pageSize || query.limit, 10) || 50, 10), 200);
-  const fastAnchorLimit = Math.min(Math.max(page * pageSize, pageSize, 50), 600);
+  const pageSize = Math.min(Math.max(Number.parseInt(query.pageSize || query.limit, 10) || 50, 10), 10000);
+  const fastAnchorLimit = Math.min(Math.max(page * pageSize * 10, pageSize * 10, 1000), 20000);
   return {
     fast,
     includePlcReadings: !isFalseToken(query.includePlcReadings),
-    includePlcSummary: fast ? false : !isFalseToken(query.includePlcSummary),
+    includePlcSummary: !isFalseToken(query.includePlcSummary),
     includeLeaktest: !isFalseToken(query.includeLeaktest),
     maxAnchorParts: fast ? fastAnchorLimit : null,
-    maxBaseLogs: fast ? Math.min(Math.max(fastAnchorLimit * 5, 300), 3000) : null,
+    maxBaseLogs: fast ? Math.min(Math.max(fastAnchorLimit * 8, 5000), 50000) : null,
   };
 }
 
@@ -125,21 +130,21 @@ function getReportExportOptions(filters = {}) {
   const hasFocusedPartSearch = Boolean(String(filters.barcode || filters.customerCode || filters.partId || "").trim());
   const fast = isTruthyToken(filters.fast || filters.quick) && !hasFocusedPartSearch;
   const rawLimit = Number.parseInt(filters.exportLimit || filters.maxAnchorParts || filters.pageSize || filters.limit, 10);
-  const exportAnchorLimit = Math.min(Math.max(rawLimit || 3000, 200), 5000);
+  const exportAnchorLimit = Math.min(Math.max(rawLimit || 10000, 500), 20000);
   return {
     fast,
     includePlcReadings: !isFalseToken(filters.includePlcReadings),
     includePlcSummary: fast ? false : !isFalseToken(filters.includePlcSummary),
     includeLeaktest: !isFalseToken(filters.includeLeaktest),
     maxAnchorParts: fast ? exportAnchorLimit : null,
-    maxBaseLogs: fast ? Math.min(Math.max(exportAnchorLimit * 5, 1500), 20000) : null,
+    maxBaseLogs: fast ? Math.min(Math.max(exportAnchorLimit * 8, 10000), 80000) : null,
   };
 }
 
 function getPagination(query = {}) {
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
   const pageSizeRaw = Number.parseInt(query.pageSize || query.limit, 10) || 50;
-  const pageSize = Math.min(Math.max(pageSizeRaw, 10), 200);
+  const pageSize = Math.min(Math.max(pageSizeRaw, 10), 10000);
   const offset = (page - 1) * pageSize;
   return { page, pageSize, offset };
 }
@@ -185,7 +190,7 @@ function derivePlcShotSummaryFromRows(rows = []) {
   return summary;
 }
 
-function paginateReportRowsByPart(rows = [], pagination = {}, totalRowsOverride = null) {
+function paginateReportRowsByPart(rows = [], pagination = {}) {
   const grouped = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
     const key = getReportPartKey(row, `row_${grouped.size}`);
@@ -197,24 +202,25 @@ function paginateReportRowsByPart(rows = [], pagination = {}, totalRowsOverride 
   const groups = Array.from(grouped.entries()).map(([key, groupRows]) => ({
     key,
     rows: groupRows,
-    latestAt: groupRows.reduce((latest, row) => {
-      const value = new Date(row.latestAnchorCreatedAt || row.createdAt || row.updatedAt || 0).getTime() || 0;
-      return Math.max(latest, value);
+    scannedAt: groupRows.reduce((earliest, row) => {
+      const value = new Date(row.firstScanCreatedAt || row.createdAt || row.latestAnchorCreatedAt || row.updatedAt || 0).getTime() || 0;
+      return earliest === 0 ? value : Math.min(earliest, value || earliest);
     }, 0),
   }));
 
-  groups.sort((a, b) => b.latestAt - a.latestAt);
+  groups.sort((a, b) => b.scannedAt - a.scannedAt);
 
   const localTotalRows = groups.length;
-  const totalRows = Number.isFinite(Number(totalRowsOverride)) && Number(totalRowsOverride) > localTotalRows
-    ? Number(totalRowsOverride)
-    : localTotalRows;
+  const totalRows = localTotalRows;
   const totalPages = Math.max(1, Math.ceil(totalRows / pagination.pageSize));
   const page = Math.min(pagination.page, totalPages);
   const offset = (page - 1) * pagination.pageSize;
   const pagedRows = groups
     .slice(offset, offset + pagination.pageSize)
-    .flatMap((group) => group.rows);
+    .flatMap((group) => group.rows.map((row) => ({
+      ...row,
+      __reportPageGroupKey: group.key,
+    })));
 
   return {
     rows: pagedRows,
@@ -259,18 +265,10 @@ exports.getReportData = async (req, res) => {
     const options = getReportOptions(req.query || {});
     const filters = stripReportControlFilters(req.query || {});
     const pagination = getPagination(req.query || {});
-    const [{ rows, shifts, plcColumnSet, metrics: pageMetrics }, totalRows, summaryMetrics, plcShotSummary] = await Promise.all([
-      getCachedReportBundle(filters, options),
-      options.fast ? fetchProductionPartCount(filters).catch(() => null) : Promise.resolve(null),
-      options.fast ? fetchProductionSummaryMetrics(filters).catch(() => null) : Promise.resolve(null),
-      fetchPlcShotSummary(filters).catch(() => null),
-    ]);
-    const paged = paginateReportRowsByPart(rows, pagination, totalRows);
-    const metrics = summaryMetrics || pageMetrics;
-    if (plcShotSummary && Number(plcShotSummary.totalProduction || 0) > 0) {
-      metrics.plcShotSummary = plcShotSummary;
-      metrics.plcShotSummarySource = "PLC_SUMMARY";
-    }
+    const { rows, shifts, plcColumnSet, metrics } = await getCachedReportBundle(filters, options);
+    const paged = paginateReportRowsByPart(rows, pagination);
+    metrics.plcShotSummary = metrics.plcShotSummary || {};
+    metrics.plcShotSummarySource = metrics.plcShotSummarySource || "REPORT_ROWS";
     
     res.json({
       rows: paged.rows,
@@ -296,6 +294,8 @@ exports.getReportData = async (req, res) => {
 exports.exportFullReportExcel = async (req, res) => {
   try {
     const { filters = {}, reportConfig = DEFAULT_REPORT_CONFIG } = req.body || {};
+    req.setTimeout?.(10 * 60 * 1000);
+    res.setTimeout?.(10 * 60 * 1000);
     const options = getReportExportOptions(filters);
     await runIndustrialExport(res, {
       filters,
@@ -312,6 +312,8 @@ exports.exportFullReportExcel = async (req, res) => {
 exports.exportNGReportExcel = async (req, res) => {
   try {
     const { filters = {}, reportConfig = DEFAULT_REPORT_CONFIG } = req.body || {};
+    req.setTimeout?.(10 * 60 * 1000);
+    res.setTimeout?.(10 * 60 * 1000);
     const ngFilters = { ...filters, resultType: "NG" };
     const options = getReportExportOptions(ngFilters);
     await runIndustrialExport(res, {
@@ -329,6 +331,8 @@ exports.exportNGReportExcel = async (req, res) => {
 exports.exportPartsReportExcel = async (req, res) => {
   try {
     const { filters = {}, reportConfig = DEFAULT_REPORT_CONFIG } = req.body || {};
+    req.setTimeout?.(10 * 60 * 1000);
+    res.setTimeout?.(10 * 60 * 1000);
     const options = getReportExportOptions(filters);
     await runIndustrialExport(res, {
       filters,
@@ -344,6 +348,8 @@ exports.exportPartsReportExcel = async (req, res) => {
 exports.exportAuditReportExcel = async (req, res) => {
   try {
     const { filters = {}, reportConfig = DEFAULT_REPORT_CONFIG } = req.body || {};
+    req.setTimeout?.(10 * 60 * 1000);
+    res.setTimeout?.(10 * 60 * 1000);
     const options = getReportExportOptions(filters);
     await runIndustrialExport(res, {
       filters,

@@ -49,7 +49,7 @@ export default function NetworkSignal() {
         if (!mounted) return;
         setBars(score.bars);
         setTone(score.tone);
-        setOnline(res.ok);
+        setOnline(Boolean(res));
       } catch (_err) {
         if (!mounted) return;
         setBars(0);

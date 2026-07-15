@@ -30,6 +30,8 @@ function createSocketClient({ ip, port, timeoutMs }) {
       ip,
       done(() => {
         socket.setTimeout(0);
+        socket.setKeepAlive(true, Math.max(Number(process.env.PLC_TCP_KEEPALIVE_DELAY_MS || 5000), 1000));
+        socket.setNoDelay(true);
         resolve(socket);
       })
     );

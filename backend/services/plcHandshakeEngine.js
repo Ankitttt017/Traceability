@@ -557,31 +557,61 @@ class PlcHandshakeEngine {
       } catch (_error) {
         registerSnapshot = {};
       }
+      let signalMap = [];
+      try {
+        signalMap = machine.plc_signal_map
+          ? (typeof machine.plc_signal_map === "string" ? JSON.parse(machine.plc_signal_map) : machine.plc_signal_map)
+          : [];
+      } catch (_error) {
+        signalMap = [];
+      }
+      if (!Array.isArray(signalMap)) signalMap = [];
+      const findSignalRow = (aliases = []) => {
+        const wanted = aliases.map((alias) => String(alias || "").trim().toUpperCase()).filter(Boolean);
+        return signalMap.find((row) => {
+          const haystack = [
+            row.signal,
+            row.signalName,
+            row.name,
+            row.key,
+            row.category,
+          ].map((value) => String(value || "").trim().toUpperCase());
+          return haystack.some((value) => wanted.some((alias) => value === alias || value.includes(alias)));
+        });
+      };
+      const blockSignalRow = findSignalRow(["BLOCK", "INTERLOCK", "BLOCK/INTERLOCK"]);
+      const startSignalRow = findSignalRow(["START"]);
+      const toInt = (value) => {
+        const n = Number(value);
+        return Number.isFinite(n) ? Math.trunc(n) : null;
+      };
 
       const ip = machine.plc_ip || machine.machine_ip;
       const port = machine.plc_port || machine.machine_port;
-      const blockRegRaw = registerSnapshot.blockRegister ?? machine.plc_block_register;
-      const startRegRaw = registerSnapshot.startRegister ?? machine.plc_start_register;
+      const blockRegRaw = registerSnapshot.blockRegister ?? machine.plc_block_register ?? blockSignalRow?.register ?? blockSignalRow?.registerNo ?? blockSignalRow?.address;
+      const startRegRaw = registerSnapshot.startRegister ?? machine.plc_start_register ?? startSignalRow?.register ?? startSignalRow?.registerNo ?? startSignalRow?.address;
       const statusRegRaw = registerSnapshot.statusRegister ?? registerSnapshot.runningRegister ?? machine.plc_status_register;
       
       // Priority: configured Block/Interlock register, then Start register as a compatibility fallback.
-      const hasBlockRegister = Number(blockRegRaw) > 0;
+      const hasBlockRegister = toInt(blockRegRaw) > 0;
       let registerSource = hasBlockRegister ? "BLOCK_REGISTER" : "START_REGISTER_FALLBACK";
       let targetReg = hasBlockRegister
-        ? Number(blockRegRaw)
-        : (Number(startRegRaw) > 0 ? Number(startRegRaw) : null);
+        ? toInt(blockRegRaw)
+        : (toInt(startRegRaw) > 0 ? toInt(startRegRaw) : null);
 
       // SAFETY: Never write interlocks to the status register (R2061) if they are distinct
-      if (targetReg === Number(statusRegRaw) && Number(startRegRaw) > 0 && Number(startRegRaw) !== targetReg) {
+      if (targetReg === Number(statusRegRaw) && toInt(startRegRaw) > 0 && toInt(startRegRaw) !== targetReg) {
           console.warn(`[PLC:MAP_OVERRIDE] Redirecting interlock from status (R${targetReg}) to start (R${startRegRaw})`);
-          targetReg = Number(startRegRaw);
+          targetReg = toInt(startRegRaw);
           registerSource = "START_REGISTER_STATUS_OVERRIDE";
       }
 
-      const blockValueRaw = registerSnapshot.blockValue ?? machine.plc_block_value ?? 2;
-      const ngValue = Number(blockValueRaw);
+      const blockValueRaw = registerSnapshot.blockValue ?? machine.plc_block_value ?? blockSignalRow?.value ?? blockSignalRow?.expectedValue ?? 2;
+      const ngValue = toInt(blockValueRaw) ?? 2;
       const protocol = String(machine.plc_protocol || "TCP_TEXT").trim().toUpperCase();
       const plcPort = Number(port);
+      const slmpDevice = String(blockSignalRow?.device || machine.plc_slmp_device || "D").trim().toUpperCase() || "D";
+      const slmpFrameMode = String(blockSignalRow?.frame || blockSignalRow?.frameMode || machine.plc_slmp_frame_mode || "AUTO").trim().toUpperCase() || "AUTO";
 
       // Update FSM, but never let a repeated INTERLOCKED/BLOCKED state prevent the PLC block write.
       const state = reason.includes("DUPLICATE") ? plcStateMachineService.states.BLOCKED : plcStateMachineService.states.INTERLOCKED;
@@ -619,9 +649,9 @@ class PlcHandshakeEngine {
               port: plcPort,
               register: Math.trunc(targetReg),
               value: Math.trunc(ngValue),
-              device: String(machine.plc_slmp_device || "D").trim().toUpperCase() || "D",
+              device: slmpDevice,
               timeoutMs: 2000,
-              frameMode: String(machine.plc_slmp_frame_mode || "AUTO").trim().toUpperCase() || "AUTO",
+              frameMode: slmpFrameMode,
             });
           } else if (protocol === "TCP_TEXT" || protocol === "TCP") {
             const plcService = require("./plcCommunicationService");

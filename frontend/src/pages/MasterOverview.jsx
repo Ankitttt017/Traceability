@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { io } from "socket.io-client";
-import { SOCKET_URL } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 import { 
   Activity, 
   Cpu, 
@@ -48,7 +48,7 @@ const MasterOverview = () => {
 
   useEffect(() => {
     loadData();
-    const socket = io(SOCKET_URL, { path: "/socket.io/", transports: ["polling"], upgrade: false });
+    const socket = io(SOCKET_URL, SOCKET_OPTIONS);
     socket.on("dashboard_refresh", () => loadData());
     socket.on("operator_popup", (payload) => {
       const msg = `Alert: ${payload.machineName || payload.machineId} reported ${payload.type}`;

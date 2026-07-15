@@ -9,7 +9,7 @@
 // ============================================================
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
-import { SOCKET_URL } from "../constants/network";
+import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 import {
   Boxes, Printer, RefreshCw, ScanLine, CheckCircle2,
   Clock, Package, QrCode, X, AlertCircle,
@@ -439,12 +439,9 @@ const Packing=()=>{
 
   useEffect(()=>{
     const socket=io(SOCKET_URL,{
-      path:"/socket.io/",
-      transports: ["polling"], upgrade: false,
+      ...SOCKET_OPTIONS,
       reconnection:true,
       reconnectionAttempts:Infinity,
-      reconnectionDelay:1000,
-      reconnectionDelayMax:5000,
       timeout:10000,
     });
     socket.on("packing_update",(payload={})=>{

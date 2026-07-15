@@ -41,6 +41,18 @@ const sequelizeConfig = {
     min: Number(process.env.DB_POOL_MIN || 2),
     acquire: Number(process.env.DB_POOL_ACQUIRE_MS || 60000),
     idle: Number(process.env.DB_POOL_IDLE_MS || 10000),
+    evict: Number(process.env.DB_POOL_EVICT_MS || 10000),
+  },
+  retry: {
+    max: Number(process.env.DB_RETRY_MAX || 2),
+    match: [
+      /ECONNRESET/i,
+      /ESOCKET/i,
+      /ETIMEOUT/i,
+      /ConnectionError/i,
+      /SequelizeConnectionError/i,
+      /Requests can only be made in the LoggedIn state/i,
+    ],
   },
   logging: false,
 };

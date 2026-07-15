@@ -65,6 +65,45 @@ function matchesCustomerQrRule(code, rules = []) {
   });
 }
 
+function getStatusFilterTokens(...values) {
+  return [...new Set(values
+    .flatMap((value) => String(value || "").split(","))
+    .map((value) => value.trim().toUpperCase())
+    .filter(Boolean))];
+}
+
+function rowMatchesReportStatus(row, token) {
+  const normalized = String(token || "").trim().toUpperCase();
+  const s = String(row.partStatus || row.statusLabel || row.industrialResult || "").trim().toUpperCase();
+  if (normalized === "VALIDATION") return row.category === "VALIDATION";
+  if (normalized === "BYPASS") return row.bypassStatus === true;
+  if (normalized === "PENDING" || normalized === "IN_PROGRESS" || normalized === "IN PROGRESS") {
+    const isPassed = ["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(s);
+    const isNg = ["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(s);
+    return !isPassed && !isNg;
+  }
+  if (normalized === "OK" || normalized === "PASSED") {
+    return ["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(s);
+  }
+  if (normalized === "NG" || normalized === "FAILED") {
+    return ["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(s);
+  }
+  return String(row.industrialResult || "").toUpperCase() === normalized;
+}
+
+function rowMatchesPartType(row, partType) {
+  const normalized = String(partType || "").trim().toUpperCase();
+  if (!normalized) return true;
+  const hasPartId = Boolean(String(row.displayPartId || row.partId || "").trim());
+  if (["PART_ID", "PARTID", "INTERNAL", "INTERNAL_PART"].includes(normalized)) {
+    return hasPartId && row.isCustomerQrOnly !== true;
+  }
+  if (["OTHER", "CUSTOMER_QR_ONLY", "CUSTOMER_QR", "QR_ONLY"].includes(normalized)) {
+    return row.isCustomerQrOnly === true || !hasPartId;
+  }
+  return true;
+}
+
 async function resolveReportPartSearchValues(input) {
   const raw = String(input || "").trim();
   if (!raw) return [];
@@ -919,25 +958,32 @@ async function buildProductionCountScope(filters = {}) {
     whereParts.push(`(${clauses.join(" OR ")})`);
   }
 
-  const normalizedStatus = String(filters.status || filters.resultType || "").trim().toUpperCase();
-  if (["NG", "FAILED"].includes(normalizedStatus)) {
-    whereParts.push(`(
+  const statusFilterTokens = getStatusFilterTokens(filters.status, filters.resultType);
+  const statusSqlParts = [];
+  if (statusFilterTokens.some((token) => ["NG", "FAILED"].includes(token))) {
+    statusSqlParts.push(`(
       ol.plc_status IN ('ENDED_NG', 'INTERLOCKED')
       OR ol.result IN ('NG', 'FAIL', 'FAILED', 'BLOCK')
       OR ol.operation_result IN ('FAILED', 'INTERLOCKED')
       OR ol.rejection_reason IS NOT NULL
       OR ol.rejection_category IS NOT NULL
     )`);
-  } else if (["OK", "PASSED"].includes(normalizedStatus)) {
-    whereParts.push(`(
+  }
+  if (statusFilterTokens.some((token) => ["OK", "PASSED"].includes(token))) {
+    statusSqlParts.push(`(
       ol.plc_status = 'ENDED_OK'
       OR ol.result IN ('OK', 'PASS', 'PASSED')
       OR ol.operation_result = 'PASSED'
     )`);
-  } else if (normalizedStatus === "VALIDATION") {
-    whereParts.push("ol.validation_result IN ('FAILED', 'BLOCKED', 'DUPLICATE')");
-  } else if (normalizedStatus === "BYPASS") {
-    whereParts.push("ol.is_bypassed = 1");
+  }
+  if (statusFilterTokens.includes("VALIDATION")) {
+    statusSqlParts.push("ol.validation_result IN ('FAILED', 'BLOCKED', 'DUPLICATE')");
+  }
+  if (statusFilterTokens.includes("BYPASS")) {
+    statusSqlParts.push("ol.is_bypassed = 1");
+  }
+  if (statusSqlParts.length) {
+    whereParts.push(`(${statusSqlParts.join(" OR ")})`);
   }
 
   return { whereParts, joins, replacements };
@@ -1059,30 +1105,33 @@ async function fetchProductionData(filters = {}, options = {}) {
         ],
       });
     }
-    const normalizedStatusFilter = String(status || resultType || "").trim().toUpperCase();
-    if (normalizedStatusFilter) {
-      if (["NG", "FAILED"].includes(normalizedStatusFilter)) {
-        andConditions.push({
-          [Op.or]: [
-            { plc_status: { [Op.in]: ["ENDED_NG", "INTERLOCKED"] } },
-            { result: { [Op.in]: ["NG", "FAIL", "FAILED", "BLOCK"] } },
-            { operation_result: { [Op.in]: ["FAILED", "INTERLOCKED"] } },
-            { rejection_reason: { [Op.ne]: null } },
-            { rejection_category: { [Op.ne]: null } },
-          ],
-        });
-      } else if (["OK", "PASSED"].includes(normalizedStatusFilter)) {
-        andConditions.push({
-          [Op.or]: [
-            { plc_status: "ENDED_OK" },
-            { result: { [Op.in]: ["OK", "PASS", "PASSED"] } },
-            { operation_result: "PASSED" },
-          ],
-        });
-      } else if (normalizedStatusFilter === "VALIDATION") {
-        andConditions.push({ validation_result: { [Op.in]: ["FAILED", "BLOCKED", "DUPLICATE"] } });
-      } else if (normalizedStatusFilter === "BYPASS") {
-        nextWhere.is_bypassed = true;
+    const statusFilterTokens = getStatusFilterTokens(status, resultType);
+    if (statusFilterTokens.length) {
+      const statusOrConditions = [];
+      if (statusFilterTokens.some((token) => ["NG", "FAILED"].includes(token))) {
+        statusOrConditions.push(
+          { plc_status: { [Op.in]: ["ENDED_NG", "INTERLOCKED"] } },
+          { result: { [Op.in]: ["NG", "FAIL", "FAILED", "BLOCK"] } },
+          { operation_result: { [Op.in]: ["FAILED", "INTERLOCKED"] } },
+          { rejection_reason: { [Op.ne]: null } },
+          { rejection_category: { [Op.ne]: null } },
+        );
+      }
+      if (statusFilterTokens.some((token) => ["OK", "PASSED"].includes(token))) {
+        statusOrConditions.push(
+          { plc_status: "ENDED_OK" },
+          { result: { [Op.in]: ["OK", "PASS", "PASSED"] } },
+          { operation_result: "PASSED" },
+        );
+      }
+      if (statusFilterTokens.includes("VALIDATION")) {
+        statusOrConditions.push({ validation_result: { [Op.in]: ["FAILED", "BLOCKED", "DUPLICATE"] } });
+      }
+      if (statusFilterTokens.includes("BYPASS")) {
+        statusOrConditions.push({ is_bypassed: true });
+      }
+      if (statusOrConditions.length) {
+        andConditions.push({ [Op.or]: statusOrConditions });
       }
     }
     if (plantId || lineId || lineName) {
@@ -1257,8 +1306,25 @@ async function fetchProductionData(filters = {}, options = {}) {
     return fetchPartStatusFallbackRows();
   }
 
+  const anchorMappings = await PartCodeMapping.findAll({
+    where: {
+      [Op.or]: [
+        { old_part_id: { [Op.in]: anchorPartIds } },
+        { customer_qr: { [Op.in]: anchorPartIds } },
+      ],
+      is_active: true,
+    },
+    attributes: ["old_part_id", "customer_qr"],
+    order: [["updatedAt", "DESC"]],
+    raw: true,
+  });
+  const linkedAnchorPartIds = [...new Set([
+    ...anchorPartIds,
+    ...anchorMappings.flatMap((row) => [row.old_part_id, row.customer_qr]),
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+
   const fullHistoryLogs = await runLogQuery({
-    part_id: { [Op.in]: anchorPartIds }
+    part_id: { [Op.in]: linkedAnchorPartIds }
   });
   const fullProductionHistoryLogs = fullHistoryLogs.filter(isProductionReportLog);
 
@@ -1284,13 +1350,13 @@ async function fetchProductionData(filters = {}, options = {}) {
   });
 
   // Fetch Part & QR Info (Flattening for performance)
-  const partIds = anchorPartIds;
+  const partIds = linkedAnchorPartIds;
   const parts = await Part.findAll({
     where: { part_id: { [Op.in]: partIds } },
     attributes: ["part_id", "qr_format_name", "status"],
     raw: true
   });
-  const partCodeMappings = await PartCodeMapping.findAll({
+  const partCodeMappings = anchorMappings.length ? anchorMappings : await PartCodeMapping.findAll({
     where: {
       [Op.or]: [
         { old_part_id: { [Op.in]: partIds } },
@@ -1438,8 +1504,12 @@ async function fetchProductionData(filters = {}, options = {}) {
     }
 
     const partIdValue = String(log.part_id || "").trim();
-    const mappedCustomerQr = sanitizeCustomerQrValue(partCodeMap[normalizeKey(partIdValue)]);
     const mappedOldPartId = String(oldPartMap[normalizeKey(partIdValue)] || "").trim();
+    const mappedCustomerQr = sanitizeCustomerQrValue(
+      partCodeMap[normalizeKey(partIdValue)] ||
+      partCodeMap[normalizeKey(mappedOldPartId)] ||
+      (oldPartMap[normalizeKey(partIdValue)] ? partIdValue : "")
+    );
     const recoveryCompletedByCustomerQr = shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr);
     const stationNo = String(log.operation_no || log.station_no || "").trim().toUpperCase();
     const leakTestReadings = getAllLeaktestReadingsForPart(leaktestIndex.byPartAndIp, partIdValue, LEAKTEST_OPERATION);
@@ -1589,36 +1659,13 @@ async function fetchProductionData(filters = {}, options = {}) {
     filtered = filtered.filter((row) => String(row.customerCode || "").toUpperCase().includes(cc));
   }
 
-  const normalizedStatus = String(status || resultType || "").trim().toUpperCase();
-  if (normalizedStatus) {
-    if (normalizedStatus === "VALIDATION") {
-      filtered = filtered.filter((row) => row.category === "VALIDATION");
-    } else if (normalizedStatus === "BYPASS") {
-      filtered = filtered.filter((row) => row.bypassStatus === true);
-    } else if (normalizedStatus === "PENDING") {
-      filtered = filtered.filter((row) => String(row.statusLabel || "").toUpperCase() === "UNKNOWN");
-    } else if (normalizedStatus === "OTHER") {
-      filtered = filtered.filter((row) => row.isCustomerQrOnly === true || !String(row.displayPartId || row.partId || "").trim());
-    } else if (normalizedStatus === "OK" || normalizedStatus === "PASSED") {
-      filtered = filtered.filter((row) => {
-        const s = String(row.partStatus || "").trim().toUpperCase();
-        return ["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(s);
-      });
-    } else if (normalizedStatus === "IN_PROGRESS" || normalizedStatus === "IN PROGRESS") {
-      filtered = filtered.filter((row) => {
-        const s = String(row.partStatus || "").trim().toUpperCase();
-        const isPassed = ["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(s);
-        const isNg = ["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(s);
-        return !isPassed && !isNg;
-      });
-    } else if (normalizedStatus === "NG" || normalizedStatus === "FAILED") {
-      filtered = filtered.filter((row) => {
-        const s = String(row.partStatus || "").trim().toUpperCase();
-        return ["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(s);
-      });
-    } else {
-      filtered = filtered.filter((row) => String(row.industrialResult || "").toUpperCase() === normalizedStatus);
-    }
+  const statusTokens = getStatusFilterTokens(status, resultType);
+  if (statusTokens.length) {
+    filtered = filtered.filter((row) => statusTokens.some((token) => rowMatchesReportStatus(row, token)));
+  }
+
+  if (filters.partType) {
+    filtered = filtered.filter((row) => rowMatchesPartType(row, filters.partType));
   }
 
   return filtered;

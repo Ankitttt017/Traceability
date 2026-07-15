@@ -16,11 +16,14 @@ class PlcPollingService {
   }
 
   async start() {
-    const machines = await Machine.findAll({ where: { status: "ACTIVE" } });
-    for (const machine of machines) {
+    const where = {};
+    if (Machine.rawAttributes?.is_active) where.is_active = true;
+    const machines = await Machine.findAll({ where });
+    const plcMachines = machines.filter((machine) => this.isMachineActive(machine) && this.isPLCConfigured(machine));
+    for (const machine of plcMachines) {
       this.startPolling(machine);
     }
-    console.log(`[PollingService] Started polling for ${machines.length} machines`);
+    console.log(`[PollingService] Started polling for ${plcMachines.length}/${machines.length} active PLC machines`);
   }
 
   stop() {
@@ -64,7 +67,7 @@ class PlcPollingService {
     let latestMachine = machine;
     try {
       const dbMachine = await Machine.findByPk(machine.id);
-      if (!dbMachine || dbMachine.status !== "ACTIVE") {
+      if (!dbMachine || !this.isMachineActive(dbMachine) || !this.isPLCConfigured(dbMachine)) {
         this.stopPolling(machine.id);
         return;
       }
@@ -154,13 +157,89 @@ class PlcPollingService {
 
   isPLCConfigured(machine) {
     const ip = machine.plc_ip || machine.machine_ip;
+    const port = Number(machine.plc_port || machine.machine_port);
     const protocol = String(machine.plc_protocol || "").trim().toUpperCase();
     
     // Skip if IP is invalid (0.0.0.0 indicates disabled)
-    if (!ip || ip === "0.0.0.0" || ip === "localhost" || protocol === "DISABLED") {
+    if (!ip || ip === "0.0.0.0" || ip === "localhost" || protocol === "DISABLED" || !Number.isFinite(port) || port <= 0) {
       return false;
     }
     return true;
+  }
+
+  isMachineActive(machine) {
+    const status = String(machine?.status || "ACTIVE").trim().toUpperCase();
+    return machine?.is_active !== false && status !== "INACTIVE" && status !== "DISABLED";
+  }
+
+  parseRegisterSnapshot(machine) {
+    try {
+      const parsed = machine?.plc_registers
+        ? (typeof machine.plc_registers === "string" ? JSON.parse(machine.plc_registers) : machine.plc_registers)
+        : {};
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_error) {
+      return {};
+    }
+  }
+
+  getSignalMap(machine) {
+    try {
+      const map = machine?.plc_signal_map
+        ? (typeof machine.plc_signal_map === "string" ? JSON.parse(machine.plc_signal_map) : machine.plc_signal_map)
+        : [];
+      return Array.isArray(map) ? map : [];
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  findSignalRow(machine, aliases = []) {
+    const wanted = new Set(aliases.map((alias) => String(alias || "").trim().toUpperCase()));
+    return this.getSignalMap(machine).find((row) => {
+      const keys = [
+        row.signal,
+        row.signalName,
+        row.name,
+        row.key,
+        row.category,
+      ].map((value) => String(value || "").trim().toUpperCase());
+      return keys.some((key) => wanted.has(key) || [...wanted].some((alias) => key.includes(alias)));
+    });
+  }
+
+  resolveRegister(machine, snapshot, fieldName, aliases = []) {
+    const direct = this.toInt(machine?.[fieldName]);
+    if (direct !== null) return direct;
+    const snapshotKeys = aliases.concat([
+      fieldName.replace(/^plc_/, "").replace(/_register$/, "Register"),
+    ]);
+    for (const key of snapshotKeys) {
+      const value = this.toInt(snapshot?.[key]);
+      if (value !== null) return value;
+    }
+    const signalRow = this.findSignalRow(machine, aliases);
+    return this.toInt(signalRow?.register ?? signalRow?.registerNo ?? signalRow?.address);
+  }
+
+  resolveValue(machine, snapshot, fieldName, aliases = [], fallback = null) {
+    const direct = this.toInt(machine?.[fieldName]);
+    if (direct !== null) return direct;
+    const snapshotKeys = aliases.concat([
+      fieldName.replace(/^plc_/, "").replace(/_value$/, "Value"),
+    ]);
+    for (const key of snapshotKeys) {
+      const value = this.toInt(snapshot?.[key]);
+      if (value !== null) return value;
+    }
+    const signalRow = this.findSignalRow(machine, aliases);
+    const mapped = this.toInt(signalRow?.value ?? signalRow?.expectedValue);
+    return mapped !== null ? mapped : fallback;
+  }
+
+  toInt(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.trunc(n) : null;
   }
 
   async readAllRegisters(machine) {
@@ -178,15 +257,15 @@ class PlcPollingService {
       const port = machine.plc_port || machine.machine_port;
       const protocol = String(machine.plc_protocol || "TCP_TEXT").trim().toUpperCase();
 
-      const toInt = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.trunc(n) : null; };
+      const snapshot = this.parseRegisterSnapshot(machine);
 
       // Section 6: Dynamic Register Mappings
-      const runningReg = toInt(machine.plc_running_register);
-      const endOkReg = toInt(machine.plc_end_ok_register);
-      const endNgReg = toInt(machine.plc_end_ng_register);
-      const resetReg = toInt(machine.plc_reset_register);
-      const bypassReg = toInt(machine.plc_bypass_register);
-      const startReg = toInt(machine.plc_start_register);
+      const runningReg = this.resolveRegister(machine, snapshot, "plc_running_register", ["runningRegister", "statusRegister", "RUNNING", "STATUS"]);
+      const endOkReg = this.resolveRegister(machine, snapshot, "plc_end_ok_register", ["endOkRegister", "END_OK", "END OK"]);
+      const endNgReg = this.resolveRegister(machine, snapshot, "plc_end_ng_register", ["endNgRegister", "END_NG", "END NG"]);
+      const resetReg = this.resolveRegister(machine, snapshot, "plc_reset_register", ["resetRegister", "RESET"]);
+      const bypassReg = this.resolveRegister(machine, snapshot, "plc_bypass_register", ["bypassRegister", "BYPASS"]);
+      const startReg = this.resolveRegister(machine, snapshot, "plc_start_register", ["startRegister", "START"]);
 
       const registers = [];
       if (runningReg !== null) registers.push(runningReg);
@@ -251,10 +330,10 @@ class PlcPollingService {
       }
 
       // Default Values for Industrial Signals (Rule 6)
-      const runningValue = Number(machine.plc_running_value ?? 1);
-      const endOkValue = Number(machine.plc_end_ok_value ?? 2);
-      const endNgValue = Number(machine.plc_end_ng_value ?? 2);
-      const bypassValue = Number(machine.plc_bypass_value ?? 1);
+      const runningValue = this.resolveValue(machine, snapshot, "plc_running_value", ["runningValue", "startedValue", "RUNNING", "STATUS"], 1);
+      const endOkValue = this.resolveValue(machine, snapshot, "plc_end_ok_value", ["endOkValue", "END_OK", "END OK"], 3);
+      const endNgValue = this.resolveValue(machine, snapshot, "plc_end_ng_value", ["endNgValue", "END_NG", "END NG"], 4);
+      const bypassValue = this.resolveValue(machine, snapshot, "plc_bypass_value", ["bypassValue", "BYPASS"], 1);
 
       const signals = {};
       if (runningReg !== null && values[runningReg] !== undefined) {
