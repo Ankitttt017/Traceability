@@ -121,8 +121,15 @@ const LEAK_TEST_COLUMNS = [
   { key: "Wey", label: "Wey" },
   { key: "Both", label: "Both" },
 ];
+const normalizeLeakResult = (value) => {
+  const token = String(value || "").trim().toUpperCase();
+  if (!token) return "";
+  if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(token)) return "NG";
+  if (["OK", "PASS", "PASSED", "GOOD"].includes(token)) return "OK";
+  return "OK";
+};
 const getLeakTestStatus = (reading) => {
-  const result = String(reading?.Result || reading?.result || "").trim().toUpperCase();
+  const result = normalizeLeakResult(reading?.Result || reading?.result);
   if (result === "OK") return "OK";
   if (result === "NG") return "NG";
   if (!reading) return "";

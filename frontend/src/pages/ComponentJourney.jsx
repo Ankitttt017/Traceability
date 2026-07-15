@@ -171,8 +171,29 @@ function hasDerivedQrSignal(station={}) {
 function isStationBypassed(station={}) {
   return Array.isArray(station.attempts) && station.attempts.some((att) => att?.isBypassed === true);
 }
+function normalizeLeakResult(value) {
+  const token = String(value || "").trim().toUpperCase();
+  if (!token) return "";
+  if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(token)) return "NG";
+  if (["OK", "PASS", "PASSED", "GOOD"].includes(token)) return "OK";
+  return "OK";
+}
+function getLeakStationState(station={}) {
+  const readings = station.leakTestReadings?.length > 0
+    ? station.leakTestReadings
+    : (station.leakTestReading ? [station.leakTestReading] : []);
+  if (!readings.length) return "";
+  const results = readings.map((reading) => normalizeLeakResult(reading?.Result || reading?.result)).filter(Boolean);
+  if (results.some((result) => result === "NG")) return "FAILED";
+  if (results.length === readings.length && results.every((result) => result === "OK")) return "PASSED";
+  return "IN_PROGRESS";
+}
 function getJourneyStationState(station={}, qrMeta=null, settings={}) {
   if (station.customerQrPending === true) return "IN_PROGRESS";
+  const leakState = getLeakStationState(station);
+  if (leakState) return leakState;
+  const backendState = String(station.stageState || "").trim().toUpperCase();
+  if (["FAILED","INTERLOCKED","ENDED_NG","NG","COMPLETED_NG"].includes(backendState)) return backendState;
   if (isStationBypassed(station)) return "COMPLETED";
   const qrState = String(station.qrVerification || "").trim().toUpperCase();
   const liveQrLabel = String(qrMeta?.label || "").trim().toUpperCase();
@@ -233,7 +254,7 @@ function formatLeakFieldValue(reading, key) {
   return reading[key] ?? "—";
 }
 function getLeakResultMeta(reading) {
-  const result = String(reading?.Result || reading?.result || "").trim().toUpperCase();
+  const result = normalizeLeakResult(reading?.Result || reading?.result);
   if (result === "OK") return { variant: "ok", label: "Leak OK" };
   if (result === "NG") return { variant: "ng", label: "Leak NG" };
   return { variant: "idle", label: "Leak -" };

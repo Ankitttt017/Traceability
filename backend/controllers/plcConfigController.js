@@ -374,12 +374,20 @@ exports.deleteRange = async (req, res) => {
       return res.status(404).json({ error: "Range not found" });
     }
 
-    const mappedMachineCount = await Machine.count({
+    const mappedMachines = await Machine.findAll({
       where: { plc_range_id: id },
+      attributes: ["id", "machine_name", "operation_no"],
+      order: [["id", "ASC"]],
+      raw: true,
     });
-    if (mappedMachineCount > 0) {
+    if (mappedMachines.length > 0) {
       return res.status(409).json({
         error: "Range is already assigned to machine(s). Re-map machines before delete.",
+        assignedMachines: mappedMachines.map((machine) => ({
+          id: machine.id,
+          machineName: machine.machine_name,
+          operationNo: machine.operation_no,
+        })),
       });
     }
 

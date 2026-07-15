@@ -130,12 +130,23 @@ const resolveRejectionDetails = (entries = []) => {
     subZone,
   };
 };
+const normalizeLeakResult = (value) => {
+  const token = String(value || "").trim().toUpperCase();
+  if (!token) return "";
+  if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(token)) return "NG";
+  if (["OK", "PASS", "PASSED", "GOOD"].includes(token)) return "OK";
+  return "OK";
+};
 const getLeakTestStatus = (reading) => {
-  const r = Array.isArray(reading) ? reading[reading.length - 1] : reading;
-  const result = String(r?.Result || r?.result || "").trim().toUpperCase();
+  const readings = Array.isArray(reading) ? reading.filter(Boolean) : (reading ? [reading] : []);
+  if (!readings.length) return "";
+  const results = readings.map((r) => normalizeLeakResult(r?.Result || r?.result)).filter(Boolean);
+  if (results.some((result) => result === "NG")) return "NG";
+  if (results.length === readings.length && results.every((result) => result === "OK")) return "OK";
+  const r = readings[readings.length - 1];
+  const result = normalizeLeakResult(r?.Result || r?.result);
   if (result === "OK") return "OK";
   if (result === "NG") return "NG";
-  if (!r) return "";
   return "IN_PROGRESS";
 };
 const getLeakTestValue = (readings, key) => {
@@ -201,8 +212,8 @@ const pickPreferredResult = (current, candidate) => {
   return current || candidate;
 };
 const operationResultRank = (value) => {
-  if (value === "OK") return 3;
-  if (value === "NG") return 2;
+  if (value === "NG") return 3;
+  if (value === "OK") return 2;
   if (value === "IN_PROGRESS") return 1;
   return 0;
 };
@@ -274,8 +285,28 @@ const INVALID_CUSTOMER_QR_VALUES = new Set([
   "NULL",
   "UNDEFINED",
 ]);
-const sanitizeCustomerQrValue = (value) => {
+const collapseRepeatedQrValue = (value) => {
   const raw = String(value || "").trim();
+  if (!raw) return "";
+  const customerQrSegments = raw.match(/R[^R]+/g);
+  if (
+    customerQrSegments &&
+    customerQrSegments.length > 1 &&
+    customerQrSegments.join("") === raw &&
+    customerQrSegments.every((segment) => segment === customerQrSegments[0])
+  ) {
+    return customerQrSegments[0];
+  }
+  if (raw.length < 16) return raw;
+  for (let size = Math.floor(raw.length / 2); size >= 8; size -= 1) {
+    if (raw.length % size !== 0) continue;
+    const token = raw.slice(0, size);
+    if (token && token.repeat(raw.length / size) === raw) return token;
+  }
+  return raw;
+};
+const sanitizeCustomerQrValue = (value) => {
+  const raw = collapseRepeatedQrValue(value);
   if (!raw || raw === "-") return "";
   if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
   return raw;
@@ -309,8 +340,6 @@ const ReportsPage = () => {
     plcColumns: [],
     pagination: { page: 1, pageSize: REPORT_ALL_ROWS_LIMIT, totalRows: 0, totalPages: 1 },
   });
-  const [reportPage, setReportPage] = useState(1);
-  const [reportPageSize, setReportPageSize] = useState(REPORT_ALL_ROWS_LIMIT);
   const [reportConfig, setReportConfig] = useState(() => loadReportConfig());
   const reportAbortRef = useRef(null);
   
@@ -403,6 +432,9 @@ const ReportsPage = () => {
         plcColumns: response.plcColumns || [],
         pagination: response.pagination || { page: 1, pageSize: REPORT_ALL_ROWS_LIMIT, totalRows: response.rows?.length || 0, totalPages: 1 },
       });
+      if (response.warning) {
+        toast.warning(response.warning);
+      }
     } catch (e) {
       if (e?.code === "ERR_CANCELED" || e?.name === "CanceledError") return;
       console.error(e);
@@ -424,41 +456,15 @@ const ReportsPage = () => {
   }, [fetchData]);
 
   const applyReportFilters = useCallback(() => {
-    setReportPage(1);
     setAppliedFilters(filters);
   }, [filters]);
 
   useEffect(() => {
-    setReportPage(1);
     const timer = window.setTimeout(() => {
       setAppliedFilters(filters);
     }, REPORT_AUTO_APPLY_MS);
     return () => window.clearTimeout(timer);
   }, [filters]);
-
-  useEffect(() => {
-    setReportPage(1);
-  }, [
-    appliedFilters.dateFrom,
-    appliedFilters.dateTo,
-    appliedFilters.plantId,
-    appliedFilters.lineId,
-    appliedFilters.machineId,
-    appliedFilters.partName,
-    appliedFilters.dieName,
-    appliedFilters.dieCastingMachine,
-    appliedFilters.lineName,
-    appliedFilters.shiftCode,
-    appliedFilters.status,
-    appliedFilters.partType,
-    appliedFilters.station,
-    appliedFilters.barcode,
-    appliedFilters.customerCode,
-    appliedFilters.operatorId,
-    appliedFilters.resultType,
-    appliedFilters.modelCode,
-    appliedFilters.operationNo,
-  ]);
 
   useEffect(() => {
     const metadataConfig = { timeout: 45000, suppressGlobalError: true };
@@ -630,7 +636,12 @@ const ReportsPage = () => {
     const dynamicRows = Array.from(grouped.values()).map((entries, idx) => {
       const first = entries[0] || {};
       const partKey = String(first.__reportPageGroupKey || first.reportPageGroupKey || first.reportGroupKey || first.report_group_key || first.traceabilityPartId || first.traceability_part_id || first.partId || first.part_id || first.barcode || first.shot_uid || `row_${idx}`).trim();
-      const displayPartId = String(first.displayPartId || first.display_part_id || "").trim();
+      const bestPartRow = entries.find((row) => String(row.displayPartId || row.display_part_id || "").trim()) || first;
+      const displayPartId = String(
+        bestPartRow.displayPartId ||
+        bestPartRow.display_part_id ||
+        ""
+      ).trim();
       const stationResults = {};
       const stationDisplayValues = {};
       const operationResults = {};
@@ -679,7 +690,8 @@ const ReportsPage = () => {
           }
         });
       });
-      if (leakData) {
+      const hasLeakData = Boolean(leakData && (!Array.isArray(leakData) || leakData.length > 0));
+      if (hasLeakData) {
         const actualLeakData = Array.isArray(leakData) ? leakData[leakData.length - 1] : leakData;
         const leakStatus = getLeakTestStatus(leakData);
         const leakMachineName = String(actualLeakData?.matchedMachineName || actualLeakData?.Machine || actualLeakData?.machineName || "").trim();
@@ -695,6 +707,10 @@ const ReportsPage = () => {
         .map((row) => sanitizeCustomerQrValue(row.customerQrCode || row.customerCode || row.customer_qr || ""))
         .find((value) => String(value || "").trim() && String(value).trim() !== "-") ||
         (looksLikeCustomerQrValue(partKey) ? partKey : "");
+      const displayShotNumber = entries
+        .map((row) => row.plcReading?.shot_number ?? row.plc_reading?.shot_number ?? row.shot_number ?? row.shotNumber ?? "")
+        .map((value) => String(value || "").trim())
+        .find((value) => value && value !== "-") || "";
       const shaped = {
         reportGroupKey: partKey,
         traceabilityPartId: partKey,
@@ -704,7 +720,7 @@ const ReportsPage = () => {
             ((Number(data.pagination?.page || 1) - 1) * Number(data.pagination?.pageSize || sourceRows.length || 0)) -
             idx
         ),
-        plc_shot_number: displayPartId ? (plcData.shot_number ?? first.shot_number ?? first.shotNumber ?? "-") : "-",
+        plc_shot_number: displayPartId ? (plcData.shot_number || displayShotNumber || "-") : "-",
         barcode: displayPartId,
         plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
@@ -712,14 +728,18 @@ const ReportsPage = () => {
         dieName: plcPartDie.dieName || first.dieName || "-",
         customerCode: mappedCustomerCode || "-",
         overallStatus: (() => {
-          const finalStatus = normalizeFinalPartStatus(first.partStatus || first.part_status || first.status);
-          if (finalStatus === "PASSED" || finalStatus === "NG") return finalStatus;
-          const vals = requiredOperations.map((operation) => normResult(operationResults[operation])).filter(Boolean);
+          const effectiveRequiredOperations = hasLeakData
+            ? requiredOperations
+            : requiredOperations.filter((operation) => operation !== LEAK_TEST_OPERATION);
+          const vals = effectiveRequiredOperations.map((operation) => normResult(operationResults[operation])).filter(Boolean);
           if (vals.some((v) => v === "NG")) return "NG";
           if (vals.some((v) => v === "IN_PROGRESS")) return "IN_PROGRESS";
-          const terminalOperation = requiredOperations[requiredOperations.length - 1];
+          const finalStatus = normalizeFinalPartStatus(first.partStatus || first.part_status || first.status);
+          if (finalStatus === "NG") return "NG";
+          const terminalOperation = effectiveRequiredOperations[effectiveRequiredOperations.length - 1];
           if (terminalOperation && normResult(operationResults[terminalOperation]) === "OK") return "PASSED";
-          if (requiredOperations.length > 0 && vals.length >= requiredOperations.length && vals.every((v) => v === "OK")) return "PASSED";
+          if (effectiveRequiredOperations.length > 0 && vals.length >= effectiveRequiredOperations.length && vals.every((v) => v === "OK")) return "PASSED";
+          if (finalStatus === "PASSED") return "PASSED";
           return "IN_PROGRESS";
         })(),
         ngReason: (() => {
@@ -803,36 +823,21 @@ const ReportsPage = () => {
 
   const reportSummaryMetrics = useMemo(() => {
     const metrics = data.metrics || {};
-    const traceRows = Array.isArray(reportTable.rows) ? reportTable.rows : [];
     const filteredTotal = Math.max(
+      Number(metrics.totalProduction || 0),
       Number(data.pagination?.totalRows || 0),
-      Number(traceRows.length || 0),
-      Number(metrics.totalProduction || 0)
+      Number(Array.isArray(reportTable.rows) ? reportTable.rows.length : 0)
     );
-    const traceSummary = traceRows.reduce((acc, row) => {
-      const status = String(row.overallStatus || "").trim().toUpperCase();
-      acc.totalProduction += 1;
-      if (status === "PASSED" || status === "OK") acc.totalOK += 1;
-      else if (status === "NG" || status === "FAILED") acc.totalNG += 1;
-      else acc.inProgress += 1;
-      return acc;
-    }, {
-      totalProduction: 0,
-      totalOK: 0,
-      totalNG: 0,
-      inProgress: 0,
-    });
-    const missingFromClientRows = Math.max(0, filteredTotal - traceSummary.totalProduction);
-    const totalOK = traceSummary.totalOK;
-    const totalNG = traceSummary.totalNG;
-    const inProgress = traceSummary.inProgress + missingFromClientRows;
-    const productionBase = traceSummary.totalOK + traceSummary.totalNG;
+    const totalOK = Number(metrics.totalOK || 0);
+    const totalNG = Number(metrics.totalNG || 0);
+    const inProgress = Number(metrics.inProgress || 0);
+    const productionBase = totalOK + totalNG;
     return {
       totalProduction: filteredTotal,
       totalOK,
       totalNG,
       inProgress,
-      validationRejects: totalNG,
+      validationRejects: Number(metrics.validationRejects ?? totalNG),
       passRate: productionBase > 0 ? Number(((totalOK / productionBase) * 100).toFixed(2)) : 0,
       plcShotSummary: metrics.plcShotSummary || {},
     };
@@ -1053,7 +1058,6 @@ const ReportsPage = () => {
             };
             setQuickRange("today");
             setFilters(nextFilters);
-            setReportPage(1);
             setAppliedFilters(nextFilters);
           }}
           className="h-9 rounded-md border border-red-200 bg-red-50 px-3 text-xs font-bold text-red-600 transition-all hover:border-red-300"
@@ -1078,7 +1082,8 @@ const ReportsPage = () => {
         loading={loading}
         progress={loadProgress}
         pagination={data.pagination}
-        disablePagination
+        defaultPageSize={500}
+        pageSizeOptions={[500, 1000, 2000]}
       />
     </div>
   );

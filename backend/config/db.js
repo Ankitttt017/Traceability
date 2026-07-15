@@ -1,4 +1,7 @@
 const { Sequelize } = require("sequelize");
+const path = require("path");
+
+require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
 
 const isTest = process.env.NODE_ENV === "test";
 const rawHost = process.env.DB_HOST || "localhost";

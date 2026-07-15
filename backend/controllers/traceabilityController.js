@@ -103,8 +103,29 @@ function normalizeStation(value) {
     .toUpperCase();
 }
 
-function sanitizeCustomerQrValue(value) {
+function collapseRepeatedQrValue(value) {
   const raw = String(value || "").trim();
+  if (!raw) return "";
+  const customerQrSegments = raw.match(/R[^R]+/g);
+  if (
+    customerQrSegments &&
+    customerQrSegments.length > 1 &&
+    customerQrSegments.join("") === raw &&
+    customerQrSegments.every((segment) => segment === customerQrSegments[0])
+  ) {
+    return customerQrSegments[0];
+  }
+  if (raw.length < 16) return raw;
+  for (let size = Math.floor(raw.length / 2); size >= 8; size -= 1) {
+    if (raw.length % size !== 0) continue;
+    const token = raw.slice(0, size);
+    if (token && token.repeat(raw.length / size) === raw) return token;
+  }
+  return raw;
+}
+
+function sanitizeCustomerQrValue(value) {
+  const raw = collapseRepeatedQrValue(value);
   if (!raw || raw === "-") return "";
   if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
   return raw;
@@ -1360,11 +1381,12 @@ async function getLatestOperationLog(partId, stationNo) {
 
   if (!logs.length) return null;
 
-  // Prioritize quality outcomes (PASS/NG) over administrative blocks (DUPLICATE/SEQUENCE)
+  // Prioritize quality outcomes (NG/PASS) over administrative blocks (DUPLICATE/SEQUENCE).
+  // NG wins because a later/parallel OK must not hide a failed quality gate.
   const success = logs.find(l => ["ENDED_OK", "PASSED", "OK"].includes(toUpper(l.plc_status)) || ["PASS", "OK"].includes(toUpper(l.result)));
   const ng = logs.find(l => ["ENDED_NG", "NG"].includes(toUpper(l.plc_status)) || ["FAIL", "NG"].includes(toUpper(l.result)));
 
-  return success || ng || logs[0];
+  return ng || success || logs[0];
 }
 
 async function safeRecordTimeline({
@@ -3232,7 +3254,7 @@ exports.getPartJourney = async (req, res) => {
       const endedOkAttempt  = attempts.find(isJourneyPassedAttempt);
       const endedNgAttempt  = attempts.find(isJourneyFailedAttempt);
       // Best attempt for display: prefer the actual production outcome
-      const productionAttempt = endedOkAttempt || endedNgAttempt || null;
+      const productionAttempt = endedNgAttempt || endedOkAttempt || null;
       // The attempt whose values we surface as "latest" (hide duplicate/interlocked noise)
       const representativeAttempt = productionAttempt || latestAttempt;
 
@@ -3243,14 +3265,14 @@ exports.getPartJourney = async (req, res) => {
         !customerMappingByStation[stationNo]?.customerQrCode
       );
 
-      if (leakTestReading) {
-        stageState = getLeaktestStageState(leakTestReading);
+      if (leakTestReadings.length > 0) {
+        stageState = getLeaktestStageStateFromReadings(leakTestReadings);
       } else if (bypassMeta.bypassed) {
-        stageState = "PASSED";
-      } else if (endedOkAttempt) {
         stageState = "PASSED";
       } else if (endedNgAttempt) {
         stageState = "FAILED";
+      } else if (endedOkAttempt) {
+        stageState = "PASSED";
       } else if (latestAttempt) {
         if (latestAttempt.plcStatus === "PLC_COMM_ERROR") {
           stageState = "COMM_ERROR";
@@ -3909,7 +3931,7 @@ exports.processScan = async (req, res) => {
         error: "partId is required (or configure scanner mode PLC_REGISTER with valid register range)",
       });
     }
-    const scannedQrRaw = String(normalizedPartId || "").trim();
+    const scannedQrRaw = collapseRepeatedQrValue(normalizedPartId);
     const machineStage = getMachineOperationStage(machine);
     const requestedStage = normalizeStation(stationNo || operation);
     if (requestedStage && machineStage && requestedStage !== machineStage) {
@@ -4309,6 +4331,7 @@ exports.processScan = async (req, res) => {
     const validateCustomerCode = stationFeatures.validateCustomerCode === true;
     const bypassState = machineBypassEnabled ? getMachineBypass(machine.id) : null;
     const isCustomerQrOnlyTrace = isCustomerQrOnlyStart || await isCustomerQrOnlyTracePart(normalizedPartId, customerQrCode);
+    const customerQrRequiredAtStation = await stationRequiresCustomerQrForCompletion(machine, normalizedStation);
     const response = await saveScan(normalizedPartId, normalizedStation, finalResult, machine.id, req.user?.id, {
       ...(ngReason ? { ngReason } : {}),
       resultSource: isCustomerQrOnlyStart ? "CUSTOMER_QR_ONLY_START" : resultSource,
@@ -4323,7 +4346,7 @@ exports.processScan = async (req, res) => {
       customerCodePattern: stationFeatures.customerCodePattern || "",
       shotValidationPartId: normalizedPartId,
       skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateQrFormat,
-      skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyTrace || !validateShotNumber,
+      skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyTrace || customerQrRequiredAtStation || !validateShotNumber,
       skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
       skipInterlockValidation: skipAllBypassValidations,
       skipDuplicateValidation: false,
@@ -4487,7 +4510,7 @@ exports.verifyScanForOperator = async (req, res) => {
     if (!inputCode || !machineId) {
       return res.status(400).json({ error: "qrCode and machineId are required" });
     }
-    const scannedQrRaw = String(inputCode || "").trim();
+    const scannedQrRaw = collapseRepeatedQrValue(inputCode);
 
     const machine = await Machine.findByPk(machineId);
     if (!machine) {

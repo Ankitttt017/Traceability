@@ -134,8 +134,15 @@ function stationResultRank(value) {
 function pickPreferredStationResult(currentValue, nextValue) {
   return stationResultRank(nextValue) > stationResultRank(currentValue) ? nextValue : (currentValue || nextValue);
 }
+function normalizeLeakResult(value) {
+  const token = String(value || "").trim().toUpperCase();
+  if (!token) return "";
+  if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(token)) return "NG";
+  if (["OK", "PASS", "PASSED", "GOOD"].includes(token)) return "OK";
+  return "OK";
+}
 function getLeakTestStatus(reading) {
-  const result = String(reading?.Result || reading?.result || "").trim().toUpperCase();
+  const result = normalizeLeakResult(reading?.Result || reading?.result);
   if (result === "OK") return "OK";
   if (result === "NG") return "NG";
   return "-";
@@ -331,6 +338,8 @@ async function generateIndustrialExcel(res, {
     if (!grouped.has(partSerial)) {
       grouped.set(partSerial, {
         partSerial,
+        partName: row.partName || row.part_name || row.modelName || row.componentName || "",
+        partDieLabel: row.partDieLabel || "",
         machineName: row.machineName || "-",
         customerQrCode: getCustomerQrFromRow(row) || "-",
         createdAt: row.createdAt || row.created_at || "-",
@@ -355,6 +364,12 @@ async function generateIndustrialExcel(res, {
       });
     }
     const bucket = grouped.get(partSerial);
+    if (!bucket.partName && (row.partName || row.part_name || row.modelName || row.componentName)) {
+      bucket.partName = row.partName || row.part_name || row.modelName || row.componentName;
+    }
+    if (!bucket.partDieLabel && row.partDieLabel) {
+      bucket.partDieLabel = row.partDieLabel;
+    }
     const rowCustomerQr = getCustomerQrFromRow(row);
     if ((!bucket.customerQrCode || bucket.customerQrCode === "-") && rowCustomerQr) {
       bucket.customerQrCode = rowCustomerQr;
@@ -516,12 +531,20 @@ async function generateIndustrialExcel(res, {
         : "IN_PROGRESS";
     const plc = row.plcReading || {};
     const shotNumber = plc.shot_number || row.shotNumber || row.shot_number || "-";
+    const exportPartName =
+      plc.part_name ||
+      row.partName ||
+      row.part_name ||
+      row.modelName ||
+      row.componentName ||
+      row.partDieLabel ||
+      "-";
     const values = [
       i + 1,
       shotNumber,
       row.partSerial,
       getCustomerQrFromRow(row) || row.customerQrCode || "-",
-      (row.plcReading && row.plcReading.part_name) || "-",
+      exportPartName,
       (row.plcReading && row.plcReading.machine_name) || row.machineName || "-",
       row.cycleStart,
       ...stationResults,

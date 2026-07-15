@@ -24,7 +24,34 @@ const INVALID_SCANNER_STATUS_TOKENS = new Set([
 ]);
 
 function sanitizeScannerPayload(value) {
-  return String(value || "").replace(/[\x00-\x1F\x7F]/g, "").trim();
+  return collapseRepeatedScannerPayload(String(value || "").replace(/[\x00-\x1F\x7F]/g, "").trim());
+}
+
+function collapseRepeatedScannerPayload(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  const customerQrSegments = raw.match(/R[^R]+/g);
+  if (
+    customerQrSegments &&
+    customerQrSegments.length > 1 &&
+    customerQrSegments.join("") === raw &&
+    customerQrSegments.every((segment) => segment === customerQrSegments[0])
+  ) {
+    return customerQrSegments[0];
+  }
+
+  if (raw.length < 16) return raw;
+
+  for (let size = Math.floor(raw.length / 2); size >= Math.max(DEFAULT_MIN_QR_PAYLOAD_LENGTH, 8); size -= 1) {
+    if (raw.length % size !== 0) continue;
+    const token = raw.slice(0, size);
+    if (token && token.repeat(raw.length / size) === raw) {
+      return token;
+    }
+  }
+
+  return raw;
 }
 
 function sanitizeDisplayPayload(value) {
@@ -215,6 +242,7 @@ function validateScannerPayload({ payload, scannerRole = "", stationNo = "", pro
 
 module.exports = {
   sanitizeScannerPayload,
+  collapseRepeatedScannerPayload,
   normalizeStation,
   buildScannerDisplayContext,
   validateScannerPayload,

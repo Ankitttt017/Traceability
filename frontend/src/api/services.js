@@ -81,7 +81,8 @@ export const plcConfigApi = {
     return data;
   },
   deleteRange: async (id) => {
-    await apiClient.delete(`${ENDPOINTS.plcConfig.ranges}/${id}`);
+    const { data } = await apiClient.delete(`${ENDPOINTS.plcConfig.ranges}/${id}`);
+    return data;
   },
   rangeRegisters: async (rangeId, params = {}) => {
     const { data } = await apiClient.get(ENDPOINTS.plcConfig.rangeRegisters(rangeId), { params });
