@@ -57,13 +57,12 @@ async function getCachedReportBundle(filters = {}, options = {}) {
   ])
     .then(([rows, shifts, plcColumnSet, plcShotSummary]) => {
       const metrics = calculateProductionMetrics(rows);
-      const rowShotSummary = derivePlcShotSummaryFromRows(rows);
-      metrics.plcShotSummary = options.includePlcSummary !== false && Number(plcShotSummary?.totalProduction || 0) > 0
-        ? plcShotSummary
-        : rowShotSummary;
+      metrics.plcShotSummary = options.includePlcSummary !== false
+        ? (plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 })
+        : { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
       metrics.plcShotSummarySource = options.includePlcSummary === false
         ? "SKIPPED_FAST"
-        : (Number(plcShotSummary?.totalProduction || 0) > 0 ? "PLC_SUMMARY" : "REPORT_ROWS");
+        : "PLC_SUMMARY";
       const bundle = { rows, shifts, plcColumnSet, metrics };
       reportDataCache.set(key, { bundle, savedAt: Date.now() });
       if (reportDataCache.size > 40) {
@@ -287,7 +286,41 @@ exports.getReportData = async (req, res) => {
   } catch (error) {
     const db = summarizeDbError(error);
     console.error(`[ReportController] getReportData failed code=${db.code} msg=${db.message}`);
-    res.status(500).json({ error: db.message });
+    try {
+      const filters = stripReportControlFilters(req.query || {});
+      const pagination = getPagination(req.query || {});
+      const fallbackOptions = {
+        ...getReportOptions(req.query || {}),
+        includePlcReadings: false,
+        includeLeaktest: false,
+        includePlcSummary: false,
+      };
+      const { rows, shifts, plcColumnSet, metrics } = await getCachedReportBundle(filters, fallbackOptions);
+      const paged = paginateReportRowsByPart(rows, pagination);
+      return res.json({
+        rows: paged.rows,
+        metrics: {
+          ...metrics,
+          plcShotSummary: { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 },
+          plcShotSummarySource: "SKIPPED_FALLBACK",
+        },
+        pagination: paged.pagination,
+        plcColumns: [...plcColumnSet],
+        reportMode: "FALLBACK_FAST",
+        warning: "Report loaded in fast mode because detailed PLC/leak enrichment was unavailable for this range.",
+        availableShifts: shifts.map((shift) => ({
+          id: shift.id,
+          shiftName: shift.shift_name,
+          shiftCode: shift.shift_code,
+          startTime: shift.start_time,
+          endTime: shift.end_time,
+        })),
+      });
+    } catch (fallbackError) {
+      const fallbackDb = summarizeDbError(fallbackError);
+      console.error(`[ReportController] getReportData fallback failed code=${fallbackDb.code} msg=${fallbackDb.message}`);
+      res.status(500).json({ error: fallbackDb.message });
+    }
   }
 };
 

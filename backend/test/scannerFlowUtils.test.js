@@ -11,6 +11,12 @@ test('sanitizeScannerPayload strips control characters without losing valid QR c
   assert.equal(sanitizeScannerPayload('   '), '');
 });
 
+test('sanitizeScannerPayload collapses repeated scanner payloads from duplicate TCP frames', () => {
+  const customerQr = 'R437111511-54T00150726A0288';
+  assert.equal(sanitizeScannerPayload(`${customerQr}${customerQr}`), customerQr);
+  assert.equal(sanitizeScannerPayload(`${customerQr}${customerQr}${customerQr}`), customerQr);
+});
+
 test('buildScannerDisplayContext preserves the original scanned QR and mapped part separately', () => {
   const context = buildScannerDisplayContext({
     rawPayload: 'CUS987654321',

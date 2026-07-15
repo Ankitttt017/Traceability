@@ -883,6 +883,24 @@ async function resolveActivePartIdForMachine(machine, stationNo) {
 
   const activeStatuses = ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING", "ENDED_OK"];
   const freshCutoff = new Date(Date.now() - CUSTOMER_QR_ACTIVE_WINDOW_MS);
+  const runningPartId = String(machine.running_part_id || "").trim();
+  const runningStation = normalizeStation(machine.running_station_no || "");
+  if (runningPartId && (!targetStation || !runningStation || runningStation === targetStation)) {
+    const runningLog = await OperationLog.findOne({
+      where: {
+        part_id: runningPartId,
+        machine_id: machine.id,
+        ...(targetStation ? { station_no: targetStation } : {}),
+        plc_status: { [Op.in]: activeStatuses },
+        result: "OK",
+        updatedAt: { [Op.gte]: freshCutoff },
+      },
+      attributes: ["id", "part_id"],
+      order: [["updatedAt", "DESC"]],
+    });
+    if (runningLog) return runningPartId;
+  }
+
   const candidateLogs = await OperationLog.findAll({
     where: {
       machine_id: machine.id,
@@ -2203,6 +2221,7 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
     ? scanPartId
     : (resolvedCode.customerQrCode || (afterCustomerQrMappingStation ? (resolvedCode.displayCustomerQrCode || null) : null));
   const isCustomerQrOnlyTrace = isCustomerQrOnlyStart || await isCustomerQrOnlyTracePart(scanPartId, resolvedCode.customerQrCode || (isCustomerQrOnlyStart ? scanPartId : ""));
+  const customerQrRequiredAtStation = await stationRequiresCustomerQrForCompletion(machine, stationNo);
   if (isMappedTraceabilityScan && resolvedCode.mappedPartId && resolvedCode.customerQrCode) {
     await promoteTraceabilityIdentityToCustomerQr({
       partId: resolvedCode.mappedPartId,
@@ -2216,7 +2235,7 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
     resultInput: "OK",
     shotValidationPartId: isMappedTraceabilityScan ? (resolvedCode.mappedPartId || partId) : partId,
     skipQrFormatValidation: isMappedTraceabilityScan || isCustomerQrOnlyStart,
-    skipShotValidation: isMappedTraceabilityScan || isCustomerQrOnlyTrace,
+    skipShotValidation: isMappedTraceabilityScan || isCustomerQrOnlyTrace || customerQrRequiredAtStation,
     skipCustomerCodeValidation: isMappedTraceabilityScan || isCustomerQrOnlyStart,
     skipSequenceValidation: isCustomerQrOnlyStart,
   });

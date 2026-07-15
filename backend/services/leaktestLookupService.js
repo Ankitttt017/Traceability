@@ -26,12 +26,28 @@ function normalizeUpper(value) {
   return normalizeText(value).toUpperCase();
 }
 
+function normalizeLeaktestResult(value) {
+  const token = normalizeUpper(value);
+  if (!token) return null;
+  if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(token)) return "NG";
+  if (["OK", "PASS", "PASSED", "GOOD"].includes(token)) return "OK";
+  return "OK";
+}
+
 function normalizeMachineName(value) {
   return normalizeUpper(value).replace(/[^A-Z0-9]+/g, "");
 }
 
 function uniqueStrings(values = []) {
   return Array.from(new Set(values.map((value) => normalizeText(value)).filter(Boolean)));
+}
+
+function chunkArray(values = [], size = 900) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
 }
 
 function getMachineIpCandidates(machine = {}) {
@@ -54,6 +70,8 @@ function isLeaktestMachine(machine = {}) {
 
 function normalizeLeaktestRow(row) {
   if (!row) return null;
+  const rawResult = normalizeText(row.Result);
+  const normalizedResult = normalizeLeaktestResult(rawResult);
   return {
     machineName: normalizeText(row.Machine) || null,
     matchedMachineName: normalizeText(row.__matchedMachineName || row.Machine) || null,
@@ -61,7 +79,8 @@ function normalizeLeaktestRow(row) {
     matchedStationNo: normalizeText(row.__matchedStationNo) || LEAKTEST_OPERATION,
     cycleEndTime: row.Cycle_End_Time || null,
     partQrCode: normalizeText(row.Part_QR_Code) || null,
-    result: normalizeUpper(row.Result) || null,
+    result: normalizedResult,
+    rawResult: rawResult || null,
     bodyLeakValue: row.Body_Leak_Value ?? null,
     gall1: row.Gall_1 ?? null,
     gall2: row.Gall_2 ?? null,
@@ -74,7 +93,8 @@ function normalizeLeaktestRow(row) {
     Machine: normalizeText(row.Machine) || null,
     Cycle_End_Time: row.Cycle_End_Time || null,
     Part_QR_Code: normalizeText(row.Part_QR_Code) || null,
-    Result: normalizeUpper(row.Result) || null,
+    Result: normalizedResult,
+    Raw_Result: rawResult || null,
     Body_Leak_Value: row.Body_Leak_Value ?? null,
     Gall_1: row.Gall_1 ?? null,
     Gall_2: row.Gall_2 ?? null,
@@ -112,15 +132,21 @@ async function fetchLeaktestRowsByQrAndIp({ qrCodes = [], machineIps = [] } = {}
     return [];
   }
 
-  return LeaktestRecord.findAll({
-    where: {
-      Part_QR_Code: { [Op.in]: uniqueQrCodes },
-      PLC_IP: { [Op.in]: uniqueMachineIps },
-    },
-    attributes: ["Id", ...LEAKTEST_VISIBLE_FIELDS, "PLC_IP"],
-    order: [["Cycle_End_Time", "DESC"], ["Id", "DESC"]],
-    raw: true,
-  });
+  const rows = [];
+  for (const qrChunk of chunkArray(uniqueQrCodes)) {
+    for (const ipChunk of chunkArray(uniqueMachineIps)) {
+      rows.push(...await LeaktestRecord.findAll({
+        where: {
+          Part_QR_Code: { [Op.in]: qrChunk },
+          PLC_IP: { [Op.in]: ipChunk },
+        },
+        attributes: ["Id", ...LEAKTEST_VISIBLE_FIELDS, "PLC_IP"],
+        order: [["Cycle_End_Time", "DESC"], ["Id", "DESC"]],
+        raw: true,
+      }));
+    }
+  }
+  return rows;
 }
 
 async function buildLeaktestIndex({ partIds = [], customerQrByPartId = {}, machines = [] } = {}) {
@@ -246,13 +272,15 @@ function getAllLeaktestReadingsForPart(byPartAndIp, partId, stationNo) {
  */
 function getLeaktestStageStateFromReadings(readings = []) {
   if (!readings.length) return "PENDING";
-  if (readings.some((r) => normalizeUpper(r?.result) === "NG"))  return "FAILED";
-  if (readings.every((r) => normalizeUpper(r?.result) === "OK")) return "PASSED";
+  const results = readings.map((r) => normalizeLeaktestResult(r?.result || r?.Result)).filter(Boolean);
+  if (!results.length) return "PENDING";
+  if (results.some((result) => result === "NG")) return "FAILED";
+  if (results.length === readings.length && results.every((result) => result === "OK")) return "PASSED";
   return "PENDING";
 }
 
 function getLeaktestStageState(reading) {
-  const result = normalizeUpper(reading?.result || reading?.Result);
+  const result = normalizeLeaktestResult(reading?.result || reading?.Result);
   if (result === "OK") return "PASSED";
   if (result === "NG") return "FAILED";
   return "PENDING";
@@ -268,6 +296,7 @@ module.exports = {
   getLeaktestStageStateFromReadings,
   getMachineIpCandidates,
   isLeaktestMachine,
+  normalizeLeaktestResult,
   normalizeLeaktestRow,
   normalizeMachineName,
 };

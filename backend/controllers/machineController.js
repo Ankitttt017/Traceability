@@ -25,6 +25,17 @@ function toInt(value) {
   return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
 }
 
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function pickProvidedInt(sources, fallback = null) {
+  for (const [obj, key] of sources) {
+    if (hasOwn(obj, key)) return toInt(obj[key]);
+  }
+  return toInt(fallback);
+}
+
 function parseRegisterToken(rawValue, fallbackDevice = null) {
   const text = String(rawValue ?? "").trim().toUpperCase();
   if (!text) {
@@ -433,7 +444,11 @@ async function normalizePayload(body = {}, existing = null) {
     .toUpperCase();
 
   const plcConfig = {
-    rangeId: toInt(cfgRaw.rangeId ?? body.plcRangeId ?? body.plc_range_id ?? existing?.plc_range_id),
+    rangeId: pickProvidedInt([
+      [cfgRaw, "rangeId"],
+      [body, "plcRangeId"],
+      [body, "plc_range_id"],
+    ], existing?.plc_range_id),
     startRegister: toInt(cfgRaw.startRegister ?? body.plcStartRegister ?? body.plc_start_register ?? existing?.plc_start_register ?? null),
     statusRegister: toInt(
       cfgRaw.statusRegister ??
@@ -461,6 +476,7 @@ async function normalizePayload(body = {}, existing = null) {
     handshakeMap: normalizeHandshakeMap(cfgRaw.handshakeMap),
     dataRegisterRanges: normalizeDataRegisterRanges(cfgRaw.dataRegisterRanges, slmpFrameMode),
   };
+  plcConfig.rangeId = Number(plcConfig.rangeId) > 0 ? plcConfig.rangeId : null;
 
   const spcConfig = normalizeSpcConfig(body.spcConfig || {});
   const plcSignalMap = normalizePlcSignalMap(body.plcSignalMap ?? body.plc_signal_map);

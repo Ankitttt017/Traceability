@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ChevronLeft, ChevronRight } from "lucide-react";
 import PageSkeleton from "../../components/PageSkeleton";
 
@@ -36,9 +36,11 @@ const ReportTable = ({
   onPageChange,
   onPageSizeChange,
   disablePagination = false,
+  defaultPageSize = 500,
+  pageSizeOptions = [500, 1000, 2000],
 }) => {
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(100);
+  const [pageSize, setPageSize] = useState(defaultPageSize);
   const tableScrollRef = useRef(null);
   const serverPaged = !disablePagination && Boolean(pagination && typeof onPageChange === "function");
   const effectivePageSize = serverPaged ? Number(pagination.pageSize || 50) : pageSize;
@@ -55,6 +57,10 @@ const ReportTable = ({
     const start = (currentPage - 1) * pageSize;
     return rows.slice(start, start + pageSize);
   }, [rows, currentPage, pageSize, serverPaged, disablePagination]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [rows]);
   const rangeStart = disablePagination ? (totalRows > 0 ? 1 : 0) : (totalRows > 0 ? ((currentPage - 1) * effectivePageSize) + 1 : 0);
   const rangeEnd = disablePagination ? pagedRows.length : (totalRows > 0 ? Math.min(totalRows, rangeStart + pagedRows.length - 1) : 0);
   const pageButtonClass = (disabled) =>
@@ -245,7 +251,7 @@ const ReportTable = ({
                 onChange={(e) => changePageSize(e.target.value)}
                 className="bg-bg-dark border border-border rounded px-2 py-1 text-text-main"
               >
-                {[25, 50, 100, 200, 500, 1000].map((s) => <option key={s} value={s}>{s}</option>)}
+                {pageSizeOptions.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
             <div className="flex items-center gap-2">

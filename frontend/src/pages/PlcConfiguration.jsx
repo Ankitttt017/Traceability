@@ -104,8 +104,15 @@ const PlcConfiguration = () => {
       await plcConfigApi.deleteRange(deleteId);
       toast.success("Block deleted");
       await loadData();
-    } catch {
-      toast.error("Delete failed");
+    } catch (err) {
+      const assigned = err.response?.data?.assignedMachines || [];
+      const names = assigned
+        .map((machine) => `${machine.machineName || `Machine ${machine.id}`}${machine.operationNo ? ` (${machine.operationNo})` : ""}`)
+        .join(", ");
+      const message = names
+        ? `Range is still assigned to: ${names}. Open Machine page, set PLC Register Range to "No range assigned", save, then delete.`
+        : err.response?.data?.error || "Delete failed";
+      toast.error(message, { duration: 9000 });
     } finally {
       setDeleteId(null);
     }

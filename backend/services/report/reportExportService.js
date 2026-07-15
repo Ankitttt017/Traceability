@@ -23,7 +23,7 @@ const {
   buildLeaktestIndex,
   getLeaktestReadingForPartStation,
   getAllLeaktestReadingsForPart,
-  getLeaktestStageState,
+  getLeaktestStageStateFromReadings,
 } = require("../leaktestLookupService");
 const PLC_READING_TABLE = "PlcCycleReadings";
 const CUSTOMER_QR_ONLY_FORMAT = "CUSTOMER_QR_ONLY";
@@ -244,6 +244,56 @@ function shouldTreatRecoveryPendingAsPassed(log, mappedCustomerQr) {
 function normalizeKey(value) {
   return String(value || "").trim().toUpperCase();
 }
+
+const SQL_IN_CHUNK_SIZE = 900;
+
+function chunkArray(values = [], size = SQL_IN_CHUNK_SIZE) {
+  const unique = [...new Set((values || []).map((value) => String(value || "").trim()).filter(Boolean))];
+  const chunks = [];
+  for (let index = 0; index < unique.length; index += size) {
+    chunks.push(unique.slice(index, index + size));
+  }
+  return chunks;
+}
+
+async function fetchPartCodeMappingsForIds(ids = []) {
+  const rows = [];
+  for (const chunk of chunkArray(ids)) {
+    rows.push(...await PartCodeMapping.findAll({
+      where: {
+        [Op.or]: [
+          { old_part_id: { [Op.in]: chunk } },
+          { customer_qr: { [Op.in]: chunk } },
+        ],
+        is_active: true,
+      },
+      attributes: ["old_part_id", "customer_qr"],
+      order: [["updatedAt", "DESC"]],
+      raw: true,
+    }));
+  }
+  return rows;
+}
+
+async function fetchPartsForIds(ids = []) {
+  const rows = [];
+  for (const chunk of chunkArray(ids)) {
+    rows.push(...await Part.findAll({
+      where: { part_id: { [Op.in]: chunk } },
+      attributes: ["part_id", "qr_format_name", "status"],
+      raw: true,
+    }));
+  }
+  return rows;
+}
+
+async function fetchLogsForPartIds(ids = [], runLogQueryFn) {
+  const rows = [];
+  for (const chunk of chunkArray(ids)) {
+    rows.push(...await runLogQueryFn({ part_id: { [Op.in]: chunk } }));
+  }
+  return rows;
+}
 const INVALID_CUSTOMER_QR_VALUES = new Set([
   "ERROR",
   "ERR",
@@ -261,8 +311,30 @@ const INVALID_CUSTOMER_QR_VALUES = new Set([
   "NULL",
   "UNDEFINED",
 ]);
-function sanitizeCustomerQrValue(value) {
+
+function collapseRepeatedQrValue(value) {
   const raw = String(value || "").trim();
+  if (!raw) return "";
+  const customerQrSegments = raw.match(/R[^R]+/g);
+  if (
+    customerQrSegments &&
+    customerQrSegments.length > 1 &&
+    customerQrSegments.join("") === raw &&
+    customerQrSegments.every((segment) => segment === customerQrSegments[0])
+  ) {
+    return customerQrSegments[0];
+  }
+  if (raw.length < 16) return raw;
+  for (let size = Math.floor(raw.length / 2); size >= 8; size -= 1) {
+    if (raw.length % size !== 0) continue;
+    const token = raw.slice(0, size);
+    if (token && token.repeat(raw.length / size) === raw) return token;
+  }
+  return raw;
+}
+
+function sanitizeCustomerQrValue(value) {
+  const raw = collapseRepeatedQrValue(value);
   if (!raw || raw === "-") return "";
   if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
   return raw;
@@ -695,19 +767,21 @@ async function fetchLatestPlcReadingsByShotTokens(values = []) {
   const shotValues = [...new Set(values.map((v) => normalizeShotToken(v)).filter(Boolean))];
   if (!shotValues.length) return map;
   try {
-    const placeholders = shotValues.map((_, idx) => `:s${idx}`).join(", ");
-    const replacements = shotValues.reduce((acc, value, idx) => {
-      acc[`s${idx}`] = value;
-      return acc;
-    }, {});
-    const [rows] = await sequelize.query(
-      `SELECT ${PLC_REPORT_SELECT} FROM ${PLC_READING_TABLE} WHERE CAST(shot_number AS NVARCHAR(255)) IN (${placeholders}) ORDER BY recorded_at DESC`,
-      { replacements }
-    );
-    for (const row of rows || []) {
-      const key = normalizeShotToken(row.shot_number || "");
-      if (!key || map.has(key)) continue;
-      map.set(key, row);
+    for (const chunk of chunkArray(shotValues)) {
+      const placeholders = chunk.map((_, idx) => `:s${idx}`).join(", ");
+      const replacements = chunk.reduce((acc, value, idx) => {
+        acc[`s${idx}`] = value;
+        return acc;
+      }, {});
+      const [rows] = await sequelize.query(
+        `SELECT ${PLC_REPORT_SELECT} FROM ${PLC_READING_TABLE} WHERE CAST(shot_number AS NVARCHAR(255)) IN (${placeholders}) ORDER BY recorded_at DESC`,
+        { replacements }
+      );
+      for (const row of rows || []) {
+        const key = normalizeShotToken(row.shot_number || "");
+        if (!key || map.has(key)) continue;
+        map.set(key, row);
+      }
     }
   } catch (_) {
     return map;
@@ -1228,20 +1302,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     if (!scopedParts.length) return [];
 
     const partIds = scopedParts.map((part) => String(part.part_id || "").trim()).filter(Boolean);
-    const mappings = partIds.length
-      ? await PartCodeMapping.findAll({
-          where: {
-            [Op.or]: [
-              { old_part_id: { [Op.in]: partIds } },
-              { customer_qr: { [Op.in]: partIds } },
-            ],
-            is_active: true,
-          },
-          attributes: ["old_part_id", "customer_qr"],
-          order: [["updatedAt", "DESC"]],
-          raw: true,
-        })
-      : [];
+    const mappings = partIds.length ? await fetchPartCodeMappingsForIds(partIds) : [];
     const customerQrByPartId = mappings.reduce((acc, row) => {
       const key = normalizeKey(row.old_part_id);
       const customerKey = normalizeKey(row.customer_qr);
@@ -1306,26 +1367,13 @@ async function fetchProductionData(filters = {}, options = {}) {
     return fetchPartStatusFallbackRows();
   }
 
-  const anchorMappings = await PartCodeMapping.findAll({
-    where: {
-      [Op.or]: [
-        { old_part_id: { [Op.in]: anchorPartIds } },
-        { customer_qr: { [Op.in]: anchorPartIds } },
-      ],
-      is_active: true,
-    },
-    attributes: ["old_part_id", "customer_qr"],
-    order: [["updatedAt", "DESC"]],
-    raw: true,
-  });
+  const anchorMappings = await fetchPartCodeMappingsForIds(anchorPartIds);
   const linkedAnchorPartIds = [...new Set([
     ...anchorPartIds,
     ...anchorMappings.flatMap((row) => [row.old_part_id, row.customer_qr]),
   ].map((value) => String(value || "").trim()).filter(Boolean))];
 
-  const fullHistoryLogs = await runLogQuery({
-    part_id: { [Op.in]: linkedAnchorPartIds }
-  });
+  const fullHistoryLogs = await fetchLogsForPartIds(linkedAnchorPartIds, runLogQuery);
   const fullProductionHistoryLogs = fullHistoryLogs.filter(isProductionReportLog);
 
   const earliestScanByPart = new Map();
@@ -1351,23 +1399,8 @@ async function fetchProductionData(filters = {}, options = {}) {
 
   // Fetch Part & QR Info (Flattening for performance)
   const partIds = linkedAnchorPartIds;
-  const parts = await Part.findAll({
-    where: { part_id: { [Op.in]: partIds } },
-    attributes: ["part_id", "qr_format_name", "status"],
-    raw: true
-  });
-  const partCodeMappings = anchorMappings.length ? anchorMappings : await PartCodeMapping.findAll({
-    where: {
-      [Op.or]: [
-        { old_part_id: { [Op.in]: partIds } },
-        { customer_qr: { [Op.in]: partIds } },
-      ],
-      is_active: true,
-    },
-    attributes: ["old_part_id", "customer_qr"],
-    order: [["updatedAt", "DESC"]],
-    raw: true,
-  });
+  const parts = await fetchPartsForIds(partIds);
+  const partCodeMappings = anchorMappings.length ? anchorMappings : await fetchPartCodeMappingsForIds(partIds);
 
   const partMap = parts.reduce((acc, p) => {
     acc[normalizeKey(p.part_id)] = p;
@@ -1417,8 +1450,8 @@ async function fetchProductionData(filters = {}, options = {}) {
     return acc;
   }, {});
 
-  // Deduplicate: per (part_id + operation_no) keep only the best outcome log.
-  // Priority: ENDED_OK > ENDED_NG > everything else.
+  // Deduplicate: per (part_id + operation_no) keep only the strongest quality outcome.
+  // Priority: ENDED_NG > ENDED_OK > everything else, because NG must not be hidden by a later/parallel OK.
   const bestByPartStation = new Map();
   for (const log of fullProductionHistoryLogs) {
     const key = `${log.part_id}||${log.operation_no || log.station_no}`;
@@ -1428,8 +1461,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     } else {
       const existStatus = String(existing.plc_status || "").toUpperCase();
       const newStatus   = String(log.plc_status || "").toUpperCase();
-      // Prefer ENDED_OK; then ENDED_NG; then most recent
-      const rank = (s) => s === "ENDED_OK" ? 2 : s === "ENDED_NG" ? 1 : 0;
+      const rank = (s) => s === "ENDED_NG" ? 3 : s === "ENDED_OK" ? 2 : 0;
       if (rank(newStatus) > rank(existStatus)) {
         bestByPartStation.set(key, log);
       } else if (rank(newStatus) === rank(existStatus)) {
@@ -1516,8 +1548,8 @@ async function fetchProductionData(filters = {}, options = {}) {
     const stationNo = String(log.operation_no || log.station_no || "").trim().toUpperCase();
     const leakTestReadings = getAllLeaktestReadingsForPart(leaktestIndex.byPartAndIp, partIdValue, LEAKTEST_OPERATION);
     const leakTestReading = leakTestReadings[leakTestReadings.length - 1] || getLeaktestReadingForPartStation(leaktestIndex.byPartAndStation, partIdValue, LEAKTEST_OPERATION);
-    const leakStageState = stationNo === LEAKTEST_OPERATION && leakTestReading
-      ? getLeaktestStageState(leakTestReading)
+    const leakStageState = stationNo === LEAKTEST_OPERATION && (leakTestReadings.length > 0 || leakTestReading)
+      ? getLeaktestStageStateFromReadings(leakTestReadings.length > 0 ? leakTestReadings : [leakTestReading])
       : null;
     const { status: industrialResultRaw, category: categoryRaw } = resolveIndustrialResult({
       result: log.result,
@@ -1576,6 +1608,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     const compactQrKey = parseCompactQrPartId(shotLookupPartId)?.key || parseCompactQrPartId(partIdValue)?.key || parseCompactQrPartId(mappedOldPartId)?.key || "";
     const shotSourceLog = { ...log, part_id: shotLookupPartId };
     const shotCandidates = deriveShotCandidates(shotSourceLog).map((s) => normalizeShotToken(s) || normalizeKey(s));
+    const fallbackShotNumber = shotCandidates[0] || parseCompactQrPartId(shotLookupPartId)?.shotRaw || parseCompactQrPartId(partIdValue)?.shotRaw || parseCompactQrPartId(mappedOldPartId)?.shotRaw || "";
     const shouldLookupPlcReading = includePlcReadings && (!customerQrOnlyPart || compactQrKey || shotCandidates.length);
     const plcReadingFromDbRaw = shouldLookupPlcReading
       ? (
@@ -1615,6 +1648,8 @@ async function fetchProductionData(filters = {}, options = {}) {
       isAnchorMachineRow: Number((latestAnchorLogByPart.get(canonicalPartId) || latestAnchorLogByPart.get(partIdValue) || latestAnchorLogByPart.get(mappedCustomerQr))?.machine_id || 0) === Number(log.machine_id || 0),
       customerCode: mappedCustomerQr || "-",
       customerQrCode: mappedCustomerQr || "-",
+      shotNumber: plcReadingFromDb?.shot_number || fallbackShotNumber || log.shot_number || "-",
+      shot_number: plcReadingFromDb?.shot_number || fallbackShotNumber || log.shot_number || "-",
       machineName: log.Machine?.machine_name || "-",
       lineName:    log.Machine?.line_name    || "-",
       operationNo: log.operation_no || log.Machine?.operation_no || "-",
