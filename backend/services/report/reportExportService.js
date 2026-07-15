@@ -1490,7 +1490,6 @@ async function fetchProductionData(filters = {}, options = {}) {
   // Enrich & Standardize
   const enriched = await Promise.all(deduplicatedLogs.map(async (log, index) => {
     const normalizedPartIdKey = normalizeKey(log.part_id);
-    const part = partMap[normalizedPartIdKey] || {};
 
     // Cycle times: scan time (createdAt of PENDING = QR scan) ? PLC end time
     const cycleStartTime = log.plc_start_at || log.createdAt || null;
@@ -1505,6 +1504,9 @@ async function fetchProductionData(filters = {}, options = {}) {
 
     const partIdValue = String(log.part_id || "").trim();
     const mappedOldPartId = String(oldPartMap[normalizeKey(partIdValue)] || "").trim();
+    const canonicalPartId = mappedOldPartId || partIdValue;
+    const canonicalPartKey = normalizeKey(canonicalPartId);
+    const part = partMap[canonicalPartKey] || partMap[normalizedPartIdKey] || {};
     const mappedCustomerQr = sanitizeCustomerQrValue(
       partCodeMap[normalizeKey(partIdValue)] ||
       partCodeMap[normalizeKey(mappedOldPartId)] ||
@@ -1522,6 +1524,11 @@ async function fetchProductionData(filters = {}, options = {}) {
       plc_status: log.plc_status,
       interlock_reason: log.interlock_reason
     });
+    const hasDistinctCustomerMapping = Boolean(
+      mappedCustomerQr &&
+      mappedOldPartId &&
+      normalizeKey(mappedCustomerQr) !== normalizeKey(mappedOldPartId)
+    );
     const invalidCustomerQrSelfMap = Boolean(
       mappedCustomerQr &&
       mappedOldPartId &&
@@ -1556,14 +1563,14 @@ async function fetchProductionData(filters = {}, options = {}) {
       ? ""
       : (structuredRejectionReason || log.interlock_reason || "");
 
-    const customerQrOnlyPart = !invalidCustomerQrSelfMap && (
+    const customerQrOnlyPart = !invalidCustomerQrSelfMap && !hasDistinctCustomerMapping && (
       isCustomerQrOnlyPart(partIdValue) ||
       Boolean(mappedCustomerQr && mappedOldPartId && normalizeKey(mappedCustomerQr) === normalizeKey(mappedOldPartId))
     );
-    const displayPartId = (customerQrOnlyPart || invalidCustomerQrSelfMap) ? "" : (mappedOldPartId || partIdValue);
+    const displayPartId = (customerQrOnlyPart || invalidCustomerQrSelfMap) ? "" : canonicalPartId;
     const reportGroupKey = (customerQrOnlyPart || invalidCustomerQrSelfMap)
       ? (mappedCustomerQr || partIdValue)
-      : (mappedOldPartId || mappedCustomerQr || partIdValue);
+      : (canonicalPartId || mappedCustomerQr || partIdValue);
     const shotLookupPartId = displayPartId || partIdValue;
     const partLookupKey = normalizeKey(shotLookupPartId);
     const compactQrKey = parseCompactQrPartId(shotLookupPartId)?.key || parseCompactQrPartId(partIdValue)?.key || parseCompactQrPartId(mappedOldPartId)?.key || "";
@@ -1597,15 +1604,15 @@ async function fetchProductionData(filters = {}, options = {}) {
       srNo: index + 1,
       partId:      displayPartId,
       reportGroupKey,
-      traceabilityPartId: partIdValue || "-",
+      traceabilityPartId: canonicalPartId || partIdValue || "-",
       displayPartId,
       isCustomerQrOnly: customerQrOnlyPart,
-      firstScanCreatedAt: earliestScanByPart.get(partIdValue) || log.createdAt || null,
-      latestAnchorCreatedAt: latestAnchorScanByPart.get(partIdValue) || log.createdAt || null,
-      anchorMachineName: latestAnchorLogByPart.get(partIdValue)?.Machine?.machine_name || log.Machine?.machine_name || "-",
-      anchorLineName: latestAnchorLogByPart.get(partIdValue)?.Machine?.line_name || log.Machine?.line_name || "-",
-      anchorShiftCode: latestAnchorLogByPart.get(partIdValue)?.shift_code || log.shift_code || "A",
-      isAnchorMachineRow: Number(latestAnchorLogByPart.get(partIdValue)?.machine_id || 0) === Number(log.machine_id || 0),
+      firstScanCreatedAt: earliestScanByPart.get(canonicalPartId) || earliestScanByPart.get(partIdValue) || earliestScanByPart.get(mappedCustomerQr) || log.createdAt || null,
+      latestAnchorCreatedAt: latestAnchorScanByPart.get(canonicalPartId) || latestAnchorScanByPart.get(partIdValue) || latestAnchorScanByPart.get(mappedCustomerQr) || log.createdAt || null,
+      anchorMachineName: latestAnchorLogByPart.get(canonicalPartId)?.Machine?.machine_name || latestAnchorLogByPart.get(partIdValue)?.Machine?.machine_name || latestAnchorLogByPart.get(mappedCustomerQr)?.Machine?.machine_name || log.Machine?.machine_name || "-",
+      anchorLineName: latestAnchorLogByPart.get(canonicalPartId)?.Machine?.line_name || latestAnchorLogByPart.get(partIdValue)?.Machine?.line_name || latestAnchorLogByPart.get(mappedCustomerQr)?.Machine?.line_name || log.Machine?.line_name || "-",
+      anchorShiftCode: latestAnchorLogByPart.get(canonicalPartId)?.shift_code || latestAnchorLogByPart.get(partIdValue)?.shift_code || latestAnchorLogByPart.get(mappedCustomerQr)?.shift_code || log.shift_code || "A",
+      isAnchorMachineRow: Number((latestAnchorLogByPart.get(canonicalPartId) || latestAnchorLogByPart.get(partIdValue) || latestAnchorLogByPart.get(mappedCustomerQr))?.machine_id || 0) === Number(log.machine_id || 0),
       customerCode: mappedCustomerQr || "-",
       customerQrCode: mappedCustomerQr || "-",
       machineName: log.Machine?.machine_name || "-",

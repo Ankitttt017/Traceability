@@ -75,7 +75,7 @@ const ioSnapshotCache = new Map();
 const ioSnapshotInFlight = new Map();
 const ioPlcConnectionStability = new Map();
 const CUSTOMER_QR_ACTIVE_WINDOW_MS = Math.max(
-  Number(process.env.CUSTOMER_QR_ACTIVE_WINDOW_MS || 10 * 60 * 1000),
+  Number(process.env.CUSTOMER_QR_ACTIVE_WINDOW_MS || 60 * 60 * 1000),
   30 * 1000
 );
 const CUSTOMER_QR_ONLY_FORMAT = "CUSTOMER_QR_ONLY";
@@ -2994,8 +2994,21 @@ exports.getPartJourney = async (req, res) => {
     ]
       .map((value) => String(value || "").trim())
       .filter(Boolean));
+    const canonicalTraceabilityPartId = String(
+      initialCustomerMappings.find((row) => {
+        const oldKey = String(row.old_part_id || "").trim().toUpperCase();
+        const customerKey = String(row.customer_qr || "").trim().toUpperCase();
+        const requestedKey = String(requestedPartId || "").trim().toUpperCase();
+        const resolvedKey = String(partId || "").trim().toUpperCase();
+        return (
+          oldKey &&
+          (oldKey === requestedKey || oldKey === resolvedKey || customerKey === requestedKey || customerKey === resolvedKey)
+        );
+      })?.old_part_id || partId || requestedPartId
+    ).trim();
     const [part, logs, reworkHistory, auditLogs, sequenceData] = await Promise.all([
-      Part.findOne({ where: { part_id: { [Op.in]: traceabilityPartIds } } }),
+      Part.findOne({ where: { part_id: canonicalTraceabilityPartId } })
+        .then((row) => row || Part.findOne({ where: { part_id: { [Op.in]: traceabilityPartIds } } })),
       OperationLog.findAll({
         where: { part_id: { [Op.in]: traceabilityPartIds } },
         order: [["createdAt", "ASC"]],
@@ -3535,7 +3548,7 @@ exports.getPartCatalog = async (req, res) => {
       shifts = await getActiveShiftDefinitions();
     }
 
-    const response = parts
+    const responseRows = parts
       .filter((part) => productionPartIds.has(String(part.part_id || "").trim()))
       .map((part) => {
         const latest = latestByPart.get(part.part_id);
@@ -3543,12 +3556,21 @@ exports.getPartCatalog = async (req, res) => {
         const rawPartId = String(part.part_id || "").trim();
         const mappedCustomerQr = catalogCustomerQrByPartId[rawPartId.toUpperCase()] || "";
         const mappedOldPart = catalogOldPartByPartId[rawPartId.toUpperCase()] || "";
-        const isCustomerQrOnly = String(part.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ||
-          Boolean(mappedOldPart && mappedCustomerQr && mappedOldPart.toUpperCase() === mappedCustomerQr.toUpperCase());
-        const displayPartId = isCustomerQrOnly ? "" : (mappedOldPart || rawPartId);
+        const hasDistinctCustomerMapping = Boolean(
+          mappedOldPart &&
+          mappedCustomerQr &&
+          mappedOldPart.toUpperCase() !== mappedCustomerQr.toUpperCase()
+        );
+        const canonicalPartId = mappedOldPart || rawPartId;
+        const isCustomerQrOnly = !hasDistinctCustomerMapping && (
+          String(part.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ||
+          Boolean(mappedOldPart && mappedCustomerQr && mappedOldPart.toUpperCase() === mappedCustomerQr.toUpperCase())
+        );
+        const displayPartId = isCustomerQrOnly ? "" : canonicalPartId;
         return {
-          partId: rawPartId,
-          traceabilityPartId: rawPartId,
+          partId: canonicalPartId,
+          traceabilityPartId: canonicalPartId,
+          rawPartId,
           displayPartId,
           mappedPartId: mappedOldPart || null,
           customerQrCode: mappedCustomerQr || null,
@@ -3583,6 +3605,17 @@ exports.getPartCatalog = async (req, res) => {
         }
         return true;
       });
+
+    const responseByPart = new Map();
+    for (const row of responseRows) {
+      const key = String(row.partId || row.traceabilityPartId || row.rawPartId || "").trim().toUpperCase();
+      if (!key) continue;
+      const existing = responseByPart.get(key);
+      if (!existing || new Date(row.latestAt || row.updatedAt || 0).getTime() > new Date(existing.latestAt || existing.updatedAt || 0).getTime()) {
+        responseByPart.set(key, row);
+      }
+    }
+    const response = [...responseByPart.values()];
 
     res.json(response);
   } catch (error) {
