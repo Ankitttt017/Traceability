@@ -10,6 +10,7 @@ const Shift = require("../models/Shift");
 const QrFormatRule = require("../models/QrFormatRule");
 const PartCodeMapping = require("../models/PartCodeMapping");
 const MachineRuntimeState = require("../models/MachineRuntimeState");
+const RejectionView = require("../models/RejectionView");
 const { saveScan } = require("../services/scanService");
 const { captureLeakReadingsForScan } = require("../services/leakTestCaptureService");
 const LeakTestReading = require("../models/LeakTestReading");
@@ -39,6 +40,7 @@ const { getScannerConnectionSnapshot } = scannerConnectionService;
 const { emitRealtime } = require("../services/realtimeService");
 const { tryAcquireMachineLock, clearMachineLock } = require("../services/machineLockService");
 const { finalizeCycleAfterPlc } = require("../services/cycleFinalizationService");
+const { autoPackReadyPart } = require("../services/packingService");
 const { TIMELINE_EVENTS, recordTimelineEvent } = require("../services/operationTimelineService");
 const {
   getStationFeatureConfig,
@@ -1429,6 +1431,12 @@ async function emitPackingReadyPopup({ partId, stationNo, machineId, machineName
   if (!station || !partId) return;
   const features = await getStationFeatureConfig(station).catch(() => null);
   if (!features?.finalPacking) return;
+  const autoPackResult = await autoPackReadyPart({
+    partId,
+    stationNo: station,
+    machineId,
+    machineName,
+  });
   emitOperatorPopup("SUCCESS", {
     partId,
     stationNo: "PACKING",
@@ -1440,7 +1448,11 @@ async function emitPackingReadyPopup({ partId, stationNo, machineId, machineName
     status: "READY_FOR_PACKING",
     plcStatus: "READY_FOR_PACKING",
     finalPackingEligible: true,
-    message: `Part ready for packing from ${station}.`,
+    autoPacked: autoPackResult?.success === true,
+    boxNumber: autoPackResult?.session?.box_number || null,
+    message: autoPackResult?.success === true && autoPackResult?.session?.box_number
+      ? `Part auto-mapped to packing box ${autoPackResult.session.box_number}.`
+      : `Part ready for packing from ${station}.`,
   });
   emitRealtime("packing_update", {
     event: "PART_READY_FOR_PACKING",
@@ -1450,6 +1462,8 @@ async function emitPackingReadyPopup({ partId, stationNo, machineId, machineName
     machineId,
     machineName,
     finalPackingEligible: true,
+    autoPacked: autoPackResult?.success === true,
+    boxNumber: autoPackResult?.session?.box_number || null,
     timestamp: new Date().toISOString(),
   });
 }
@@ -3570,6 +3584,44 @@ exports.getPartCatalog = async (req, res) => {
       shifts = await getActiveShiftDefinitions();
     }
 
+    const catalogQrRules = await QrFormatRule.findAll({
+      where: { is_active: true },
+      attributes: ["regex_pattern"],
+      raw: true,
+    });
+    const matchesCatalogQrRule = (value) => {
+      const raw = String(value || "").trim();
+      if (!raw) return false;
+      return catalogQrRules.some((rule) => {
+        const pattern = String(rule.regex_pattern || "").trim();
+        if (!pattern) return false;
+        try {
+          return new RegExp(pattern, "i").test(raw);
+        } catch (_error) {
+          return false;
+        }
+      });
+    };
+    const looksLikePartialTraceabilityId = (value) => {
+      const raw = String(value || "").trim().toUpperCase();
+      if (!raw) return false;
+      if (/^R\d{9}-[A-Z0-9-]{10,}$/.test(raw)) return false;
+      if (/^\d{8}[A-Z0-9]\d{1,6}$/.test(raw)) return false;
+      return (
+        /^[A-Z]?\d{3,6}$/.test(raw) ||
+        /^[A-Z0-9]{1,6}$/.test(raw) ||
+        /^[A-Z0-9]{0,4}54T\d{8}[A-Z]\d{4}$/i.test(raw) ||
+        /^[A-Z0-9]{0,4}T\d{8}[A-Z]\d{4}$/i.test(raw)
+      );
+    };
+    const isUsableCatalogPartId = (value) => {
+      const raw = String(value || "").trim();
+      if (!raw || raw === "-") return false;
+      if (matchesCatalogQrRule(raw)) return true;
+      if (looksLikePartialTraceabilityId(raw)) return false;
+      return catalogQrRules.length === 0 && /^[A-Za-z0-9][A-Za-z0-9\-_/.:]{7,127}$/.test(raw);
+    };
+
     const responseRows = parts
       .filter((part) => productionPartIds.has(String(part.part_id || "").trim()))
       .map((part) => {
@@ -3588,10 +3640,24 @@ exports.getPartCatalog = async (req, res) => {
           String(part.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ||
           Boolean(mappedOldPart && mappedCustomerQr && mappedOldPart.toUpperCase() === mappedCustomerQr.toUpperCase())
         );
-        const displayPartId = isCustomerQrOnly ? "" : canonicalPartId;
+        const validCanonicalPartId = isUsableCatalogPartId(canonicalPartId);
+        const validRawPartId = isUsableCatalogPartId(rawPartId);
+        const validMappedOldPart = isUsableCatalogPartId(mappedOldPart);
+        const safePartIdForDisplay = validCanonicalPartId
+          ? canonicalPartId
+          : validMappedOldPart
+            ? mappedOldPart
+            : validRawPartId
+              ? rawPartId
+              : "";
+        const displayPartId = isCustomerQrOnly ? "" : safePartIdForDisplay;
+        if (!displayPartId && !mappedCustomerQr && looksLikePartialTraceabilityId(rawPartId)) {
+          return null;
+        }
+        const traceabilityPartId = displayPartId || mappedCustomerQr || canonicalPartId;
         return {
-          partId: canonicalPartId,
-          traceabilityPartId: canonicalPartId,
+          partId: traceabilityPartId,
+          traceabilityPartId,
           rawPartId,
           displayPartId,
           mappedPartId: mappedOldPart || null,
@@ -3615,6 +3681,7 @@ exports.getPartCatalog = async (req, res) => {
           operatorId: latest?.user_id || null,
         };
       })
+      .filter(Boolean)
       .filter((row) => {
         if (statusFilter === "OTHER") {
           return row.isCustomerQrOnly === true;
@@ -4345,6 +4412,8 @@ exports.processScan = async (req, res) => {
       qualityPayload,
       customerCodePattern: stationFeatures.customerCodePattern || "",
       shotValidationPartId: normalizedPartId,
+      enforceQrFormatValidation: !isMappedCustomerQrScan && !isCustomerQrOnlyStart && qrValidationEnabled && !skipAllBypassValidations,
+      enforceSequenceValidation: !isCustomerQrOnlyStart && !skipAllBypassValidations,
       skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateQrFormat,
       skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyTrace || customerQrRequiredAtStation || !validateShotNumber,
       skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
@@ -4895,6 +4964,8 @@ exports.verifyScanForOperator = async (req, res) => {
       qualityPayload,
       customerCodePattern: stationFeatures.customerCodePattern || "",
       shotValidationPartId: finalPartId,
+      enforceQrFormatValidation: !isMappedCustomerQrScan && !isCustomerQrOnlyStart && qrValidationEnabled && !skipAllBypassValidations,
+      enforceSequenceValidation: !isCustomerQrOnlyStart && !skipAllBypassValidations,
       skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateQrFormat,
       skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyTrace || !validateShotNumber,
       skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
@@ -7633,6 +7704,163 @@ exports.getDashboardReport = async (req, res) => {
       partsList,
       plcReadingColumns,
       availableLines,
+      availableShifts: shifts.map((shift) => ({
+        shiftCode: shift.shift_code,
+        shiftName: shift.shift_name,
+        startTime: normalizeTimeValue(shift.start_time, { includeSeconds: true }),
+        endTime: normalizeTimeValue(shift.end_time, { includeSeconds: true }),
+      })),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.getRejectionAnalysis = async (req, res) => {
+  try {
+    const SYSTEM_RECOVERY_REASONS = ["RECOVERY_PENDING_AFTER_BACKEND_RESTART"];
+    const now = new Date();
+    const from = req.query.dateFrom ? new Date(req.query.dateFrom) : new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const to = req.query.dateTo ? new Date(req.query.dateTo) : now;
+    const machineId = Number(req.query.machineId || 0);
+    const plantId = Number(req.query.plantId || 0);
+    const lineId = Number(req.query.lineId || 0);
+    const lineName = String(req.query.lineName || "").trim();
+    const partId = String(req.query.partId || "").trim();
+    const shiftCodeFilter = String(req.query.shiftCode || "").trim().toUpperCase();
+    const categoryFilter = String(req.query.category || "").trim();
+    const viewFilter = String(req.query.view || "").trim();
+    const zoneFilter = String(req.query.zone || "").trim();
+    const reasonFilter = String(req.query.reason || "").trim();
+
+    const machineWhere = {};
+    if (machineId) machineWhere.id = machineId;
+    if (plantId) machineWhere.plant_id = plantId;
+    if (lineId) machineWhere.line_id = lineId;
+    if (lineName) machineWhere.line_name = lineName;
+
+    const where = {
+      createdAt: { [Op.between]: [from, to] },
+      [Op.and]: [
+        {
+          [Op.or]: [
+            { interlock_reason: null },
+            { interlock_reason: { [Op.notIn]: SYSTEM_RECOVERY_REASONS } },
+          ],
+        },
+      ],
+      [Op.or]: [
+        { result: { [Op.in]: ["NG", "FAIL", "FAILED"] } },
+        { plc_status: { [Op.in]: ["ENDED_NG", "COMPLETED_NG", "FAILED"] } },
+        { rejection_reason: { [Op.ne]: null } },
+        { rejection_category: { [Op.ne]: null } },
+        { interlock_reason: { [Op.like]: "%NG%" } },
+      ],
+    };
+    if (partId) {
+      where.part_id = { [Op.like]: `%${partId}%` };
+    }
+    if (categoryFilter) {
+      where.rejection_category = categoryFilter;
+    }
+    if (viewFilter) {
+      where.rejection_view = viewFilter;
+    }
+    if (zoneFilter) {
+      where.rejection_zone = zoneFilter;
+    }
+    if (reasonFilter) {
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        {
+          [Op.or]: [
+            { rejection_reason: reasonFilter },
+            { interlock_reason: reasonFilter },
+          ],
+        },
+      ];
+    }
+
+    const rows = await OperationLog.findAll({
+      where,
+      include: [{
+        model: Machine,
+        required: Object.keys(machineWhere).length > 0,
+        where: machineWhere,
+        attributes: ["id", "machine_name", "line_name", "plant_id", "line_id", "operation_no"],
+      }],
+      order: [["createdAt", "DESC"]],
+      limit: Math.min(Math.max(Number(req.query.limit || 5000), 1), 20000),
+    });
+
+    const shifts = await Shift.findAll({ order: [["start_time", "ASC"]] }).catch(() => []);
+    const partIds = [...new Set(rows.map((row) => String(row.part_id || "").trim()).filter(Boolean))];
+    const mappings = partIds.length
+      ? await PartCodeMapping.findAll({
+          where: { old_part_id: { [Op.in]: partIds }, is_active: true },
+          order: [["updatedAt", "DESC"]],
+          raw: true,
+        }).catch(() => [])
+      : [];
+    const mappingByPart = mappings.reduce((acc, row) => {
+      const key = String(row.old_part_id || "").trim();
+      if (key && !acc[key]) acc[key] = String(row.customer_qr || "").trim();
+      return acc;
+    }, {});
+
+    const configuredPartRows = await RejectionView.findAll({
+      attributes: ["part_name"],
+      group: ["part_name"],
+      raw: true,
+    }).catch(() => []);
+
+    const analysisRows = rows.map((row) => {
+      const plain = row.get({ plain: true });
+      const machine = plain.Machine || {};
+      const shift = resolveShift(plain.createdAt, shifts);
+      const rejectionReason = String(plain.rejection_reason || "").trim();
+      const fallbackReason = String(plain.interlock_reason || "").trim();
+      const cleanReason = SYSTEM_RECOVERY_REASONS.includes(fallbackReason.toUpperCase())
+        ? ""
+        : fallbackReason;
+      return {
+        id: plain.id,
+        partId: plain.part_id || "",
+        customerQrCode: mappingByPart[String(plain.part_id || "").trim()] || null,
+        machineId: plain.machine_id || null,
+        machineName: machine.machine_name || null,
+        lineName: machine.line_name || null,
+        plantId: machine.plant_id || null,
+        lineId: machine.line_id || null,
+        stationNo: normalizeStation(plain.station_no || plain.operation_no || machine.operation_no || ""),
+        result: "NG",
+        plcStatus: plain.plc_status || "",
+        category: plain.rejection_category || "",
+        view: plain.rejection_view || "",
+        zone: plain.rejection_zone || "",
+        reason: rejectionReason || cleanReason || "NG",
+        rejectionReasonOnly: rejectionReason,
+        remark: plain.rejection_remark || "",
+        resultSource: plain.result_source || "",
+        shiftCode: shift?.shift_code || "UNASSIGNED",
+        createdAt: plain.createdAt,
+      };
+    }).filter((row) => !shiftCodeFilter || String(row.shiftCode || "").toUpperCase() === shiftCodeFilter);
+
+    res.json({
+      filters: {
+        from,
+        to,
+        machineId: machineId || null,
+        plantId: plantId || null,
+        lineId: lineId || null,
+        lineName: lineName || null,
+        partId: partId || null,
+        shiftCode: shiftCodeFilter || null,
+      },
+      rows: analysisRows,
+      total: analysisRows.length,
+      configuredParts: configuredPartRows.map((row) => String(row.part_name || "").trim()).filter(Boolean),
       availableShifts: shifts.map((shift) => ({
         shiftCode: shift.shift_code,
         shiftName: shift.shift_name,

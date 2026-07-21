@@ -46,9 +46,80 @@ function normalizeFinalPartStatus(value) {
   return "IN_PROGRESS";
 }
 
-function calculateProductionMetrics(rows) {
+function toTime(value) {
+  const time = new Date(value || 0).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function isWithinRange(value, range = {}) {
+  const time = toTime(value);
+  if (!time) return false;
+  const from = range.dateFrom ? toTime(range.dateFrom) : 0;
+  const to = range.dateTo ? toTime(range.dateTo) : 0;
+  if (from && time < from) return false;
+  if (to && time > to) return false;
+  return true;
+}
+
+function getRowResultTimestamp(row = {}) {
+  return (
+    row.finalResultCreatedAt ||
+    row.finalResultAt ||
+    row.cycleEndAt ||
+    row.plc_end_at ||
+    row.plcEndAt ||
+    row.createdAt ||
+    row.updatedAt ||
+    null
+  );
+}
+
+function getRowFirstScanTimestamp(row = {}) {
+  return (
+    row.firstScanCreatedAt ||
+    row.first_scan_created_at ||
+    row.createdAt ||
+    row.created_at ||
+    row.latestAnchorCreatedAt ||
+    row.updatedAt ||
+    null
+  );
+}
+
+function isFinalInspectionOperation(rowOrOperation = {}) {
+  const operation = typeof rowOrOperation === "string"
+    ? rowOrOperation
+    : (rowOrOperation.operationNo || rowOrOperation.stationNo || rowOrOperation.operation_no || rowOrOperation.station_no || "");
+  const machineName = typeof rowOrOperation === "string"
+    ? ""
+    : (rowOrOperation.machineName || rowOrOperation.machine_name || rowOrOperation?.Machine?.machine_name || "");
+  const op = String(operation || "").trim().toUpperCase();
+  const machine = String(machineName || "").trim().toUpperCase();
+  return op === "OP160" || machine.includes("FINAL INSPECTION") || machine.includes("FINAL_INSPECTION");
+}
+
+function getMetricGroupKey(row = {}, fallback = "") {
+  return String(
+    row.reportGroupKey ||
+    row.report_group_key ||
+    row.traceabilityPartId ||
+    row.traceability_part_id ||
+    row.displayPartId ||
+    row.display_part_id ||
+    row.partId ||
+    row.part_id ||
+    row.barcode ||
+    row.shot_uid ||
+    fallback ||
+    ""
+  ).trim();
+}
+
+function calculateProductionMetrics(rows, range = {}) {
   const metrics = {
     totalProduction: 0,
+    traceabilityProduction: 0,
+    completedProduction: 0,
     totalOK: 0,
     totalNG: 0,
     inProgress: 0,
@@ -68,8 +139,8 @@ function calculateProductionMetrics(rows) {
     )
   );
 
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const key = String(row.partId || row.part_id || row.barcode || row.shot_uid || "").trim();
+  for (const [index, row] of (Array.isArray(rows) ? rows : []).entries()) {
+    const key = getMetricGroupKey(row, `row_${index}`);
     if (!key) continue;
     if (!groupedByPart.has(key)) groupedByPart.set(key, []);
     groupedByPart.get(key).push(row);
@@ -80,6 +151,12 @@ function calculateProductionMetrics(rows) {
     let latestRow = entries[0] || {};
     let latestTs = new Date(latestRow?.latestAnchorCreatedAt || latestRow?.createdAt || 0).getTime() || 0;
     let hasValidationReject = false;
+    let firstNgAt = null;
+    let firstScanAt = null;
+    let firstScanRow = entries[0] || {};
+    let activityInRange = false;
+    const operationResultTimes = {};
+    let finalInspectionOkAt = null;
 
     for (const row of entries) {
       const { status: fallbackStatus, category: fallbackCategory } = resolveIndustrialResult(row);
@@ -89,9 +166,39 @@ function calculateProductionMetrics(rows) {
       const normalized = normalizeResult(industrialResult, row.reason || row.interlock_reason, row);
       if (operationKey && normalized) {
         operationResults[operationKey] = pickPreferredOperationResult(operationResults[operationKey], normalized);
+        const resultTime = getRowResultTimestamp(row);
+        if (isWithinRange(resultTime, range)) {
+          activityInRange = true;
+        }
+        if (resultTime) {
+          const currentTime = operationResultTimes[operationKey];
+          if (!currentTime || toTime(resultTime) >= toTime(currentTime)) {
+            operationResultTimes[operationKey] = resultTime;
+          }
+        }
       }
       if (category === "VALIDATION") {
         hasValidationReject = true;
+      }
+      if (normalized === "NG") {
+        const resultTime = getRowResultTimestamp(row);
+        if (resultTime && (!firstNgAt || toTime(resultTime) < toTime(firstNgAt))) {
+          firstNgAt = resultTime;
+        }
+      }
+      if (normalized === "OK" && isFinalInspectionOperation(row)) {
+        const resultTime = getRowResultTimestamp(row);
+        if (resultTime && (!finalInspectionOkAt || toTime(resultTime) >= toTime(finalInspectionOkAt))) {
+          finalInspectionOkAt = resultTime;
+        }
+      }
+      const scanTime = getRowFirstScanTimestamp(row);
+      if (scanTime && (!firstScanAt || toTime(scanTime) < toTime(firstScanAt))) {
+        firstScanAt = scanTime;
+        firstScanRow = row;
+      }
+      if (isWithinRange(row.latestAnchorCreatedAt || row.createdAt || row.updatedAt, range)) {
+        activityInRange = true;
       }
       const rowTs = new Date(row.latestAnchorCreatedAt || row.createdAt || 0).getTime() || 0;
       if (rowTs >= latestTs) {
@@ -103,26 +210,36 @@ function calculateProductionMetrics(rows) {
     const overallStatus = (() => {
       const values = requiredOperations.map((operation) => normalizeResult(operationResults[operation])).filter(Boolean);
       if (values.some((value) => value === "NG")) return "NG";
+      if (finalInspectionOkAt) return "PASSED";
       if (values.some((value) => value === "IN_PROGRESS")) return "IN_PROGRESS";
       const finalStatus = normalizeFinalPartStatus(latestRow.partStatus || latestRow.part_status || latestRow.status);
       if (finalStatus === "NG") return "NG";
-      const terminalOperation = requiredOperations[requiredOperations.length - 1];
-      if (terminalOperation && normalizeResult(operationResults[terminalOperation]) === "OK") {
-        return "PASSED";
-      }
-      if (requiredOperations.length > 0 && values.length >= requiredOperations.length && values.every((value) => value === "OK")) {
+      if (requiredOperations.length > 1 && values.length >= requiredOperations.length && values.every((value) => value === "OK")) {
         return "PASSED";
       }
       if (finalStatus === "PASSED") return "PASSED";
       return "IN_PROGRESS";
     })();
+    const terminalOperation = requiredOperations[requiredOperations.length - 1];
+    const finalResultAt = overallStatus === "NG"
+      ? firstNgAt
+      : overallStatus === "PASSED"
+        ? (finalInspectionOkAt || operationResultTimes[terminalOperation] || getRowResultTimestamp(latestRow))
+        : null;
+    const finalResultInRange = isWithinRange(finalResultAt, range);
+    const firstScanInRange = isWithinRange(firstScanAt, range);
 
     return {
       partId: String(latestRow.partId || latestRow.part_id || "").trim(),
-      machineName: latestRow.anchorMachineName || latestRow.machineName || "Unknown Machine",
-      shiftCode: latestRow.anchorShiftCode || latestRow.shiftCode || "Unknown Shift",
-      lineName: latestRow.anchorLineName || latestRow.lineName || "Unknown Line",
+      machineName: firstScanRow.anchorMachineName || firstScanRow.machineName || latestRow.anchorMachineName || latestRow.machineName || "Unknown Machine",
+      shiftCode: firstScanRow.firstScanShiftCode || firstScanRow.shiftCode || firstScanRow.anchorShiftCode || latestRow.firstScanShiftCode || latestRow.anchorShiftCode || latestRow.shiftCode || "Unknown Shift",
+      lineName: firstScanRow.anchorLineName || firstScanRow.lineName || latestRow.anchorLineName || latestRow.lineName || "Unknown Line",
       overallStatus,
+      firstScanAt,
+      firstScanInRange,
+      activityInRange,
+      finalResultAt,
+      finalResultInRange,
       hasValidationReject,
     };
   });
@@ -136,22 +253,26 @@ function calculateProductionMetrics(rows) {
     if (!metrics.byShift[shiftCode]) metrics.byShift[shiftCode] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
     if (!metrics.byLine[lineName]) metrics.byLine[lineName] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
 
-    metrics.totalProduction += 1;
-    metrics.byMachine[machineName].total += 1;
-    metrics.byShift[shiftCode].total += 1;
-    metrics.byLine[lineName].total += 1;
+    if (part.firstScanInRange) {
+      metrics.traceabilityProduction += 1;
+      metrics.byMachine[machineName].total += 1;
+      metrics.byShift[shiftCode].total += 1;
+      metrics.byLine[lineName].total += 1;
+    }
 
-    if (part.overallStatus === "PASSED") {
+    if (part.overallStatus === "PASSED" && part.finalResultInRange) {
+      metrics.completedProduction += 1;
       metrics.totalOK += 1;
       metrics.byMachine[machineName].ok += 1;
       metrics.byShift[shiftCode].ok += 1;
       metrics.byLine[lineName].ok += 1;
-    } else if (part.overallStatus === "NG") {
+    } else if (part.overallStatus === "NG" && part.finalResultInRange) {
+      metrics.completedProduction += 1;
       metrics.totalNG += 1;
       metrics.byMachine[machineName].ng += 1;
       metrics.byShift[shiftCode].ng += 1;
       metrics.byLine[lineName].ng += 1;
-    } else {
+    } else if (part.firstScanInRange || part.activityInRange) {
       metrics.inProgress += 1;
       metrics.byMachine[machineName].inProgress += 1;
       metrics.byShift[shiftCode].inProgress += 1;
@@ -167,6 +288,7 @@ function calculateProductionMetrics(rows) {
   });
 
   const productionBase = metrics.totalOK + metrics.totalNG;
+  metrics.totalProduction = metrics.traceabilityProduction;
   metrics.passRate = productionBase > 0
     ? Number(((metrics.totalOK / productionBase) * 100).toFixed(2))
     : 0;

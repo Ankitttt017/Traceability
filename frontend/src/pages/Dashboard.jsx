@@ -1265,7 +1265,6 @@ const Dashboard = () => {
     { id:"machines",  label:t("dashboard.machineKpisTab", "Machine KPIs"),      icon:Cpu        },
     { id:"oee",       label:t("dashboard.oeeAnalysisTab", "OEE Analysis"),      icon:Activity   },
     { id:"oa",        label:t("dashboard.oaAnalysisTab", "OA Analysis"),       icon:Target     },
-    { id:"rejection", label:t("dashboard.rejectionAnalysisTab", "Rejection Analysis"),icon:AlertTriangle },
       ];
 
   return (

@@ -13,6 +13,10 @@ class PlcPollingService {
     this.DEFAULT_POLLING_INTERVAL_MS = 300;
     this.QUIET_PLC_POLL_LOGS = String(process.env.QUIET_PLC_POLL_LOGS || "true").trim().toLowerCase() !== "false";
     this.lastRefetchWarnAt = new Map(); // machineId -> timestamp
+    this.machineCache = new Map(); // machineId -> latest DB model
+    this.nextMachineRefetchAt = new Map(); // machineId -> timestamp
+    this.machineRefetchMs = Math.max(Number(process.env.PLC_MACHINE_REFETCH_MS || 5000), 1000);
+    this.machineRefetchFailureBackoffMs = Math.max(Number(process.env.PLC_MACHINE_REFETCH_FAILURE_BACKOFF_MS || 30000), 5000);
   }
 
   async start() {
@@ -39,6 +43,7 @@ class PlcPollingService {
     }
 
     this.pollers.set(machine.id, { active: true });
+    this.machineCache.set(machine.id, machine);
     const interval = machine.polling_interval_ms || this.DEFAULT_POLLING_INTERVAL_MS;
     const stagger = machine.stagger_delay_ms || 0;
 
@@ -57,27 +62,35 @@ class PlcPollingService {
     }
     // Clean up signal history to prevent stale entries
     this.signalHistory.delete(machineId);
+    this.machineCache.delete(machineId);
+    this.nextMachineRefetchAt.delete(machineId);
+    this.lastRefetchWarnAt.delete(machineId);
   }
 
   async pollLoop(machine, interval) {
     const poller = this.pollers.get(machine.id);
     if (!poller || !poller.active) return;
 
-    // Re-fetch the latest machine instance from the database dynamically
-    let latestMachine = machine;
-    try {
-      const dbMachine = await Machine.findByPk(machine.id);
-      if (!dbMachine || !this.isMachineActive(dbMachine) || !this.isPLCConfigured(dbMachine)) {
-        this.stopPolling(machine.id);
-        return;
-      }
-      latestMachine = dbMachine;
-    } catch (err) {
-      const now = Date.now();
-      const prev = this.lastRefetchWarnAt.get(machine.id) || 0;
-      if (now - prev >= 30_000) {
-        this.lastRefetchWarnAt.set(machine.id, now);
-        console.warn(`[PollingService] Failed to re-fetch machine ${machine.id}: ${err.message}`);
+    let latestMachine = this.machineCache.get(machine.id) || machine;
+    const now = Date.now();
+    const nextRefetchAt = this.nextMachineRefetchAt.get(machine.id) || 0;
+    if (now >= nextRefetchAt) {
+      try {
+        const dbMachine = await Machine.findByPk(machine.id);
+        if (!dbMachine || !this.isMachineActive(dbMachine) || !this.isPLCConfigured(dbMachine)) {
+          this.stopPolling(machine.id);
+          return;
+        }
+        latestMachine = dbMachine;
+        this.machineCache.set(machine.id, dbMachine);
+        this.nextMachineRefetchAt.set(machine.id, now + this.machineRefetchMs);
+      } catch (err) {
+        this.nextMachineRefetchAt.set(machine.id, now + this.machineRefetchFailureBackoffMs);
+        const prev = this.lastRefetchWarnAt.get(machine.id) || 0;
+        if (now - prev >= this.machineRefetchFailureBackoffMs) {
+          this.lastRefetchWarnAt.set(machine.id, now);
+          console.warn(`[PollingService] Machine ${machine.id} metadata refresh failed; using cached config for ${Math.round(this.machineRefetchFailureBackoffMs / 1000)}s (${err.message})`);
+        }
       }
     }
 
@@ -145,9 +158,12 @@ class PlcPollingService {
       // Only transition state once, not on every failure
       if (count <= FAIL_THRESHOLD) {
         try {
-          await plcStateMachineService.transition(machine.id, plcStateMachineService.states.PLC_ERROR, {
-            error_message: error.message
-          });
+          const runtime = await plcStateMachineService.getOrCreateRuntimeState(machine.id);
+          if (runtime.current_state !== plcStateMachineService.states.IDLE) {
+            await plcStateMachineService.transition(machine.id, plcStateMachineService.states.PLC_ERROR, {
+              error_message: error.message
+            });
+          }
         } catch (transitionError) {
           // Suppress transition errors entirely
         }

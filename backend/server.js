@@ -57,6 +57,7 @@ require("./models/RoleAccessSetting");
 require("./models/PlcRegisterRange");
 require("./models/ScannerConnection");
 require("./models/PartCodeMapping");
+require("./models/FinalProductionResult");
 require("./models/RejectionCategory");
 require("./models/RejectionReason");
 require("./models/RejectionView");
@@ -101,8 +102,8 @@ require("./models/Alarm");    // UPGRADE 6 — auto-sync Alarms table
 
 const app = express();
 const server = http.createServer(app);
-server.timeout = 180000; // 3 min — allow large date-range report queries to complete
 server.keepAliveTimeout = 65000;
+server.timeout = 600000; // 10 min, aligned with large Excel report exports.
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -515,12 +516,34 @@ async function startServer() {
 }
 
 // --- Industrial Runtime Protection ---
+function isRecoverableRuntimeError(error = {}) {
+  const code = String(error?.code || "").toUpperCase();
+  const message = String(error?.message || error || "").toUpperCase();
+  return (
+    code === "ECONNRESET" ||
+    code === "EPIPE" ||
+    code === "ETIMEOUT" ||
+    code === "ESOCKET" ||
+    message.includes("ECONNRESET") ||
+    message.includes("COULD NOT CONNECT") ||
+    message.includes("REQUESTS CAN ONLY BE MADE IN THE LOGGEDIN STATE")
+  );
+}
+
 process.on("uncaughtException", (error) => {
+  if (isRecoverableRuntimeError(error)) {
+    console.warn("[RECOVERABLE:RUNTIME_IO] Transient network/database disconnect handled:", error.message || error);
+    return;
+  }
   console.error("[CRITICAL:UNCAUGHT_EXCEPTION] Server survived an unexpected error:", error);
   // Log details but DO NOT crash the process in production
 });
 
 process.on("unhandledRejection", (reason, promise) => {
+  if (isRecoverableRuntimeError(reason)) {
+    console.warn("[RECOVERABLE:RUNTIME_PROMISE] Transient network/database disconnect handled:", reason?.message || reason);
+    return;
+  }
   console.error("[CRITICAL:UNHANDLED_REJECTION] Unhandled promise rejection at:", promise, "reason:", reason);
 });
 

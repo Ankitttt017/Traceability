@@ -24,4 +24,19 @@ const ProductionLog = sequelize.define("ProductionLog", {
   },
 });
 
+function scheduleFinalProductionRefresh(instance) {
+  const partId = instance?.part_id || instance?.get?.("part_id");
+  if (!partId) return;
+  setImmediate(() => {
+    try {
+      require("../services/report/finalProductionResultService").scheduleMaterializePart(partId);
+    } catch (error) {
+      console.warn(`[FinalProductionResult] production log hook skipped: ${error.message}`);
+    }
+  });
+}
+
+ProductionLog.addHook("afterCreate", scheduleFinalProductionRefresh);
+ProductionLog.addHook("afterUpdate", scheduleFinalProductionRefresh);
+
 module.exports = ProductionLog;

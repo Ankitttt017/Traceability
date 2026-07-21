@@ -1152,6 +1152,8 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     .trim()
     .toUpperCase();
   const skipInterlockValidation = options?.skipInterlockValidation === true;
+  const enforceQrFormatValidation = options?.enforceQrFormatValidation === true;
+  const enforceSequenceValidation = options?.enforceSequenceValidation === true;
   let skipDuplicateValidation = options?.skipDuplicateValidation === true;
   let skipSequenceValidation = options?.skipSequenceValidation === true;
   let skipQrFormatValidation = options?.skipQrFormatValidation === true;
@@ -1192,6 +1194,12 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     skipSequenceValidation = skipSequenceValidation || stationFeatures.validatePreviousStation === false;
     skipDuplicateValidation = skipDuplicateValidation || stationFeatures.validateDuplicateBarcode === false;
     skipCustomerCodeValidation = skipCustomerCodeValidation || stationFeatures.validateCustomerCode !== true;
+    if (enforceQrFormatValidation && qrValidationEnabled) {
+      skipQrFormatValidation = false;
+    }
+    if (enforceSequenceValidation) {
+      skipSequenceValidation = false;
+    }
     if (!customerCodePattern && stationFeatures.validateCustomerCode === true) {
       customerCodePattern = String(stationFeatures.customerCodePattern || "").trim();
     }
@@ -1343,32 +1351,40 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
           status: "IN_PROGRESS",
         });
         const interlockReason = String(plcMatch?.reason || "PART_NOT_FOUND").toUpperCase();
+        const isNgShotStatus = interlockReason === "NG_SHOT_STATUS";
         const blockedLog = await OperationLog.create({
           part_id: normalizedPartId,
           machine_id: mId || null,
           operation_no: station,
           station_no: station,
-          plc_status: "INTERLOCKED",
-          result: "BLOCK",
+          plc_status: isNgShotStatus ? "ENDED_NG" : "INTERLOCKED",
+          result: isNgShotStatus ? "NG" : "BLOCK",
           scan_attempt_type: "INITIAL",
-          validation_result: "FAILED",
-          operation_result: "INTERLOCKED",
+          validation_result: isNgShotStatus ? "PASSED" : "FAILED",
+          operation_result: isNgShotStatus ? "FAILED" : "INTERLOCKED",
           user_id: userId,
           interlock_reason: interlockReason,
           shot_number: plcMatch?.shotNumber || null,
         });
-        blockedPart.last_validation_result = "FAILED";
+        if (isNgShotStatus) {
+          blockedPart.status = "NG";
+          blockedPart.is_interlocked = true;
+        }
+        blockedPart.last_validation_result = isNgShotStatus ? "PASSED" : "FAILED";
         blockedPart.interlock_reason = interlockReason;
         await blockedPart.save();
         return {
           decision: "BLOCK",
           reason: interlockReason,
-          validationResult: "FAILED",
+          validationResult: isNgShotStatus ? "PASSED" : "FAILED",
+          qrStatus: isNgShotStatus ? "FAILED" : undefined,
+          operationStatus: isNgShotStatus ? "FAILED" : "INTERLOCKED",
           message: interlockReason === "NG_SHOT_STATUS"
             ? (plcMatch?.message || "Shot status is not OK. Warm-up/offset shots are blocked.")
             : "Part QR not found in moulding records. Verify part was recorded first.",
-          currentStatus: "REJECTED_PLC_MATCH",
+          currentStatus: isNgShotStatus ? blockedPart.status : "REJECTED_PLC_MATCH",
           operationLogId: blockedLog.id,
+          forceNg: isNgShotStatus,
         };
       }
     }
@@ -1672,6 +1688,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     });
 
     part.current_operation = station;
+    part.current_station = station;
     part.status = part.status === "REWORK" ? "REWORK" : "IN_PROGRESS";
     part.last_validation_result = "PASSED";
     await part.save();

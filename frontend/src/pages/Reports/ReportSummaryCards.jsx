@@ -1,121 +1,191 @@
 import React from 'react';
-import { CheckCircle2, XCircle, Activity, Clock3, Gauge, CircleSlash } from 'lucide-react';
+import { CheckCircle2, Activity, Clock3, Gauge, CircleSlash, TrendingUp, AlertCircle, Shield } from 'lucide-react';
 
 const SummaryCardSkeleton = () => (
-  <div className="relative min-h-[108px] overflow-hidden bg-bg-card border border-border rounded-lg p-3 shadow-sm">
-    <div className="absolute inset-0 -translate-x-full animate-[shimmer_1.4s_infinite] bg-gradient-to-r from-transparent via-white/60 to-transparent" />
+  <div className="relative min-h-[120px] overflow-hidden bg-[rgb(var(--pk-bg-card))] border border-[rgba(var(--pk-bdr),0.12)] rounded-xl p-4 shadow-sm shadow-[rgba(var(--pk-navy),0.04)]">
+    <div className="absolute inset-0 -translate-x-full animate-[shimmer_1.4s_infinite] bg-gradient-to-r from-transparent via-white/20 to-transparent" />
     <div className="flex items-start justify-between mb-3">
-      <div className="h-8 w-8 rounded-md bg-slate-200" />
-      <div className="h-5 w-24 rounded border border-slate-200 bg-slate-100" />
+      <div className="h-11 w-11 rounded-xl bg-[rgba(var(--pk-steel),0.06)] border border-[rgba(var(--pk-bdr),0.06)]" />
+      <div className="h-5 w-20 rounded-lg bg-[rgba(var(--pk-steel),0.06)] border border-[rgba(var(--pk-bdr),0.04)]" />
     </div>
     <div className="space-y-2.5">
-      <div className="h-3 w-32 rounded bg-slate-200" />
-      <div className="h-6 w-16 rounded bg-slate-200" />
+      <div className="h-3 w-32 rounded-lg bg-[rgba(var(--pk-steel),0.06)]" />
+      <div className="h-7 w-20 rounded-lg bg-[rgba(var(--pk-steel),0.08)]" />
     </div>
   </div>
 );
 
-const SummaryCard = ({ label, value, icon: Icon, colorClass, subValue }) => (
-  <div className="bg-bg-card border border-border rounded-lg p-3 shadow-sm">
-    <div className="flex items-start justify-between mb-2">
-      <div className={`p-1.5 rounded-md ${colorClass}`}>
-        <Icon size={15} className="text-white" strokeWidth={2.7} />
+const SummaryCard = ({ label, value, icon: Icon, colorClass, subValue, subtitle }) => {
+  const colorMap = {
+    navy: { bg: 'rgba(26,50,99,0.08)', border: 'rgba(26,50,99,0.15)', text: 'rgb(26,50,99)', light: 'rgba(26,50,99,0.04)' },
+    green: { bg: 'rgba(34,197,94,0.1)', border: 'rgba(34,197,94,0.2)', text: 'rgb(34,197,94)', light: 'rgba(34,197,94,0.04)' },
+    red: { bg: 'rgba(239,68,68,0.1)', border: 'rgba(239,68,68,0.2)', text: 'rgb(239,68,68)', light: 'rgba(239,68,68,0.04)' },
+    orange: { bg: 'rgba(249,115,22,0.1)', border: 'rgba(249,115,22,0.2)', text: 'rgb(249,115,22)', light: 'rgba(249,115,22,0.04)' },
+    amber: { bg: 'rgba(250,185,91,0.12)', border: 'rgba(250,185,91,0.2)', text: 'rgb(250,185,91)', light: 'rgba(250,185,91,0.04)' },
+  };
+  const styles = colorMap[colorClass] || colorMap.navy;
+
+  return (
+    <div className="group relative bg-[rgb(var(--pk-bg-card))] border border-[rgba(var(--pk-bdr),0.12)] rounded-xl p-4 shadow-sm shadow-[rgba(var(--pk-navy),0.04)] hover:shadow-md hover:shadow-[rgba(var(--pk-navy),0.08)] hover:border-[rgba(var(--pk-steel),0.2)] transition-all duration-300 hover:-translate-y-0.5">
+      <div className="absolute inset-0 rounded-xl bg-gradient-to-br from-[rgba(var(--pk-steel),0.02)] to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+      <div className="relative">
+        <div className="flex items-start justify-between mb-3">
+          <div
+            className="p-2.5 rounded-xl transition-all duration-300 group-hover:scale-110 group-hover:shadow-md"
+            style={{
+              background: styles.bg,
+              border: `1px solid ${styles.border}`,
+              boxShadow: `0 2px 8px ${styles.light}`,
+            }}
+          >
+            <Icon size={17} style={{ color: styles.text }} strokeWidth={2.5} />
+          </div>
+          {subValue && (
+            <span className="text-[9px] font-extrabold text-[rgb(var(--pk-txt-muted))] bg-[rgba(var(--pk-bdr),0.06)] px-2.5 py-1 rounded-lg border border-[rgba(var(--pk-bdr),0.06)] uppercase tracking-wider">
+              {subValue}
+            </span>
+          )}
+        </div>
+        <div className="space-y-1">
+          <p className="text-[10px] font-extrabold text-[rgb(var(--pk-txt-muted))] uppercase tracking-wider">
+            {label}
+          </p>
+          <div className="flex items-end gap-2">
+            <h3 className="text-2xl font-black text-[rgb(var(--pk-txt-pri))] tracking-tight font-mono leading-none">
+              {typeof value === 'number' ? value.toLocaleString() : value}
+            </h3>
+            {subtitle && (
+              <span className="text-[10px] font-medium text-[rgb(var(--pk-txt-muted))] mb-0.5">
+                {subtitle}
+              </span>
+            )}
+          </div>
+        </div>
       </div>
-      {subValue && (
-        <span className="text-[9px] font-black text-text-main bg-bg-dark px-1.5 py-0.5 rounded border border-border">
-          {subValue}
-        </span>
-      )}
     </div>
-    <div className="space-y-0.5">
-      <p className="text-[9px] font-black text-text-main uppercase tracking-wide">{label}</p>
-      <h3 className="text-xl font-black text-text-main tracking-tight font-mono leading-none">{value}</h3>
-    </div>
-  </div>
-);
+  );
+};
 
 const ReportSummaryCards = ({ metrics = {}, loading = false }) => {
   const plc = metrics.plcShotSummary || {};
-  const traceabilityCards = [
-    {
-      label: "Traceability Production",
-      value: metrics.totalProduction || 0,
-      icon: Activity,
-      colorClass: "bg-primary",
-      subValue: "Parts"
-    },
-    {
-      label: "Traceability OK",
-      value: metrics.totalOK || 0,
-      icon: CheckCircle2,
-      colorClass: "bg-green-500",
-      subValue: "Passed"
-    },
-    {
-      label: "Traceability NG",
-      value: metrics.totalNG || 0,
-      icon: XCircle,
-      colorClass: "bg-red-500",
-      subValue: "Failed"
-    },
-    {
-      label: "In Progress",
-      value: metrics.inProgress || 0,
-      icon: Clock3,
-      colorClass: "bg-orange-500",
-      subValue: "Running"
-    }
-  ];
+  const totalProduction = metrics.totalProduction || 0;
+  const totalOK = metrics.totalOK || 0;
+  const totalNG = metrics.totalNG || 0;
+  const inProgress = metrics.inProgress || 0;
+  const completed = totalOK + totalNG;
+  const passRate = completed > 0 ? Math.round((totalOK / completed) * 100) : 0;
 
   const shotCards = [
     {
-      label: "Total Shot",
+      label: "Total Shots",
       value: plc.totalProduction ?? 0,
-      icon: Activity,
-      colorClass: "bg-primary",
-      subValue: "HPDC Machine Shots"
+      icon: TrendingUp,
+      colorClass: "navy",
+      subValue: "HPDC Machine",
+      subtitle: "shots",
     },
     {
-      label: "OK Shot",
+      label: "OK Shots",
       value: plc.okShot ?? 0,
       icon: CheckCircle2,
-      colorClass: "bg-green-500",
-      subValue: "Status"
+      colorClass: "green",
+      subValue: "Passed",
+      subtitle: "shots",
     },
     {
-      label: "Warm Up Shot",
+      label: "Warm Up Shots",
       value: plc.warmUpShot ?? 0,
       icon: Gauge,
-      colorClass: "bg-red-500",
-      subValue: "NG Status"
+      colorClass: "amber",
+      subValue: "NG Status",
+      subtitle: "shots",
     },
     {
-      label: "Off Shot",
+      label: "Off Shots",
       value: plc.offShot ?? 0,
       icon: CircleSlash,
-      colorClass: "bg-red-500",
-      subValue: "Status "
-    }
+      colorClass: "red",
+      subValue: "Rejected",
+      subtitle: "shots",
+    },
+  ];
+
+  const traceabilityCards = [
+    {
+      label: "Total Production",
+      value: totalProduction,
+      icon: Activity,
+      colorClass: "navy",
+      subValue: "Scanned Parts",
+      subtitle: "parts",
+    },
+    {
+      label: "Passed",
+      value: totalOK,
+      icon: Shield,
+      colorClass: "green",
+      subValue: "Quality OK",
+      subtitle: `(${passRate}% pass rate)`,
+    },
+    {
+      label: "Failed",
+      value: totalNG,
+      icon: AlertCircle,
+      colorClass: "red",
+      subValue: "Quality NG",
+      subtitle: totalNG > 0 ? "Needs review" : "All good",
+    },
+    {
+      label: "In Progress",
+      value: inProgress,
+      icon: Clock3,
+      colorClass: "orange",
+      subValue: "Active",
+      subtitle: "parts",
+    },
   ];
 
   return (
-    <div className="space-y-3 mb-5">
+    <div className="space-y-4 mb-6">
       {loading ? (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             {shotCards.map((_, i) => <SummaryCardSkeleton key={`shot-skeleton-${i}`} />)}
           </div>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             {traceabilityCards.map((_, i) => <SummaryCardSkeleton key={`trace-skeleton-${i}`} />)}
           </div>
         </>
       ) : (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            {shotCards.map((card, i) => <SummaryCard key={`shot-${i}`} {...card} />)}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 px-1">
+              <div className="h-4 w-1 rounded-full bg-[rgb(var(--pk-steel))]" />
+              <span className="text-[10px] font-extrabold text-[rgb(var(--pk-txt-muted))] uppercase tracking-wider">
+                Machine Shot Statistics
+              </span>
+              <span className="text-[10px] text-[rgb(var(--pk-txt-muted))] font-medium opacity-60">
+                {plc.totalProduction ? `${plc.totalProduction} total shots` : ''}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {shotCards.map((card, i) => <SummaryCard key={`shot-${i}`} {...card} />)}
+            </div>
           </div>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            {traceabilityCards.map((card, i) => <SummaryCard key={`trace-${i}`} {...card} />)}
+
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 px-1">
+              <div className="h-4 w-1 rounded-full bg-[rgb(var(--pk-amber))]" />
+              <span className="text-[10px] font-extrabold text-[rgb(var(--pk-txt-muted))] uppercase tracking-wider">
+                Production Traceability
+              </span>
+              <span className="text-[10px] text-[rgb(var(--pk-txt-muted))] font-medium opacity-60">
+                {totalProduction ? `${totalProduction} parts tracked` : ''}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {traceabilityCards.map((card, i) => <SummaryCard key={`trace-${i}`} {...card} />)}
+            </div>
           </div>
         </>
       )}

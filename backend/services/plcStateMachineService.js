@@ -76,6 +76,13 @@ class PlcStateMachineService {
 
     // Guard Rules (Point 19)
     if (!this.isValidTransition(currentState, newState)) {
+      if (currentState === States.IDLE && newState === States.PLC_ERROR) {
+        logWarn("IDLE_PLC_ERROR_IGNORED", {
+          machineId,
+          reason: metadata.error_message || "PLC poll failed while machine was idle",
+        });
+        return runtime;
+      }
       const errorMsg = `Illegal state transition from ${currentState} to ${newState}`;
       console.error(`[StateMachine] Invalid transition: ${currentState} -> ${newState} for machine ${machineId}`);
       // Don't throw immediately, log it but allow transition if both states are error/recovery states

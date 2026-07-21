@@ -9,5 +9,19 @@ const LeakTestReading = sequelize.define("LeakTestReading", {
   payload_json: { type: DataTypes.TEXT, allowNull: false },
 });
 
-module.exports = LeakTestReading;
+function scheduleFinalProductionRefresh(instance) {
+  const partId = instance?.part_id || instance?.get?.("part_id");
+  if (!partId) return;
+  setImmediate(() => {
+    try {
+      require("../services/report/finalProductionResultService").scheduleMaterializePart(partId);
+    } catch (error) {
+      console.warn(`[FinalProductionResult] leak-test hook skipped: ${error.message}`);
+    }
+  });
+}
 
+LeakTestReading.addHook("afterCreate", scheduleFinalProductionRefresh);
+LeakTestReading.addHook("afterUpdate", scheduleFinalProductionRefresh);
+
+module.exports = LeakTestReading;

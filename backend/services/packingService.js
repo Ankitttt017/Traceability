@@ -175,7 +175,7 @@ async function packPart({ boxNumber, partId, capacity }) {
 
   const finalPackingStations = await getFinalPackingStations();
   if (finalPackingStations.length > 0) {
-    const currentStation = String(part.current_station || "")
+    const currentStation = String(part.current_station || part.current_operation || "")
       .trim()
       .toUpperCase();
     if (!finalPackingStations.includes(currentStation)) {
@@ -278,6 +278,45 @@ async function packPart({ boxNumber, partId, capacity }) {
     resolvedPartId: normalizedPartId,
     customerQrCode: resolvedScan.customerQrCode,
   };
+}
+
+async function autoPackReadyPart({ partId, stationNo, machineId = null, machineName = null }) {
+  const normalizedPartId = String(partId || "").trim();
+  if (!normalizedPartId) {
+    return { success: false, reason: "PART_ID_REQUIRED" };
+  }
+
+  try {
+    const packed = await packPart({ partId: normalizedPartId });
+    return {
+      success: true,
+      session: packed.session,
+      item: packed.item,
+      resolvedPartId: packed.resolvedPartId,
+      customerQrCode: packed.customerQrCode,
+    };
+  } catch (error) {
+    const message = String(error?.message || "Auto packing failed");
+    if (message.toUpperCase().includes("ALREADY PACKED")) {
+      return { success: true, alreadyPacked: true, reason: "ALREADY_PACKED" };
+    }
+
+    emitRealtime("operator_popup", {
+      type: "WARNING",
+      stationNo: "PACKING",
+      sourceStationNo: stationNo || null,
+      machineId,
+      machineName,
+      partId: normalizedPartId,
+      qrStatus: "PASSED",
+      operationStatus: "READY_FOR_PACKING",
+      status: "READY_FOR_PACKING",
+      plcStatus: "READY_FOR_PACKING",
+      message: `Part ready for packing, but auto-map failed: ${message}`,
+      timestamp: new Date().toISOString(),
+    });
+    return { success: false, reason: message };
+  }
 }
 
 async function getPackingOverview() {
@@ -427,4 +466,5 @@ module.exports = {
   normalizeBoxNumber,
   assertValidBoxNumber,
   resolvePackingPartId,
+  autoPackReadyPart,
 };

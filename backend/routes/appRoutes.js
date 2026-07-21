@@ -46,7 +46,10 @@ router.post("/scan/process", async (req, res) => {
       return res.status(400).json({ error: "partId and operation are required" });
     }
 
-    const response = await saveScan(partId, operation, result, machineId || 0);
+    const response = await saveScan(partId, operation, result, machineId || 0, null, {
+      enforceQrFormatValidation: true,
+      enforceSequenceValidation: true,
+    });
     res.json(response);
   } catch (error) {
     res.status(500).json({ error: error.message });

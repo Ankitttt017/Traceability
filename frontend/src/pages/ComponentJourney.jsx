@@ -18,7 +18,6 @@ import {
 } from "lucide-react";
 import { machineApi, shiftApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
-import PlantLineSelector from "../components/PlantLineSelector";
 import {
   getStationFeatureSettings, getStationFeatures, saveStationFeatureSettings,
 } from "../utils/stationSettings";
@@ -176,7 +175,7 @@ function normalizeLeakResult(value) {
   if (!token) return "";
   if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(token)) return "NG";
   if (["OK", "PASS", "PASSED", "GOOD"].includes(token)) return "OK";
-  return "OK";
+  return "";
 }
 function getLeakStationState(station={}) {
   const readings = station.leakTestReadings?.length > 0
@@ -207,6 +206,23 @@ function getJourneyStationState(station={}, qrMeta=null, settings={}) {
     !opFailLike &&
     !qrFailLike;
   return forcePassForAutoStations ? "COMPLETED" : station.stageState;
+}
+function deriveJourneyPartStatus(part={}, stationTimeline=[], qrByStation={}, stationSettings={}) {
+  const states = (stationTimeline || [])
+    .map((station) => String(getJourneyStationState(
+      station,
+      qrByStation[station.stationNo],
+      getStationFeatures(station.stationNo, stationSettings)
+    ) || "").trim().toUpperCase())
+    .filter(Boolean);
+  if (states.some((state) => ["FAILED", "INTERLOCKED", "ENDED_NG", "NG", "COMPLETED_NG", "COMM_ERROR"].includes(state))) {
+    return "NG";
+  }
+  const rawStatus = String(part?.status || "").trim().toUpperCase();
+  if (["NG", "INTERLOCKED", "FAILED", "COMPLETED_NG", "ENDED_NG"].includes(rawStatus)) return "NG";
+  if (states.length && states.every((state) => ["PASSED", "COMPLETED", "COMPLETED_OK"].includes(state))) return "COMPLETED";
+  if (states.some((state) => ["IN_PROGRESS", "RUNNING", "REWORK", "STARTED"].includes(state))) return "IN_PROGRESS";
+  return rawStatus || "IN_PROGRESS";
 }
 function formatTime(v) {
   if (!v) return "—";
@@ -602,6 +618,10 @@ const ComponentJourney = () => {
   const stationTimeline = useMemo(()=>journeyData?.stationTimeline||[],[journeyData?.stationTimeline]);
   const selectedPartDisplayId = selectedPart?.displayPartId || journeyData?.part?.displayPartId || selectedPartId || "";
   const selectedCustomerQrCode = sanitizeCustomerQrValue(selectedPart?.customerQrCode || journeyData?.part?.customerQrCode || "");
+  const selectedDerivedPartStatus = useMemo(
+    () => deriveJourneyPartStatus(journeyData?.part || selectedPart || {}, stationTimeline, qrByStation, stationSettings),
+    [journeyData?.part, selectedPart, stationTimeline, qrByStation, stationSettings]
+  );
   const statusSummary   = useMemo(()=>stationTimeline.reduce((acc,st)=>{
     const s=String(getJourneyStationState(st, qrByStation[st.stationNo], getStationFeatures(st.stationNo, stationSettings))||"").toUpperCase();
     if (s==="PASSED" || s==="COMPLETED") acc.passed++;
@@ -1167,22 +1187,12 @@ const ComponentJourney = () => {
               onChange={(e)=>setFilters((prev)=>({...prev,dateTo:e.target.value}))}
               style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
             />
-            <div style={{gridColumn:"1 / -1",minWidth:0}}>
-              <PlantLineSelector
-                value={filters}
-                onChange={(scope)=>setFilters((prev)=>({...prev,...scope,machineId:""}))}
-                includeAll
-                compact
-                className="grid grid-cols-1 gap-2 md:grid-cols-2"
-                inputClassName="h-9 min-w-0 rounded-lg border border-border bg-bg-dark px-3 text-xs font-bold text-text-main outline-none"
-              />
-            </div>
             <select
               value={filters.machineId}
               onChange={(e)=>setFilters((prev)=>({...prev,machineId:e.target.value}))}
               style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
             >
-              <option value="">All Machines</option>
+              <option value="">All Quality Gates</option>
               {machines
                 .filter((machine)=>!filters.plantId || String(machine.plantId || "") === String(filters.plantId))
                 .filter((machine)=>!filters.lineId || String(machine.lineId || "") === String(filters.lineId))
@@ -1191,12 +1201,6 @@ const ComponentJourney = () => {
                   <option key={machine.id} value={machine.id}>{machine.machineName}</option>
                 ))}
             </select>
-            <input
-              value={filters.stationNo}
-              onChange={(e)=>setFilters((prev)=>({...prev,stationNo:e.target.value.toUpperCase()}))}
-              placeholder="Station"
-              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
-            />
             <select
               value={filters.status}
               onChange={(e)=>setFilters((prev)=>({...prev,status:e.target.value}))}
@@ -1209,12 +1213,6 @@ const ComponentJourney = () => {
               <option value="INTERLOCKED">BLOCKED</option>
               <option value="OTHER">OTHER CATEGORY</option>
             </select>
-            <input
-              value={filters.operatorId}
-              onChange={(e)=>setFilters((prev)=>({...prev,operatorId:e.target.value}))}
-              placeholder="Operator ID"
-              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
-            />
             <select
               value={filters.shiftCode}
               onChange={(e)=>setFilters((prev)=>({...prev,shiftCode:e.target.value}))}
@@ -1225,12 +1223,6 @@ const ComponentJourney = () => {
                 <option key={shift.shiftCode} value={shift.shiftCode}>{shift.shiftName}</option>
               ))}
             </select>
-            <input
-              value={filters.partId}
-              onChange={(e)=>setFilters((prev)=>({...prev,partId:e.target.value}))}
-              placeholder="Part ID"
-              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
-            />
             <button
               onClick={()=>setFilters({dateFrom:"",dateTo:"",partId:"",plantId:"",lineId:"",machineId:"",stationNo:"",status:"",operatorId:"",shiftCode:"",lineName:""})}
               style={{width:"100%",height:36,padding:"0 12px",borderRadius:8,border:`1px solid ${C.ng(0.25)}`,background:C.ng(0.08),color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer",boxSizing:"border-box"}}
@@ -1289,7 +1281,7 @@ const ComponentJourney = () => {
 
             {parts.map(part=>{
               const active = selectedPartId===part.partId;
-              const meta   = getPartMeta(part.status);
+              const meta   = getPartMeta(active ? selectedDerivedPartStatus : part.status);
               const visiblePartId = part.displayPartId || part.partId || "-";
               return (
                 <div key={part.partId} style={{

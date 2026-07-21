@@ -78,6 +78,7 @@ const PLC_COLUMN_UNITS = {
   average_die_clamp_tonnage_count: "count",
 };
 const withUnit = (label, unit) => unit ? `${label} (${unit})` : label;
+const LEAK_TEST_SHARED_KEY = "__LEAK_TEST_OP150__";
 
 function splitRejectionZone(value) {
   const raw = String(value || "").trim();
@@ -133,6 +134,41 @@ function stationResultRank(value) {
 
 function pickPreferredStationResult(currentValue, nextValue) {
   return stationResultRank(nextValue) > stationResultRank(currentValue) ? nextValue : (currentValue || nextValue);
+}
+function getStationResultStatus(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (!normalized || normalized === "-") return "-";
+  if (/\bNG\b|NOK|FAILED|FAIL/.test(normalized)) return "NG";
+  if (/\bOK\b|PASSED|PASS/.test(normalized)) return "OK";
+  if (normalized.includes("IN_PROGRESS") || normalized.includes("IN PROGRESS")) return "IN_PROGRESS";
+  return normalized;
+}
+function pickPreferredStationDisplay(currentValue, nextValue) {
+  const currentRank = stationResultRank(getStationResultStatus(currentValue));
+  const nextRank = stationResultRank(getStationResultStatus(nextValue));
+  return nextRank > currentRank ? nextValue : (currentValue || nextValue);
+}
+function buildStationPair(machineName, op) {
+  const operation = String(op || "").trim().toUpperCase();
+  if (!operation) return null;
+  if (operation === LEAK_TEST_OPERATION) {
+    return {
+      key: LEAK_TEST_SHARED_KEY,
+      machineName: "Leak Test",
+      op: LEAK_TEST_OPERATION,
+      label: "Leak Test OP150",
+      sharedLeakOperation: true,
+    };
+  }
+  const name = String(machineName || "").trim();
+  if (!name) return null;
+  return { key: `${name}__${operation}`, machineName: name, op: operation, label: `${name} + ${operation}` };
+}
+function normalizeFinalPartStatus(value) {
+  const status = String(value || "").trim().toUpperCase();
+  if (["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(status)) return "PASSED";
+  if (["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(status)) return "NG";
+  return "IN_PROGRESS";
 }
 function normalizeLeakResult(value) {
   const token = String(value || "").trim().toUpperCase();
@@ -190,6 +226,36 @@ function getCustomerQrFromRow(row = {}) {
     row.mappedCustomerQrCode ||
     ""
   ).trim();
+}
+
+function getExcelGroupKey(row = {}, fallback = "") {
+  return String(
+    row.reportGroupKey ||
+    row.report_group_key ||
+    row.traceabilityPartId ||
+    row.traceability_part_id ||
+    row.displayPartId ||
+    row.display_part_id ||
+    row.partId ||
+    row.part_id ||
+    row.barcode ||
+    row.shot_uid ||
+    fallback ||
+    ""
+  ).trim();
+}
+
+function getDisplayPartSerial(row = {}, fallback = "-") {
+  return String(
+    row.displayPartId ||
+    row.display_part_id ||
+    row.traceabilityPartId ||
+    row.traceability_part_id ||
+    row.partId ||
+    row.part_id ||
+    fallback ||
+    "-"
+  ).trim() || "-";
 }
 
 function nowStamp() {
@@ -310,15 +376,15 @@ async function generateIndustrialExcel(res, {
 
   const stationMap = new Map();
   (stationPairs || []).forEach((s) => {
-    if (!s?.key || !s?.label) return;
-    stationMap.set(s.key, { key: s.key, machineName: s.machineName || "", op: s.op || "", label: s.label });
+    const station = buildStationPair(s.machineName, s.op);
+    if (!station) return;
+    stationMap.set(station.key, station);
   });
   rows.forEach((row) => {
     const machineName = String(row.machineName || row.machine_name || row?.Machine?.machine_name || "").trim();
     const op = String(row.operation_no || row.operationNo || row.stationNo || "").trim();
-    if (!machineName || !op) return;
-    const key = `${machineName}__${op}`;
-    if (!stationMap.has(key)) stationMap.set(key, { key, machineName, op, label: `${machineName} + ${op}` });
+    const station = buildStationPair(machineName, op);
+    if (station && !stationMap.has(station.key)) stationMap.set(station.key, station);
   });
   const stationPairsFinal = Array.from(stationMap.values()).sort((a, b) =>
     a.op.localeCompare(b.op, undefined, { numeric: true, sensitivity: "base" }) || a.machineName.localeCompare(b.machineName)
@@ -332,17 +398,21 @@ async function generateIndustrialExcel(res, {
   );
 
   const grouped = new Map();
-  rows.forEach((row) => {
-    const partSerial = row.part_id || row.partId || "-";
+  rows.forEach((row, index) => {
+    const groupKey = getExcelGroupKey(row, `row_${index}`);
+    const partSerial = getDisplayPartSerial(row, groupKey);
     const rejectionDetails = resolveRejectionDetails(row);
-    if (!grouped.has(partSerial)) {
-      grouped.set(partSerial, {
+    if (!grouped.has(groupKey)) {
+      grouped.set(groupKey, {
+        groupKey,
         partSerial,
         partName: row.partName || row.part_name || row.modelName || row.componentName || "",
         partDieLabel: row.partDieLabel || "",
-        machineName: row.machineName || "-",
+        qualityGateName: row.anchorMachineName || row.anchor_machine_name || row.machineName || row.machine_name || "-",
+        dieCastingMachineName: row.plcReading?.machine_name || row.plc_reading?.machine_name || row.dieCastingMachine || row.die_casting_machine || "",
         customerQrCode: getCustomerQrFromRow(row) || "-",
-        createdAt: row.createdAt || row.created_at || "-",
+        createdAt: row.firstScanCreatedAt || row.createdAt || row.created_at || "-",
+        finalResultAt: row.finalResultCreatedAt || row.finalResultAt || row.cycleEndAt || row.plc_end_at || row.plcEndAt || "",
         cycleStart: row.cycleStartTime || "-",
         cycleEnd: row.cycleEndTime || "-",
         cycleTime: row.cycleTime || "0.00",
@@ -351,6 +421,7 @@ async function generateIndustrialExcel(res, {
         startAt: row.plc_start_at || row.startAt || "-",
         startTime: row.startTime || "-",
         status: row.statusLabel || row.industrialResult || row.result || "-",
+        partStatus: row.partStatus || row.part_status || row.status || "",
         shotDate: row.shot_date || row.shotDate || "-",
         reason: row.interlock_reason || row.reason || "-",
         rejectionCategory: rejectionDetails.category,
@@ -363,12 +434,28 @@ async function generateIndustrialExcel(res, {
         leakTestReading: row.leakTestReading || null,
       });
     }
-    const bucket = grouped.get(partSerial);
+    const bucket = grouped.get(groupKey);
+    const nextPartSerial = getDisplayPartSerial(row, bucket.partSerial);
+    if ((!bucket.partSerial || bucket.partSerial === "-") && nextPartSerial) {
+      bucket.partSerial = nextPartSerial;
+    }
     if (!bucket.partName && (row.partName || row.part_name || row.modelName || row.componentName)) {
       bucket.partName = row.partName || row.part_name || row.modelName || row.componentName;
     }
+    if ((!bucket.qualityGateName || bucket.qualityGateName === "-") && (row.anchorMachineName || row.anchor_machine_name || row.machineName || row.machine_name)) {
+      bucket.qualityGateName = row.anchorMachineName || row.anchor_machine_name || row.machineName || row.machine_name;
+    }
+    if (!bucket.dieCastingMachineName && (row.plcReading?.machine_name || row.plc_reading?.machine_name || row.dieCastingMachine || row.die_casting_machine)) {
+      bucket.dieCastingMachineName = row.plcReading?.machine_name || row.plc_reading?.machine_name || row.dieCastingMachine || row.die_casting_machine;
+    }
+    if (!bucket.finalResultAt && (row.finalResultCreatedAt || row.finalResultAt || row.cycleEndAt || row.plc_end_at || row.plcEndAt)) {
+      bucket.finalResultAt = row.finalResultCreatedAt || row.finalResultAt || row.cycleEndAt || row.plc_end_at || row.plcEndAt;
+    }
     if (!bucket.partDieLabel && row.partDieLabel) {
       bucket.partDieLabel = row.partDieLabel;
+    }
+    if (!bucket.partStatus && (row.partStatus || row.part_status || row.status)) {
+      bucket.partStatus = row.partStatus || row.part_status || row.status;
     }
     const rowCustomerQr = getCustomerQrFromRow(row);
     if ((!bucket.customerQrCode || bucket.customerQrCode === "-") && rowCustomerQr) {
@@ -381,12 +468,19 @@ async function generateIndustrialExcel(res, {
     if (!bucket.rejectionSubZone && rejectionDetails.subZone) bucket.rejectionSubZone = rejectionDetails.subZone;
     const machineName = String(row.machineName || row.machine_name || row?.Machine?.machine_name || "").trim();
     const op = String(row.operation_no || row.operationNo || row.stationNo || "").trim();
-    const stationKey = machineName && op ? `${machineName}__${op}` : "";
+    const station = buildStationPair(machineName, op);
+    const stationKey = station?.key || "";
     const resolved = row.industrialResult ? { status: row.industrialResult } : resolveIndustrialResult(row);
     const status = String(resolved.status || "").toUpperCase();
     if (stationKey && String(op || "").trim().toUpperCase() !== LEAK_TEST_OPERATION) {
       const normalizedStatus = status === "OK" || status === "NG" || status === "IN_PROGRESS" ? status : "-";
       bucket.stationResults[stationKey] = pickPreferredStationResult(bucket.stationResults[stationKey], normalizedStatus);
+    } else if (stationKey && String(op || "").trim().toUpperCase() === LEAK_TEST_OPERATION) {
+      const normalizedStatus = status === "OK" || status === "NG" || status === "IN_PROGRESS" ? status : "-";
+      const displayStatus = machineName && normalizedStatus !== "-"
+        ? `${machineName} ${normalizedStatus}`
+        : normalizedStatus;
+      bucket.stationResults[stationKey] = pickPreferredStationDisplay(bucket.stationResults[stationKey], displayStatus);
     }
     const nextPlcReading = row.plcReading || {};
     Object.keys(nextPlcReading).forEach((key) => {
@@ -394,6 +488,9 @@ async function generateIndustrialExcel(res, {
         bucket.plcReading[key] = nextPlcReading[key];
       }
     });
+    if (!bucket.dieCastingMachineName && bucket.plcReading.machine_name) {
+      bucket.dieCastingMachineName = bucket.plcReading.machine_name;
+    }
     if (!bucket.leakTestReadings && row.leakTestReadings) {
       bucket.leakTestReadings = row.leakTestReadings;
     }
@@ -404,13 +501,9 @@ async function generateIndustrialExcel(res, {
       const leakMachineName = String(
         bucket.leakTestReading.matchedMachineName || bucket.leakTestReading.Machine || bucket.leakTestReading.machineName || ""
       ).trim();
-      const leakStationKey = leakMachineName ? `${leakMachineName}__${LEAK_TEST_OPERATION}` : "";
-      if (leakStationKey) {
-        bucket.stationResults[leakStationKey] = pickPreferredStationResult(
-          bucket.stationResults[leakStationKey],
-          getLeakTestStatus(bucket.leakTestReading)
-        );
-      }
+      const leakStatus = getLeakTestStatus(bucket.leakTestReading);
+      const leakDisplay = leakMachineName && leakStatus !== "-" ? `${leakMachineName} ${leakStatus}` : leakStatus;
+      bucket.stationResults[LEAK_TEST_SHARED_KEY] = pickPreferredStationDisplay(bucket.stationResults[LEAK_TEST_SHARED_KEY], leakDisplay);
     }
   });
 
@@ -453,8 +546,9 @@ async function generateIndustrialExcel(res, {
     { header: "Part Serial No.", width: 28 },
     { header: "Customer QR Code", width: 20 },
     { header: "Part Name", width: 22 },
-    { header: "Machine Name", width: 22 },
-    { header: "Scanned Date & Time", width: 22 },
+    { header: "Die Casting Machine", width: 22 },
+    { header: "First Scan Date & Time", width: 22 },
+    { header: "Final Result Date & Time", width: 22 },
   ];
   const stationColumns = stationPairsFinal.map((s) => ({ header: s.label, width: 24 }));
   const finalColumn = [{ header: "Final Status", width: 16 }];
@@ -514,21 +608,24 @@ async function generateIndustrialExcel(res, {
     const operationResults = requiredOperations.map((operation) => {
       const operationStationResults = stationPairsFinal
         .filter((station) => String(station.op || "").trim().toUpperCase() === operation)
-        .map((station) => row.stationResults[station.key] || "-");
+        .map((station) => getStationResultStatus(row.stationResults[station.key] || "-"));
       if (operationStationResults.includes("NG")) return "NG";
       if (operationStationResults.includes("OK")) return "OK";
       if (operationStationResults.includes("IN_PROGRESS")) return "IN_PROGRESS";
       return "-";
     });
+    const finalPartStatus = normalizeFinalPartStatus(row.partStatus);
     const overall = operationResults.includes("NG")
       ? "NG"
       : operationResults.includes("IN_PROGRESS")
         ? "IN_PROGRESS"
-      : (requiredOperations.length > 0 && operationResults[requiredOperations.length - 1] === "OK")
-        ? "PASSED"
-      : (requiredOperations.length > 0 && requiredOperations.every((_, idx) => operationResults[idx] === "OK"))
-        ? "PASSED"
-        : "IN_PROGRESS";
+        : finalPartStatus === "NG"
+          ? "NG"
+          : requiredOperations.length > 1 && operationResults.length >= requiredOperations.length && operationResults.every((value) => value === "OK")
+            ? "PASSED"
+          : finalPartStatus === "PASSED"
+            ? "PASSED"
+            : "IN_PROGRESS";
     const plc = row.plcReading || {};
     const shotNumber = plc.shot_number || row.shotNumber || row.shot_number || "-";
     const exportPartName =
@@ -545,8 +642,9 @@ async function generateIndustrialExcel(res, {
       row.partSerial,
       getCustomerQrFromRow(row) || row.customerQrCode || "-",
       exportPartName,
-      (row.plcReading && row.plcReading.machine_name) || row.machineName || "-",
+      row.dieCastingMachineName || row.plcReading?.machine_name || "-",
       row.cycleStart,
+      row.finalResultAt ? formatIndustrialTimestamp(row.finalResultAt) : "-",
       ...stationResults,
       overall,
       row.rejectionCategory || "-",
@@ -618,7 +716,7 @@ async function generateIndustrialExcel(res, {
 
     stationPairsFinal.forEach((_, sIdx) => {
       const stationCell = worksheet.getCell(rowIndex, baseColumns.length + sIdx + 1);
-      const v = String(stationCell.value || "").toUpperCase();
+      const v = getStationResultStatus(stationCell.value);
       if (v === "OK") stationCell.font = { bold: true, size: 9, color: { argb: "FF059669" } };
       if (v === "NG") stationCell.font = { bold: true, size: 9, color: { argb: RED } };
     });
@@ -650,12 +748,11 @@ async function generateIndustrialExcel(res, {
   footer.font = { italic: true, size: 8, color: { argb: GRAY } };
   footer.alignment = { horizontal: "center" };
 
-  const buffer = await workbook.xlsx.writeBuffer();
   const filename = `${filePrefix}_${nowStamp()}.xlsx`;
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-  res.setHeader("Content-Length", buffer.byteLength);
-  res.send(Buffer.from(buffer));
+  await workbook.xlsx.write(res);
+  res.end();
 }
 
 module.exports = { generateIndustrialExcel };

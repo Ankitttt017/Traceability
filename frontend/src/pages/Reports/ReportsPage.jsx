@@ -1,13 +1,12 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+﻿import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { reportApi, machineApi, organizationApi, shiftApi } from '../../api/services';
 import { toDatetimeLocal } from '../../utils/time';
 import { loadReportConfig } from '../../utils/reportConfig';
 import ReportSummaryCards from './ReportSummaryCards';
 import ReportTable from './ReportTable';
-import { FileText, Download, RefreshCw } from 'lucide-react';
+import { FileText, Download, RefreshCw, Filter, Calendar, Clock, ChevronDown, X, Zap, TrendingUp, AlertCircle, CheckCircle, Activity, BarChart3, Database, ChevronLeft, ChevronRight } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useLanguage } from '../../context/LanguageContext';
-import PlantLineSelector from '../../components/PlantLineSelector';
 
 const DEFAULT_PLC_CYCLE_COLUMNS = [
   "machine_name","shot_date","shot_time","shot_number","cycle_time",
@@ -20,7 +19,6 @@ const DEFAULT_PLC_CYCLE_COLUMNS = [
   "fix_1_flow","fix_2_flow","fix_3_flow","mov_1_flow","mov_2_flow","mov_3_flow","vacuum_pressure_mmhg",
   "average_die_clamp_tonnage_count","time_for_stroke","stroke","shot_status"
 ];
-const REPORT_AUTO_APPLY_MS = 650;
 const LEAK_TEST_OPERATION = "OP150";
 const LEAK_TEST_SHARED_KEY = "__LEAK_TEST_OP150__";
 const LEAK_TEST_COLUMNS = [
@@ -135,7 +133,18 @@ const normalizeLeakResult = (value) => {
   if (!token) return "";
   if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(token)) return "NG";
   if (["OK", "PASS", "PASSED", "GOOD"].includes(token)) return "OK";
-  return "OK";
+  return "";
+};
+const normalizeStationCellResult = (value) => {
+  if (value && typeof value === "object") {
+    return normResult(value.status || value.text || "");
+  }
+  const raw = String(value || "").trim().toUpperCase();
+  if (!raw || raw === "-") return "";
+  if (/\bNG\b|NOK|FAILED|FAIL/.test(raw)) return "NG";
+  if (/\bOK\b|PASSED|PASS/.test(raw)) return "OK";
+  if (raw.includes("IN_PROGRESS") || raw.includes("IN PROGRESS")) return "IN_PROGRESS";
+  return normResult(raw);
 };
 const getLeakTestStatus = (reading) => {
   const readings = Array.isArray(reading) ? reading.filter(Boolean) : (reading ? [reading] : []);
@@ -210,6 +219,28 @@ const pickPreferredResult = (current, candidate) => {
   const candidateRank = resultRank(candidate);
   if (candidateRank > currentRank) return candidate;
   return current || candidate;
+};
+const getResultTimestamp = (row = {}) => (
+  row.finalResultCreatedAt ||
+  row.finalResultAt ||
+  row.cycleEndAt ||
+  row.plc_end_at ||
+  row.plcEndAt ||
+  row.createdAtRaw ||
+  row.createdAt ||
+  row.updatedAt ||
+  null
+);
+const isFinalInspectionOperation = (rowOrOperation = {}) => {
+  const operation = typeof rowOrOperation === "string"
+    ? rowOrOperation
+    : (rowOrOperation.operationNo || rowOrOperation.stationNo || rowOrOperation.operation_no || rowOrOperation.station_no || "");
+  const machineName = typeof rowOrOperation === "string"
+    ? ""
+    : (rowOrOperation.machineName || rowOrOperation.machine_name || rowOrOperation?.Machine?.machine_name || "");
+  const op = String(operation || "").trim().toUpperCase();
+  const machine = String(machineName || "").trim().toUpperCase();
+  return op === "OP160" || machine.includes("FINAL INSPECTION") || machine.includes("FINAL_INSPECTION");
 };
 const operationResultRank = (value) => {
   if (value === "NG") return 3;
@@ -312,9 +343,639 @@ const sanitizeCustomerQrValue = (value) => {
   return raw;
 };
 const looksLikeCustomerQrValue = (value) => /^R[A-Z0-9-]{12,}$/i.test(String(value || "").trim());
-const REPORT_ALL_ROWS_LIMIT = 10000;
+const REPORT_PREVIEW_ROWS_LIMIT = 500;
+
+// ── Professional Design System ────────────────────────────────────────────
+const DS = `
+  :root {
+    --pk-navy: 26,50,99;
+    --pk-steel: 84,119,146;
+    --pk-amber: 250,185,91;
+    --pk-linen: 232,226,219;
+    --pk-ok: 34,197,94;
+    --pk-ng: 239,68,68;
+    --pk-wip: 249,115,22;
+    --pk-idle: 148,163,184;
+  }
+  [data-theme="light"] {
+    --pk-bg-card: 255,255,255;
+    --pk-bg-surf: 240,236,230;
+    --pk-bg-input: 255,255,255;
+    --pk-txt-pri: 26,50,99;
+    --pk-txt-sec: 84,119,146;
+    --pk-txt-muted: 140,160,180;
+    --pk-bdr: 84,119,146;
+    --pk-bop: 0.13;
+  }
+  [data-theme="dark"] {
+    --pk-bg-card: 20,34,62;
+    --pk-bg-surf: 16,26,50;
+    --pk-bg-input: 14,22,44;
+    --pk-txt-pri: 232,226,219;
+    --pk-txt-sec: 120,160,190;
+    --pk-txt-muted: 84,119,146;
+    --pk-bdr: 84,119,146;
+    --pk-bop: 0.18;
+  }
+  @keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes shimmer {
+    0% { background-position: -200% center; }
+    100% { background-position: 200% center; }
+  }
+  @keyframes pulseGlow {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(var(--pk-steel), 0.2); }
+    50% { box-shadow: 0 0 20px 4px rgba(var(--pk-steel), 0.1); }
+  }
+  @keyframes datePop {
+    0% { transform: scale(0.95); opacity: 0; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  .reports-container {
+    animation: fadeSlideIn 0.3s ease;
+  }
+  .reports-gradient-bar {
+    height: 3px;
+    background: linear-gradient(90deg, rgb(var(--pk-navy)), rgb(var(--pk-steel)), rgb(var(--pk-amber)), rgb(var(--pk-steel)), rgb(var(--pk-navy)));
+    background-size: 200% 100%;
+    animation: shimmer 3s ease-in-out infinite;
+  }
+  .reports-card {
+    background: rgb(var(--pk-bg-card));
+    border: 1px solid rgba(var(--pk-bdr), var(--pk-bop));
+    border-radius: 14px;
+    box-shadow: 0 2px 12px rgba(var(--pk-navy), 0.06);
+    transition: all 0.2s ease;
+  }
+  .reports-card:hover {
+    box-shadow: 0 4px 24px rgba(var(--pk-navy), 0.1);
+  }
+  .reports-filter-group {
+    background: rgb(var(--pk-bg-card));
+    border: 1px solid rgba(var(--pk-bdr), var(--pk-bop));
+    border-radius: 12px;
+    padding: 16px 20px;
+    box-shadow: 0 2px 8px rgba(var(--pk-navy), 0.04);
+    transition: all 0.3s ease;
+  }
+  .reports-filter-input {
+    height: 36px;
+    min-width: 0;
+    border-radius: 8px;
+    border: 1px solid rgba(var(--pk-bdr), 0.2);
+    background: rgb(var(--pk-bg-input));
+    padding: 0 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: rgb(var(--pk-txt-pri));
+    outline: none;
+    transition: all 0.15s ease;
+  }
+  .reports-filter-input:focus {
+    border-color: rgba(var(--pk-steel), 0.5);
+    box-shadow: 0 0 0 3px rgba(var(--pk-steel), 0.08);
+  }
+  .reports-filter-input::placeholder {
+    color: rgba(var(--pk-txt-muted), 0.6);
+    font-weight: 400;
+  }
+  .reports-btn-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 18px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    border: none;
+    background: linear-gradient(135deg, rgb(var(--pk-navy)), rgb(var(--pk-steel)));
+    color: rgb(var(--pk-linen));
+    box-shadow: 0 3px 12px rgba(var(--pk-navy), 0.25);
+    transition: all 0.15s ease;
+  }
+  .reports-btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(var(--pk-navy), 0.3);
+  }
+  .reports-btn-primary:active {
+    transform: translateY(0);
+  }
+  .reports-btn-primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+  }
+  .reports-btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 16px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    background: rgba(var(--pk-steel), 0.08);
+    border: 1px solid rgba(var(--pk-steel), 0.2);
+    color: rgb(var(--pk-steel));
+    transition: all 0.15s ease;
+  }
+  .reports-btn-secondary:hover {
+    background: rgba(var(--pk-steel), 0.15);
+    border-color: rgba(var(--pk-steel), 0.35);
+  }
+  .reports-btn-clear {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 36px;
+    padding: 0 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    background: rgba(var(--pk-ng), 0.06);
+    border: 1px solid rgba(var(--pk-ng), 0.15);
+    color: rgb(var(--pk-ng));
+    transition: all 0.15s ease;
+  }
+  .reports-btn-clear:hover {
+    background: rgba(var(--pk-ng), 0.12);
+    border-color: rgba(var(--pk-ng), 0.25);
+  }
+  .reports-btn-export {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 20px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    border: none;
+    background: linear-gradient(135deg, rgb(var(--pk-amber)), #f6b83d);
+    color: rgb(var(--pk-navy));
+    box-shadow: 0 3px 12px rgba(var(--pk-amber), 0.3);
+    transition: all 0.15s ease;
+    position: relative;
+    overflow: hidden;
+  }
+  .reports-btn-export:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(var(--pk-amber), 0.35);
+  }
+  .reports-btn-export:active {
+    transform: translateY(0);
+  }
+  .reports-btn-export:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+    transform: none;
+  }
+  .reports-btn-export .progress-bar {
+    position: absolute;
+    inset: 0;
+    left: 0;
+    background: rgba(255, 255, 255, 0.2);
+    transition: width 0.3s ease;
+  }
+  .reports-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 10px;
+    border-radius: 99px;
+    font-size: 9px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .reports-badge-ok {
+    background: rgba(var(--pk-ok), 0.1);
+    color: rgb(var(--pk-ok));
+    border: 1px solid rgba(var(--pk-ok), 0.2);
+  }
+  .reports-badge-ng {
+    background: rgba(var(--pk-ng), 0.1);
+    color: rgb(var(--pk-ng));
+    border: 1px solid rgba(var(--pk-ng), 0.2);
+  }
+  .reports-badge-wip {
+    background: rgba(var(--pk-amber), 0.1);
+    color: rgb(var(--pk-amber));
+    border: 1px solid rgba(var(--pk-amber), 0.2);
+  }
+  
+  /* Custom Date Picker Styles */
+  .date-picker-container {
+    position: relative;
+    animation: datePop 0.2s ease;
+  }
+  .date-picker-dropdown {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    background: rgb(var(--pk-bg-card));
+    border: 1px solid rgba(var(--pk-bdr), 0.2);
+    border-radius: 12px;
+    box-shadow: 0 12px 48px rgba(var(--pk-navy), 0.15), 0 2px 8px rgba(var(--pk-navy), 0.06);
+    padding: 16px;
+    z-index: 1000;
+    min-width: 280px;
+    max-width: 340px;
+    animation: datePop 0.2s ease;
+  }
+  .date-picker-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .date-picker-header button {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid rgba(var(--pk-bdr), 0.1);
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgb(var(--pk-txt-sec));
+    transition: all 0.15s ease;
+  }
+  .date-picker-header button:hover {
+    background: rgba(var(--pk-steel), 0.08);
+    border-color: rgba(var(--pk-steel), 0.2);
+  }
+  .date-picker-header span {
+    font-size: 13px;
+    font-weight: 700;
+    color: rgb(var(--pk-txt-pri));
+  }
+  .date-picker-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 3px;
+  }
+  .date-picker-weekday {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: rgba(var(--pk-txt-muted), 0.7);
+    padding: 4px 0;
+    text-align: center;
+  }
+  .date-picker-day {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 600;
+    color: rgb(var(--pk-txt-pri));
+    cursor: pointer;
+    transition: all 0.12s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  .date-picker-day:hover {
+    background: rgba(var(--pk-steel), 0.08);
+  }
+  .date-picker-day.selected {
+    background: linear-gradient(135deg, rgb(var(--pk-navy)), rgb(var(--pk-steel)));
+    color: rgb(var(--pk-linen));
+    box-shadow: 0 2px 8px rgba(var(--pk-navy), 0.25);
+  }
+  .date-picker-day.in-range {
+    background: rgba(var(--pk-steel), 0.12);
+    color: rgb(var(--pk-txt-pri));
+  }
+  .date-picker-day.range-start {
+    background: linear-gradient(135deg, rgb(var(--pk-navy)), rgb(var(--pk-steel)));
+    color: rgb(var(--pk-linen));
+    box-shadow: 0 2px 8px rgba(var(--pk-navy), 0.25);
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .date-picker-day.range-end {
+    background: linear-gradient(135deg, rgb(var(--pk-navy)), rgb(var(--pk-steel)));
+    color: rgb(var(--pk-linen));
+    box-shadow: 0 2px 8px rgba(var(--pk-navy), 0.25);
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+  }
+  .date-picker-day.range-middle {
+    background: rgba(var(--pk-steel), 0.12);
+    border-radius: 0;
+  }
+  .date-picker-day.other-month {
+    color: rgba(var(--pk-txt-muted), 0.3);
+  }
+  .date-picker-day.today {
+    border: 2px solid rgba(var(--pk-amber), 0.4);
+  }
+  .date-picker-day.today.selected,
+  .date-picker-day.today.range-start,
+  .date-picker-day.today.range-end {
+    border-color: rgba(var(--pk-linen), 0.3);
+  }
+  .date-picker-footer {
+    display: flex;
+    gap: 6px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(var(--pk-bdr), 0.08);
+  }
+  .date-picker-footer button {
+    flex: 1;
+    height: 30px;
+    border-radius: 6px;
+    border: none;
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .date-picker-footer .clear-btn {
+    background: rgba(var(--pk-ng), 0.06);
+    color: rgb(var(--pk-ng));
+    border: 1px solid rgba(var(--pk-ng), 0.1);
+  }
+  .date-picker-footer .clear-btn:hover {
+    background: rgba(var(--pk-ng), 0.12);
+  }
+  .date-picker-footer .apply-btn {
+    background: linear-gradient(135deg, rgb(var(--pk-navy)), rgb(var(--pk-steel)));
+    color: rgb(var(--pk-linen));
+  }
+  .date-picker-footer .apply-btn:hover {
+    opacity: 0.9;
+  }
+  
+  @media (max-width: 768px) {
+    .reports-filters-grid {
+      grid-template-columns: 1fr 1fr !important;
+    }
+    .date-picker-dropdown {
+      left: -50%;
+      min-width: 260px;
+    }
+  }
+  @media (max-width: 480px) {
+    .reports-filters-grid {
+      grid-template-columns: 1fr !important;
+    }
+    .reports-actions {
+      flex-wrap: wrap !important;
+    }
+    .date-picker-dropdown {
+      left: -100%;
+      min-width: 240px;
+      max-width: 280px;
+    }
+    .date-picker-day {
+      width: 28px;
+      height: 28px;
+      font-size: 11px;
+    }
+  }
+`;
+
+// ── Inject Styles ──────────────────────────────────────────────────────────
+let _dsInjected = false;
+function injectReportStyles() {
+  if (_dsInjected || typeof document === "undefined") return;
+  _dsInjected = true;
+  const el = document.createElement("style");
+  el.textContent = DS;
+  document.head.appendChild(el);
+  if (!document.documentElement.hasAttribute("data-theme")) {
+    document.documentElement.setAttribute("data-theme", "light");
+  }
+}
+
+// ── Custom Date Range Picker Component ──────────────────────────────────
+const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select Date Range" }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [selectedStart, setSelectedStart] = useState(startDate ? new Date(startDate) : null);
+  const [selectedEnd, setSelectedEnd] = useState(endDate ? new Date(endDate) : null);
+  const [tempStart, setTempStart] = useState(selectedStart);
+  const [tempEnd, setTempEnd] = useState(selectedEnd);
+  const [isSelecting, setIsSelecting] = useState(false);
+  const pickerRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (pickerRef.current && !pickerRef.current.contains(event.target)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    setSelectedStart(startDate ? new Date(startDate) : null);
+    setSelectedEnd(endDate ? new Date(endDate) : null);
+    setTempStart(startDate ? new Date(startDate) : null);
+    setTempEnd(endDate ? new Date(endDate) : null);
+  }, [startDate, endDate]);
+
+  const formatDateDisplay = (date) => {
+    if (!date) return '';
+    return date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+
+  const getDaysInMonth = (year, month) => {
+    return new Date(year, month + 1, 0).getDate();
+  };
+
+  const getFirstDayOfMonth = (year, month) => {
+    return new Date(year, month, 1).getDay();
+  };
+
+  const handleDayClick = (day, month, year) => {
+    const clickedDate = new Date(year, month, day);
+    clickedDate.setHours(0, 0, 0, 0);
+
+    if (!tempStart || (tempStart && tempEnd)) {
+      // Start new selection
+      setTempStart(clickedDate);
+      setTempEnd(null);
+      setIsSelecting(true);
+    } else if (tempStart && !tempEnd) {
+      // Complete selection
+      if (clickedDate < tempStart) {
+        setTempStart(clickedDate);
+        setTempEnd(tempStart);
+      } else {
+        setTempEnd(clickedDate);
+      }
+      setIsSelecting(false);
+    }
+  };
+
+  const handleApply = () => {
+    if (tempStart) {
+      const end = tempEnd || tempStart;
+      const formattedStart = new Date(tempStart);
+      formattedStart.setHours(0, 0, 0, 0);
+      const formattedEnd = new Date(end);
+      formattedEnd.setHours(23, 59, 59, 999);
+      
+      setSelectedStart(formattedStart);
+      setSelectedEnd(formattedEnd);
+      onApply(formattedStart, formattedEnd);
+      setIsOpen(false);
+    }
+  };
+
+  const handleClear = () => {
+    setTempStart(null);
+    setTempEnd(null);
+    setSelectedStart(null);
+    setSelectedEnd(null);
+    setIsSelecting(false);
+    onClear();
+    setIsOpen(false);
+  };
+
+  const handleMonthChange = (delta) => {
+    const newMonth = new Date(currentMonth);
+    newMonth.setMonth(newMonth.getMonth() + delta);
+    setCurrentMonth(newMonth);
+  };
+
+  const renderCalendar = () => {
+    const year = currentMonth.getFullYear();
+    const month = currentMonth.getMonth();
+    const daysInMonth = getDaysInMonth(year, month);
+    const firstDay = getFirstDayOfMonth(year, month);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const days = [];
+    // Weekday headers
+    const weekdays = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+    weekdays.forEach((day) => {
+      days.push(
+        <div key={`weekday-${day}`} className="date-picker-weekday">
+          {day}
+        </div>
+      );
+    });
+
+    // Empty cells for days before first day
+    for (let i = 0; i < firstDay; i++) {
+      days.push(<div key={`empty-${i}`} />);
+    }
+
+    // Days of the month
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = new Date(year, month, day);
+      date.setHours(0, 0, 0, 0);
+      const isToday = date.getTime() === today.getTime();
+      const isSelected = tempStart && date.getTime() === tempStart.getTime();
+      const isEndSelected = tempEnd && date.getTime() === tempEnd.getTime();
+      const isInRange = tempStart && tempEnd && date > tempStart && date < tempEnd;
+      const isStart = tempStart && date.getTime() === tempStart.getTime();
+      const isEnd = tempEnd && date.getTime() === tempEnd.getTime();
+      const isOtherMonth = false;
+
+      let className = 'date-picker-day';
+      if (isToday) className += ' today';
+      if (isSelected || isStart) className += ' range-start';
+      if (isEndSelected || isEnd) className += ' range-end';
+      if (isInRange) className += ' range-middle';
+      if (isOtherMonth) className += ' other-month';
+
+      days.push(
+        <button
+          key={`day-${day}`}
+          className={className}
+          onClick={() => handleDayClick(day, month, year)}
+        >
+          {day}
+        </button>
+      );
+    }
+
+    return days;
+  };
+
+  const dateRangeText = selectedStart && selectedEnd
+    ? `${formatDateDisplay(selectedStart)} - ${formatDateDisplay(selectedEnd)}`
+    : selectedStart
+    ? formatDateDisplay(selectedStart)
+    : label;
+
+  return (
+    <div className="date-picker-container" ref={pickerRef}>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="reports-filter-input"
+        style={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          gap: '8px',
+          minWidth: '220px',
+          justifyContent: 'space-between',
+        }}
+      >
+        <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <Calendar size={14} className="text-[rgb(var(--pk-txt-muted))]" />
+          <span style={{ fontSize: '12px', fontWeight: 600, color: selectedStart ? 'rgb(var(--pk-txt-pri))' : 'rgba(var(--pk-txt-muted),0.6)' }}>
+            {dateRangeText}
+          </span>
+        </span>
+        <ChevronDown size={14} className={`text-[rgb(var(--pk-txt-muted))] transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+      </button>
+
+      {isOpen && (
+        <div className="date-picker-dropdown">
+          <div className="date-picker-header">
+            <button onClick={() => handleMonthChange(-1)}>
+              <ChevronLeft size={14} />
+            </button>
+            <span>
+              {currentMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}
+            </span>
+            <button onClick={() => handleMonthChange(1)}>
+              <ChevronRight size={14} />
+            </button>
+          </div>
+          
+          <div className="date-picker-grid">
+            {renderCalendar()}
+          </div>
+
+          <div className="date-picker-footer">
+            <button className="clear-btn" onClick={handleClear}>
+              Clear
+            </button>
+            <button className="apply-btn" onClick={handleApply}>
+              Apply Range
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 const ReportsPage = () => {
+  injectReportStyles();
   const { t } = useLanguage();
   const getMesDayRange = useCallback(() => {
     const now = new Date();
@@ -338,10 +999,14 @@ const ReportsPage = () => {
     metrics: {},
     availableShifts: [],
     plcColumns: [],
-    pagination: { page: 1, pageSize: REPORT_ALL_ROWS_LIMIT, totalRows: 0, totalPages: 1 },
+    pagination: { page: 1, pageSize: REPORT_PREVIEW_ROWS_LIMIT, totalRows: 0, totalPages: 1 },
   });
+  const [reportPage, setReportPage] = useState({ page: 1, pageSize: REPORT_PREVIEW_ROWS_LIMIT });
   const [reportConfig, setReportConfig] = useState(() => loadReportConfig());
   const reportAbortRef = useRef(null);
+  const shotSummarySeqRef = useRef(0);
+  const reportPageCacheRef = useRef(new Map());
+  const shotSummaryCacheRef = useRef(new Map());
   
   const [filters, setFilters] = useState(() => {
     const r = (() => {
@@ -377,7 +1042,7 @@ const ReportsPage = () => {
   });
   const [appliedFilters, setAppliedFilters] = useState(filters);
   const [quickRange, setQuickRange] = useState("today");
-  const filterControlCls = "h-9 min-w-0 rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10";
+  const [isFilterExpanded, setIsFilterExpanded] = useState(true);
 
   const applyQuickRange = useCallback((key) => {
     const now = new Date();
@@ -411,7 +1076,40 @@ const ReportsPage = () => {
     reportAbortRef.current?.abort();
     const controller = new AbortController();
     reportAbortRef.current = controller;
-    const requestPayload = { ...appliedFilters, fast: "1", page: 1, pageSize: REPORT_ALL_ROWS_LIMIT };
+    const cacheKey = JSON.stringify({
+      filters: appliedFilters,
+      page: reportPage.page,
+      pageSize: reportPage.pageSize,
+    });
+    const summaryCacheKey = JSON.stringify({ filters: appliedFilters });
+    const mergeShotSummary = (pageData) => {
+      const cachedSummary = shotSummaryCacheRef.current.get(summaryCacheKey);
+      if (!cachedSummary) return pageData;
+      return {
+        ...pageData,
+        metrics: {
+          ...(pageData.metrics || {}),
+          plcShotSummary: cachedSummary.plcShotSummary,
+          plcShotSummarySource: cachedSummary.plcShotSummarySource,
+        },
+      };
+    };
+    const cachedPage = reportPageCacheRef.current.get(cacheKey);
+    if (cachedPage) {
+      const pageWithShotSummary = mergeShotSummary(cachedPage);
+      setData(pageWithShotSummary);
+      reportPageCacheRef.current.set(cacheKey, pageWithShotSummary);
+      setLoading(false);
+      setLoadProgress(0);
+      return;
+    }
+    const requestPayload = {
+      ...appliedFilters,
+      fast: "1",
+      includePlcSummary: "0",
+      page: reportPage.page,
+      pageSize: reportPage.pageSize,
+    };
     setLoading(true);
     setLoadProgress(8);
     const progressTimer = window.setInterval(() => {
@@ -425,20 +1123,57 @@ const ReportsPage = () => {
     try {
       const response = await reportApi.getData(requestPayload, { signal: controller.signal });
       setLoadProgress(100);
-      setData({
+      const pageData = mergeShotSummary({
+        reportMode: response.reportMode || "",
         rows: response.rows || [], 
         metrics: response.metrics || {},
         availableShifts: response.availableShifts || [],
         plcColumns: response.plcColumns || [],
-        pagination: response.pagination || { page: 1, pageSize: REPORT_ALL_ROWS_LIMIT, totalRows: response.rows?.length || 0, totalPages: 1 },
+        pagination: response.pagination || { page: reportPage.page, pageSize: reportPage.pageSize, totalRows: response.rows?.length || 0, totalPages: 1 },
       });
+      setData(pageData);
+      reportPageCacheRef.current.set(cacheKey, pageData);
+      if (reportPageCacheRef.current.size > 20) {
+        const oldestKey = reportPageCacheRef.current.keys().next().value;
+        reportPageCacheRef.current.delete(oldestKey);
+      }
+      const summarySeq = shotSummarySeqRef.current + 1;
+      shotSummarySeqRef.current = summarySeq;
+      const summaryFilters = { ...appliedFilters, fast: "1" };
+      reportApi.getShotSummary(summaryFilters)
+        .then((summary) => {
+          if (shotSummarySeqRef.current !== summarySeq) return;
+          const nextShotSummary = {
+            plcShotSummary: summary?.plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 },
+            plcShotSummarySource: summary?.plcShotSummarySource || "PLC_SUMMARY",
+          };
+          shotSummaryCacheRef.current.set(summaryCacheKey, nextShotSummary);
+          let nextDataForCache = null;
+          setData((prev) => {
+            nextDataForCache = {
+              ...prev,
+              metrics: {
+                ...(prev.metrics || {}),
+                ...nextShotSummary,
+              },
+            };
+            return nextDataForCache;
+          });
+          if (nextDataForCache) {
+            reportPageCacheRef.current.set(cacheKey, nextDataForCache);
+          }
+        })
+        .catch((summaryError) => {
+          if (shotSummarySeqRef.current !== summarySeq) return;
+          console.warn("Report shot summary failed", summaryError);
+        });
       if (response.warning) {
-        toast.warning(response.warning);
+        toast(response.warning);
       }
     } catch (e) {
       if (e?.code === "ERR_CANCELED" || e?.name === "CanceledError") return;
       console.error(e);
-      toast.error(t("reports.failedLoad", "Failed to load production analytics"));
+      toast.error(t("reports.failedLoad", "Preview failed to load. You can still download the filtered Excel report."));
     } finally {
       window.clearInterval(progressTimer);
       if (reportAbortRef.current === controller) {
@@ -449,22 +1184,21 @@ const ReportsPage = () => {
         reportAbortRef.current = null;
       }
     }
-  }, [appliedFilters]);
+  }, [appliedFilters, reportPage.page, reportPage.pageSize]);
 
   const refreshReportData = useCallback(() => {
+    reportPageCacheRef.current.clear();
+    shotSummaryCacheRef.current.clear();
     fetchData();
   }, [fetchData]);
 
   const applyReportFilters = useCallback(() => {
+    reportPageCacheRef.current.clear();
+    shotSummaryCacheRef.current.clear();
+    setReportPage((prev) => ({ ...prev, page: 1 }));
     setAppliedFilters(filters);
-  }, [filters]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setAppliedFilters(filters);
-    }, REPORT_AUTO_APPLY_MS);
-    return () => window.clearTimeout(timer);
-  }, [filters]);
+    toast.success(t("reports.filtersApplied", "✅ Filters applied successfully"));
+  }, [filters, t]);
 
   useEffect(() => {
     const metadataConfig = { timeout: 45000, suppressGlobalError: true };
@@ -493,7 +1227,7 @@ const ReportsPage = () => {
   const handleExport = async (type = "full") => {
     setExportLoading(true);
     setExportProgress(8);
-    const toastId = toast.loading(t("reports.preparingReport", "Preparing report..."));
+    const toastId = toast.loading(t("reports.preparingReport", "📊 Preparing report..."));
     const exportTimer = window.setInterval(() => {
       setExportProgress((prev) => {
         if (prev < 45) return prev + 6;
@@ -504,13 +1238,24 @@ const ReportsPage = () => {
     }, 700);
     try {
       let blob;
-      const exportFilters = { ...appliedFilters, fast: "1", includePlcSummary: "0", exportLimit: 10000 };
+      const { page, pageSize, limit, offset, ...filtersWithoutPagination } = appliedFilters || {};
+      void page; void pageSize; void limit; void offset;
+      const exportFilters = { ...filtersWithoutPagination, fast: "0", full: "1", includePlcSummary: "0" };
+      const downloadConfig = {
+        onDownloadProgress: (event) => {
+          if (event.total) {
+            const percent = Math.min(95, Math.max(12, Math.round((event.loaded / event.total) * 95)));
+            setExportProgress(percent);
+            return;
+          }
+          setExportProgress((prev) => Math.min(92, Math.max(prev, prev + 1)));
+        },
+      };
 
-      // Pass filters and reportConfig separately; services.js builds the body.
-      if (type === 'full')  blob = await reportApi.exportFull(exportFilters, reportConfig);
-      else if (type === 'ng')    blob = await reportApi.exportNG(exportFilters, reportConfig);
-      else if (type === 'parts') blob = await reportApi.exportParts(exportFilters, reportConfig);
-      else if (type === 'audit') blob = await reportApi.exportAudit(exportFilters, reportConfig);
+      if (type === 'full')  blob = await reportApi.exportFull(exportFilters, reportConfig, downloadConfig);
+      else if (type === 'ng')    blob = await reportApi.exportNG(exportFilters, reportConfig, downloadConfig);
+      else if (type === 'parts') blob = await reportApi.exportParts(exportFilters, reportConfig, downloadConfig);
+      else if (type === 'audit') blob = await reportApi.exportAudit(exportFilters, reportConfig, downloadConfig);
 
       if (!blob) throw new Error("Empty response from export engine");
       setExportProgress(100);
@@ -524,16 +1269,25 @@ const ReportsPage = () => {
       link.click();
       link.remove();
       window.URL.revokeObjectURL(url);
-      toast.success(t("reports.reportDownloaded", "Report downloaded successfully"), { id: toastId });
+      toast.success(t("reports.reportDownloaded", "✅ Report downloaded successfully"), { id: toastId });
     } catch (e) {
       console.error("Export failed:", e);
       const status = Number(e?.response?.status || 0);
       const code = String(e?.code || "").toUpperCase();
+      const errorBlob = e?.response?.data instanceof Blob ? e.response.data : null;
+      let serverMessage = "";
+      if (errorBlob && errorBlob.type?.includes("application/json")) {
+        try {
+          serverMessage = JSON.parse(await errorBlob.text())?.error || "";
+        } catch (_parseError) {
+          serverMessage = "";
+        }
+      }
       const message = status === 504
-        ? "Export timed out at server/proxy. Try a shorter date range or increase nginx proxy timeout for large reports."
+        ? "⏱️ Template export timed out. Try a shorter date range."
         : code === "ECONNABORTED"
-        ? "Export timed out. Try a shorter date range or run again during low traffic."
-        : e?.response?.data?.error || t("reports.exportFailed", "Export failed - check console");
+        ? "⏱️ Export timed out. Try a shorter date range."
+        : serverMessage || e?.response?.data?.error || t("reports.exportFailed", "Export failed");
       toast.error(message, { id: toastId, duration: 7000 });
     } finally {
       window.clearInterval(exportTimer);
@@ -542,6 +1296,24 @@ const ReportsPage = () => {
         setExportProgress(0);
       }, 350);
     }
+  };
+
+  const handleDateRangeApply = (start, end) => {
+    setFilters((prev) => ({
+      ...prev,
+      dateFrom: toDatetimeLocal(start),
+      dateTo: toDatetimeLocal(end),
+    }));
+    setQuickRange("custom");
+  };
+
+  const handleDateRangeClear = () => {
+    setFilters((prev) => ({
+      ...prev,
+      dateFrom: '',
+      dateTo: '',
+    }));
+    setQuickRange("");
   };
 
   const reportTable = useMemo(() => {
@@ -612,18 +1384,19 @@ const ReportsPage = () => {
     });
 
     const dynamicColumns = [
-      { key: "srNo", label: "Sr No" },
-      { key: "plc_shot_number", label: "Shot Number" },
-      { key: "barcode", label: "Part Serial No.", blankIfEmpty: true },
-      { key: "customerCode", label: "Customer QR Code" },
-      { key: "createdAt", label: "Scanned Date & Time" },
+      { key: "srNo", label: "#" },
+      { key: "plc_shot_number", label: "Shot #" },
+      { key: "barcode", label: "Part Serial", blankIfEmpty: true },
+      { key: "customerCode", label: "Customer QR" },
+      { key: "createdAt", label: "First Scan" },
+      { key: "finalResultAt", label: "Final Result Time" },
       ...stationPairs.map((s) => ({
         key: `station_${s.key}`,
         label: s.label,
         renderAsText: Boolean(s.sharedLeakOperation),
         renderLeakOperation: Boolean(s.sharedLeakOperation),
       })),
-      { key: "overallStatus", label: "Final Status" },
+      { key: "overallStatus", label: "Status" },
       { key: "rejectionCategory", label: "Category" },
       { key: "rejectionReason", label: "Rejection" },
       { key: "rejectionView", label: "View" },
@@ -645,9 +1418,12 @@ const ReportsPage = () => {
       const stationResults = {};
       const stationDisplayValues = {};
       const operationResults = {};
+      const operationResultTimes = {};
       const stationCycleTimes = {};
       const plcData = {};
       let leakData = null;
+      let leakResultTime = null;
+      let finalInspectionOkAt = null;
       const firstScanAt = entries.reduce((earliest, row) => {
         const raw = row.firstScanCreatedAt || row.createdAtRaw || row.createdAt || null;
         if (!raw) return earliest;
@@ -671,9 +1447,24 @@ const ReportsPage = () => {
           );
           if (normalizedStationResult) {
             stationResults[stationKey] = pickPreferredResult(stationResults[stationKey], normalizedStationResult);
+            const resultTime = getResultTimestamp(row);
+            if (resultTime) {
+              const currentTime = operationResultTimes[stationOp];
+              if (!currentTime || new Date(resultTime).getTime() >= new Date(currentTime).getTime()) {
+                operationResultTimes[stationOp] = resultTime;
+              }
+            }
           }
           if (stationOp && normalizedStationResult) {
             operationResults[stationOp] = pickPreferredOperationResult(operationResults[stationOp], normalizedStationResult);
+          }
+          if (normalizedStationResult === "OK" && isFinalInspectionOperation(row)) {
+            const resultTime = getResultTimestamp(row);
+            if (resultTime) {
+              if (!finalInspectionOkAt || new Date(resultTime).getTime() >= new Date(finalInspectionOkAt).getTime()) {
+                finalInspectionOkAt = resultTime;
+              }
+            }
           }
           stationCycleTimes[stationKey] = row.cycleTime || "-";
         }
@@ -695,6 +1486,7 @@ const ReportsPage = () => {
         const actualLeakData = Array.isArray(leakData) ? leakData[leakData.length - 1] : leakData;
         const leakStatus = getLeakTestStatus(leakData);
         const leakMachineName = String(actualLeakData?.matchedMachineName || actualLeakData?.Machine || actualLeakData?.machineName || "").trim();
+        leakResultTime = actualLeakData?.Cycle_End_Time || actualLeakData?.cycleEndTime || actualLeakData?.updatedAt || actualLeakData?.createdAt || null;
         stationResults[LEAK_TEST_SHARED_KEY] = pickPreferredResult(stationResults[LEAK_TEST_SHARED_KEY], leakStatus);
         stationDisplayValues[LEAK_TEST_SHARED_KEY] = leakMachineName
           ? `${leakMachineName} ${leakStatus || "-"}`.trim()
@@ -707,10 +1499,77 @@ const ReportsPage = () => {
         .map((row) => sanitizeCustomerQrValue(row.customerQrCode || row.customerCode || row.customer_qr || ""))
         .find((value) => String(value || "").trim() && String(value).trim() !== "-") ||
         (looksLikeCustomerQrValue(partKey) ? partKey : "");
+      const customerQrPending = entries.some((row) => Boolean(row.customerQrPending || row.customer_qr_pending));
       const displayShotNumber = entries
         .map((row) => row.plcReading?.shot_number ?? row.plc_reading?.shot_number ?? row.shot_number ?? row.shotNumber ?? "")
         .map((value) => String(value || "").trim())
         .find((value) => value && value !== "-") || "";
+      const resolveOverallStatus = () => {
+        const effectiveRequiredOperations = hasLeakData
+          ? requiredOperations
+          : requiredOperations.filter((operation) => operation !== LEAK_TEST_OPERATION);
+        const vals = effectiveRequiredOperations.map((operation) => normResult(operationResults[operation])).filter(Boolean);
+        if (vals.some((v) => v === "NG")) return "NG";
+        if (finalInspectionOkAt) return "PASSED";
+        if (vals.some((v) => v === "IN_PROGRESS")) return "IN_PROGRESS";
+        const finalStatus = normalizeFinalPartStatus(first.partStatus || first.part_status || first.status);
+        if (finalStatus === "NG") return "NG";
+        if (effectiveRequiredOperations.length > 1 && vals.length >= effectiveRequiredOperations.length && vals.every((v) => v === "OK")) return "PASSED";
+        if (finalStatus === "PASSED") return "PASSED";
+        return "IN_PROGRESS";
+      };
+      const overallStatus = customerQrPending && !mappedCustomerCode ? "IN_PROGRESS" : resolveOverallStatus();
+      const finalResultRaw = (() => {
+        if (overallStatus === "NG") {
+          return entries.reduce((picked, row) => {
+            const normalized = normResult(
+              String(row.industrialResult || row.statusLabel || row.result || "-").toUpperCase(),
+              row.reason || row.interlock_reason,
+              row
+            );
+            if (normalized !== "NG") return picked;
+            const resultTime = getResultTimestamp(row);
+            if (!resultTime) return picked;
+            if (!picked) return resultTime;
+            return new Date(resultTime).getTime() < new Date(picked).getTime() ? resultTime : picked;
+          }, leakResultTime);
+        }
+        if (overallStatus === "PASSED") {
+          const effectiveRequiredOperations = hasLeakData
+            ? requiredOperations
+            : requiredOperations.filter((operation) => operation !== LEAK_TEST_OPERATION);
+          const terminalOperation = effectiveRequiredOperations[effectiveRequiredOperations.length - 1];
+          return finalInspectionOkAt || operationResultTimes[terminalOperation] || entries.reduce((latest, row) => {
+            const normalized = normResult(
+              String(row.industrialResult || row.statusLabel || row.result || "-").toUpperCase(),
+              row.reason || row.interlock_reason,
+              row
+            );
+            if (normalized !== "OK") return latest;
+            const resultTime = getResultTimestamp(row);
+            if (!resultTime) return latest;
+            if (!latest) return resultTime;
+            return new Date(resultTime).getTime() > new Date(latest).getTime() ? resultTime : latest;
+          }, null);
+        }
+        return null;
+      })();
+      const finalResultInAppliedRange = (() => {
+        if (!finalResultRaw) return false;
+        const time = new Date(finalResultRaw).getTime();
+        if (!Number.isFinite(time)) return false;
+        const from = appliedFilters.dateFrom ? new Date(appliedFilters.dateFrom).getTime() : 0;
+        const to = appliedFilters.dateTo ? new Date(appliedFilters.dateTo).getTime() : 0;
+        if (Number.isFinite(from) && from && time < from) return false;
+        if (Number.isFinite(to) && to && time > to) return false;
+        return true;
+      })();
+      const hasKnownFinalResultTime = Boolean(finalResultRaw);
+      const hasExplicitStatusFilter = Boolean(String(appliedFilters.status || appliedFilters.resultType || "").trim());
+      const displayOverallStatus = !hasExplicitStatusFilter && ["OK", "NG"].includes(normResult(overallStatus)) && hasKnownFinalResultTime && !finalResultInAppliedRange
+        ? "IN_PROGRESS"
+        : overallStatus;
+      const displayFinalResultRaw = displayOverallStatus === "IN_PROGRESS" ? null : finalResultRaw;
       const shaped = {
         reportGroupKey: partKey,
         traceabilityPartId: partKey,
@@ -724,24 +1583,11 @@ const ReportsPage = () => {
         barcode: displayPartId,
         plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
+        finalResultAt: displayFinalResultRaw ? new Date(displayFinalResultRaw).toLocaleString("en-IN") : "-",
         partName: plcPartDie.partName || first.partName || first.modelName || first.componentName || "-",
         dieName: plcPartDie.dieName || first.dieName || "-",
-        customerCode: mappedCustomerCode || "-",
-        overallStatus: (() => {
-          const effectiveRequiredOperations = hasLeakData
-            ? requiredOperations
-            : requiredOperations.filter((operation) => operation !== LEAK_TEST_OPERATION);
-          const vals = effectiveRequiredOperations.map((operation) => normResult(operationResults[operation])).filter(Boolean);
-          if (vals.some((v) => v === "NG")) return "NG";
-          if (vals.some((v) => v === "IN_PROGRESS")) return "IN_PROGRESS";
-          const finalStatus = normalizeFinalPartStatus(first.partStatus || first.part_status || first.status);
-          if (finalStatus === "NG") return "NG";
-          const terminalOperation = effectiveRequiredOperations[effectiveRequiredOperations.length - 1];
-          if (terminalOperation && normResult(operationResults[terminalOperation]) === "OK") return "PASSED";
-          if (effectiveRequiredOperations.length > 0 && vals.length >= effectiveRequiredOperations.length && vals.every((v) => v === "OK")) return "PASSED";
-          if (finalStatus === "PASSED") return "PASSED";
-          return "IN_PROGRESS";
-        })(),
+        customerCode: mappedCustomerCode || (customerQrPending ? "Customer QR Pending" : "-"),
+        overallStatus: displayOverallStatus,
         ngReason: (() => {
           const rawReason = first.reason || first.interlock_reason || "";
           const normalizedReason = String(rawReason || "").trim().toUpperCase();
@@ -818,22 +1664,29 @@ const ReportsPage = () => {
       return shaped;
     });
 
-    return { columns: dynamicColumns, rows: dynamicRows };
-  }, [data.rows, data.plcColumns, filters.machineId, machines]);
+    const visibleRows = dynamicRows.map((row, index, list) => ({
+      ...row,
+      srNo: list.length - index,
+    }));
+
+    return { columns: dynamicColumns, rows: visibleRows };
+  }, [data.rows, data.plcColumns, filters.machineId, machines, appliedFilters.dateFrom, appliedFilters.dateTo]);
 
   const reportSummaryMetrics = useMemo(() => {
     const metrics = data.metrics || {};
-    const filteredTotal = Math.max(
-      Number(metrics.totalProduction || 0),
-      Number(data.pagination?.totalRows || 0),
-      Number(Array.isArray(reportTable.rows) ? reportTable.rows.length : 0)
+    const traceabilityProduction = Number(
+      metrics.traceabilityProduction ??
+      metrics.totalProduction ??
+      data.pagination?.totalRows ??
+      (Array.isArray(reportTable.rows) ? reportTable.rows.length : 0)
     );
     const totalOK = Number(metrics.totalOK || 0);
     const totalNG = Number(metrics.totalNG || 0);
     const inProgress = Number(metrics.inProgress || 0);
     const productionBase = totalOK + totalNG;
     return {
-      totalProduction: filteredTotal,
+      totalProduction: traceabilityProduction,
+      traceabilityProduction,
       totalOK,
       totalNG,
       inProgress,
@@ -894,196 +1747,225 @@ const ReportsPage = () => {
   }, [availableDieCastingMachines, filters.lineId, filters.dieCastingMachine]);
 
   return (
-    <div className="space-y-4 pb-16 rise-in">
-      {/* Page Header */}
-      <div className="db-header-card mb-6">
-        <div className="db-header-gradient-bar" />
-        <div className="db-header-inner">
-          <div className="db-header-title-group">
-            <div className="db-header-icon-box">
-              <FileText size={22} />
+    <div className="space-y-5 pb-16 reports-container">
+      {/* ── Enhanced Page Header ── */}
+      <div className="reports-card overflow-hidden">
+        <div className="reports-gradient-bar" />
+        <div className="flex items-start justify-between p-5 md:p-6">
+          <div className="flex items-start gap-4">
+            <div className="hidden sm:flex w-12 h-12 rounded-xl bg-gradient-to-br from-[rgb(var(--pk-navy))] to-[rgb(var(--pk-steel))] flex-shrink-0 items-center justify-center shadow-lg shadow-[rgba(var(--pk-navy),0.25)]">
+              <FileText size={22} className="text-[rgb(var(--pk-linen))]" />
             </div>
             <div>
-              <h1 className="db-header-title text-text-main">{t("reports.title", "Traceability Report")}</h1>
-              <p className="db-header-subtitle">{t("reports.subtitle", "Production analytics and PLC cycle trace data")}</p>
+              <h1 className="text-xl font-extrabold text-[rgb(var(--pk-txt-pri))] tracking-tight flex items-center gap-2">
+                {t("reports.title", "📊 Traceability Report")}
+               
+              </h1>
+              <p className="text-sm text-[rgb(var(--pk-txt-sec))] mt-0.5 flex items-center gap-2">
+                <span className="inline-flex items-center gap-1 text-xs">
+                  <Database size={12} className="text-[rgb(var(--pk-txt-muted))]" />
+                  {data.pagination?.totalRows || 0} records
+                </span>
+                <span className="w-px h-4 bg-[rgba(var(--pk-bdr),0.2)]" />
+                <span className="inline-flex items-center gap-1 text-xs">
+                  <Activity size={12} className="text-[rgb(var(--pk-txt-muted))]" />
+                  {loading ? t("reports.loading", "Loading...") : t("reports.productionAnalytics", "Production Analytics")}
+                </span>
+              </p>
             </div>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              disabled={loading}
+              onClick={refreshReportData}
+              className="reports-btn-secondary"
+            >
+              <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
+              <span className="hidden sm:inline">{loading ? t("reports.refreshing", "Refreshing...") : t("reports.refresh", "Refresh")}</span>
+            </button>
+            <button
+              disabled={exportLoading}
+              onClick={() => handleExport("full")}
+              className="reports-btn-export"
+            >
+              {exportLoading && (
+                <span
+                  className="absolute inset-y-0 left-0 bg-white/20 transition-all duration-300"
+                  style={{ width: `${Math.max(8, exportProgress)}%` }}
+                />
+              )}
+              <span className="relative inline-flex items-center gap-2">
+                {exportLoading ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
+                <span className="hidden sm:inline">{exportLoading ? `Preparing ${exportProgress}%` : t("reports.downloadReport", "Download Report")}</span>
+                <span className="sm:hidden">{exportLoading ? `${exportProgress}%` : <Download size={14} />}</span>
+              </span>
+            </button>
           </div>
         </div>
       </div>
 
-      <div className="bg-bg-card border border-border rounded-xl p-3 mb-2 flex items-center justify-between">
-        <p className="text-[14px] font-bold text-text-muted uppercase tracking-wider">{t("reports.report", "Report")}</p>
-        <div className="flex items-center gap-2">
-          <button
-            disabled={loading}
-            onClick={refreshReportData}
-            className="inline-flex items-center gap-2 bg-bg-dark text-text-main px-3 py-2 rounded-lg text-xs font-bold border border-border hover:border-primary/40 transition-all disabled:opacity-60"
-          >
-            <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> {loading ? t("reports.refreshing", "Refreshing...") : t("reports.refresh", "Refresh")}
-          </button>
-          <button
-            disabled={exportLoading}
-            onClick={() => handleExport("full")}
-            className="relative inline-flex min-w-[172px] items-center justify-center gap-2 overflow-hidden bg-primary text-on-primary px-4 py-2.5 rounded-lg text-xs font-bold shadow-lg shadow-primary/20 hover:brightness-110 active:scale-95 transition-all disabled:opacity-75"
-          >
-            {exportLoading && (
-              <span
-                className="absolute inset-y-0 left-0 bg-white/20 transition-all duration-500"
-                style={{ width: `${Math.max(8, exportProgress)}%` }}
-              />
-            )}
-            <span className="relative inline-flex items-center gap-2">
-              {exportLoading ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
-              {exportLoading ? `Preparing ${exportProgress}%` : t("reports.downloadReport", "Download Report")}
+      {/* ── Enhanced Filters ── */}
+      <div className="reports-filter-group">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-3">
+            <Filter size={16} className="text-[rgb(var(--pk-txt-muted))]" />
+            <span className="text-sm font-bold text-[rgb(var(--pk-txt-pri))]">{t("reports.filters", "Filters")}</span>
+            <span className="text-xs text-[rgb(var(--pk-txt-muted))] bg-[rgba(var(--pk-bdr),0.06)] px-2 py-0.5 rounded-full border border-[rgba(var(--pk-bdr),0.06)]">
+              {Object.values(filters).filter(v => v && String(v).trim()).length} active
             </span>
-          </button>
+          </div>
+         
+        </div>
+
+        <div className={`grid gap-2.5 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 reports-filters-grid ${isFilterExpanded ? '' : 'max-h-48 overflow-hidden'}`}>
+          <select
+            value={filters.partType === "OTHER" ? "__OTHER__" : (filters.partName || "")}
+            onChange={(e) => {
+              const value = e.target.value;
+              if (value === "__OTHER__") {
+                setFilters((prev) => ({ ...prev, partName: "", partType: "OTHER", dieName: "", dieCastingMachine: "" }));
+                return;
+              }
+              setFilters((prev) => ({ ...prev, partName: normalizePartToken(value), partType: prev.partType === "OTHER" ? "" : prev.partType, dieName: "", dieCastingMachine: "" }));
+            }}
+            className="reports-filter-input"
+          >
+            <option value="">🔹 All Parts</option>
+            <option value="__OTHER__">📌 Other Parts</option>
+            {availablePartNames.map((partName) => <option key={partName} value={partName}>{partName}</option>)}
+          </select>
+          <select
+            value={filters.dieName || ""}
+            onChange={(e) => setFilters((prev) => ({ ...prev, dieName: normalizePartToken(e.target.value), dieCastingMachine: "" }))}
+            className="reports-filter-input"
+          >
+            <option value="">🔸 All Dies</option>
+            {availableDies.map((dieName) => <option key={dieName} value={dieName}>{dieName}</option>)}
+          </select>
+          <select
+            value={filters.dieCastingMachine || ""}
+            onChange={(e) => setFilters((prev) => ({ ...prev, dieCastingMachine: normalizePartToken(e.target.value) }))}
+            className="reports-filter-input"
+          >
+            <option value="">🏭 All Die Casting Machines</option>
+            {availableDieCastingMachines.map((machineName) => <option key={machineName} value={machineName}>{machineName}</option>)}
+          </select>
+          <select
+            value={filters.machineId}
+            onChange={(e) => setFilters((prev) => ({ ...prev, machineId: e.target.value }))}
+            className="reports-filter-input"
+          >
+            <option value="">⚙️ All Quality Gates</option>
+            {scopedMachines
+              .filter((m) => !filters.lineId || String(m.line_id || m.lineId || "") === String(filters.lineId))
+              .filter((m) => !filters.lineName || String(m.line_name || m.lineName || "").trim() === filters.lineName)
+              .map((m) => <option key={m.id} value={m.id}>{m.machine_name || m.machineName}</option>)}
+          </select>
+          <input
+            value={filters.barcode || ""}
+            onChange={(e) => setFilters((prev) => ({ ...prev, barcode: e.target.value }))}
+            placeholder="🔍 Customer QR / Part ID / Shot #"
+            className="reports-filter-input"
+          />
+          <select
+            value={filters.status || ""}
+            onChange={(e) => setFilters((prev) => ({ ...prev, status: e.target.value }))}
+            className="reports-filter-input"
+          >
+            <option value="">📊 All Status</option>
+            <option value="OK">✅ PASSED</option>
+            <option value="NG">❌ FAILED</option>
+            <option value="IN_PROGRESS">⏳ IN PROGRESS</option>
+          </select>
+          <select
+            value={filters.shiftCode || ""}
+            onChange={(e) => setFilters((prev) => ({ ...prev, shiftCode: e.target.value }))}
+            className="reports-filter-input"
+          >
+            <option value="">🕐 All Shifts</option>
+            {((data.availableShifts && data.availableShifts.length) ? data.availableShifts : availableShifts).map((shift) => (
+              <option key={shift.shiftCode || shift.shift_code} value={shift.shiftCode || shift.shift_code}>
+                {shift.shiftName || shift.shift_name || shift.shiftCode || shift.shift_code}
+              </option>
+            ))}
+          </select>
+          
+          {/* Custom Date Range Picker */}
+          <DateRangePicker
+            startDate={filters.dateFrom}
+            endDate={filters.dateTo}
+            onApply={handleDateRangeApply}
+            onClear={handleDateRangeClear}
+            label="📅 Select Date Range"
+          />
+
+          <div className="flex items-center gap-1.5 col-span-1 md:col-span-2 lg:col-span-1">
+            <button
+              onClick={() => {
+                const nextFilters = {
+                  dateFrom: toDatetimeLocal(getMesDayRange().start),
+                  dateTo: toDatetimeLocal(getMesDayRange().end),
+                  plantId: '', lineId: '', machineId: '', partName: '', dieName: '', dieCastingMachine: '', lineName: '', shiftCode: '', status: '', partType: '', station: '', barcode: '', customerCode: '',
+                  operatorId: '', resultType: '', modelCode: '', operationNo: ''
+                };
+                setQuickRange("today");
+                setFilters(nextFilters);
+                setAppliedFilters(nextFilters);
+                setReportPage((prev) => ({ ...prev, page: 1 }));
+                reportPageCacheRef.current.clear();
+                shotSummaryCacheRef.current.clear();
+                toast(t("reports.filtersCleared", "🧹 Filters cleared"));
+              }}
+              className="reports-btn-clear flex-1"
+            >
+              <X size={13} /> {t("reports.clear", "Clear")}
+            </button>
+            <button
+              disabled={loading}
+              onClick={applyReportFilters}
+              className="reports-btn-primary flex-1"
+            >
+              <Zap size={14} /> {loading ? t("reports.loading", "Loading...") : t("reports.applyFilters", "Apply")}
+            </button>
+          </div>
+        </div>
+
+        {/* Active filters summary */}
+        <div className="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-[rgba(var(--pk-bdr),0.06)]">
+          {Object.entries(filters).filter(([key, value]) => value && String(value).trim() && !['dateFrom', 'dateTo'].includes(key)).slice(0, 5).map(([key, value]) => (
+            <span key={key} className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full bg-[rgba(var(--pk-steel),0.06)] border border-[rgba(var(--pk-steel),0.1)] text-[rgb(var(--pk-txt-sec))]">
+              <span className="opacity-50">{key}:</span> {String(value).slice(0, 20)}
+            </span>
+          ))}
+          {Object.entries(filters).filter(([key, value]) => value && String(value).trim() && !['dateFrom', 'dateTo'].includes(key)).length > 5 && (
+            <span className="text-[10px] text-[rgb(var(--pk-txt-muted))] font-medium">+{Object.entries(filters).filter(([key, value]) => value && String(value).trim() && !['dateFrom', 'dateTo'].includes(key)).length - 5} more</span>
+          )}
+          {filters.dateFrom && filters.dateTo && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full bg-[rgba(var(--pk-amber),0.06)] border border-[rgba(var(--pk-amber),0.1)] text-[rgb(var(--pk-amber))]">
+              <Calendar size={10} /> {new Date(filters.dateFrom).toLocaleDateString()} → {new Date(filters.dateTo).toLocaleDateString()}
+            </span>
+          )}
         </div>
       </div>
-      <div className="bg-white border border-border rounded-lg p-4 shadow-sm grid gap-3 md:grid-cols-2 lg:grid-cols-5" style={{ boxShadow: "0 2px 12px rgba(26,50,99,.08),0 1px 3px rgba(26,50,99,.05)" }}>
-        <PlantLineSelector
-          value={filters}
-          onChange={(scope) => setFilters((prev) => ({ ...prev, ...scope, machineId: "", partName: "", dieName: "", dieCastingMachine: "" }))}
-          includeAll
-          compact
-          requirePlantForLine
-          hideLabels
-          className="grid grid-cols-1 gap-2 min-w-0 sm:grid-cols-2 xl:col-span-2"
-          inputClassName={filterControlCls}
-        />
-        <select
-          value={filters.partType === "OTHER" ? "__OTHER__" : (filters.partName || "")}
-          onChange={(e) => {
-            const value = e.target.value;
-            if (value === "__OTHER__") {
-              setFilters((prev) => ({ ...prev, partName: "", partType: "OTHER", dieName: "", dieCastingMachine: "" }));
-              return;
-            }
-            setFilters((prev) => ({ ...prev, partName: normalizePartToken(value), partType: prev.partType === "OTHER" ? "" : prev.partType, dieName: "", dieCastingMachine: "" }));
-          }}
-          className={filterControlCls}
-        >
-          <option value="">All Parts</option>
-          <option value="__OTHER__">Other Parts</option>
-          {availablePartNames.map((partName) => <option key={partName} value={partName}>{partName}</option>)}
-        </select>
-        <select
-          value={filters.dieName || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, dieName: normalizePartToken(e.target.value), dieCastingMachine: "" }))}
-          className={filterControlCls}
-        >
-          <option value="">All Dies</option>
-          {availableDies.map((dieName) => <option key={dieName} value={dieName}>{dieName}</option>)}
-        </select>
-        <select
-          value={filters.dieCastingMachine || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, dieCastingMachine: normalizePartToken(e.target.value) }))}
-          className={filterControlCls}
-        >
-          <option value="">All Die Casting Machines</option>
-          {availableDieCastingMachines.map((machineName) => <option key={machineName} value={machineName}>{machineName}</option>)}
-        </select>
-        <select
-          value={filters.machineId}
-          onChange={(e) => setFilters((prev) => ({ ...prev, machineId: e.target.value }))}
-          className={filterControlCls}
-        >
-          <option value="">All Quality Gates</option>
-          {scopedMachines
-            .filter((m) => !filters.lineId || String(m.line_id || m.lineId || "") === String(filters.lineId))
-            .filter((m) => !filters.lineName || String(m.line_name || m.lineName || "").trim() === filters.lineName)
-            .map((m) => <option key={m.id} value={m.id}>{m.machine_name || m.machineName}</option>)}
-        </select>
-        <input
-          value={filters.barcode || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, barcode: e.target.value }))}
-          placeholder="Customer QR / Part ID / Shot Number"
-          className={filterControlCls}
-        />
-        <select
-          value={filters.status || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, status: e.target.value }))}
-          className={filterControlCls}
-        >
-          <option value="">{t("reports.allStatus", "All Status")}</option>
-          <option value="OK">{t("reports.passed", "PASSED")}</option>
-          <option value="NG">{t("reports.failed", "FAILED")}</option>
-          <option value="IN_PROGRESS">{t("reports.inProgress", "IN PROGRESS")}</option>
-        </select>
-        <select
-          value={filters.shiftCode || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, shiftCode: e.target.value }))}
-          className={filterControlCls}
-        >
-          <option value="">{t("reports.allShifts", "All Shifts")}</option>
-          {((data.availableShifts && data.availableShifts.length) ? data.availableShifts : availableShifts).map((shift) => (
-            <option key={shift.shiftCode || shift.shift_code} value={shift.shiftCode || shift.shift_code}>
-              {shift.shiftName || shift.shift_name || shift.shiftCode || shift.shift_code}
-            </option>
-          ))}
-        </select>
-        <select
-          value={quickRange}
-          onChange={(e) => {
-            const key = e.target.value;
-            setQuickRange(key);
-            applyQuickRange(key);
-          }}
-          className={filterControlCls}
-        >
-          <option value="today">{t("reports.today", "Today")}</option>
-          <option value="yesterday">{t("reports.yesterday", "Yesterday")}</option>
-          <option value="last7">{t("reports.last7Days", "Last 7 Days")}</option>
-          <option value="last15">{t("reports.last15Days", "Last 15 Days")}</option>
-          <option value="last30">{t("reports.last1Month", "Last 1 Month")}</option>
-        </select>
-        <input
-          type="datetime-local"
-          value={filters.dateFrom || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, dateFrom: e.target.value }))}
-          className={filterControlCls}
-        />
-        <input
-          type="datetime-local"
-          value={filters.dateTo || ""}
-          onChange={(e) => setFilters((prev) => ({ ...prev, dateTo: e.target.value }))}
-          className={filterControlCls}
-        />
-        <button
-          onClick={() => {
-            const nextFilters = {
-              dateFrom: toDatetimeLocal(getMesDayRange().start),
-              dateTo: toDatetimeLocal(getMesDayRange().end),
-              plantId: '', lineId: '', machineId: '', partName: '', dieName: '', dieCastingMachine: '', lineName: '', shiftCode: '', status: '', partType: '', station: '', barcode: '', customerCode: '',
-              operatorId: '', resultType: '', modelCode: '', operationNo: ''
-            };
-            setQuickRange("today");
-            setFilters(nextFilters);
-            setAppliedFilters(nextFilters);
-          }}
-          className="h-9 rounded-md border border-red-200 bg-red-50 px-3 text-xs font-bold text-red-600 transition-all hover:border-red-300"
-        >
-          {t("reports.clear", "Clear")}
-        </button>
-        <button
-          disabled={loading}
-          onClick={applyReportFilters}
-          className="h-9 rounded-md border px-3 text-xs font-bold inline-flex items-center justify-center gap-2 disabled:opacity-60"
-          style={{ background: "rgba(84,119,146,0.10)", borderColor: "rgba(84,119,146,0.30)", color: "rgb(84,119,146)" }}
-        >
-          <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> {loading ? t("reports.loading", "Loading...") : t("reports.applyFilters", "Apply Filters")}
-        </button>
-      </div>
 
+      {/* ── Summary Cards ── */}
       <ReportSummaryCards metrics={reportSummaryMetrics} loading={loading} />
 
+      {/* ── Table ── */}
       <ReportTable
         rows={reportTable.rows}
         columns={reportTable.columns}
         loading={loading}
         progress={loadProgress}
         pagination={data.pagination}
-        defaultPageSize={500}
-        pageSizeOptions={[500, 1000, 2000]}
+        onPageChange={(page) => setReportPage((prev) => ({ ...prev, page }))}
+        onPageSizeChange={(pageSize) => {
+          reportPageCacheRef.current.clear();
+          shotSummaryCacheRef.current.clear();
+          setReportPage({ page: 1, pageSize });
+        }}
+        defaultPageSize={REPORT_PREVIEW_ROWS_LIMIT}
+        pageSizeOptions={[100, 250, 500, 1000]}
       />
     </div>
   );

@@ -496,6 +496,10 @@ export const dashboardApi = {
     const { data } = await apiClient.get(ENDPOINTS.dashboard.report, { ...config, params });
     return data;
   },
+  rejectionAnalysis: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.rejectionAnalysis, { ...config, params });
+    return data;
+  },
   exportReport: async (params) => {
     const { data } = await apiClient.post(ENDPOINTS.dashboard.exportFullReport, {
       filters: params || {},
@@ -713,7 +717,16 @@ export const reportApi = {
     });
     return data;
   },
-  exportFull: async (params, reportConfig) => {
+  getShotSummary: async (params, config = {}) => {
+    const cleanParams = normalizeReportFilters(params);
+    const { data } = await apiClient.get(ENDPOINTS.reports.shotSummary, {
+      params: cleanParams,
+      timeout: 180000,
+      ...config,
+    });
+    return data;
+  },
+  exportFull: async (params, reportConfig, config = {}) => {
     const cleanParams = normalizeReportFilters(params);
     const { data } = await apiClient.post(ENDPOINTS.reports.exportFull, {
       filters: cleanParams,
@@ -721,10 +734,11 @@ export const reportApi = {
     }, {
       responseType: "blob",
       timeout: 600000,
+      ...config,
     });
     return data;
   },
-  exportNG: async (params, reportConfig) => {
+  exportNG: async (params, reportConfig, config = {}) => {
     const cleanParams = normalizeReportFilters(params);
     const { data } = await apiClient.post(ENDPOINTS.reports.exportNG, {
       filters: cleanParams,
@@ -732,10 +746,11 @@ export const reportApi = {
     }, {
       responseType: "blob",
       timeout: 600000,
+      ...config,
     });
     return data;
   },
-  exportParts: async (params, reportConfig) => {
+  exportParts: async (params, reportConfig, config = {}) => {
     const cleanParams = normalizeReportFilters(params);
     const { data } = await apiClient.post(ENDPOINTS.reports.exportParts, {
       filters: cleanParams,
@@ -743,10 +758,11 @@ export const reportApi = {
     }, {
       responseType: "blob",
       timeout: 600000,
+      ...config,
     });
     return data;
   },
-  exportAudit: async (params, reportConfig) => {
+  exportAudit: async (params, reportConfig, config = {}) => {
     const cleanParams = normalizeReportFilters(params);
     const { data } = await apiClient.post(ENDPOINTS.reports.exportAudit, {
       filters: cleanParams,
@@ -754,6 +770,7 @@ export const reportApi = {
     }, {
       responseType: "blob",
       timeout: 600000,
+      ...config,
     });
     return data;
   },

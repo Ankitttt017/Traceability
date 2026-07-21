@@ -7,10 +7,16 @@
 const {
   runIndustrialExport,
   fetchProductionData,
+  fetchProductionPartCount,
   getPlcReadingColumns,
   fetchPlcShotSummary,
 } = require("../services/report/reportExportService");
 const { calculateProductionMetrics } = require("../services/report/reportMetricsService");
+const {
+  fetchMaterializedReportPage,
+  fetchMaterializedReportRows,
+  upsertMaterializedReportRows,
+} = require("../services/report/finalProductionResultService");
 const Shift = require("../models/Shift");
 
 const REPORT_CACHE_TTL_MS = Math.max(Number(process.env.REPORT_CACHE_TTL_MS || 60000), 1000);
@@ -33,13 +39,14 @@ function reportCacheKey(filters = {}, options = {}) {
   }, {}));
 }
 
-async function getCachedReportBundle(filters = {}, options = {}) {
-  const cleanFilters = stripReportControlFilters(filters);
-  const key = reportCacheKey(cleanFilters, options);
-  const cached = reportDataCache.get(key);
-  if (cached && Date.now() - cached.savedAt < REPORT_CACHE_TTL_MS) return cached.bundle;
-  if (reportDataInFlight.has(key)) return reportDataInFlight.get(key);
-  const request = Promise.all([
+function countReportGroups(rows = []) {
+  return new Set((Array.isArray(rows) ? rows : [])
+    .map((row, index) => getReportPartKey(row, `row_${index}`))
+    .filter(Boolean)).size;
+}
+
+async function getLegacyReportBundle(cleanFilters = {}, options = {}) {
+  const [rows, shifts, plcColumnSet, plcShotSummary] = await Promise.all([
     fetchProductionData(cleanFilters, {
       includePlcReadings: options.includePlcReadings !== false,
       includeLeaktest: options.includeLeaktest !== false,
@@ -54,23 +61,66 @@ async function getCachedReportBundle(filters = {}, options = {}) {
     }),
     options.includePlcReadings === false ? Promise.resolve(new Set()) : getPlcReadingColumns(),
     options.includePlcSummary === false ? Promise.resolve(null) : fetchPlcShotSummary(cleanFilters),
-  ])
-    .then(([rows, shifts, plcColumnSet, plcShotSummary]) => {
-      const metrics = calculateProductionMetrics(rows);
-      metrics.plcShotSummary = options.includePlcSummary !== false
-        ? (plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 })
-        : { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
-      metrics.plcShotSummarySource = options.includePlcSummary === false
-        ? "SKIPPED_FAST"
-        : "PLC_SUMMARY";
-      const bundle = { rows, shifts, plcColumnSet, metrics };
+  ]);
+  upsertMaterializedReportRows(rows).catch((error) => {
+    console.warn(`[FinalProductionResult] report cache refresh skipped: ${error.message}`);
+  });
+  const metrics = calculateProductionMetrics(rows, cleanFilters);
+  metrics.plcShotSummary = options.includePlcSummary !== false
+    ? (plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 })
+    : { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
+  metrics.plcShotSummarySource = options.includePlcSummary === false
+    ? "SKIPPED_FAST"
+    : "PLC_SUMMARY";
+  return { rows, shifts, plcColumnSet, metrics, source: "LEGACY" };
+}
+
+async function getMaterializedReportBundle(cleanFilters = {}, options = {}) {
+  if (process.env.REPORT_USE_FINAL_RESULT_TABLE === "0") return null;
+  if (options.maxAnchorParts || options.maxBaseLogs) return null;
+  const rows = await fetchMaterializedReportRows(cleanFilters);
+  if (!rows.length) return null;
+  const [legacyCount] = await Promise.all([
+    fetchProductionPartCount(cleanFilters).catch(() => 0),
+  ]);
+  const materializedCount = countReportGroups(rows);
+  if (legacyCount > 0 && materializedCount < legacyCount) return null;
+  const [shifts, plcColumnSet, plcShotSummary] = await Promise.all([
+    Shift.findAll({
+      where: { is_active: true },
+      attributes: ["id", "shift_name", "shift_code", "start_time", "end_time"],
+      order: [["start_time", "ASC"]],
+      raw: true,
+    }),
+    options.includePlcReadings === false ? Promise.resolve(new Set()) : getPlcReadingColumns(),
+    options.includePlcSummary === false ? Promise.resolve(null) : fetchPlcShotSummary(cleanFilters),
+  ]);
+  const metrics = calculateProductionMetrics(rows, cleanFilters);
+  metrics.plcShotSummary = options.includePlcSummary !== false
+    ? (plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 })
+    : { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
+  metrics.plcShotSummarySource = options.includePlcSummary === false
+    ? "SKIPPED_FAST"
+    : "PLC_SUMMARY";
+  return { rows, shifts, plcColumnSet, metrics, source: "FINAL_RESULT_TABLE" };
+}
+
+async function getCachedReportBundle(filters = {}, options = {}) {
+  const cleanFilters = stripReportControlFilters(filters);
+  const key = reportCacheKey(cleanFilters, options);
+  const cached = reportDataCache.get(key);
+  if (cached && Date.now() - cached.savedAt < REPORT_CACHE_TTL_MS) return cached.bundle;
+  if (reportDataInFlight.has(key)) return reportDataInFlight.get(key);
+  const request = (async () => {
+      const bundle = await getMaterializedReportBundle(cleanFilters, options)
+        || await getLegacyReportBundle(cleanFilters, options);
       reportDataCache.set(key, { bundle, savedAt: Date.now() });
       if (reportDataCache.size > 40) {
         const oldestKey = reportDataCache.keys().next().value;
         reportDataCache.delete(oldestKey);
       }
       return bundle;
-    })
+    })()
     .finally(() => reportDataInFlight.delete(key));
   reportDataInFlight.set(key, request);
   return request;
@@ -129,14 +179,14 @@ function getReportExportOptions(filters = {}) {
   const hasFocusedPartSearch = Boolean(String(filters.barcode || filters.customerCode || filters.partId || "").trim());
   const fast = isTruthyToken(filters.fast || filters.quick) && !hasFocusedPartSearch;
   const rawLimit = Number.parseInt(filters.exportLimit || filters.maxAnchorParts || filters.pageSize || filters.limit, 10);
-  const exportAnchorLimit = Math.min(Math.max(rawLimit || 10000, 500), 20000);
+  const exportAnchorLimit = Math.min(Math.max(rawLimit || 20000, 500), 50000);
   return {
     fast,
     includePlcReadings: !isFalseToken(filters.includePlcReadings),
     includePlcSummary: fast ? false : !isFalseToken(filters.includePlcSummary),
     includeLeaktest: !isFalseToken(filters.includeLeaktest),
     maxAnchorParts: fast ? exportAnchorLimit : null,
-    maxBaseLogs: fast ? Math.min(Math.max(exportAnchorLimit * 8, 10000), 80000) : null,
+    maxBaseLogs: fast ? Math.min(Math.max(exportAnchorLimit * 6, 10000), 250000) : null,
   };
 }
 
@@ -264,6 +314,42 @@ exports.getReportData = async (req, res) => {
     const options = getReportOptions(req.query || {});
     const filters = stripReportControlFilters(req.query || {});
     const pagination = getPagination(req.query || {});
+    if (process.env.REPORT_USE_FINAL_RESULT_TABLE !== "0") {
+      const materializedPage = await fetchMaterializedReportPage(filters, pagination).catch((error) => {
+        console.warn(`[FinalProductionResult] paged report read skipped: ${error.message}`);
+        return null;
+      });
+      if (materializedPage) {
+        const [shifts, plcColumnSet, plcShotSummary] = await Promise.all([
+          Shift.findAll({
+            where: { is_active: true },
+            attributes: ["id", "shift_name", "shift_code", "start_time", "end_time"],
+            order: [["start_time", "ASC"]],
+            raw: true,
+          }),
+          options.includePlcReadings === false ? Promise.resolve(new Set()) : getPlcReadingColumns(),
+          options.includePlcSummary === false ? Promise.resolve(null) : fetchPlcShotSummary(filters).catch(() => null),
+        ]);
+        materializedPage.metrics.plcShotSummary = options.includePlcSummary !== false
+          ? (plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 })
+          : { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
+        materializedPage.metrics.plcShotSummarySource = options.includePlcSummary === false ? "SKIPPED_FAST" : "PLC_SUMMARY";
+        return res.json({
+          rows: materializedPage.rows,
+          metrics: materializedPage.metrics,
+          pagination: materializedPage.pagination,
+          plcColumns: [...plcColumnSet],
+          reportMode: "FINAL_RESULT_TABLE_PAGE",
+          availableShifts: shifts.map((shift) => ({
+            id: shift.id,
+            shiftName: shift.shift_name,
+            shiftCode: shift.shift_code,
+            startTime: shift.start_time,
+            endTime: shift.end_time,
+          })),
+        });
+      }
+    }
     const { rows, shifts, plcColumnSet, metrics } = await getCachedReportBundle(filters, options);
     const paged = paginateReportRowsByPart(rows, pagination);
     metrics.plcShotSummary = metrics.plcShotSummary || {};
@@ -324,6 +410,21 @@ exports.getReportData = async (req, res) => {
   }
 };
 
+exports.getReportShotSummary = async (req, res) => {
+  try {
+    const filters = stripReportControlFilters(req.query || {});
+    const plcShotSummary = await fetchPlcShotSummary(filters);
+    res.json({
+      plcShotSummary: plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 },
+      plcShotSummarySource: "PLC_SUMMARY",
+    });
+  } catch (error) {
+    const db = summarizeDbError(error);
+    console.error(`[ReportController] getReportShotSummary failed code=${db.code} msg=${db.message}`);
+    res.status(500).json({ error: db.message });
+  }
+};
+
 exports.exportFullReportExcel = async (req, res) => {
   try {
     const { filters = {}, reportConfig = DEFAULT_REPORT_CONFIG } = req.body || {};
@@ -338,7 +439,7 @@ exports.exportFullReportExcel = async (req, res) => {
     });
   } catch (error) {
     console.error("Excel export error:", error);
-    res.status(500).json({ error: error.message });
+    if (!res.headersSent) res.status(500).json({ error: error.message });
   }
 };
 
@@ -357,7 +458,7 @@ exports.exportNGReportExcel = async (req, res) => {
     });
   } catch (error) {
     console.error("NG Excel export error:", error);
-    res.status(500).json({ error: error.message });
+    if (!res.headersSent) res.status(500).json({ error: error.message });
   }
 };
 
@@ -374,7 +475,7 @@ exports.exportPartsReportExcel = async (req, res) => {
       options,
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    if (!res.headersSent) res.status(500).json({ error: error.message });
   }
 };
 
@@ -391,7 +492,7 @@ exports.exportAuditReportExcel = async (req, res) => {
       options,
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    if (!res.headersSent) res.status(500).json({ error: error.message });
   }
 };
 

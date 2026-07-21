@@ -19,6 +19,22 @@ class IndustrialTransactionService {
     this.MAX_RETRIES = 3;
   }
 
+  async finishSafely(transaction, action, context = {}) {
+    if (!transaction || transaction.finished) return false;
+    try {
+      if (action === "commit") await transaction.commit();
+      else if (action === "rollback") await transaction.rollback();
+      return true;
+    } catch (error) {
+      logWarn("INDUSTRIAL_TRANSACTION_FINISH_FAILED", {
+        action,
+        error: error.message,
+        ...context,
+      });
+      return false;
+    }
+  }
+
   /**
    * Execute an atomic DB update and PLC command.
    * If DB fails, rolls back.
@@ -46,12 +62,12 @@ class IndustrialTransactionService {
         }
 
         // 3. Commit DB
-        await transaction.commit();
+        await this.finishSafely(transaction, "commit", { machineId: machine.id, partId, attempt });
         return result;
 
       } catch (error) {
         // 4. Rollback DB
-        if (!transaction.finished) await transaction.rollback();
+        await this.finishSafely(transaction, "rollback", { machineId: machine.id, partId, attempt });
         
         logError("INDUSTRIAL_TRANSACTION_FAILED", { 
           machineId: machine.id, 

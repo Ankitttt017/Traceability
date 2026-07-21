@@ -17,6 +17,11 @@ const MachineModel = require("../../models/Machine");
 const { calculateProductionMetrics } = require("./reportMetricsService");
 const { generateIndustrialExcel } = require("./excelTemplateEngine");
 const { resolveIndustrialResult } = require("./reportFormatter");
+const {
+  buildStationPairsFromRows,
+  fetchMaterializedReportRows,
+  upsertMaterializedReportRows,
+} = require("./finalProductionResultService");
 const { toMinutes: parseShiftMinutes } = require("../../utils/time");
 const {
   LEAKTEST_OPERATION,
@@ -89,6 +94,197 @@ function rowMatchesReportStatus(row, token) {
     return ["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(s);
   }
   return String(row.industrialResult || "").toUpperCase() === normalized;
+}
+
+function normalizeReportRowResult(value, reason = "", row = null) {
+  const status = String(value || "").trim().toUpperCase();
+  const normalizedReason = String(reason || "").trim().toUpperCase();
+  const bypassStatus = Boolean(row?.bypassStatus || row?.is_bypassed || row?.isBypassed);
+  const bypassReason = String(row?.bypassReason || row?.bypass_reason || "").trim().toUpperCase();
+
+  if (bypassStatus || ["MACHINE_BYPASS_AUTO_OK", "STATION_BYPASS_AUTO_OK", "STATION_OPERATION_DISABLED_AUTO_OK"].includes(bypassReason)) {
+    return "OK";
+  }
+  if (normalizedReason === "NG_SHOT_STATUS" && ["BLOCK", "INTERLOCKED"].includes(status)) {
+    return "NG";
+  }
+  if (["OK", "PASS", "PASSED", "COMPLETED", "ENDED_OK", "COMPLETED_OK"].includes(status)) {
+    return "OK";
+  }
+  if (["NG", "FAIL", "FAILED", "ENDED_NG", "COMPLETED_NG", "INTERLOCKED", "REJECTED"].includes(status)) {
+    return "NG";
+  }
+  if (!status || status === "-" || status === "UNKNOWN") {
+    return "";
+  }
+  return "IN_PROGRESS";
+}
+
+function pickPreferredReportResult(current, candidate) {
+  const rank = (value) => {
+    if (value === "NG") return 3;
+    if (value === "OK") return 2;
+    if (value === "IN_PROGRESS") return 1;
+    return 0;
+  };
+  return rank(candidate) > rank(current) ? candidate : (current || candidate);
+}
+
+function normalizeReportFinalPartStatus(value) {
+  const status = String(value || "").trim().toUpperCase();
+  if (["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(status)) return "PASSED";
+  if (["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(status)) return "NG";
+  return "IN_PROGRESS";
+}
+
+function getReportGroupKey(row = {}, fallback = "") {
+  return String(row.reportGroupKey || row.report_group_key || row.traceabilityPartId || row.traceability_part_id || row.partId || row.part_id || row.barcode || row.shot_uid || fallback || "").trim();
+}
+
+function toReportTime(value) {
+  const time = new Date(value || 0).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function isReportTimeWithinRange(value, range = {}) {
+  const time = toReportTime(value);
+  if (!time) return false;
+  const from = range.dateFrom ? toReportTime(range.dateFrom) : 0;
+  const to = range.dateTo ? toReportTime(range.dateTo) : 0;
+  if (from && time < from) return false;
+  if (to && time > to) return false;
+  return true;
+}
+
+function getReportRowResultTimestamp(row = {}) {
+  return (
+    row.finalResultCreatedAt ||
+    row.finalResultAt ||
+    row.cycleEndAt ||
+    row.plc_end_at ||
+    row.plcEndAt ||
+    row.createdAt ||
+    row.updatedAt ||
+    null
+  );
+}
+
+function isFinalInspectionOperation(rowOrOperation = {}) {
+  const operation = typeof rowOrOperation === "string"
+    ? rowOrOperation
+    : (rowOrOperation.operationNo || rowOrOperation.stationNo || rowOrOperation.operation_no || rowOrOperation.station_no || "");
+  const machineName = typeof rowOrOperation === "string"
+    ? ""
+    : (rowOrOperation.machineName || rowOrOperation.machine_name || rowOrOperation?.Machine?.machine_name || "");
+  const op = String(operation || "").trim().toUpperCase();
+  const machine = String(machineName || "").trim().toUpperCase();
+  return op === "OP160" || machine.includes("FINAL INSPECTION") || machine.includes("FINAL_INSPECTION");
+}
+
+function deriveReportGroupStatus(entries = [], requiredOperations = [], range = {}) {
+  const operationResults = {};
+  const operationResultTimes = {};
+  let latestRow = entries[0] || {};
+  let latestTs = new Date(latestRow?.latestAnchorCreatedAt || latestRow?.createdAt || 0).getTime() || 0;
+  let firstNgAt = null;
+  let finalInspectionOkAt = null;
+
+  for (const row of entries) {
+    const { status: fallbackStatus } = resolveIndustrialResult(row);
+    const industrialResult = String(row.industrialResult || fallbackStatus || "").trim().toUpperCase();
+    const operationKey = String(row.operationNo || row.stationNo || row.operation_no || row.station_no || "").trim().toUpperCase();
+    const normalized = normalizeReportRowResult(industrialResult, row.reason || row.interlock_reason, row);
+    if (operationKey && normalized) {
+      operationResults[operationKey] = pickPreferredReportResult(operationResults[operationKey], normalized);
+      const resultTime = getReportRowResultTimestamp(row);
+      if (resultTime) {
+        const currentTime = operationResultTimes[operationKey];
+        if (!currentTime || toReportTime(resultTime) >= toReportTime(currentTime)) {
+          operationResultTimes[operationKey] = resultTime;
+        }
+      }
+    }
+    if (normalized === "NG") {
+      const resultTime = getReportRowResultTimestamp(row);
+      if (resultTime && (!firstNgAt || toReportTime(resultTime) < toReportTime(firstNgAt))) {
+        firstNgAt = resultTime;
+      }
+    }
+    if (normalized === "OK" && isFinalInspectionOperation(row)) {
+      const resultTime = getReportRowResultTimestamp(row);
+      if (resultTime && (!finalInspectionOkAt || toReportTime(resultTime) >= toReportTime(finalInspectionOkAt))) {
+        finalInspectionOkAt = resultTime;
+      }
+    }
+
+    const rowTs = new Date(row.latestAnchorCreatedAt || row.createdAt || 0).getTime() || 0;
+    if (rowTs >= latestTs) {
+      latestRow = row;
+      latestTs = rowTs;
+    }
+  }
+
+  const values = requiredOperations.map((operation) => normalizeReportRowResult(operationResults[operation])).filter(Boolean);
+  const finalStatus = normalizeReportFinalPartStatus(latestRow.partStatus || latestRow.part_status || latestRow.status);
+  let overallStatus = "IN_PROGRESS";
+  if (values.some((value) => value === "NG")) overallStatus = "NG";
+  else if (finalInspectionOkAt) overallStatus = "PASSED";
+  else if (values.some((value) => value === "IN_PROGRESS")) overallStatus = "IN_PROGRESS";
+  else if (finalStatus === "NG") overallStatus = "NG";
+  else if (requiredOperations.length > 1 && values.length >= requiredOperations.length && values.every((value) => value === "OK")) overallStatus = "PASSED";
+  else if (finalStatus === "PASSED") overallStatus = "PASSED";
+
+  const terminalOperation = requiredOperations[requiredOperations.length - 1];
+  const finalResultAt = overallStatus === "NG"
+    ? firstNgAt
+    : overallStatus === "PASSED"
+      ? (finalInspectionOkAt || operationResultTimes[terminalOperation] || getReportRowResultTimestamp(latestRow))
+      : null;
+  if ((overallStatus === "NG" || overallStatus === "PASSED") && !isReportTimeWithinRange(finalResultAt, range)) {
+    return "IN_PROGRESS";
+  }
+  return overallStatus;
+}
+
+function groupMatchesReportStatus(entries = [], token, requiredOperations = [], range = {}) {
+  const normalized = String(token || "").trim().toUpperCase();
+  if (normalized === "VALIDATION" || normalized === "BYPASS") {
+    return entries.some((row) => rowMatchesReportStatus(row, token));
+  }
+
+  const status = deriveReportGroupStatus(entries, requiredOperations, range);
+  if (normalized === "PENDING" || normalized === "IN_PROGRESS" || normalized === "IN PROGRESS" || normalized === "WIP") {
+    return status === "IN_PROGRESS";
+  }
+  if (normalized === "OK" || normalized === "PASSED") {
+    return status === "PASSED";
+  }
+  if (normalized === "NG" || normalized === "FAILED") {
+    return status === "NG";
+  }
+  return entries.some((row) => rowMatchesReportStatus(row, token));
+}
+
+function filterRowsByReportGroupStatus(rows = [], tokens = [], range = {}) {
+  if (!tokens.length) return rows;
+
+  const requiredOperations = Array.from(
+    new Set(
+      rows
+        .map((row) => String(row.operationNo || row.stationNo || row.operation_no || row.station_no || "").trim().toUpperCase())
+        .filter(Boolean)
+    )
+  );
+  const grouped = new Map();
+  rows.forEach((row, index) => {
+    const key = getReportGroupKey(row, `row_${index}`);
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(row);
+  });
+
+  return Array.from(grouped.values())
+    .filter((entries) => tokens.some((token) => groupMatchesReportStatus(entries, token, requiredOperations, range)))
+    .flat();
 }
 
 function rowMatchesPartType(row, partType) {
@@ -339,6 +535,42 @@ function sanitizeCustomerQrValue(value) {
   if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
   return raw;
 }
+
+function matchesAnyQrRule(value, qrRules = []) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  return (qrRules || []).some((rule) => {
+    const pattern = String(rule.regex_pattern || "").trim();
+    if (!pattern) return false;
+    try {
+      return new RegExp(pattern, "i").test(raw);
+    } catch (_error) {
+      return false;
+    }
+  });
+}
+
+function looksLikePartialTraceabilityId(value) {
+  const raw = String(value || "").trim().toUpperCase();
+  if (!raw) return false;
+  if (/^R\d{9}-[A-Z0-9-]{10,}$/.test(raw)) return false;
+  if (/^\d{8}[A-Z0-9]\d{1,6}$/.test(raw)) return false;
+  return (
+    /^[A-Z]?\d{3,6}$/.test(raw) ||
+    /^[A-Z0-9]{1,6}$/.test(raw) ||
+    /^[A-Z0-9]{0,4}54T\d{8}[A-Z]\d{4}$/i.test(raw) ||
+    /^[A-Z0-9]{0,4}T\d{8}[A-Z]\d{4}$/i.test(raw)
+  );
+}
+
+function isUsableTraceabilityPartId(value, qrRules = []) {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "-") return false;
+  if (matchesAnyQrRule(raw, qrRules)) return true;
+  if (looksLikePartialTraceabilityId(raw)) return false;
+  return (qrRules || []).length === 0 && /^[A-Za-z0-9][A-Za-z0-9\-_/.:]{7,127}$/.test(raw);
+}
+
 function splitRejectionZone(value) {
   const raw = String(value || "").trim();
   if (!raw) return { zone: "", subZone: "" };
@@ -939,27 +1171,27 @@ async function findAllWithRetry(queryFn, retries = 1, waitMs = 1200) {
 
 async function runIndustrialExport(res, { filters, reportConfig, type = "full", options = {} }) {
   // 1. Resolve Data
-  const rows = await fetchProductionData(filters, options);
-  const machineWhere = {};
-  if (filters?.machineId) machineWhere.id = filters.machineId;
-  if (filters?.plantId) machineWhere.plant_id = filters.plantId;
-  if (filters?.lineId) machineWhere.line_id = filters.lineId;
-  else if (filters?.lineName) machineWhere.line_name = filters.lineName;
-  const machines = await Machine.findAll({ where: machineWhere, raw: true });
-  const stationPairs = (machines || [])
-    .map((m) => {
-      const machineName = String(m.machine_name || m.machineName || "").trim();
-      const op = String(m.operation_no || m.operationNo || m.station_no || m.stationNo || "").trim();
-      if (!machineName || !op) return null;
-      return { key: `${machineName}__${op}`, machineName, op, label: `${machineName} + ${op}` };
-    })
-    .filter(Boolean)
-    .sort((a, b) =>
-      a.op.localeCompare(b.op, undefined, { numeric: true, sensitivity: "base" }) || a.machineName.localeCompare(b.machineName)
-    );
+  let rows = [];
+  let usedFinalResultTable = false;
+  if (process.env.REPORT_USE_FINAL_RESULT_TABLE !== "0" && options.preferMaterialized !== false && !options.maxAnchorParts && !options.maxBaseLogs) {
+    try {
+      rows = await fetchMaterializedReportRows(filters);
+      usedFinalResultTable = rows.length > 0;
+    } catch (error) {
+      console.warn(`[FinalProductionResult] export read skipped: ${error.message}`);
+      rows = [];
+    }
+  }
+  if (!usedFinalResultTable) {
+    rows = await fetchProductionData(filters, options);
+    upsertMaterializedReportRows(rows).catch((error) => {
+      console.warn(`[FinalProductionResult] export refresh skipped: ${error.message}`);
+    });
+  }
+  const stationPairs = await buildStationPairsFromRows(rows, filters);
 
   // 2. Calculate Metrics
-  const metrics = calculateProductionMetrics(rows);
+  const metrics = calculateProductionMetrics(rows, filters);
 
   // 3. Generate File
   await generateIndustrialExcel(res, {
@@ -1179,35 +1411,8 @@ async function fetchProductionData(filters = {}, options = {}) {
         ],
       });
     }
-    const statusFilterTokens = getStatusFilterTokens(status, resultType);
-    if (statusFilterTokens.length) {
-      const statusOrConditions = [];
-      if (statusFilterTokens.some((token) => ["NG", "FAILED"].includes(token))) {
-        statusOrConditions.push(
-          { plc_status: { [Op.in]: ["ENDED_NG", "INTERLOCKED"] } },
-          { result: { [Op.in]: ["NG", "FAIL", "FAILED", "BLOCK"] } },
-          { operation_result: { [Op.in]: ["FAILED", "INTERLOCKED"] } },
-          { rejection_reason: { [Op.ne]: null } },
-          { rejection_category: { [Op.ne]: null } },
-        );
-      }
-      if (statusFilterTokens.some((token) => ["OK", "PASSED"].includes(token))) {
-        statusOrConditions.push(
-          { plc_status: "ENDED_OK" },
-          { result: { [Op.in]: ["OK", "PASS", "PASSED"] } },
-          { operation_result: "PASSED" },
-        );
-      }
-      if (statusFilterTokens.includes("VALIDATION")) {
-        statusOrConditions.push({ validation_result: { [Op.in]: ["FAILED", "BLOCKED", "DUPLICATE"] } });
-      }
-      if (statusFilterTokens.includes("BYPASS")) {
-        statusOrConditions.push({ is_bypassed: true });
-      }
-      if (statusOrConditions.length) {
-        andConditions.push({ [Op.or]: statusOrConditions });
-      }
-    }
+    // Status is applied after all station history is grouped. Filtering here
+    // would hide non-OK station rows and can falsely turn partial parts into PASSED.
     if (plantId || lineId || lineName) {
       const machineWhere = {};
       if (plantId) machineWhere.plant_id = plantId;
@@ -1377,6 +1582,7 @@ async function fetchProductionData(filters = {}, options = {}) {
   const fullProductionHistoryLogs = fullHistoryLogs.filter(isProductionReportLog);
 
   const earliestScanByPart = new Map();
+  const earliestLogByPart = new Map();
   const latestAnchorScanByPart = new Map();
   const latestAnchorLogByPart = new Map();
   fullProductionHistoryLogs.forEach((log) => {
@@ -1385,6 +1591,7 @@ async function fetchProductionData(filters = {}, options = {}) {
     const prev = earliestScanByPart.get(partId);
     if (!prev || new Date(log.createdAt).getTime() < new Date(prev).getTime()) {
       earliestScanByPart.set(partId, log.createdAt);
+      earliestLogByPart.set(partId, log);
     }
   });
   productionLogs.forEach((log) => {
@@ -1444,7 +1651,11 @@ async function fetchProductionData(filters = {}, options = {}) {
       })()
     : { byPartAndIp: new Map(), byPartAndStation: new Map() };
 
-  const qrRules = await QrFormatRule.findAll({ attributes: ["format_name", "model_code", "regex_pattern"], raw: true });
+  const qrRules = await QrFormatRule.findAll({
+    where: { is_active: true },
+    attributes: ["format_name", "model_code", "regex_pattern"],
+    raw: true,
+  });
   const qrMap = qrRules.reduce((acc, q) => {
     acc[q.format_name] = q.model_code;
     return acc;
@@ -1599,17 +1810,32 @@ async function fetchProductionData(filters = {}, options = {}) {
       isCustomerQrOnlyPart(partIdValue) ||
       Boolean(mappedCustomerQr && mappedOldPartId && normalizeKey(mappedCustomerQr) === normalizeKey(mappedOldPartId))
     );
-    const displayPartId = (customerQrOnlyPart || invalidCustomerQrSelfMap) ? "" : canonicalPartId;
-    const reportGroupKey = (customerQrOnlyPart || invalidCustomerQrSelfMap)
+    const validCanonicalPartId = isUsableTraceabilityPartId(canonicalPartId, qrRules);
+    const validRawPartId = isUsableTraceabilityPartId(partIdValue, qrRules);
+    const validMappedOldPartId = isUsableTraceabilityPartId(mappedOldPartId, qrRules);
+    const safePartIdForDisplay = validCanonicalPartId
+      ? canonicalPartId
+      : validMappedOldPartId
+        ? mappedOldPartId
+        : validRawPartId
+          ? partIdValue
+          : "";
+    const displayPartId = (customerQrOnlyPart || invalidCustomerQrSelfMap) ? "" : safePartIdForDisplay;
+    const reportGroupKey = (customerQrOnlyPart || invalidCustomerQrSelfMap || !displayPartId)
       ? (mappedCustomerQr || partIdValue)
-      : (canonicalPartId || mappedCustomerQr || partIdValue);
-    const shotLookupPartId = displayPartId || partIdValue;
+      : (displayPartId || mappedCustomerQr || partIdValue);
+    if (!displayPartId && !mappedCustomerQr && looksLikePartialTraceabilityId(partIdValue)) {
+      return null;
+    }
+    const shotLookupPartId = displayPartId;
     const partLookupKey = normalizeKey(shotLookupPartId);
-    const compactQrKey = parseCompactQrPartId(shotLookupPartId)?.key || parseCompactQrPartId(partIdValue)?.key || parseCompactQrPartId(mappedOldPartId)?.key || "";
+    const compactQrKey = parseCompactQrPartId(shotLookupPartId)?.key || "";
     const shotSourceLog = { ...log, part_id: shotLookupPartId };
     const shotCandidates = deriveShotCandidates(shotSourceLog).map((s) => normalizeShotToken(s) || normalizeKey(s));
-    const fallbackShotNumber = shotCandidates[0] || parseCompactQrPartId(shotLookupPartId)?.shotRaw || parseCompactQrPartId(partIdValue)?.shotRaw || parseCompactQrPartId(mappedOldPartId)?.shotRaw || "";
-    const shouldLookupPlcReading = includePlcReadings && (!customerQrOnlyPart || compactQrKey || shotCandidates.length);
+    const fallbackShotNumber = displayPartId
+      ? (shotCandidates[0] || parseCompactQrPartId(shotLookupPartId)?.shotRaw || "")
+      : "";
+    const shouldLookupPlcReading = includePlcReadings && Boolean(displayPartId) && (!customerQrOnlyPart || compactQrKey || shotCandidates.length);
     const plcReadingFromDbRaw = shouldLookupPlcReading
       ? (
         (compactQrKey && plcByCompactQr.get(compactQrKey)) ||
@@ -1632,6 +1858,8 @@ async function fetchProductionData(filters = {}, options = {}) {
       );
     const plcPartDie = splitPlcPartDie(plcReadingFromDb?.part_name || "");
 
+    const firstScanLog = earliestLogByPart.get(canonicalPartId) || earliestLogByPart.get(partIdValue) || earliestLogByPart.get(mappedCustomerQr) || log;
+
     return {
       ...log,
       srNo: index + 1,
@@ -1641,6 +1869,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       displayPartId,
       isCustomerQrOnly: customerQrOnlyPart,
       firstScanCreatedAt: earliestScanByPart.get(canonicalPartId) || earliestScanByPart.get(partIdValue) || earliestScanByPart.get(mappedCustomerQr) || log.createdAt || null,
+      firstScanShiftCode: firstScanLog?.shift_code || log.shift_code || "",
       latestAnchorCreatedAt: latestAnchorScanByPart.get(canonicalPartId) || latestAnchorScanByPart.get(partIdValue) || latestAnchorScanByPart.get(mappedCustomerQr) || log.createdAt || null,
       anchorMachineName: latestAnchorLogByPart.get(canonicalPartId)?.Machine?.machine_name || latestAnchorLogByPart.get(partIdValue)?.Machine?.machine_name || latestAnchorLogByPart.get(mappedCustomerQr)?.Machine?.machine_name || log.Machine?.machine_name || "-",
       anchorLineName: latestAnchorLogByPart.get(canonicalPartId)?.Machine?.line_name || latestAnchorLogByPart.get(partIdValue)?.Machine?.line_name || latestAnchorLogByPart.get(mappedCustomerQr)?.Machine?.line_name || log.Machine?.line_name || "-",
@@ -1648,8 +1877,8 @@ async function fetchProductionData(filters = {}, options = {}) {
       isAnchorMachineRow: Number((latestAnchorLogByPart.get(canonicalPartId) || latestAnchorLogByPart.get(partIdValue) || latestAnchorLogByPart.get(mappedCustomerQr))?.machine_id || 0) === Number(log.machine_id || 0),
       customerCode: mappedCustomerQr || "-",
       customerQrCode: mappedCustomerQr || "-",
-      shotNumber: plcReadingFromDb?.shot_number || fallbackShotNumber || log.shot_number || "-",
-      shot_number: plcReadingFromDb?.shot_number || fallbackShotNumber || log.shot_number || "-",
+      shotNumber: displayPartId ? (plcReadingFromDb?.shot_number || fallbackShotNumber || log.shot_number || "-") : "-",
+      shot_number: displayPartId ? (plcReadingFromDb?.shot_number || fallbackShotNumber || log.shot_number || "-") : "-",
       machineName: log.Machine?.machine_name || "-",
       lineName:    log.Machine?.line_name    || "-",
       operationNo: log.operation_no || log.Machine?.operation_no || "-",
@@ -1680,9 +1909,40 @@ async function fetchProductionData(filters = {}, options = {}) {
       leakTestReading,
       leakTestReadings,
     };
-  }));
+  })).then((rows) => rows.filter(Boolean));
 
-  let filtered = enriched;
+  const groupFirstScanTime = (entries = []) => entries.reduce((earliest, row) => {
+    const raw = row.firstScanCreatedAt || row.createdAt || row.latestAnchorCreatedAt || row.updatedAt || null;
+    const time = toReportTime(raw);
+    if (!time) return earliest;
+    return earliest === 0 ? time : Math.min(earliest, time);
+  }, 0);
+  const groupHasActivityInRange = (entries = []) => entries.some((row) => (
+    isReportTimeWithinRange(row.latestAnchorCreatedAt || row.createdAt || row.updatedAt, filters) ||
+    isReportTimeWithinRange(row.finalResultCreatedAt || row.finalResultAt || row.cycleEndAt || row.plc_end_at || row.plcEndAt, filters)
+  ));
+  const firstScanScopedGroups = new Map();
+  enriched.forEach((row, index) => {
+    const key = getReportGroupKey(row, `row_${index}`);
+    if (!firstScanScopedGroups.has(key)) firstScanScopedGroups.set(key, []);
+    firstScanScopedGroups.get(key).push(row);
+  });
+  let filtered = Array.from(firstScanScopedGroups.values())
+    .filter((entries) => {
+      const firstScanTime = groupFirstScanTime(entries);
+      const firstScanInRange = isReportTimeWithinRange(firstScanTime, filters);
+      const activityInRange = groupHasActivityInRange(entries);
+      if (!firstScanInRange && !activityInRange) return false;
+      if (!shiftCode) return true;
+      const targetShift = String(shiftCode || "").trim().toUpperCase();
+      return entries.some((row) => {
+        const rowShift = firstScanInRange
+          ? (row.firstScanShiftCode || row.shiftCode || row.shift_code || "")
+          : (row.shiftCode || row.shift_code || row.firstScanShiftCode || "");
+        return String(rowShift || "").trim().toUpperCase() === targetShift;
+      });
+    })
+    .flat();
 
   if (filterPartName || filterDieName) {
     filtered = filtered.filter((row) => {
@@ -1703,7 +1963,7 @@ async function fetchProductionData(filters = {}, options = {}) {
 
   const statusTokens = getStatusFilterTokens(status, resultType);
   if (statusTokens.length) {
-    filtered = filtered.filter((row) => statusTokens.some((token) => rowMatchesReportStatus(row, token)));
+    filtered = filterRowsByReportGroupStatus(filtered, statusTokens, filters);
   }
 
   if (filters.partType) {

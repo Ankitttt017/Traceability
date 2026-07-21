@@ -9,6 +9,7 @@ const PartCodeMapping = require("../models/PartCodeMapping");
 const ProductionLog = require("../models/ProductionLog");
 const { saveScan } = require("../services/scanService");
 const { getStationFeatureConfig } = require("../services/stationFeatureService");
+const { autoPackReadyPart } = require("../services/packingService");
 const plcHandshakeEngine = require("../services/plcHandshakeEngine");
 const {
   buildWorkflowKey,
@@ -77,6 +78,19 @@ const tcpDiagnostics = {
   totalConnections: 0,
 };
 let nextQueueId = 1;
+
+async function finishTransactionSafely(transaction, action, context = "") {
+  if (!transaction || transaction.finished) return false;
+  try {
+    if (action === "commit") await transaction.commit();
+    else if (action === "rollback") await transaction.rollback();
+    return true;
+  } catch (error) {
+    const message = String(error?.message || error || "");
+    console.warn(`[TCP_TRANSACTION] ${action} failed${context ? ` (${context})` : ""}: ${message}`);
+    return false;
+  }
+}
 
 
 function sanitizeScannerPayload(value) {
@@ -451,6 +465,26 @@ async function markOperationEndedOk({ operationLogId, partId, stationNo, machine
     part.interlock_reason = null;
     part.is_rework = false;
     await part.save();
+
+    const features = await getStationFeatureConfig(station).catch(() => null);
+    if (features?.finalPacking) {
+      const autoPackResult = await autoPackReadyPart({
+        partId,
+        stationNo: station,
+        machineId,
+      });
+      emitRealtime("packing_update", {
+        event: "PART_READY_FOR_PACKING",
+        partId,
+        stationNo: "PACKING",
+        sourceStationNo: station,
+        machineId,
+        finalPackingEligible: true,
+        autoPacked: autoPackResult?.success === true,
+        boxNumber: autoPackResult?.session?.box_number || null,
+        timestamp: new Date().toISOString(),
+      });
+    }
   }
 
 
@@ -1832,9 +1866,9 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
 
     if (existingMapping && String(existingMapping.old_part_id || "").trim() === activePartId) {
       existingSamePartMapping = true;
-      await transaction.commit();
+      await finishTransactionSafely(transaction, "commit", "customer_qr_same_mapping");
     } else if (existingMapping && String(existingMapping.old_part_id || "").trim() !== activePartId) {
-      await transaction.commit();
+      await finishTransactionSafely(transaction, "commit", "customer_qr_conflict");
       emitCustomerQrScannerResult({
         type: "ERROR",
         partId: activePartId,
@@ -1863,10 +1897,10 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
         station_no: stationNo || null,
         is_active: true,
       }, { transaction });
-      await transaction.commit();
+      await finishTransactionSafely(transaction, "commit", "customer_qr_upsert");
     }
   } catch (error) {
-    await transaction.rollback();
+    await finishTransactionSafely(transaction, "rollback", "customer_qr_mapping_failed");
     logScannerTrace({
       level: "error",
       stage: "customer_qr_mapping_failed",
@@ -2234,6 +2268,8 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
     resultSource: isCustomerQrOnlyStart ? "CUSTOMER_QR_ONLY_START" : "TCP_PUSH_SCANNER",
     resultInput: "OK",
     shotValidationPartId: isMappedTraceabilityScan ? (resolvedCode.mappedPartId || partId) : partId,
+    enforceQrFormatValidation: !isMappedTraceabilityScan && !isCustomerQrOnlyStart,
+    enforceSequenceValidation: !isCustomerQrOnlyStart,
     skipQrFormatValidation: isMappedTraceabilityScan || isCustomerQrOnlyStart,
     skipShotValidation: isMappedTraceabilityScan || isCustomerQrOnlyTrace || customerQrRequiredAtStation,
     skipCustomerCodeValidation: isMappedTraceabilityScan || isCustomerQrOnlyStart,
@@ -2471,6 +2507,19 @@ let tcpServer = null;
 let running = false;
 
 
+function isExpectedSocketDisconnect(error = {}) {
+  const code = String(error?.code || "").toUpperCase();
+  const message = String(error?.message || error || "").toUpperCase();
+  return (
+    code === "ECONNRESET" ||
+    code === "EPIPE" ||
+    code === "ETIMEDOUT" ||
+    message.includes("ECONNRESET") ||
+    message.includes("SOCKET HANG UP")
+  );
+}
+
+
 function getTcpPort() {
   const parsed = Number(process.env.TCP_SERVER_PORT || 0);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
@@ -2596,6 +2645,10 @@ function startTcpServer() {
 
     socket.on("error", (error) => {
       clearFlushTimer();
+      if (isExpectedSocketDisconnect(error)) {
+        console.warn(`[TCP] Client disconnected unexpectedly: ${remoteIp}:${socket.remotePort || "-"} (${error.code || error.message})`);
+        return;
+      }
       console.error("[TCP] Client socket error:", error.message);
     });
   });
