@@ -1,10 +1,11 @@
 const { Op } = require("sequelize");
 const FinalProductionResult = require("../../models/FinalProductionResult");
 const Machine = require("../../models/Machine");
+const OperationLog = require("../../models/OperationLog");
 
 const MATERIALIZER_LOOKBACK_DAYS = Math.max(Number(process.env.REPORT_MATERIALIZER_LOOKBACK_DAYS || 90), 1);
-const MATERIALIZER_BATCH_SIZE = Math.max(Number(process.env.REPORT_MATERIALIZER_BATCH_SIZE || 25), 1);
-const MATERIALIZER_DEBOUNCE_MS = Math.max(Number(process.env.REPORT_MATERIALIZER_DEBOUNCE_MS || 1500), 250);
+const MATERIALIZER_BATCH_SIZE = Math.max(Number(process.env.REPORT_MATERIALIZER_BATCH_SIZE || 50), 1);
+const MATERIALIZER_DEBOUNCE_MS = Math.max(Number(process.env.REPORT_MATERIALIZER_DEBOUNCE_MS || 0), 0);
 
 const pendingPartIds = new Map();
 let materializerTimer = null;
@@ -309,12 +310,7 @@ async function upsertMaterializedReportRows(rows = []) {
   let upserted = 0;
   for (const [groupKey, groupRows] of grouped.entries()) {
     const record = buildMaterializedRecord(groupKey, groupRows);
-    const existing = await FinalProductionResult.findOne({ where: { report_group_key: groupKey } });
-    if (existing) {
-      await existing.update(record);
-    } else {
-      await FinalProductionResult.create(record);
-    }
+    await FinalProductionResult.upsert(record);
     upserted += 1;
   }
   return { upserted };
@@ -335,10 +331,8 @@ function hasStationNgColumns(record = {}) {
 }
 
 function getRecordEffectiveStatus(record = {}) {
-  if (hasStationNgColumns(record) || record.rejection_reason || record.rejection_category) return "NG";
   const status = normalizeStatusFilter(record.final_status);
   if (status === "PASSED" || status === "NG") return status;
-  if (normalizeStatusFilter(record.op160_status) === "OK") return "PASSED";
   return "IN_PROGRESS";
 }
 
@@ -383,6 +377,22 @@ function getPassedWhere() {
   };
 }
 
+function getFinalStatusWhere(status) {
+  const normalized = normalizeStatusFilter(status);
+  if (normalized === "PASSED") return { final_status: { [Op.in]: ["PASSED", "OK"] } };
+  if (normalized === "NG") return { final_status: "NG" };
+  if (normalized === "IN_PROGRESS") {
+    return {
+      [Op.or]: [
+        { final_status: "IN_PROGRESS" },
+        { final_status: "" },
+        { final_status: null },
+      ],
+    };
+  }
+  return {};
+}
+
 function getMaterializedDateRange(filters = {}) {
   const now = new Date();
   const from = filters.dateFrom ? toDate(filters.dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
@@ -401,19 +411,18 @@ function buildMaterializedWhere(filters = {}) {
   const where = {};
   if (status === "PASSED") {
     where[Op.and] = [
-      getPassedWhere(),
+      getFinalStatusWhere("PASSED"),
       { final_result_at: { [Op.gte]: from, [Op.lte]: to } },
     ];
   } else if (status === "NG") {
     where[Op.and] = [
-      getStationNgWhere(),
+      getFinalStatusWhere("NG"),
       { final_result_at: { [Op.gte]: from, [Op.lte]: to } },
     ];
   } else if (status === "IN_PROGRESS") {
     where[Op.and] = [
       { [Op.or]: activityRange },
-      { [Op.not]: getStationNgWhere() },
-      { [Op.not]: getPassedWhere() },
+      getFinalStatusWhere("IN_PROGRESS"),
     ];
   } else {
     where[Op.or] = activityRange;
@@ -444,6 +453,76 @@ function buildMaterializedWhere(filters = {}) {
     where.die_casting_machine_name = { [Op.like]: `%${normalizeText(filters.dieCastingMachine || filters.die_casting_machine)}%` };
   }
   return where;
+}
+
+function appendMaterializedDimensionFilters(where = {}, filters = {}) {
+  if (filters.shiftCode && !["ALL", "ALL_SHIFTS", "ALL SHIFT", "ALL SHIFTS"].includes(normalizeUpper(filters.shiftCode))) {
+    where.shift_code = normalizeText(filters.shiftCode);
+  }
+  if (filters.lineId) where.line_id = filters.lineId;
+  if (filters.plantId) where.plant_id = filters.plantId;
+  if (filters.machineId) where.anchor_machine_id = filters.machineId;
+
+  const search = normalizeText(filters.barcode || filters.customerCode || filters.partId);
+  if (search) {
+    where[Op.and] = [
+      ...(where[Op.and] || []),
+      {
+        [Op.or]: [
+          { part_serial_no: { [Op.like]: `%${search}%` } },
+          { customer_qr_code: { [Op.like]: `%${search}%` } },
+          { traceability_part_id: { [Op.like]: `%${search}%` } },
+          { shot_number: { [Op.like]: `%${search}%` } },
+        ],
+      },
+    ];
+  }
+  if (filters.partName || filters.part_name) where.part_name = { [Op.like]: `%${normalizeText(filters.partName || filters.part_name)}%` };
+  if (filters.dieName || filters.die_name) where.die_name = { [Op.like]: `%${normalizeText(filters.dieName || filters.die_name)}%` };
+  if (filters.dieCastingMachine || filters.die_casting_machine) {
+    where.die_casting_machine_name = { [Op.like]: `%${normalizeText(filters.dieCastingMachine || filters.die_casting_machine)}%` };
+  }
+  return where;
+}
+
+function mergeMaterializedWhere(...parts) {
+  const and = parts.filter((part) => part && Reflect.ownKeys(part).length);
+  return and.length ? { [Op.and]: and } : {};
+}
+
+async function fetchMaterializedTraceabilityMetrics(filters = {}) {
+  const { from, to } = getMaterializedDateRange(filters);
+  const status = normalizeStatusFilter(filters.status || filters.resultType);
+  const baseWhere = appendMaterializedDimensionFilters({}, filters);
+  const range = (field) => ({ [field]: { [Op.gte]: from, [Op.lte]: to } });
+  const activityWhere = {
+    [Op.or]: [
+      range("first_scan_at"),
+      range("final_result_at"),
+      range("last_activity_at"),
+    ],
+  };
+  const countOrZero = async (where) => Number(await FinalProductionResult.count({ where }).catch(() => 0)) || 0;
+  const [totalProduction, passed, failed, inProgress] = await Promise.all([
+    countOrZero(mergeMaterializedWhere(baseWhere, range("first_scan_at"))),
+    status && status !== "PASSED" ? Promise.resolve(0) : countOrZero(mergeMaterializedWhere(baseWhere, getFinalStatusWhere("PASSED"), range("final_result_at"))),
+    status && status !== "NG" ? Promise.resolve(0) : countOrZero(mergeMaterializedWhere(baseWhere, getFinalStatusWhere("NG"), range("final_result_at"))),
+    status && status !== "IN_PROGRESS" ? Promise.resolve(0) : countOrZero(mergeMaterializedWhere(baseWhere, getFinalStatusWhere("IN_PROGRESS"), activityWhere)),
+  ]);
+  const productionBase = passed + failed;
+  return {
+    totalProduction,
+    traceabilityProduction: totalProduction,
+    completedProduction: productionBase,
+    totalOK: passed,
+    totalNG: failed,
+    inProgress,
+    validationRejects: failed,
+    passRate: productionBase > 0 ? Number(((passed / productionBase) * 100).toFixed(2)) : 0,
+    byMachine: {},
+    byShift: {},
+    byLine: {},
+  };
 }
 
 function getRecordRows(record = {}) {
@@ -530,11 +609,16 @@ function rowsFromMaterializedRecords(records = [], filters = {}) {
 
 async function fetchMaterializedRecords(filters = {}, options = {}) {
   const where = buildMaterializedWhere(filters);
-  const limit = Number(options.limit || filters.limit || 0) > 0 ? Number(options.limit || filters.limit) : null;
+  const requestedLimit = Number(options.limit || filters.limit || 0) > 0 ? Number(options.limit || filters.limit) : null;
+  const limit = requestedLimit ? Math.min(requestedLimit, 200000) : 200000;
   const offset = Number(options.offset || 0) > 0 ? Number(options.offset) : 0;
   return FinalProductionResult.findAll({
     where,
-    order: [["first_scan_at", "DESC"], ["last_activity_at", "DESC"]],
+    order: [
+      ["first_scan_at", "DESC"],
+      ["last_activity_at", "DESC"],
+      ["final_result_at", "DESC"],
+    ],
     ...(limit ? { limit } : {}),
     ...(offset ? { offset } : {}),
     raw: true,
@@ -582,7 +666,10 @@ function calculateMaterializedMetrics(records = [], filters = {}) {
 
     const firstScanInRange = isWithinDate(summary.firstScanAt, from, to);
     const finalResultInRange = isWithinDate(summary.finalResultAt, from, to);
+    const finalStatus = normalizeStatusFilter(summary.finalStatus);
     const activityInRange = firstScanInRange || finalResultInRange || isWithinDate(summary.lastActivityAt, from, to);
+    const completedInRange = finalResultInRange && (finalStatus === "PASSED" || finalStatus === "NG");
+
     if (firstScanInRange) {
       metrics.traceabilityProduction += 1;
       metrics.byMachine[machineName].total += 1;
@@ -590,7 +677,6 @@ function calculateMaterializedMetrics(records = [], filters = {}) {
       metrics.byLine[lineName].total += 1;
     }
 
-    const finalStatus = normalizeStatusFilter(summary.finalStatus);
     if (finalStatus === "PASSED" && finalResultInRange) {
       metrics.completedProduction += 1;
       metrics.totalOK += 1;
@@ -603,7 +689,7 @@ function calculateMaterializedMetrics(records = [], filters = {}) {
       metrics.byMachine[machineName].ng += 1;
       metrics.byShift[shiftCode].ng += 1;
       metrics.byLine[lineName].ng += 1;
-    } else if (activityInRange) {
+    } else if (activityInRange && !completedInRange) {
       metrics.inProgress += 1;
       metrics.byMachine[machineName].inProgress += 1;
       metrics.byShift[shiftCode].inProgress += 1;
@@ -627,7 +713,7 @@ async function getMaterializedGroupCount(filters = {}) {
   if (!filters.machineId && !filters.operationNo && !filters.station) {
     return FinalProductionResult.count({ where: buildMaterializedWhere(filters) });
   }
-  const records = await fetchMaterializedRecords(filters, { limit: Number(filters.countLimit || 1000000) });
+  const records = await fetchMaterializedRecords(filters, { limit: Number(filters.countLimit || 50000) });
   return records.filter((record) => recordMatchesMaterializedFilters(record, filters)).length;
 }
 
@@ -642,7 +728,7 @@ async function fetchMaterializedReportPage(filters = {}, pagination = {}) {
 
   let records;
   if (filters.machineId || filters.operationNo || filters.station) {
-    const allRecords = await fetchMaterializedRecords(filters, { limit: Number(filters.countLimit || 1000000) });
+    const allRecords = await fetchMaterializedRecords(filters, { limit: Number(filters.countLimit || 50000) });
     records = allRecords.filter((record) => recordMatchesMaterializedFilters(record, filters)).slice(offset, offset + pageSize);
   } else {
     records = await fetchMaterializedRecords(filters, { limit: pageSize, offset });
@@ -651,7 +737,7 @@ async function fetchMaterializedReportPage(filters = {}, pagination = {}) {
     ...row,
     __reportMaterialized: true,
   }));
-  const metricsRecords = await fetchMaterializedRecords(filters, { limit: Number(filters.metricsLimit || 1000000) });
+  const metricsRecords = await fetchMaterializedRecords(filters, { limit: Number(filters.metricsLimit || 50000) });
   const metrics = calculateMaterializedMetrics(metricsRecords, filters);
   return {
     rows,
@@ -671,12 +757,8 @@ async function materializePartFromCurrentReport(partId) {
   const token = normalizeText(partId);
   if (!token) return { upserted: 0 };
   const { fetchProductionData } = require("./reportExportService");
-  const dateTo = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  const dateFrom = new Date(Date.now() - MATERIALIZER_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const rows = await fetchProductionData({
-    barcode: token,
-    dateFrom: dateFrom.toISOString(),
-    dateTo: dateTo.toISOString(),
+    exactPartId: token,
   }, {
     includePlcReadings: true,
     includeLeaktest: true,
@@ -685,12 +767,42 @@ async function materializePartFromCurrentReport(partId) {
   return upsertMaterializedReportRows(rows);
 }
 
+async function refreshRecentMaterializedParts(filters = {}, options = {}) {
+  const limit = Math.min(Math.max(Number(options.limit || 25), 1), 100);
+  const { from, to } = getMaterializedDateRange(filters);
+  const where = {
+    createdAt: { [Op.gte]: from, [Op.lte]: to },
+  };
+  if (filters.machineId) where.machine_id = filters.machineId;
+  if (filters.operationNo) where.operation_no = normalizeUpper(filters.operationNo);
+  if (filters.station) {
+    where[Op.or] = [
+      { operation_no: normalizeUpper(filters.station) },
+      { station_no: normalizeUpper(filters.station) },
+    ];
+  }
+  const rows = await OperationLog.findAll({
+    where,
+    attributes: ["part_id", "createdAt", "updatedAt"],
+    order: [["createdAt", "DESC"], ["updatedAt", "DESC"]],
+    limit: limit * 3,
+    raw: true,
+  }).catch(() => []);
+  const partIds = [...new Set(rows.map((row) => normalizeText(row.part_id)).filter(Boolean))].slice(0, limit);
+  for (const partId of partIds) {
+    await materializePartFromCurrentReport(partId);
+  }
+  return { refreshed: partIds.length };
+}
+
 function scheduleMaterializePart(partId) {
   const token = normalizeText(partId);
   if (!token) return;
   pendingPartIds.set(token, Date.now());
   if (!materializerTimer) {
-    materializerTimer = setTimeout(flushMaterializerQueue, MATERIALIZER_DEBOUNCE_MS);
+    materializerTimer = MATERIALIZER_DEBOUNCE_MS > 0
+      ? setTimeout(flushMaterializerQueue, MATERIALIZER_DEBOUNCE_MS)
+      : setImmediate(flushMaterializerQueue);
   }
 }
 
@@ -716,7 +828,9 @@ async function flushMaterializerQueue() {
   } finally {
     materializerRunning = false;
     if (pendingPartIds.size) {
-      materializerTimer = setTimeout(flushMaterializerQueue, MATERIALIZER_DEBOUNCE_MS);
+      materializerTimer = MATERIALIZER_DEBOUNCE_MS > 0
+        ? setTimeout(flushMaterializerQueue, MATERIALIZER_DEBOUNCE_MS)
+        : setImmediate(flushMaterializerQueue);
     }
   }
 }
@@ -754,7 +868,9 @@ module.exports = {
   upsertMaterializedReportRows,
   fetchMaterializedReportRows,
   fetchMaterializedReportPage,
+  fetchMaterializedTraceabilityMetrics,
   getMaterializedGroupCount,
+  refreshRecentMaterializedParts,
   materializePartFromCurrentReport,
   scheduleMaterializePart,
   buildStationPairsFromRows,

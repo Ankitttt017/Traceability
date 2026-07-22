@@ -66,14 +66,12 @@ const SummaryCard = ({ label, value, icon: Icon, colorClass, subValue, subtitle 
   );
 };
 
-const ReportSummaryCards = ({ metrics = {}, loading = false }) => {
+const ReportSummaryCards = ({ metrics = {}, loading = false, shotSummaryLoading = false }) => {
   const plc = metrics.plcShotSummary || {};
-  const totalProduction = metrics.totalProduction || 0;
-  const totalOK = metrics.totalOK || 0;
-  const totalNG = metrics.totalNG || 0;
-  const inProgress = metrics.inProgress || 0;
-  const completed = totalOK + totalNG;
-  const passRate = completed > 0 ? Math.round((totalOK / completed) * 100) : 0;
+  const totalProduction = metrics.totalProduction ?? 0;
+  const totalOK = metrics.totalOK ?? 0;
+  const totalNG = metrics.totalNG ?? 0;
+  const inProgress = metrics.inProgress ?? 0;
 
   const shotCards = [
     {
@@ -125,7 +123,7 @@ const ReportSummaryCards = ({ metrics = {}, loading = false }) => {
       icon: Shield,
       colorClass: "green",
       subValue: "Quality OK",
-      subtitle: `(${passRate}% pass rate)`,
+      subtitle: "parts",
     },
     {
       label: "Failed",
@@ -161,26 +159,29 @@ const ReportSummaryCards = ({ metrics = {}, loading = false }) => {
           <div className="space-y-2">
             <div className="flex items-center gap-2 px-1">
               <div className="h-4 w-1 rounded-full bg-[rgb(var(--pk-steel))]" />
-              <span className="text-[10px] font-extrabold text-[rgb(var(--pk-txt-muted))] uppercase tracking-wider">
+              <span className="text-[11px] font-extrabold text-[rgb(var(--pk-steel))] uppercase tracking-wider">
                 Machine Shot Statistics
               </span>
-              <span className="text-[10px] text-[rgb(var(--pk-txt-muted))] font-medium opacity-60">
-                {plc.totalProduction ? `${plc.totalProduction} total shots` : ''}
+              <span className="text-[11px] text-[rgb(var(--pk-txt-muted))] font-semibold">
+                {plc.totalProduction ? `${plc.totalProduction.toLocaleString()} total shots` : ''}
               </span>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              {shotCards.map((card, i) => <SummaryCard key={`shot-${i}`} {...card} />)}
+              {shotSummaryLoading 
+                ? shotCards.map((_, i) => <SummaryCardSkeleton key={`shot-skeleton-${i}`} />)
+                : shotCards.map((card, i) => <SummaryCard key={`shot-${i}`} {...card} />)
+              }
             </div>
           </div>
 
           <div className="space-y-2">
             <div className="flex items-center gap-2 px-1">
               <div className="h-4 w-1 rounded-full bg-[rgb(var(--pk-amber))]" />
-              <span className="text-[10px] font-extrabold text-[rgb(var(--pk-txt-muted))] uppercase tracking-wider">
+              <span className="text-[11px] font-extrabold text-[rgb(var(--pk-steel))] uppercase tracking-wider">
                 Production Traceability
               </span>
-              <span className="text-[10px] text-[rgb(var(--pk-txt-muted))] font-medium opacity-60">
-                {totalProduction ? `${totalProduction} parts tracked` : ''}
+              <span className="text-[11px] text-[rgb(var(--pk-txt-muted))] font-semibold">
+                {totalProduction ? `${totalProduction.toLocaleString()} parts tracked` : ''}
               </span>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">

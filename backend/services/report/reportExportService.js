@@ -20,7 +20,7 @@ const { resolveIndustrialResult } = require("./reportFormatter");
 const {
   buildStationPairsFromRows,
   fetchMaterializedReportRows,
-  upsertMaterializedReportRows,
+  fetchMaterializedTraceabilityMetrics,
 } = require("./finalProductionResultService");
 const { toMinutes: parseShiftMinutes } = require("../../utils/time");
 const {
@@ -141,6 +141,64 @@ function getReportGroupKey(row = {}, fallback = "") {
   return String(row.reportGroupKey || row.report_group_key || row.traceabilityPartId || row.traceability_part_id || row.partId || row.part_id || row.barcode || row.shot_uid || fallback || "").trim();
 }
 
+function countReportGroups(rows = []) {
+  return new Set((Array.isArray(rows) ? rows : [])
+    .map((row, index) => getReportGroupKey(row, `row_${index}`))
+    .filter(Boolean)).size;
+}
+
+function stripMetricStatusFilters(filters = {}) {
+  const {
+    status,
+    resultType,
+    statusFilter,
+    ...rest
+  } = filters || {};
+  void status; void resultType; void statusFilter;
+  return rest;
+}
+
+async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
+  const nextMetrics = { ...(metrics || {}) };
+  const materializedMetrics = process.env.REPORT_USE_FINAL_RESULT_TABLE === "0"
+    ? null
+    : await fetchMaterializedTraceabilityMetrics(filters).catch((error) => {
+      console.warn(`[ReportExport] materialized traceability summary skipped: ${error.message}`);
+      return null;
+    });
+  if (materializedMetrics) {
+    return {
+      ...nextMetrics,
+      ...materializedMetrics,
+    };
+  }
+  const [summaryMetrics, totalProduction] = await Promise.all([
+    fetchProductionSummaryMetrics(filters).catch((error) => {
+      console.warn(`[ReportExport] traceability SQL summary skipped: ${error.message}`);
+      return null;
+    }),
+    fetchProductionFirstScanPartCount(stripMetricStatusFilters(filters)).catch((error) => {
+      console.warn(`[ReportExport] first-scan production total skipped: ${error.message}`);
+      return null;
+    }),
+  ]);
+
+  if (summaryMetrics) {
+    nextMetrics.totalOK = Number(summaryMetrics.totalOK || 0);
+    nextMetrics.totalNG = Number(summaryMetrics.totalNG || 0);
+    nextMetrics.inProgress = Number(summaryMetrics.inProgress || 0);
+    nextMetrics.validationRejects = Number(summaryMetrics.validationRejects || nextMetrics.totalNG || 0);
+    nextMetrics.passRate = Number(summaryMetrics.passRate || 0);
+  }
+
+  const normalizedTotal = Number(totalProduction);
+  if (Number.isFinite(normalizedTotal) && normalizedTotal >= 0) {
+    nextMetrics.traceabilityProduction = normalizedTotal;
+    nextMetrics.totalProduction = normalizedTotal;
+  }
+  return nextMetrics;
+}
+
 function toReportTime(value) {
   const time = new Date(value || 0).getTime();
   return Number.isFinite(time) ? time : 0;
@@ -188,11 +246,16 @@ function deriveReportGroupStatus(entries = [], requiredOperations = [], range = 
   let latestTs = new Date(latestRow?.latestAnchorCreatedAt || latestRow?.createdAt || 0).getTime() || 0;
   let firstNgAt = null;
   let finalInspectionOkAt = null;
+  let hasLeakData = false;
 
   for (const row of entries) {
     const { status: fallbackStatus } = resolveIndustrialResult(row);
     const industrialResult = String(row.industrialResult || fallbackStatus || "").trim().toUpperCase();
     const operationKey = String(row.operationNo || row.stationNo || row.operation_no || row.station_no || "").trim().toUpperCase();
+    const rowLeakData = row.leakTestReadings || row.leakTestReading || row.leak_test_readings || row.leak_test_reading;
+    if (Array.isArray(rowLeakData) ? rowLeakData.length > 0 : Boolean(rowLeakData)) {
+      hasLeakData = true;
+    }
     const normalized = normalizeReportRowResult(industrialResult, row.reason || row.interlock_reason, row);
     if (operationKey && normalized) {
       operationResults[operationKey] = pickPreferredReportResult(operationResults[operationKey], normalized);
@@ -224,17 +287,20 @@ function deriveReportGroupStatus(entries = [], requiredOperations = [], range = 
     }
   }
 
-  const values = requiredOperations.map((operation) => normalizeReportRowResult(operationResults[operation])).filter(Boolean);
+  const effectiveRequiredOperations = hasLeakData
+    ? requiredOperations
+    : requiredOperations.filter((operation) => operation !== LEAKTEST_OPERATION);
+  const values = effectiveRequiredOperations.map((operation) => normalizeReportRowResult(operationResults[operation])).filter(Boolean);
   const finalStatus = normalizeReportFinalPartStatus(latestRow.partStatus || latestRow.part_status || latestRow.status);
   let overallStatus = "IN_PROGRESS";
   if (values.some((value) => value === "NG")) overallStatus = "NG";
   else if (finalInspectionOkAt) overallStatus = "PASSED";
   else if (values.some((value) => value === "IN_PROGRESS")) overallStatus = "IN_PROGRESS";
   else if (finalStatus === "NG") overallStatus = "NG";
-  else if (requiredOperations.length > 1 && values.length >= requiredOperations.length && values.every((value) => value === "OK")) overallStatus = "PASSED";
+  else if (effectiveRequiredOperations.length > 1 && values.length >= effectiveRequiredOperations.length && values.every((value) => value === "OK")) overallStatus = "PASSED";
   else if (finalStatus === "PASSED") overallStatus = "PASSED";
 
-  const terminalOperation = requiredOperations[requiredOperations.length - 1];
+  const terminalOperation = effectiveRequiredOperations[effectiveRequiredOperations.length - 1];
   const finalResultAt = overallStatus === "NG"
     ? firstNgAt
     : overallStatus === "PASSED"
@@ -1175,23 +1241,24 @@ async function runIndustrialExport(res, { filters, reportConfig, type = "full", 
   let usedFinalResultTable = false;
   if (process.env.REPORT_USE_FINAL_RESULT_TABLE !== "0" && options.preferMaterialized !== false && !options.maxAnchorParts && !options.maxBaseLogs) {
     try {
-      rows = await fetchMaterializedReportRows(filters);
-      usedFinalResultTable = rows.length > 0;
+      const materializedRows = await fetchMaterializedReportRows(filters);
+      const liveCount = await fetchProductionPartCount(filters).catch(() => 0);
+      const materializedCount = countReportGroups(materializedRows);
+      if (materializedRows.length && (!liveCount || materializedCount >= liveCount)) {
+        rows = materializedRows;
+        usedFinalResultTable = true;
+      }
     } catch (error) {
       console.warn(`[FinalProductionResult] export read skipped: ${error.message}`);
-      rows = [];
     }
   }
   if (!usedFinalResultTable) {
     rows = await fetchProductionData(filters, options);
-    upsertMaterializedReportRows(rows).catch((error) => {
-      console.warn(`[FinalProductionResult] export refresh skipped: ${error.message}`);
-    });
   }
   const stationPairs = await buildStationPairsFromRows(rows, filters);
 
   // 2. Calculate Metrics
-  const metrics = calculateProductionMetrics(rows, filters);
+  const metrics = await applyUncappedTraceabilityMetrics(calculateProductionMetrics(rows, filters), filters);
 
   // 3. Generate File
   await generateIndustrialExcel(res, {
@@ -1205,20 +1272,24 @@ async function runIndustrialExport(res, { filters, reportConfig, type = "full", 
   });
 }
 
-async function buildProductionCountScope(filters = {}) {
+async function buildProductionCountScope(filters = {}, options = {}) {
+  const includeDateRange = options.includeDateRange !== false;
+  const includeStatusFilter = options.includeStatusFilter !== false;
   const now = new Date();
   const from = filters.dateFrom ? new Date(filters.dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const to = filters.dateTo ? new Date(filters.dateTo) : now;
   const safeFrom = Number.isNaN(from.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : from;
   const safeTo = Number.isNaN(to.getTime()) ? now : to;
   const whereParts = [
-    "ol.createdAt >= :dateFrom",
-    "ol.createdAt <= :dateTo",
     "NULLIF(LTRIM(RTRIM(CAST(ol.part_id AS NVARCHAR(255)))), '') IS NOT NULL",
     "(ol.plc_status IS NULL OR ol.plc_status NOT IN ('RESET', 'VALIDATION_ONLY'))",
     "(ol.validation_result IS NULL OR ol.validation_result NOT IN ('FAILED', 'DUPLICATE', 'BLOCKED'))",
     "(ol.result IS NULL OR ol.result <> 'BLOCK')",
   ];
+  if (includeDateRange) {
+    whereParts.unshift("ol.createdAt <= :dateTo");
+    whereParts.unshift("ol.createdAt >= :dateFrom");
+  }
   const replacements = { dateFrom: safeFrom, dateTo: safeTo };
   const joins = [];
 
@@ -1264,32 +1335,34 @@ async function buildProductionCountScope(filters = {}) {
     whereParts.push(`(${clauses.join(" OR ")})`);
   }
 
-  const statusFilterTokens = getStatusFilterTokens(filters.status, filters.resultType);
-  const statusSqlParts = [];
-  if (statusFilterTokens.some((token) => ["NG", "FAILED"].includes(token))) {
-    statusSqlParts.push(`(
-      ol.plc_status IN ('ENDED_NG', 'INTERLOCKED')
-      OR ol.result IN ('NG', 'FAIL', 'FAILED', 'BLOCK')
-      OR ol.operation_result IN ('FAILED', 'INTERLOCKED')
-      OR ol.rejection_reason IS NOT NULL
-      OR ol.rejection_category IS NOT NULL
-    )`);
-  }
-  if (statusFilterTokens.some((token) => ["OK", "PASSED"].includes(token))) {
-    statusSqlParts.push(`(
-      ol.plc_status = 'ENDED_OK'
-      OR ol.result IN ('OK', 'PASS', 'PASSED')
-      OR ol.operation_result = 'PASSED'
-    )`);
-  }
-  if (statusFilterTokens.includes("VALIDATION")) {
-    statusSqlParts.push("ol.validation_result IN ('FAILED', 'BLOCKED', 'DUPLICATE')");
-  }
-  if (statusFilterTokens.includes("BYPASS")) {
-    statusSqlParts.push("ol.is_bypassed = 1");
-  }
-  if (statusSqlParts.length) {
-    whereParts.push(`(${statusSqlParts.join(" OR ")})`);
+  if (includeStatusFilter) {
+    const statusFilterTokens = getStatusFilterTokens(filters.status, filters.resultType);
+    const statusSqlParts = [];
+    if (statusFilterTokens.some((token) => ["NG", "FAILED"].includes(token))) {
+      statusSqlParts.push(`(
+        ol.plc_status IN ('ENDED_NG', 'INTERLOCKED')
+        OR ol.result IN ('NG', 'FAIL', 'FAILED', 'BLOCK')
+        OR ol.operation_result IN ('FAILED', 'INTERLOCKED')
+        OR ol.rejection_reason IS NOT NULL
+        OR ol.rejection_category IS NOT NULL
+      )`);
+    }
+    if (statusFilterTokens.some((token) => ["OK", "PASSED"].includes(token))) {
+      statusSqlParts.push(`(
+        ol.plc_status = 'ENDED_OK'
+        OR ol.result IN ('OK', 'PASS', 'PASSED')
+        OR ol.operation_result = 'PASSED'
+      )`);
+    }
+    if (statusFilterTokens.includes("VALIDATION")) {
+      statusSqlParts.push("ol.validation_result IN ('FAILED', 'BLOCKED', 'DUPLICATE')");
+    }
+    if (statusFilterTokens.includes("BYPASS")) {
+      statusSqlParts.push("ol.is_bypassed = 1");
+    }
+    if (statusSqlParts.length) {
+      whereParts.push(`(${statusSqlParts.join(" OR ")})`);
+    }
   }
 
   return { whereParts, joins, replacements };
@@ -1303,6 +1376,30 @@ async function fetchProductionPartCount(filters = {}) {
       FROM OperationLogs ol
       ${joins.join("\n")}
       WHERE ${whereParts.join("\n        AND ")}
+    `,
+    { replacements }
+  );
+  return Number(rows?.[0]?.totalRows || 0) || 0;
+}
+
+async function fetchProductionFirstScanPartCount(filters = {}) {
+  const { whereParts, joins, replacements } = await buildProductionCountScope(filters, {
+    includeDateRange: false,
+    includeStatusFilter: false,
+  });
+  const [rows] = await sequelize.query(
+    `
+      WITH PartFirstScans AS (
+        SELECT ol.part_id, MIN(ol.createdAt) AS firstScanAt
+        FROM OperationLogs ol
+        ${joins.join("\n")}
+        WHERE ${whereParts.join("\n          AND ")}
+        GROUP BY ol.part_id
+      )
+      SELECT COUNT(*) AS totalRows
+      FROM PartFirstScans
+      WHERE firstScanAt >= :dateFrom
+        AND firstScanAt <= :dateTo
     `,
     { replacements }
   );
@@ -1323,8 +1420,7 @@ async function fetchProductionSummaryMetrics(filters = {}) {
       SELECT
         COUNT(*) AS totalProduction,
         SUM(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('OK', 'PASSED', 'PASS', 'COMPLETED', 'COMPLETED_OK', 'ENDED_OK') THEN 1 ELSE 0 END) AS totalOK,
-        SUM(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('NG', 'FAILED', 'FAIL', 'REJECTED', 'INTERLOCKED', 'COMPLETED_NG', 'ENDED_NG') THEN 1 ELSE 0 END) AS totalNG,
-        SUM(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) NOT IN ('OK', 'PASSED', 'PASS', 'COMPLETED', 'COMPLETED_OK', 'ENDED_OK', 'NG', 'FAILED', 'FAIL', 'REJECTED', 'INTERLOCKED', 'COMPLETED_NG', 'ENDED_NG') THEN 1 ELSE 0 END) AS inProgress
+        SUM(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('NG', 'FAILED', 'FAIL', 'REJECTED', 'INTERLOCKED', 'COMPLETED_NG', 'ENDED_NG') THEN 1 ELSE 0 END) AS totalNG
       FROM FilteredParts fp
       LEFT JOIN Parts p ON p.part_id = fp.part_id
     `,
@@ -1334,7 +1430,7 @@ async function fetchProductionSummaryMetrics(filters = {}) {
   const totalProduction = Number(first.totalProduction || 0);
   const totalOK = Number(first.totalOK || 0);
   const totalNG = Number(first.totalNG || 0);
-  const inProgress = Number(first.inProgress || 0);
+  const inProgress = Math.max(0, totalProduction - totalOK - totalNG);
   const productionBase = totalOK + totalNG;
   return {
     totalProduction,
@@ -1396,7 +1492,10 @@ async function fetchProductionData(filters = {}, options = {}) {
     if (machineId) nextWhere.machine_id = machineId;
     if (operationNo) nextWhere.operation_no = operationNo;
     if (operatorId) nextWhere.user_id = operatorId;
-    if (barcode) {
+    if (filters.exactPartId) {
+      if (includeDateRange) delete nextWhere.createdAt;
+      nextWhere.part_id = String(filters.exactPartId).trim();
+    } else if (barcode) {
       const searchValues = await resolveReportPartSearchValues(barcode);
       nextWhere.part_id = {
         [Op.or]: searchValues.map((value) => ({ [Op.like]: `%${value}%` })),
@@ -1477,7 +1576,10 @@ async function fetchProductionData(filters = {}, options = {}) {
       },
     };
     const searchToken = String(barcode || customerCode || "").trim();
-    if (searchToken) {
+    if (filters.exactPartId) {
+      delete partWhere.updatedAt;
+      partWhere.part_id = String(filters.exactPartId).trim();
+    } else if (searchToken) {
       const values = await resolveReportPartSearchValues(searchToken);
       partWhere.part_id = values.length
         ? { [Op.in]: values }
@@ -1977,6 +2079,7 @@ module.exports = {
   runIndustrialExport,
   fetchProductionData,
   fetchProductionPartCount,
+  fetchProductionFirstScanPartCount,
   fetchProductionSummaryMetrics,
   getPlcReadingColumns,
   fetchPlcShotSummary,

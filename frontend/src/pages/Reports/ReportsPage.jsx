@@ -989,6 +989,7 @@ const ReportsPage = () => {
 
   const [loading, setLoading] = useState(false);
   const [loadProgress, setLoadProgress] = useState(0);
+  const [shotSummaryLoading, setShotSummaryLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [machines, setMachines] = useState([]);
@@ -1005,8 +1006,6 @@ const ReportsPage = () => {
   const [reportConfig, setReportConfig] = useState(() => loadReportConfig());
   const reportAbortRef = useRef(null);
   const shotSummarySeqRef = useRef(0);
-  const reportPageCacheRef = useRef(new Map());
-  const shotSummaryCacheRef = useRef(new Map());
   
   const [filters, setFilters] = useState(() => {
     const r = (() => {
@@ -1076,37 +1075,13 @@ const ReportsPage = () => {
     reportAbortRef.current?.abort();
     const controller = new AbortController();
     reportAbortRef.current = controller;
-    const cacheKey = JSON.stringify({
-      filters: appliedFilters,
-      page: reportPage.page,
-      pageSize: reportPage.pageSize,
-    });
-    const summaryCacheKey = JSON.stringify({ filters: appliedFilters });
-    const mergeShotSummary = (pageData) => {
-      const cachedSummary = shotSummaryCacheRef.current.get(summaryCacheKey);
-      if (!cachedSummary) return pageData;
-      return {
-        ...pageData,
-        metrics: {
-          ...(pageData.metrics || {}),
-          plcShotSummary: cachedSummary.plcShotSummary,
-          plcShotSummarySource: cachedSummary.plcShotSummarySource,
-        },
-      };
-    };
-    const cachedPage = reportPageCacheRef.current.get(cacheKey);
-    if (cachedPage) {
-      const pageWithShotSummary = mergeShotSummary(cachedPage);
-      setData(pageWithShotSummary);
-      reportPageCacheRef.current.set(cacheKey, pageWithShotSummary);
-      setLoading(false);
-      setLoadProgress(0);
-      return;
-    }
     const requestPayload = {
       ...appliedFilters,
       fast: "1",
       includePlcSummary: "0",
+      includePlcReadings: "1",
+      includeLeaktest: "1",
+      noCache: "1",
       page: reportPage.page,
       pageSize: reportPage.pageSize,
     };
@@ -1123,23 +1098,19 @@ const ReportsPage = () => {
     try {
       const response = await reportApi.getData(requestPayload, { signal: controller.signal });
       setLoadProgress(100);
-      const pageData = mergeShotSummary({
+      const pageData = {
         reportMode: response.reportMode || "",
         rows: response.rows || [], 
         metrics: response.metrics || {},
         availableShifts: response.availableShifts || [],
         plcColumns: response.plcColumns || [],
         pagination: response.pagination || { page: reportPage.page, pageSize: reportPage.pageSize, totalRows: response.rows?.length || 0, totalPages: 1 },
-      });
+      };
       setData(pageData);
-      reportPageCacheRef.current.set(cacheKey, pageData);
-      if (reportPageCacheRef.current.size > 20) {
-        const oldestKey = reportPageCacheRef.current.keys().next().value;
-        reportPageCacheRef.current.delete(oldestKey);
-      }
       const summarySeq = shotSummarySeqRef.current + 1;
       shotSummarySeqRef.current = summarySeq;
-      const summaryFilters = { ...appliedFilters, fast: "1" };
+      const summaryFilters = { ...appliedFilters, fast: "1", noCache: "1" };
+      setShotSummaryLoading(true);
       reportApi.getShotSummary(summaryFilters)
         .then((summary) => {
           if (shotSummarySeqRef.current !== summarySeq) return;
@@ -1147,25 +1118,22 @@ const ReportsPage = () => {
             plcShotSummary: summary?.plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 },
             plcShotSummarySource: summary?.plcShotSummarySource || "PLC_SUMMARY",
           };
-          shotSummaryCacheRef.current.set(summaryCacheKey, nextShotSummary);
-          let nextDataForCache = null;
           setData((prev) => {
-            nextDataForCache = {
+            return {
               ...prev,
               metrics: {
                 ...(prev.metrics || {}),
                 ...nextShotSummary,
               },
             };
-            return nextDataForCache;
           });
-          if (nextDataForCache) {
-            reportPageCacheRef.current.set(cacheKey, nextDataForCache);
-          }
         })
         .catch((summaryError) => {
           if (shotSummarySeqRef.current !== summarySeq) return;
           console.warn("Report shot summary failed", summaryError);
+        })
+        .finally(() => {
+          if (shotSummarySeqRef.current === summarySeq) setShotSummaryLoading(false);
         });
       if (response.warning) {
         toast(response.warning);
@@ -1187,14 +1155,10 @@ const ReportsPage = () => {
   }, [appliedFilters, reportPage.page, reportPage.pageSize]);
 
   const refreshReportData = useCallback(() => {
-    reportPageCacheRef.current.clear();
-    shotSummaryCacheRef.current.clear();
     fetchData();
   }, [fetchData]);
 
   const applyReportFilters = useCallback(() => {
-    reportPageCacheRef.current.clear();
-    shotSummaryCacheRef.current.clear();
     setReportPage((prev) => ({ ...prev, page: 1 }));
     setAppliedFilters(filters);
     toast.success(t("reports.filtersApplied", "✅ Filters applied successfully"));
@@ -1240,7 +1204,15 @@ const ReportsPage = () => {
       let blob;
       const { page, pageSize, limit, offset, ...filtersWithoutPagination } = appliedFilters || {};
       void page; void pageSize; void limit; void offset;
-      const exportFilters = { ...filtersWithoutPagination, fast: "0", full: "1", includePlcSummary: "0" };
+      const exportFilters = {
+        ...filtersWithoutPagination,
+        fast: "0",
+        quick: "0",
+        full: "1",
+        includePlcSummary: "0",
+        includePlcReadings: "1",
+        includeLeaktest: "1",
+      };
       const downloadConfig = {
         onDownloadProgress: (event) => {
           if (event.total) {
@@ -1356,9 +1328,7 @@ const ReportsPage = () => {
           .filter(Boolean)
       )
     );
-    const discoveredPlcColumns = Array.isArray(data.plcColumns) && data.plcColumns.length
-      ? data.plcColumns
-      : DEFAULT_PLC_CYCLE_COLUMNS;
+    const discoveredPlcColumns = Array.isArray(data.plcColumns) ? data.plcColumns : DEFAULT_PLC_CYCLE_COLUMNS;
     const plcKeys = discoveredPlcColumns
       .filter((key) => DEFAULT_PLC_CYCLE_COLUMNS.includes(key))
       .filter((key) => !["machine_name", "part_name", "shot_number", "shot_date", "shot_time"].includes(key));
@@ -1674,11 +1644,12 @@ const ReportsPage = () => {
 
   const reportSummaryMetrics = useMemo(() => {
     const metrics = data.metrics || {};
+    // Fix: only use server-provided metrics; never fall back to pagination.totalRows
+    // (that is the paginated page row count, not the actual "parts tracked" metric)
     const traceabilityProduction = Number(
       metrics.traceabilityProduction ??
       metrics.totalProduction ??
-      data.pagination?.totalRows ??
-      (Array.isArray(reportTable.rows) ? reportTable.rows.length : 0)
+      0
     );
     const totalOK = Number(metrics.totalOK || 0);
     const totalNG = Number(metrics.totalNG || 0);
@@ -1694,7 +1665,7 @@ const ReportsPage = () => {
       passRate: productionBase > 0 ? Number(((totalOK / productionBase) * 100).toFixed(2)) : 0,
       plcShotSummary: metrics.plcShotSummary || {},
     };
-  }, [data.metrics, data.pagination, reportTable.rows]);
+  }, [data.metrics]);
   const scopedMachines = useMemo(
     () => (machines || []).filter((machine) => !filters.plantId || String(machine.plantId || "") === String(filters.plantId)),
     [machines, filters.plantId]
@@ -1912,8 +1883,6 @@ const ReportsPage = () => {
                 setFilters(nextFilters);
                 setAppliedFilters(nextFilters);
                 setReportPage((prev) => ({ ...prev, page: 1 }));
-                reportPageCacheRef.current.clear();
-                shotSummaryCacheRef.current.clear();
                 toast(t("reports.filtersCleared", "🧹 Filters cleared"));
               }}
               className="reports-btn-clear flex-1"
@@ -1949,7 +1918,7 @@ const ReportsPage = () => {
       </div>
 
       {/* ── Summary Cards ── */}
-      <ReportSummaryCards metrics={reportSummaryMetrics} loading={loading} />
+      <ReportSummaryCards metrics={reportSummaryMetrics} loading={loading} shotSummaryLoading={shotSummaryLoading} />
 
       {/* ── Table ── */}
       <ReportTable
@@ -1960,8 +1929,6 @@ const ReportsPage = () => {
         pagination={data.pagination}
         onPageChange={(page) => setReportPage((prev) => ({ ...prev, page }))}
         onPageSizeChange={(pageSize) => {
-          reportPageCacheRef.current.clear();
-          shotSummaryCacheRef.current.clear();
           setReportPage({ page: 1, pageSize });
         }}
         defaultPageSize={REPORT_PREVIEW_ROWS_LIMIT}

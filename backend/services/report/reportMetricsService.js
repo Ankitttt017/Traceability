@@ -5,6 +5,8 @@
 
 const { resolveIndustrialResult } = require("./reportFormatter");
 
+const LEAK_TEST_OPERATION = "OP150";
+
 function normalizeResult(value, reason = "", row = null) {
   const status = String(value || "").trim().toUpperCase();
   const normalizedReason = String(reason || "").trim().toUpperCase();
@@ -157,12 +159,17 @@ function calculateProductionMetrics(rows, range = {}) {
     let activityInRange = false;
     const operationResultTimes = {};
     let finalInspectionOkAt = null;
+    let hasLeakData = false;
 
     for (const row of entries) {
       const { status: fallbackStatus, category: fallbackCategory } = resolveIndustrialResult(row);
       const industrialResult = String(row.industrialResult || fallbackStatus || "").trim().toUpperCase();
       const category = String(row.category || fallbackCategory || "").trim().toUpperCase();
       const operationKey = String(row.operationNo || row.stationNo || row.operation_no || row.station_no || "").trim().toUpperCase();
+      const rowLeakData = row.leakTestReadings || row.leakTestReading || row.leak_test_readings || row.leak_test_reading;
+      if (Array.isArray(rowLeakData) ? rowLeakData.length > 0 : Boolean(rowLeakData)) {
+        hasLeakData = true;
+      }
       const normalized = normalizeResult(industrialResult, row.reason || row.interlock_reason, row);
       if (operationKey && normalized) {
         operationResults[operationKey] = pickPreferredOperationResult(operationResults[operationKey], normalized);
@@ -208,19 +215,25 @@ function calculateProductionMetrics(rows, range = {}) {
     }
 
     const overallStatus = (() => {
-      const values = requiredOperations.map((operation) => normalizeResult(operationResults[operation])).filter(Boolean);
+      const effectiveRequiredOperations = hasLeakData
+        ? requiredOperations
+        : requiredOperations.filter((operation) => operation !== LEAK_TEST_OPERATION);
+      const values = effectiveRequiredOperations.map((operation) => normalizeResult(operationResults[operation])).filter(Boolean);
       if (values.some((value) => value === "NG")) return "NG";
       if (finalInspectionOkAt) return "PASSED";
       if (values.some((value) => value === "IN_PROGRESS")) return "IN_PROGRESS";
       const finalStatus = normalizeFinalPartStatus(latestRow.partStatus || latestRow.part_status || latestRow.status);
       if (finalStatus === "NG") return "NG";
-      if (requiredOperations.length > 1 && values.length >= requiredOperations.length && values.every((value) => value === "OK")) {
+      if (effectiveRequiredOperations.length > 1 && values.length >= effectiveRequiredOperations.length && values.every((value) => value === "OK")) {
         return "PASSED";
       }
       if (finalStatus === "PASSED") return "PASSED";
       return "IN_PROGRESS";
     })();
-    const terminalOperation = requiredOperations[requiredOperations.length - 1];
+    const effectiveRequiredOperations = hasLeakData
+      ? requiredOperations
+      : requiredOperations.filter((operation) => operation !== LEAK_TEST_OPERATION);
+    const terminalOperation = effectiveRequiredOperations[effectiveRequiredOperations.length - 1];
     const finalResultAt = overallStatus === "NG"
       ? firstNgAt
       : overallStatus === "PASSED"
@@ -228,7 +241,6 @@ function calculateProductionMetrics(rows, range = {}) {
         : null;
     const finalResultInRange = isWithinRange(finalResultAt, range);
     const firstScanInRange = isWithinRange(firstScanAt, range);
-
     return {
       partId: String(latestRow.partId || latestRow.part_id || "").trim(),
       machineName: firstScanRow.anchorMachineName || firstScanRow.machineName || latestRow.anchorMachineName || latestRow.machineName || "Unknown Machine",
@@ -253,6 +265,9 @@ function calculateProductionMetrics(rows, range = {}) {
     if (!metrics.byShift[shiftCode]) metrics.byShift[shiftCode] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
     if (!metrics.byLine[lineName]) metrics.byLine[lineName] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
 
+    const completedInRange = part.finalResultInRange && (part.overallStatus === "PASSED" || part.overallStatus === "NG");
+    const activeInRange = part.firstScanInRange || part.activityInRange || part.finalResultInRange;
+
     if (part.firstScanInRange) {
       metrics.traceabilityProduction += 1;
       metrics.byMachine[machineName].total += 1;
@@ -272,7 +287,7 @@ function calculateProductionMetrics(rows, range = {}) {
       metrics.byMachine[machineName].ng += 1;
       metrics.byShift[shiftCode].ng += 1;
       metrics.byLine[lineName].ng += 1;
-    } else if (part.firstScanInRange || part.activityInRange) {
+    } else if (activeInRange && !completedInRange) {
       metrics.inProgress += 1;
       metrics.byMachine[machineName].inProgress += 1;
       metrics.byShift[shiftCode].inProgress += 1;
