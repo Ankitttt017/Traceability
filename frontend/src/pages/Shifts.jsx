@@ -22,54 +22,56 @@ const parseTimeParts = (value) => {
   if (value === null || value === undefined || value === "") return null;
 
   if (value instanceof Date && Number.isFinite(value.getTime())) {
-    return { hour: value.getUTCHours(), minute: value.getUTCMinutes() };
+    return { hour: value.getUTCHours(), minute: value.getUTCMinutes(), second: value.getUTCSeconds() };
   }
 
   const raw = String(value).trim();
   if (!raw) return null;
 
-  const directMatch = raw.match(/^(\d{1,2}):(\d{2})/);
+  const directMatch = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
   if (directMatch) {
     const hour = Number(directMatch[1]);
     const minute = Number(directMatch[2]);
-    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
-      return { hour, minute };
+    const second = Number(directMatch[3] || 0);
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 && second >= 0 && second <= 59) {
+      return { hour, minute, second };
     }
   }
 
-  const isoMatch = raw.match(/T(\d{2}):(\d{2})/i);
+  const isoMatch = raw.match(/T(\d{2}):(\d{2})(?::(\d{2}))?/i);
   if (isoMatch) {
     const hour = Number(isoMatch[1]);
     const minute = Number(isoMatch[2]);
-    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
-      return { hour, minute };
+    const second = Number(isoMatch[3] || 0);
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 && second >= 0 && second <= 59) {
+      return { hour, minute, second };
     }
   }
 
   const parsedDate = new Date(raw);
   if (Number.isFinite(parsedDate.getTime())) {
-    return { hour: parsedDate.getUTCHours(), minute: parsedDate.getUTCMinutes() };
+    return { hour: parsedDate.getUTCHours(), minute: parsedDate.getUTCMinutes(), second: parsedDate.getUTCSeconds() };
   }
 
   return null;
 };
 
-const formatHHmm = (value) => {
+const formatHHmmss = (value) => {
   const parts = parseTimeParts(value);
-  if (!parts) return "--:--";
-  return `${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}`;
+  if (!parts) return "--:--:--";
+  return `${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}:${String(parts.second || 0).padStart(2, "0")}`;
 };
 
 const formatTimeInputValue = (value) => {
   const parts = parseTimeParts(value);
   if (!parts) return "";
-  return `${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}`;
+  return `${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}:${String(parts.second || 0).padStart(2, "0")}`;
 };
 
-const toMinutes = (value) => {
+const toSeconds = (value) => {
   const parts = parseTimeParts(value);
   if (!parts) return null;
-  return parts.hour * 60 + parts.minute;
+  return parts.hour * 3600 + parts.minute * 60 + (parts.second || 0);
 };
 
 const Shifts = () => {
@@ -155,24 +157,26 @@ const Shifts = () => {
 
   const formatDuration = (start, end) => {
     if (!start || !end) return "-";
-    const startMins = toMinutes(start);
-    const endMins = toMinutes(end);
-    if (startMins === null || endMins === null) return "-";
-    let mins = endMins - startMins;
-    if (mins < 0) mins += 1440;
-    const h = Math.floor(mins / 60), m = mins % 60;
-    return `${h}h ${m > 0 ? `${m}m` : ""}`;
+    const startSecs = toSeconds(start);
+    const endSecs = toSeconds(end);
+    if (startSecs === null || endSecs === null) return "-";
+    let secs = endSecs - startSecs;
+    if (secs < 0) secs += 86400;
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    return `${h}h ${m > 0 ? `${m}m` : ""}${s > 0 ? ` ${s}s` : ""}`;
   };
 
   // Calculate stats
   const activeShifts = shifts.filter(s => s.isActive).length;
   const totalHours = shifts.reduce((total, shift) => {
-    const startMins = toMinutes(shift.startTime);
-    const endMins = toMinutes(shift.endTime);
-    if (startMins !== null && endMins !== null) {
-      let mins = endMins - startMins;
-      if (mins < 0) mins += 1440;
-      return total + mins;
+    const startSecs = toSeconds(shift.startTime);
+    const endSecs = toSeconds(shift.endTime);
+    if (startSecs !== null && endSecs !== null) {
+      let secs = endSecs - startSecs;
+      if (secs < 0) secs += 86400;
+      return total + secs / 60;
     }
     return total;
   }, 0);
@@ -270,11 +274,11 @@ const Shifts = () => {
             </div>
             <div>
               <Label required>Start Time</Label>
-              <input type="time" value={form.startTime} onChange={set("startTime")} required className={INPUT_CLS} />
+              <input type="time" step="1" value={form.startTime} onChange={set("startTime")} required className={INPUT_CLS} />
             </div>
             <div>
               <Label required>End Time</Label>
-              <input type="time" value={form.endTime} onChange={set("endTime")} required className={INPUT_CLS} />
+              <input type="time" step="1" value={form.endTime} onChange={set("endTime")} required className={INPUT_CLS} />
             </div>
             <div>
               <Label>Status</Label>
@@ -363,8 +367,8 @@ const Shifts = () => {
                       {shift.shiftCode}
                     </span>
                   </td>
-                  <td className="px-4 py-3 font-mono text-text-main text-xs">{formatHHmm(shift.startTime)}</td>
-                  <td className="px-4 py-3 font-mono text-text-main text-xs">{formatHHmm(shift.endTime)}</td>
+                  <td className="px-4 py-3 font-mono text-text-main text-xs">{formatHHmmss(shift.startTime)}</td>
+                  <td className="px-4 py-3 font-mono text-text-main text-xs">{formatHHmmss(shift.endTime)}</td>
                   <td className="px-4 py-3 text-text-muted text-xs font-semibold">{formatDuration(shift.startTime, shift.endTime)}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1.5">

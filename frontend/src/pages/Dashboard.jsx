@@ -13,17 +13,16 @@ import {
   AlertTriangle, Cpu, Activity, History, Clock,
   BellRing, X, Shield, Zap, Target, Layers,
   TrendingUp, BarChart3, Settings2, ChevronDown,
-  Circle, Wifi, WifiOff,
+  Calendar, ChevronLeft, ChevronRight, Circle, Wifi, WifiOff,
 } from "lucide-react";
 import {
   PieChart, Pie, Cell, Tooltip,
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   BarChart, Bar, Legend, AreaChart, Area, ComposedChart,
 } from "recharts";
-import { dashboardApi, machineApi, rejectionConfigApi } from "../api/services";
+import { dashboardApi, machineApi, rejectionConfigApi, reportApi, shiftApi } from "../api/services";
 import ChartTooltip from "../components/charts/ChartTooltip";
 import SafeChart from "../components/charts/SafeChart";
-import PlantLineSelector from "../components/PlantLineSelector";
 import { CHART_COLORS } from "../constants/chartTheme";
 import { useLanguage } from "../context/LanguageContext";
 
@@ -68,6 +67,168 @@ const DS = `
     --db-txt-muted:  84,119,146;
     --db-bdr:        84,119,146;
     --db-bop:        0.18;
+  }
+  .db-filter-input {
+    width: 100%;
+    height: 36px;
+    min-width: 0;
+    border-radius: 8px;
+    border: 1px solid rgba(var(--db-bdr), 0.2);
+    background: rgb(var(--db-bg-input));
+    padding: 0 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: rgb(var(--db-txt-pri));
+    outline: none;
+    transition: all 0.15s ease;
+  }
+  .db-filter-input:focus {
+    border-color: rgba(var(--db-steel), 0.5);
+    box-shadow: 0 0 0 3px rgba(var(--db-steel), 0.08);
+  }
+  .db-filter-input::placeholder {
+    color: rgba(var(--db-txt-muted), 0.6);
+    font-weight: 400;
+  }
+  .db-date-picker-container {
+    position: relative;
+  }
+  .db-date-picker-dropdown {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    background: rgb(var(--db-bg-card));
+    border: 1px solid rgba(var(--db-bdr), 0.2);
+    border-radius: 12px;
+    box-shadow: 0 12px 48px rgba(var(--db-navy), 0.15), 0 2px 8px rgba(var(--db-navy), 0.06);
+    padding: 16px;
+    z-index: 5000;
+    min-width: 280px;
+    max-width: 340px;
+    animation: dbFadeIn 0.2s ease;
+  }
+  .db-date-picker-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .db-date-picker-header button {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid rgba(var(--db-bdr), 0.1);
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgb(var(--db-txt-sec));
+    transition: all 0.15s ease;
+  }
+  .db-date-picker-header button:hover {
+    background: rgba(var(--db-steel), 0.08);
+    border-color: rgba(var(--db-steel), 0.2);
+  }
+  .db-date-picker-header span {
+    font-size: 13px;
+    font-weight: 700;
+    color: rgb(var(--db-txt-pri));
+  }
+  .db-date-picker-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 3px;
+  }
+  .db-date-picker-weekday {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: rgba(var(--db-txt-muted), 0.7);
+    padding: 4px 0;
+    text-align: center;
+  }
+  .db-date-picker-day {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 600;
+    color: rgb(var(--db-txt-pri));
+    cursor: pointer;
+    transition: all 0.12s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .db-date-picker-day:hover { background: rgba(var(--db-steel), 0.08); }
+  .db-date-picker-day.today { border: 2px solid rgba(var(--db-amber), 0.4); }
+  .db-date-picker-day.range-start,
+  .db-date-picker-day.range-end,
+  .db-date-picker-day.selected {
+    background: linear-gradient(135deg, rgb(var(--db-navy)), rgb(var(--db-steel)));
+    color: rgb(var(--db-linen));
+    box-shadow: 0 2px 8px rgba(var(--db-navy), 0.25);
+  }
+  .db-date-picker-day.range-start {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .db-date-picker-day.range-end {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+  }
+  .db-date-picker-day.range-middle {
+    background: rgba(var(--db-steel), 0.12);
+    border-radius: 0;
+  }
+  .db-date-picker-footer {
+    display: flex;
+    gap: 6px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(var(--db-bdr), 0.08);
+  }
+  .db-date-picker-footer button {
+    flex: 1;
+    height: 30px;
+    border-radius: 6px;
+    border: none;
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .db-date-picker-footer .clear-btn {
+    background: rgba(var(--db-ng), 0.06);
+    color: rgb(var(--db-ng));
+    border: 1px solid rgba(var(--db-ng), 0.1);
+  }
+  .db-date-picker-footer .apply-btn {
+    background: linear-gradient(135deg, rgb(var(--db-navy)), rgb(var(--db-steel)));
+    color: rgb(var(--db-linen));
+  }
+  .db-filter-preset {
+    height: 36px;
+    padding: 0 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(var(--db-bdr), 0.14);
+    background: rgba(var(--db-steel), 0.05);
+    color: rgb(var(--db-txt-sec));
+    font-size: 11px;
+    font-weight: 800;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+  .db-filter-preset:hover,
+  .db-filter-preset.active {
+    border-color: rgba(var(--db-navy), 0.35);
+    background: rgba(var(--db-navy), 0.08);
+    color: rgb(var(--db-navy));
   }
   @media (max-width: 1200px){
     .db-tablet-grid-2 { grid-template-columns: 1fr !important; }
@@ -195,6 +356,14 @@ function localDateTimeToIso(value) {
   return date.toISOString();
 }
 
+function getCurrentDashboardProductionRange(anchor = new Date()) {
+  const start = new Date(anchor);
+  start.setHours(6, 0, 0, 0);
+  if (anchor < start) start.setDate(start.getDate() - 1);
+  const end = new Date(anchor);
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
 function uniqueStages(rows = []) {
   const seen = new Set();
   const out = [];
@@ -220,6 +389,63 @@ function shortChartLabel(value = "", maxLength = 18) {
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
+function normalizeDashboardShiftCode(value = "") {
+  const raw = String(value || "").trim().toUpperCase().replace(/[-\s]+/g, "_");
+  if (!raw) return "UNASSIGNED";
+  const parts = raw.split("_").filter(Boolean);
+  if (raw === "A" || raw === "SHIFT_A" || raw === "A_SHIFT" || (parts.includes("SHIFT") && parts.includes("A"))) return "SHIFT_A";
+  if (raw === "B" || raw === "SHIFT_B" || raw === "B_SHIFT" || (parts.includes("SHIFT") && parts.includes("B"))) return "SHIFT_B";
+  if (raw === "C" || raw === "SHIFT_C" || raw === "C_SHIFT" || (parts.includes("SHIFT") && parts.includes("C"))) return "SHIFT_C";
+  if (raw === "S1" || raw === "SHIFT_S1" || raw === "S1_SHIFT" || raw === "SHIFT_1") return "SHIFT_S1";
+  if (raw === "S2" || raw === "SHIFT_S2" || raw === "S2_SHIFT" || raw === "SHIFT_2") return "SHIFT_S2";
+  if (raw === "S3" || raw === "SHIFT_S3" || raw === "S3_SHIFT" || raw === "SHIFT_3") return "SHIFT_S3";
+  return raw;
+}
+
+function getDashboardShiftLabel(code = "") {
+  const normalized = normalizeDashboardShiftCode(code);
+  if (normalized === "SHIFT_A") return "Shift A";
+  if (normalized === "SHIFT_B") return "Shift B";
+  if (normalized === "SHIFT_C") return "Shift C";
+  return String(normalized || "Unassigned").replace(/^SHIFT_/, "").replace(/_/g, " ");
+}
+
+function getDashboardShiftSeconds(value = "") {
+  const [hours, minutes, seconds = 0] = String(value || "").split(":").map(Number);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  return hours * 3600 + minutes * 60 + (Number.isFinite(seconds) ? seconds : 0);
+}
+
+function resolveDashboardShiftCodeForDate(dateValue, shifts = []) {
+  const rawDateValue = String(dateValue || "").trim();
+  const ts = rawDateValue && !rawDateValue.includes("T")
+    ? new Date(rawDateValue.replace(" ", "T"))
+    : new Date(dateValue || 0);
+  if (Number.isNaN(ts.getTime())) return "UNASSIGNED";
+  const second = ts.getHours() * 3600 + ts.getMinutes() * 60 + ts.getSeconds();
+  const matches = [];
+  for (const shift of shifts || []) {
+    const code = normalizeDashboardShiftCode(shift?.shiftCode || shift?.shift_code);
+    const start = getDashboardShiftSeconds(shift?.startTime || shift?.start_time);
+    const end = getDashboardShiftSeconds(shift?.endTime || shift?.end_time);
+    if (!code || start === null || end === null) continue;
+    const inShift = start === end
+      ? true
+      : start < end
+        ? second >= start && second <= end
+        : second >= start || second <= end;
+    if (inShift) {
+      const duration = start === end ? 24 * 3600 : start < end ? end - start : (24 * 3600 - start + end);
+      matches.push({ code, start, duration });
+    }
+  }
+  if (matches.length) {
+    matches.sort((a, b) => (b.start - a.start) || (a.duration - b.duration));
+    return matches[0].code;
+  }
+  return "UNASSIGNED";
+}
+
 function normalizeDashboardStationResult(value, reason = "", row = null) {
   const status = String(value || "").trim().toUpperCase();
   const normalizedReason = String(reason || "").trim().toUpperCase();
@@ -231,6 +457,13 @@ function normalizeDashboardStationResult(value, reason = "", row = null) {
   if (["NG", "FAIL", "FAILED", "ENDED_NG", "COMPLETED_NG", "INTERLOCKED", "REJECTED"].includes(status)) return "NG";
   if (["IN_PROGRESS", "WIP", "RUNNING", "PENDING"].includes(status)) return "IN_PROGRESS";
   return status ? "IN_PROGRESS" : "";
+}
+
+function normalizeDashboardLeakResult(reading = {}) {
+  const status = String(reading?.result || reading?.Result || reading?.rawResult || reading?.Raw_Result || "").trim().toUpperCase();
+  if (["OK", "PASS", "PASSED", "GOOD"].includes(status)) return "OK";
+  if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(status)) return "NG";
+  return "IN_PROGRESS";
 }
 
 function getDashboardStatusPriority(value) {
@@ -392,13 +625,20 @@ const MachineCard = ({ row, plcOnline=null, scannerOnline=null, nowMs=0, t }) =>
   const color = acc>=85 ? C.ok() : acc>=60 ? C.amber() : C.ng();
   const lastScan = row.lastScanTime ? new Date(row.lastScanTime) : null;
   const msAgo    = lastScan&&nowMs ? nowMs-lastScan.getTime() : null;
+  const targetValue = Number(row.targetProduction ?? row.targetQty ?? 0);
+  const cycleSeconds = Number(row.cycleTime ?? row.cycle_time ?? 0);
+  const loadingSeconds = Number(row.loadingTime ?? row.loading_time ?? 0);
+  const targetTitle = targetValue > 0
+    ? `Target uses shift available time / (cycle time ${cycleSeconds || 0}s + loading time ${loadingSeconds || 0}s)`
+    : "Target requires cycle time + loading time or daily target setup";
   const scanColor = msAgo===null ? C.txt("muted")
     : msAgo>600000 ? C.ng() : msAgo>300000 ? C.amber() : C.ok();
 
   return (
     <div style={{
       background:C.bg("card"),border:`1px solid ${C.bdr()}`,
-      borderRadius:14,padding:"18px 18px 14px",
+      borderRadius:14,padding:"22px 22px 18px",
+      minHeight: 268,
       boxShadow:SHADOW,position:"relative",overflow:"hidden",
       transition:"border-color 0.15s, box-shadow 0.15s",
     }}
@@ -406,14 +646,14 @@ const MachineCard = ({ row, plcOnline=null, scannerOnline=null, nowMs=0, t }) =>
       onMouseLeave={e=>{e.currentTarget.style.borderColor=C.bdr();e.currentTarget.style.boxShadow=SHADOW;}}
     >
       {/* Header */}
-      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
-        <OeeGauge value={acc} size={56} stroke={6}/>
+      <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:18}}>
+        <OeeGauge value={acc} size={66} stroke={7}/>
         <div style={{minWidth:0,flex:1}}>
-          <p style={{fontSize:14,fontWeight:800,color:C.txt("pri"),
+          <p style={{fontSize:16,fontWeight:850,color:C.txt("pri"),
             overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:3}}>
             {row.machineName||"Machine"}
           </p>
-          <p style={{fontSize:11,color:C.txt("muted"),overflow:"hidden",
+          <p style={{fontSize:12,color:C.txt("muted"),overflow:"hidden",
             textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
             {row.lineName||"—"} · {row.stationNo||"—"}
           </p>
@@ -421,21 +661,34 @@ const MachineCard = ({ row, plcOnline=null, scannerOnline=null, nowMs=0, t }) =>
       </div>
 
       {/* Stats grid */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:16}}>
         {[
           { label:t("dashboard.passed", "Passed"),    value:row.okCount,              color:C.ok()        },
-          { label:t("dashboard.target", "Target"),    value:(row.targetProduction ?? row.targetQty ?? 0), color:C.txt("muted")},
+          { label:t("dashboard.target", "Target"),    value:targetValue, color:C.txt("muted"), title: targetTitle},
           { label:t("dashboard.achieved", "Achieved"),  value:`${row.achievementPct||0}%`, color:color       },
         ].map((s,i)=>(
-          <div key={i} style={{background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
-            borderRadius:9,padding:"8px 6px",textAlign:"center"}}>
-            <p style={{fontSize:16,fontWeight:800,color:s.color,
+          <div key={i} style={{
+            background: "linear-gradient(180deg, rgba(26,50,99,0.96), rgba(17,35,72,0.98))",
+            border: "1px solid rgba(84,119,146,0.42)",
+            borderRadius:9,
+            padding:"11px 8px",
+            textAlign:"center",
+            boxShadow: "inset 0 1px 0 rgba(255,255,255,0.08)",
+          }} title={s.title || ""}>
+            <p style={{fontSize:18,fontWeight:850,color:s.color === C.txt("muted") ? "rgba(241,246,253,0.96)" : s.color,
               fontFamily:"'DM Mono',monospace",lineHeight:1}}>{s.value}</p>
-            <p style={{fontSize:10,fontWeight:700,color:C.txt("muted"),
+            <p style={{fontSize:10.5,fontWeight:850,color:"rgba(226,238,252,0.82)",
               textTransform:"uppercase",letterSpacing:"0.06em",marginTop:4}}>{s.label}</p>
           </div>
         ))}
       </div>
+      {(cycleSeconds > 0 || loadingSeconds > 0) && (
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+          <Badge variant="idle" label={`CT ${cycleSeconds || 0}s`} />
+          <Badge variant="idle" label={`Load ${loadingSeconds || 0}s`} />
+          <Badge variant="idle" label={`Eff ${cycleSeconds + loadingSeconds}s`} />
+        </div>
+      )}
 
       {/* Footer */}
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
@@ -513,6 +766,12 @@ const TooltipStyle = {
   allowEscapeViewBox:{ x: true, y: true },
 };
 
+const CenterTooltipStyle = {
+  ...TooltipStyle,
+  position: { x: 72, y: 54 },
+  wrapperStyle: { zIndex: 20000, pointerEvents: "none" },
+};
+
 const RejectionPieTooltip = ({ active, payload, total = 0 }) => {
   if (!active || !payload?.length) return null;
   const row = payload[0]?.payload || {};
@@ -537,18 +796,152 @@ const RejectionPieTooltip = ({ active, payload, total = 0 }) => {
 
 const getPresetRange = (preset) => {
   const now = new Date();
-  const end = new Date(now);
+  let end = new Date(now);
   const start = new Date(now);
+  start.setHours(6, 0, 0, 0);
+  if (now < start) start.setDate(start.getDate() - 1);
   if (preset === "today") {
-    start.setHours(0, 0, 0, 0);
+    end = new Date(start);
+    end.setDate(end.getDate() + 1);
+  } else if (preset === "yesterday") {
+    start.setDate(start.getDate() - 1);
+    end = new Date(start);
+    end.setDate(end.getDate() + 1);
   } else if (preset === "last7") {
     start.setDate(start.getDate() - 7);
   } else if (preset === "last30") {
-    start.setMonth(start.getMonth() - 1);
+    start.setDate(start.getDate() - 30);
   } else {
     return { start: "", end: "" };
   }
   return { start: start.toISOString(), end: end.toISOString() };
+};
+
+const DashboardDateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select Date Range" }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [selectedStart, setSelectedStart] = useState(startDate ? new Date(startDate) : null);
+  const [selectedEnd, setSelectedEnd] = useState(endDate ? new Date(endDate) : null);
+  const [tempStart, setTempStart] = useState(selectedStart);
+  const [tempEnd, setTempEnd] = useState(selectedEnd);
+  const pickerRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (pickerRef.current && !pickerRef.current.contains(event.target)) setIsOpen(false);
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    const nextStart = startDate ? new Date(startDate) : null;
+    const nextEnd = endDate ? new Date(endDate) : null;
+    setSelectedStart(nextStart);
+    setSelectedEnd(nextEnd);
+    setTempStart(nextStart);
+    setTempEnd(nextEnd);
+  }, [startDate, endDate]);
+
+  const formatDateDisplay = (date) =>
+    date ? date.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "";
+
+  const handleDayClick = (day) => {
+    const clickedDate = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), day);
+    clickedDate.setHours(0, 0, 0, 0);
+    if (!tempStart || (tempStart && tempEnd)) {
+      setTempStart(clickedDate);
+      setTempEnd(null);
+    } else if (clickedDate < tempStart) {
+      setTempStart(clickedDate);
+      setTempEnd(tempStart);
+    } else {
+      setTempEnd(clickedDate);
+    }
+  };
+
+  const handleApply = () => {
+    if (!tempStart) return;
+    const start = new Date(tempStart);
+    const end = new Date(tempEnd || tempStart);
+    start.setHours(6, 0, 0, 0);
+    end.setHours(6, 0, 0, 0);
+    end.setDate(end.getDate() + 1);
+    setSelectedStart(start);
+    setSelectedEnd(end);
+    onApply(start, end);
+    setIsOpen(false);
+  };
+
+  const handleClear = () => {
+    setTempStart(null);
+    setTempEnd(null);
+    setSelectedStart(null);
+    setSelectedEnd(null);
+    onClear();
+    setIsOpen(false);
+  };
+
+  const daysInMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0).getDate();
+  const firstDay = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1).getDay();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day) => (
+    <div key={`weekday-${day}`} className="db-date-picker-weekday">{day}</div>
+  ));
+  for (let index = 0; index < firstDay; index += 1) days.push(<div key={`empty-${index}`} />);
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const date = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), day);
+    date.setHours(0, 0, 0, 0);
+    const isToday = date.getTime() === today.getTime();
+    const isStart = tempStart && date.getTime() === tempStart.getTime();
+    const isEnd = tempEnd && date.getTime() === tempEnd.getTime();
+    const isInRange = tempStart && tempEnd && date > tempStart && date < tempEnd;
+    let className = "db-date-picker-day";
+    if (isToday) className += " today";
+    if (isStart) className += " range-start selected";
+    if (isEnd) className += " range-end selected";
+    if (isInRange) className += " range-middle";
+    days.push(<button key={`day-${day}`} className={className} onClick={() => handleDayClick(day)}>{day}</button>);
+  }
+
+  const dateRangeText = selectedStart && selectedEnd
+    ? `${formatDateDisplay(selectedStart)} - ${formatDateDisplay(new Date(selectedEnd.getTime() - 1))}`
+    : selectedStart
+      ? formatDateDisplay(selectedStart)
+      : label;
+
+  return (
+    <div className="db-date-picker-container" ref={pickerRef}>
+      <button
+        onClick={() => setIsOpen((value) => !value)}
+        className="db-filter-input"
+        style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}
+      >
+        <span style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+          <Calendar size={14} color={C.txt("muted")} style={{ flexShrink: 0 }} />
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: selectedStart ? C.txt("pri") : C.txt("muted") }}>
+            {dateRangeText}
+          </span>
+        </span>
+        <ChevronDown size={14} color={C.txt("muted")} style={{ flexShrink: 0, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s ease" }} />
+      </button>
+      {isOpen && (
+        <div className="db-date-picker-dropdown">
+          <div className="db-date-picker-header">
+            <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1))}><ChevronLeft size={14} /></button>
+            <span>{currentMonth.toLocaleString("default", { month: "long", year: "numeric" })}</span>
+            <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1))}><ChevronRight size={14} /></button>
+          </div>
+          <div className="db-date-picker-grid">{days}</div>
+          <div className="db-date-picker-footer">
+            <button className="clear-btn" onClick={handleClear}>Clear</button>
+            <button className="apply-btn" onClick={handleApply}>Apply Range</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 };
 
 // ==============================================================================
@@ -561,16 +954,29 @@ const Dashboard = () => {
   const [machines,     setMachines]     = useState([]);
   const [summary,      setSummary]      = useState(EMPTY_SUMMARY);
   const [report,       setReport]       = useState(EMPTY_REPORT);
+  const [reportMetrics, setReportMetrics] = useState(null);
+  const [shiftManagerShifts, setShiftManagerShifts] = useState([]);
   const [oeeData,      setOeeData]      = useState([]);
   const [loading,      setLoading]      = useState(true);
   const [activeTab,    setActiveTab]    = useState("overview");
-  const [showFilters,  setShowFilters]  = useState(false);
+  const [showFilters,  setShowFilters]  = useState(true);
   const [plcMap,       setPlcMap]       = useState({});
   const [nowMs,        setNowMs]        = useState(Date.now());
-  const [filters,      setFilters]      = useState({
-    dateFrom:"", dateTo:"", datePreset:"", plantId:"", lineId:"", lineName:"", machineId:"", partId:"", status:"", shiftCode:"",
+  const [filters,      setFilters]      = useState(() => {
+    const range = getCurrentDashboardProductionRange();
+    return {
+      dateFrom: range.start,
+      dateTo: range.end,
+      plantId: "",
+      lineId: "",
+      lineName: "",
+      machineId: "",
+      partId: "",
+      status: "",
+      shiftCode: "",
+    };
   });
-  const [chartModeHourly, setChartModeHourly] = useState("line");
+  const [chartModeHourly, setChartModeHourly] = useState("bar");
   const [chartModeShift, setChartModeShift] = useState("bar");
   const [chartModeRejectTrend, setChartModeRejectTrend] = useState("area");
   const [rejectionConfigParts, setRejectionConfigParts] = useState([]);
@@ -629,9 +1035,8 @@ const Dashboard = () => {
   }, [rejectionFilters.view, heatMapConfig]);
 
   const query = useMemo(() => {
-    const presetRange = getPresetRange(filters.datePreset);
-    const dateFrom = presetRange.start || localDateTimeToIso(filters.dateFrom);
-    const dateTo = presetRange.end || localDateTimeToIso(filters.dateTo);
+    const dateFrom = localDateTimeToIso(filters.dateFrom);
+    const dateTo = localDateTimeToIso(filters.dateTo);
     return {
     dateFrom,
     dateTo,
@@ -640,10 +1045,34 @@ const Dashboard = () => {
     lineId:     filters.lineId     || undefined,
     lineName:   filters.lineName   || undefined,
     partId:     filters.partId     || undefined,
-    status:     filters.status     || undefined,
+    status:     filters.status === "WIP" ? "IN_PROGRESS" : (filters.status || undefined),
     shiftCode:  filters.shiftCode  || undefined,
   };
-  },[filters]);
+  },[filters, nowMs]);
+
+  const selectedQualityGate = useMemo(() => {
+    if (!filters.machineId) return null;
+    return (machines || []).find((row) => String(row.id || row.machineId || "") === String(filters.machineId)) || null;
+  }, [filters.machineId, machines]);
+
+  const reportMetricsQuery = useMemo(() => {
+    const selectedOperation = String(
+      selectedQualityGate?.operationNo ||
+      selectedQualityGate?.operation_no ||
+      selectedQualityGate?.stationNo ||
+      selectedQualityGate?.station_no ||
+      ""
+    ).trim().toUpperCase();
+    if (!selectedOperation) return query;
+    const { machineId, ...rest } = query;
+    void machineId;
+    return {
+      ...rest,
+      station: selectedOperation,
+      operationNo: selectedOperation,
+      stationNo: selectedOperation,
+    };
+  }, [query, selectedQualityGate]);
 
   const loadData = useCallback(async()=>{
     if (refreshInFlightRef.current) {
@@ -653,11 +1082,22 @@ const Dashboard = () => {
     refreshInFlightRef.current = true;
     try {
       setLoading(true);
-      const [machinesResult, summaryResult, reportResult, oeeResult] = await Promise.allSettled([
+      const [machinesResult, summaryResult, reportResult, oeeResult, reportMetricsResult, shiftsResult] = await Promise.allSettled([
         machines.length ? Promise.resolve(machines) : machineApi.list({ timeout: 20000, suppressGlobalError: true }),
         dashboardApi.summary(query, { timeout: 25000, suppressGlobalError: true }),
         dashboardApi.report({ ...query, light: "1" }, { timeout: 45000, suppressGlobalError: true }),
         dashboardApi.oee({ timeout: 20000, suppressGlobalError: true }),
+        reportApi.getData({
+          ...reportMetricsQuery,
+          fast: "1",
+          includePlcSummary: "0",
+          includePlcReadings: "0",
+          includeLeaktest: "1",
+          noCache: "1",
+          page: 1,
+          pageSize: 10,
+        }, { timeout: 60000, suppressGlobalError: true }),
+        shiftApi.list(undefined, { timeout: 20000, suppressGlobalError: true }),
       ]);
 
       if (machinesResult.status === "fulfilled") {
@@ -672,19 +1112,28 @@ const Dashboard = () => {
       if (oeeResult.status === "fulfilled" && oeeResult.value) {
         setOeeData(oeeResult.value?.oee || []);
       }
+      if (reportMetricsResult.status === "fulfilled") {
+        setReportMetrics(reportMetricsResult.value?.metrics || null);
+      }
+      if (shiftsResult.status === "fulfilled") {
+        setShiftManagerShifts((shiftsResult.value || []).filter((row) => row?.isActive !== false));
+      }
 
       const failures = [
         machinesResult.status === "rejected" ? machinesResult.reason : null,
         summaryResult.status === "rejected" ? summaryResult.reason : null,
         reportResult.status === "rejected" ? reportResult.reason : null,
         oeeResult.status === "rejected" ? oeeResult.reason : null,
+        reportMetricsResult.status === "rejected" ? reportMetricsResult.reason : null,
+        shiftsResult.status === "rejected" ? shiftsResult.reason : null,
       ].filter(Boolean);
 
       if (
         machinesResult.status === "rejected" &&
         summaryResult.status === "rejected" &&
         reportResult.status === "rejected" &&
-        oeeResult.status === "rejected"
+        oeeResult.status === "rejected" &&
+        reportMetricsResult.status === "rejected"
       ) {
         console.error("Dashboard load error", failures[0]);
       }
@@ -698,7 +1147,7 @@ const Dashboard = () => {
         loadData();
       }
     }
-  },[query, machines]);
+  },[query, reportMetricsQuery, machines]);
 
   const scheduleRefresh = useCallback((cooldownMs = 300) => {
     const elapsed = Date.now() - lastRefreshAtRef.current;
@@ -764,11 +1213,16 @@ const Dashboard = () => {
     return `Line: All (${lines.length})`;
   }, [filters.machineId, filters.lineName, machines]);
 
+  const dashboardLineOptions = useMemo(() => (
+    [...new Set((machines || []).map((row) => String(row.lineName || row.line_name || "").trim()).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b))
+  ), [machines]);
+
   const dashboardParts = useMemo(() => {
     const grouped = new Map();
     const rows = Array.isArray(report.partsList) ? report.partsList : [];
     rows.forEach((row, index) => {
-      const partId = String(row?.partId || row?.part_id || "").trim();
+      const partId = String(row?.partId || row?.part_id || row?.traceabilityPartId || row?.customerQrCode || "").trim();
       if (!partId) return;
       const machineName = String(row?.machineName || "").trim();
       const stationNo = String(row?.stationNo || row?.station_no || row?.operationNo || row?.operation_no || "").trim();
@@ -896,56 +1350,91 @@ const Dashboard = () => {
     return dashboardParts.reduce((acc, part) => {
       if (part.finalStatus === "PASSED") acc.passed += 1;
       else if (part.finalStatus === "FAILED") acc.failed += 1;
-      else if (part.blocked) acc.blocked += 1;
-      else acc.inProgress += 1;
+      else {
+        if (part.blocked) acc.blocked += 1;
+        acc.inProgress += 1;
+      }
       return acc;
     }, { passed: 0, failed: 0, blocked: 0, inProgress: 0 });
   }, [dashboardParts]);
 
   const reportTraceabilityCounts = useMemo(() => {
+    if (reportMetrics && typeof reportMetrics === "object") {
+      const passed = Number(reportMetrics.totalOK || 0);
+      const failed = Number(reportMetrics.totalNG || 0);
+      const inProgress = Number(reportMetrics.inProgress || 0);
+      return {
+        passed,
+        failed,
+        blocked: Number(reportMetrics.validationRejects || 0) > failed ? Number(reportMetrics.validationRejects || 0) - failed : 0,
+        inProgress,
+        total: Number(reportMetrics.traceabilityProduction ?? reportMetrics.totalProduction ?? passed + failed + inProgress),
+      };
+    }
     const counts = report?.traceabilityCounts;
     if (!counts || typeof counts !== "object") return null;
     return {
       passed: Number(counts.passed || 0),
       failed: Number(counts.failed || 0),
       blocked: Number(counts.blocked || 0),
-      inProgress: Number(counts.inProgress || 0),
+      inProgress: Number(counts.inProgress || 0) + Number(counts.blocked || 0),
     };
-  }, [report?.traceabilityCounts]);
+  }, [report?.traceabilityCounts, reportMetrics]);
 
   const dashboardPartCounts = reportTraceabilityCounts || dashboardPartCountsFromJourney;
 
   const dashboardMachineCards = useMemo(() => {
     const machineCountsFromParts = new Map();
+    const addMachinePartStatus = ({ machineId, partId, normalizedStatus, createdAt }) => {
+      const numericMachineId = Number(machineId || 0);
+      const normalizedPartId = String(partId || "").trim();
+      if (!numericMachineId || !normalizedPartId) return;
+
+      const createdAtMs = new Date(createdAt || 0).getTime() || 0;
+      if (!machineCountsFromParts.has(numericMachineId)) {
+        machineCountsFromParts.set(numericMachineId, new Map());
+      }
+
+      const byPart = machineCountsFromParts.get(numericMachineId);
+      const existing = byPart.get(normalizedPartId);
+      const existingTs = existing ? (new Date(existing.createdAt || 0).getTime() || 0) : -1;
+      const nextPriority = getDashboardStatusPriority(normalizedStatus);
+      const existingPriority = existing ? getDashboardStatusPriority(existing.normalizedStatus) : -1;
+
+      if (!existing || createdAtMs > existingTs || (createdAtMs === existingTs && nextPriority >= existingPriority)) {
+        byPart.set(normalizedPartId, {
+          normalizedStatus,
+          createdAt: createdAt || null,
+        });
+      }
+    };
 
     (report.partsList || []).forEach((row) => {
-      const machineId = Number(row?.machineId || row?.machine_id || 0);
-      const partId = String(row?.partId || row?.part_id || "").trim();
-      if (!machineId || !partId) return;
+      const partId = String(row?.partId || row?.part_id || row?.traceabilityPartId || row?.customerQrCode || "").trim();
+      if (!partId) return;
+      const leakReadings = Array.isArray(row?.leakTestReadings) ? row.leakTestReadings : [];
+      if (leakReadings.length > 0) {
+        leakReadings.forEach((reading) => {
+          addMachinePartStatus({
+            machineId: reading?.matchedMachineId,
+            partId,
+            normalizedStatus: normalizeDashboardLeakResult(reading),
+            createdAt: reading?.cycleEndTime || reading?.Cycle_End_Time || row?.createdAt || row?.createdAtRaw,
+          });
+        });
+      }
 
       const normalizedStatus = normalizeDashboardStationResult(
         row?.result || row?.status || row?.statusLabel || row?.industrialResult,
         row?.interlockReason || row?.reason,
         row
       );
-      const createdAtMs = new Date(row?.createdAt || row?.createdAtRaw || 0).getTime() || 0;
-
-      if (!machineCountsFromParts.has(machineId)) {
-        machineCountsFromParts.set(machineId, new Map());
-      }
-
-      const byPart = machineCountsFromParts.get(machineId);
-      const existing = byPart.get(partId);
-      const existingTs = existing ? (new Date(existing.createdAt || 0).getTime() || 0) : -1;
-      const nextPriority = getDashboardStatusPriority(normalizedStatus);
-      const existingPriority = existing ? getDashboardStatusPriority(existing.normalizedStatus) : -1;
-
-      if (!existing || createdAtMs > existingTs || (createdAtMs === existingTs && nextPriority >= existingPriority)) {
-        byPart.set(partId, {
-          normalizedStatus,
-          createdAt: row?.createdAt || row?.createdAtRaw || null,
-        });
-      }
+      addMachinePartStatus({
+        machineId: row?.machineId || row?.machine_id,
+        partId,
+        normalizedStatus,
+        createdAt: row?.createdAt || row?.createdAtRaw,
+      });
     });
 
     const machineCountSummary = new Map();
@@ -963,14 +1452,30 @@ const Dashboard = () => {
       const machineId = Number(row.machineId || row.machine_id || 0);
       const derived = machineCountSummary.get(machineId);
       if (!derived) {
+        const plannedMinutes = Number(row.plannedProductionMinutes || 0);
+        const effectiveCycleSeconds = Number(row.cycleTime ?? row.cycle_time ?? 0) + Number(row.loadingTime ?? row.loading_time ?? 0);
+        const target = Number(row.targetProduction ?? row.targetQty ?? 0)
+          || (effectiveCycleSeconds > 0 && plannedMinutes > 0 ? Math.floor((plannedMinutes * 60) / effectiveCycleSeconds) : 0);
         return {
           ...row,
+          targetProduction: target,
+          targetQty: target,
           interlockedCount: 0,
+          achievementPct: target > 0 ? Number(((Number(row.actualProduction || row.processedCount || 0) / target) * 100).toFixed(2)) : Number(row.achievementPct || 0),
         };
       }
 
       const processedCount = Number(derived.ok || 0) + Number(derived.ng || 0);
-      const target = Number(row.targetProduction ?? row.targetQty ?? 0);
+      const derivedQuality = processedCount > 0 ? Number(((Number(derived.ok || 0) / processedCount) * 100).toFixed(2)) : 0;
+      const downtimeMinutes = Number(row.downtimeMinutes || 0);
+      const plannedMinutes = Number(row.plannedProductionMinutes || 0);
+      const effectiveCycleSeconds = Number(row.cycleTime ?? row.cycle_time ?? 0) + Number(row.loadingTime ?? row.loading_time ?? 0);
+      const target = Number(row.targetProduction ?? row.targetQty ?? 0)
+        || (effectiveCycleSeconds > 0 && plannedMinutes > 0 ? Math.floor((plannedMinutes * 60) / effectiveCycleSeconds) : 0);
+      const derivedOa = processedCount > 0
+        ? Number(row.oa || 0) || (plannedMinutes > 0 ? Number((((Math.max(plannedMinutes - downtimeMinutes, 0)) / plannedMinutes) * 100).toFixed(2)) : 100)
+        : 0;
+      const derivedOee = processedCount > 0 ? Number(row.oee || 0) || derivedQuality : 0;
 
       return {
         ...row,
@@ -980,71 +1485,172 @@ const Dashboard = () => {
         interlockedCount: 0,
         processedCount,
         actualProduction: processedCount,
-        accuracy: processedCount > 0 ? Number(((Number(derived.ok || 0) / processedCount) * 100).toFixed(2)) : 0,
+        targetProduction: target,
+        targetQty: target,
+        accuracy: derivedQuality,
+        quality: derivedQuality,
+        oa: derivedOa,
+        oee: derivedOee,
         achievementPct: target > 0 ? Number(((processedCount / target) * 100).toFixed(2)) : Number(row.achievementPct || 0),
       };
     });
   }, [report.machineCards, report.partsList]);
 
   const efficiency = useMemo(()=>{
+    if (reportMetrics && (reportMetrics.totalOK !== undefined || reportMetrics.totalNG !== undefined)) {
+      const ok = Number(reportMetrics.totalOK || 0);
+      const ng = Number(reportMetrics.totalNG || 0);
+      const totalFinal = ok + ng;
+      return totalFinal > 0 ? Number(((ok / totalFinal) * 100).toFixed(2)) : 0;
+    }
     const ok = Number(dashboardPartCounts.passed || 0);
     const ng = Number(dashboardPartCounts.failed || 0);
     const t = ok + ng;
-    return t > 0 ? Math.round((ok / t) * 100) : 0;
-  },[dashboardPartCounts]);
+    return t > 0 ? Number(((ok / t) * 100).toFixed(2)) : 0;
+  },[dashboardPartCounts, reportMetrics]);
 
   // Pie data
   const pieData = useMemo(()=>[
     { name:t("dashboard.pass", "Pass"),    value:Number(dashboardPartCounts.passed || 0)  },
     { name:t("dashboard.fail", "Fail"),    value:Number(dashboardPartCounts.failed || 0)  },
-  ],[dashboardPartCounts]);
+    { name:t("dashboard.inProgress", "In Progress"), value:Number(dashboardPartCounts.inProgress || 0) },
+  ],[dashboardPartCounts, t]);
+
+  const dashboardShifts = useMemo(() => {
+    const rows = [
+      ...((shiftManagerShifts || []).filter(Boolean)),
+      ...((report.availableShifts || []).filter(Boolean)),
+      ...((summary.availableShifts || []).filter(Boolean)),
+    ];
+    const seen = new Set();
+    const normalized = rows
+      .map((shift) => {
+        const code = normalizeDashboardShiftCode(shift?.shiftCode || shift?.shift_code);
+        const startTime = shift?.startTime || shift?.start_time;
+        const endTime = shift?.endTime || shift?.end_time;
+        if (!code || code === "UNASSIGNED" || !startTime || !endTime || seen.has(code)) return null;
+        seen.add(code);
+        return {
+          ...shift,
+          shiftCode: code,
+          shiftName: shift?.shiftName || shift?.shift_name || getDashboardShiftLabel(code),
+          startTime,
+          endTime,
+        };
+      })
+      .filter(Boolean);
+    return normalized.length
+      ? normalized.sort((a, b) => (getDashboardShiftSeconds(a.startTime) ?? 0) - (getDashboardShiftSeconds(b.startTime) ?? 0))
+      : ["SHIFT_A", "SHIFT_B", "SHIFT_C"].map((code) => ({ shiftCode: code, shiftName: getDashboardShiftLabel(code), startTime: "", endTime: "" }));
+  }, [report.availableShifts, shiftManagerShifts, summary.availableShifts]);
 
   // Shift bar data
   const shiftData = useMemo(() => {
-    const grouped = Array.isArray(report.shiftWiseMetrics) ? report.shiftWiseMetrics : [];
-    const shiftOrder = ["SHIFT_A", "SHIFT_B", "SHIFT_C"];
-    const shiftLabel = {
-      SHIFT_A: "Shift A",
-      SHIFT_B: "Shift B",
-      SHIFT_C: "Shift C",
-    };
-    if (grouped.length > 0) {
-      const normalizedMap = grouped.reduce((acc, row) => {
-        const code = String(row.shiftCode || "UNASSIGNED").toUpperCase();
-        if (!acc[code]) {
-          acc[code] = { code, actual: 0, target: 0, oee: 0, oa: 0, count: 0 };
-        }
-        acc[code].actual += Number(row.actualProduction || 0);
-        acc[code].target += Number(row.targetProduction || 0);
-        acc[code].oee += Number(row.oee || 0);
-        acc[code].oa += Number(row.oa || 0);
-        acc[code].count += 1;
-        return acc;
-      }, {});
-      return shiftOrder.map((code) => ({
-        code,
-        name: shiftLabel[code],
-        actual: Number(normalizedMap[code]?.actual || 0),
-        target: Number(normalizedMap[code]?.target || 0),
-        oee: Number((normalizedMap[code]?.oee || 0) / Math.max(1, normalizedMap[code]?.count || 0)),
-        oa: Number((normalizedMap[code]?.oa || 0) / Math.max(1, normalizedMap[code]?.count || 0)),
-      }));
-    }
-    const fallbackMap = Object.entries(report.shiftProduction || {}).reduce((acc, [k, v]) => {
-      acc[String(k).toUpperCase()] = {
-        actual: Number((v?.ok || 0) + (v?.ng || 0)),
-      };
+    const shiftLabelByCode = dashboardShifts.reduce((acc, shift) => {
+      acc[normalizeDashboardShiftCode(shift.shiftCode || shift.shift_code)] = shift.shiftName || shift.shift_name || getDashboardShiftLabel(shift.shiftCode || shift.shift_code);
       return acc;
     }, {});
-    return shiftOrder.map((code) => ({
-      code,
-      name: shiftLabel[code],
-      actual: Number(fallbackMap[code]?.actual || 0),
-      target: 0,
-      oee: 0,
-      oa: 0,
-    }));
-  }, [report.shiftProduction, report.shiftWiseMetrics]);
+    const shiftOrder = dashboardShifts.map((shift) => normalizeDashboardShiftCode(shift.shiftCode || shift.shift_code)).filter(Boolean);
+    const toShiftRows = (normalizedMap) => shiftOrder.map((code) => {
+      const row = normalizedMap[code] || {};
+      const ok = Number(row.ok || 0);
+      const ng = Number(row.ng || 0);
+      const inProgress = Number(row.inProgress || 0);
+      const total = Number(row.total || 0);
+      return {
+        code,
+        name: shiftLabelByCode[code] || getDashboardShiftLabel(code),
+        actual: total || ok + ng + inProgress,
+        ok,
+        ng,
+        inProgress,
+        target: Number(row.target || 0),
+        oee: Number(row.oee || 0),
+        oa: Number(row.oa || 0),
+      };
+    });
+    const reconcileShiftRows = (rows) => {
+      return rows;
+    };
+
+    if (reportMetrics?.byShift && typeof reportMetrics.byShift === "object" && Object.keys(reportMetrics.byShift).length > 0) {
+      const normalizedMap = Object.entries(reportMetrics.byShift).reduce((acc, [key, row]) => {
+        const code = normalizeDashboardShiftCode(row?.shiftCode || row?.shift_code || key);
+        if (!acc[code]) acc[code] = { total: 0, ok: 0, ng: 0, inProgress: 0, target: 0 };
+        acc[code].total += Number(row?.total || row?.totalProduction || row?.actualProduction || 0);
+        acc[code].ok += Number(row?.ok || row?.totalOK || row?.passed || 0);
+        acc[code].ng += Number(row?.ng || row?.totalNG || row?.failed || 0);
+        acc[code].inProgress += Number(row?.inProgress || row?.wip || row?.active || 0);
+        acc[code].target += Number(row?.target || row?.targetProduction || row?.targetQty || 0);
+        return acc;
+      }, {});
+      return reconcileShiftRows(toShiftRows(normalizedMap));
+    }
+
+    const shiftRowsFromParts = (dashboardParts || []).reduce((acc, part) => {
+      const code = resolveDashboardShiftCodeForDate(part?.createdAt || part?.latestCreatedAt, dashboardShifts);
+      if (!acc[code]) acc[code] = { total: 0, ok: 0, ng: 0, inProgress: 0, target: 0 };
+      acc[code].total += 1;
+      if (part?.finalStatus === "PASSED") acc[code].ok += 1;
+      else if (part?.finalStatus === "FAILED") acc[code].ng += 1;
+      else acc[code].inProgress += 1;
+      return acc;
+    }, {});
+    if (Object.keys(shiftRowsFromParts).length > 0) return reconcileShiftRows(toShiftRows(shiftRowsFromParts));
+
+    if (report.shiftProduction && Object.keys(report.shiftProduction || {}).length > 0) {
+      const normalizedMap = Object.entries(report.shiftProduction || {}).reduce((acc, [key, row]) => {
+        const code = normalizeDashboardShiftCode(row?.shiftCode || row?.shift_code || key);
+        if (!acc[code]) acc[code] = { total: 0, ok: 0, ng: 0, inProgress: 0, target: 0 };
+        acc[code].total += Number(row?.total || 0);
+        acc[code].ok += Number(row?.ok || row?.totalOK || row?.passed || 0);
+        acc[code].ng += Number(row?.ng || row?.totalNG || row?.failed || 0);
+        acc[code].inProgress += Number(row?.inProgress || row?.wip || row?.active || 0);
+        return acc;
+      }, {});
+      return reconcileShiftRows(toShiftRows(normalizedMap));
+    }
+
+    const shiftRowsFromMetrics = (report.shiftWiseMetrics || []).reduce((acc, row) => {
+      const code = normalizeDashboardShiftCode(row?.shiftCode || row?.shift_code);
+      if (!code || code === "UNASSIGNED") return acc;
+      if (!acc[code]) acc[code] = { total: 0, ok: 0, ng: 0, inProgress: 0, target: 0 };
+      acc[code].total += Number(row?.actualProduction || row?.actual || row?.total || 0);
+      acc[code].target += Number(row?.targetProduction || row?.target || 0);
+      return acc;
+    }, {});
+    if (Object.keys(shiftRowsFromMetrics).length > 0) return reconcileShiftRows(toShiftRows(shiftRowsFromMetrics));
+
+    const shiftRowsFromStationRows = (report.partsList || []).reduce((acc, row) => {
+      const scanTime = row?.createdAt || row?.createdAtRaw || row?.firstScanAt || row?.latestCreatedAt;
+      const code = resolveDashboardShiftCodeForDate(scanTime, dashboardShifts);
+      if (!acc[code]) acc[code] = { total: 0, ok: 0, ng: 0, inProgress: 0, target: 0 };
+      const normalizedStatus = normalizeDashboardStationResult(
+        row?.result || row?.status || row?.statusLabel || row?.industrialResult,
+        row?.interlockReason || row?.reason,
+        row
+      );
+      acc[code].total += 1;
+      if (normalizedStatus === "OK") acc[code].ok += 1;
+      else if (normalizedStatus === "NG") acc[code].ng += 1;
+      else acc[code].inProgress += 1;
+      return acc;
+    }, {});
+    if (Object.keys(shiftRowsFromStationRows).length > 0) return reconcileShiftRows(toShiftRows(shiftRowsFromStationRows));
+
+    const shiftRowsFromHourly = (report.hourlyProduction || []).reduce((acc, row) => {
+      const hourValue = row?.hour || row?.time || row?.bucket;
+      const code = resolveDashboardShiftCodeForDate(hourValue, dashboardShifts);
+      if (!acc[code]) acc[code] = { total: 0, ok: 0, ng: 0, inProgress: 0, target: 0 };
+      acc[code].total += Number(row?.total || 0);
+      acc[code].ok += Number(row?.ok || row?.pass || row?.passed || 0);
+      acc[code].ng += Number(row?.ng || row?.fail || row?.failed || 0);
+      acc[code].inProgress += Number(row?.inProgress || row?.wip || 0);
+      return acc;
+    }, {});
+    if (Object.keys(shiftRowsFromHourly).length > 0) return reconcileShiftRows(toShiftRows(shiftRowsFromHourly));
+    return reconcileShiftRows(toShiftRows({}));
+  }, [dashboardParts, dashboardShifts, report.hourlyProduction, report.partsList, report.shiftProduction, report.shiftWiseMetrics, reportMetrics]);
 
   const hasFilters = Object.values(filters).some(Boolean);
   const rejectionAnalysisRows = useMemo(() => {
@@ -1152,17 +1758,25 @@ const Dashboard = () => {
   }, [filteredRejectionRows]);
 
   const rejectionTopReasons = useMemo(() => {
+    const maxRejects = Number(dashboardPartCounts.failed || reportMetrics?.totalNG || 0);
     const grouped = filteredRejectionRows.reduce((acc, row) => {
       const reason = String(row.rejectionReasonOnly || row.reason || row.interlock_reason || "").trim();
       if (!reason) return acc;
       acc[reason] = (acc[reason] || 0) + 1;
       return acc;
     }, {});
+    let remaining = maxRejects > 0 ? maxRejects : Infinity;
     return Object.entries(grouped)
       .map(([reason, count]) => ({ reason, count }))
       .sort((a, b) => b.count - a.count)
+      .map((row) => {
+        const count = Math.min(Number(row.count || 0), remaining);
+        remaining -= count;
+        return { ...row, count };
+      })
+      .filter((row) => Number(row.count || 0) > 0)
       .slice(0, 6);
-  }, [filteredRejectionRows]);
+  }, [dashboardPartCounts.failed, filteredRejectionRows, reportMetrics]);
 
   const rejectionParetoData = useMemo(() => {
     const total = rejectionTopReasons.reduce((sum, row) => sum + Number(row.count || 0), 0);
@@ -1204,7 +1818,6 @@ const Dashboard = () => {
   }, [filteredRejectionRows]);
 
   const isMultiDayRange = useMemo(() => {
-    if (filters.datePreset === "last7" || filters.datePreset === "last30") return true;
     if (filters.dateFrom && filters.dateTo) {
       const fromMs = new Date(filters.dateFrom).getTime();
       const toMs = new Date(filters.dateTo).getTime();
@@ -1213,7 +1826,7 @@ const Dashboard = () => {
       }
     }
     return false;
-  }, [filters.datePreset, filters.dateFrom, filters.dateTo]);
+  }, [filters.dateFrom, filters.dateTo]);
 
   const productionTrendData = useMemo(() => {
     if (!isMultiDayRange) return report.hourlyProduction || [];
@@ -1249,10 +1862,10 @@ const Dashboard = () => {
   }, [isMultiDayRange, rejectionTrend, filteredRejectionRows]);
 
   const analysisMachineRows = useMemo(() => {
-    const filteredCards = Array.isArray(report.machineCards) ? report.machineCards : [];
+    const filteredCards = Array.isArray(dashboardMachineCards) ? dashboardMachineCards : [];
     if (filteredCards.length > 0) return filteredCards;
     return Array.isArray(oeeData) ? oeeData : [];
-  }, [oeeData, report.machineCards]);
+  }, [dashboardMachineCards, oeeData]);
   const isInitialDashboardLoading = loading &&
     Number(summary?.machines?.total || 0) === 0 &&
     !report.machineCards?.length &&
@@ -1265,7 +1878,6 @@ const Dashboard = () => {
     { id:"machines",  label:t("dashboard.machineKpisTab", "Machine KPIs"),      icon:Cpu        },
     { id:"oee",       label:t("dashboard.oeeAnalysisTab", "OEE Analysis"),      icon:Activity   },
     { id:"oa",        label:t("dashboard.oaAnalysisTab", "OA Analysis"),       icon:Target     },
-    { id:"rejection", label:t("dashboard.rejectionAnalysisTab", "Rejection Analysis"),icon:AlertTriangle },
       ];
 
   return (
@@ -1275,7 +1887,7 @@ const Dashboard = () => {
       {/* —— Page Header ————————————————————————————————————————————————————————— */}
       <div style={{
         background:C.bg("card"),border:`1px solid ${C.bdr()}`,
-        borderRadius:16,padding:"18px 20px",boxShadow:SHADOW,overflow:"hidden",
+        borderRadius:16,padding:"18px 20px",boxShadow:SHADOW,overflow:"visible",position:"relative",zIndex:30,
       }}>
         <div style={{height:3,background:`linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`,
           margin:"-18px -20px 16px"}}/>
@@ -1353,93 +1965,53 @@ const Dashboard = () => {
 
         {showFilters && (
           <div style={{
-            marginTop:16,padding:"16px",borderRadius:12,
-            background:C.bg("surf"),border:`1px solid ${C.bdr()}`,
-            display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:12,
+            marginTop:16,padding:"16px 18px",borderRadius:12,
+            background:C.bg("card"),border:`1px solid ${C.bdr()}`,
+            boxShadow:"inset 0 1px 0 rgba(255,255,255,0.35)",
+            display:"flex",flexDirection:"column",gap:12,
             animation:"dbFadeIn 0.2s ease",
+            position:"relative",zIndex:10,
           }}>
-            <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.fromDateTime", "From Date/Time")}</label>
-              <input
-                type="datetime-local"
-                value={filters.dateFrom}
-                onChange={e => setFilters(prev => ({ ...prev, dateFrom: e.target.value, datePreset: "" }))}
-                style={{
-                  height:36,padding:"0 12px",
-                  background:C.bg("input"),
-                  border:`1px solid ${C.bdr()}`,
-                  borderRadius:8,fontSize:12,
-                  color:C.txt("pri"),outline:"none",
-                  fontFamily:"var(--font-db)",
+            <div style={{
+              display:"grid",
+              gridTemplateColumns:"minmax(230px,320px) repeat(4,minmax(140px,1fr)) auto auto",
+              gap:10,
+              alignItems:"center",
+            }}>
+              <DashboardDateRangePicker
+                startDate={filters.dateFrom}
+                endDate={filters.dateTo}
+                onApply={(start, end) => {
+                  const currentRange = getCurrentDashboardProductionRange();
+                  const cappedEnd = new Date(end);
+                  if (new Date(start).toDateString() === new Date(currentRange.start).toDateString() && cappedEnd > new Date(currentRange.end)) {
+                    cappedEnd.setTime(new Date(currentRange.end).getTime());
+                  }
+                  setFilters((prev) => ({
+                    ...prev,
+                    dateFrom: start.toISOString(),
+                    dateTo: cappedEnd.toISOString(),
+                  }));
+                }}
+                onClear={() => {
+                  const range = getCurrentDashboardProductionRange();
+                  setFilters((prev) => ({ ...prev, dateFrom: range.start, dateTo: range.end }));
                 }}
               />
-            </div>
-            <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.toDateTime", "To Date/Time")}</label>
-              <input
-                type="datetime-local"
-                value={filters.dateTo}
-                onChange={e => setFilters(prev => ({ ...prev, dateTo: e.target.value, datePreset: "" }))}
-                style={{
-                  height:36,padding:"0 12px",
-                  background:C.bg("input"),
-                  border:`1px solid ${C.bdr()}`,
-                  borderRadius:8,fontSize:12,
-                  color:C.txt("pri"),outline:"none",
-                  fontFamily:"var(--font-db)",
-                }}
-              />
-            </div>
-            <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.dateRange", "Date Range")}</label>
               <select
-                value={filters.datePreset}
-                onChange={e=>setFilters(prev=>({...prev,datePreset:e.target.value, dateFrom:"", dateTo:""}))}
-                style={{
-                  height:36,padding:"0 12px",
-                  background:C.bg("input"),
-                  border:`1px solid ${C.bdr()}`,
-                  borderRadius:8,fontSize:12,
-                  color:C.txt("pri"),outline:"none",
-                  fontFamily:"var(--font-db)",
-                  cursor:"pointer",
-                  appearance:"auto",
-                }}>
-               
-                <option value="today">{t("dashboard.today", "Today")}</option>
-                <option value="last7">{t("dashboard.last7Days", "Last 7 Days")}</option>
-                <option value="last30">{t("dashboard.last1Month", "Last 1 Month")}</option>
+                value={filters.lineName}
+                onChange={e=>setFilters(prev=>({...prev,lineName:e.target.value,lineId:"",plantId:"",machineId:""}))}
+                className="db-filter-input">
+                <option value="">All Lines</option>
+                {dashboardLineOptions.map((lineName)=>(
+                  <option key={lineName} value={lineName}>{lineName}</option>
+                ))}
               </select>
-            </div>
-
-            <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <PlantLineSelector
-                value={filters}
-                onChange={(scope)=>setFilters(prev=>({...prev,...scope,machineId:""}))}
-                includeAll
-                compact
-                hideLabels
-                className="grid grid-cols-1 gap-2 sm:grid-cols-2"
-                inputClassName="h-9 rounded-md border border-border bg-white px-3 text-xs font-semibold text-slate-800 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10"
-              />
-            </div>
-
-            <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.machineName", "Machine Name")}</label>
               <select
                 value={filters.machineId}
                 onChange={e=>setFilters(prev=>({...prev,machineId:e.target.value}))}
-                style={{
-                  height:36,padding:"0 12px",
-                  background:C.bg("input"),
-                  border:`1px solid ${C.bdr()}`,
-                  borderRadius:8,fontSize:12,
-                  color:C.txt("pri"),outline:"none",
-                  fontFamily:"var(--font-db)",
-                  cursor:"pointer",
-                  appearance:"auto",
-                }}>
-                <option value="">{t("dashboard.allMachines", "All Machines")}</option>
+                className="db-filter-input">
+                <option value="">{t("dashboard.allQualityGates", "All Quality Gates")}</option>
                 {machines
                   .filter((m) => !filters.plantId || String(m.plantId || "") === String(filters.plantId))
                   .filter((m) => !filters.lineId || String(m.lineId || "") === String(filters.lineId))
@@ -1448,70 +2020,53 @@ const Dashboard = () => {
                   <option key={m.id} value={m.id}>{m.machineName}</option>
                 ))}
               </select>
-            </div>
-
-            <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>{t("dashboard.partSerialNo", "Part Serial No")}</label>
-              <input
-                type="text"
-                placeholder={t("dashboard.searchSerial", "Search serial...")}
-                value={filters.partId}
-                onChange={e=>setFilters(prev=>({...prev,partId:e.target.value}))}
-                style={{
-                  height:36,padding:"0 12px",
-                  background:C.bg("input"),
-                  border:`1px solid ${C.bdr()}`,
-                  borderRadius:8,fontSize:12,
-                  color:C.txt("pri"),outline:"none",
-                  fontFamily:"var(--font-db)",
-                }}
-              />
-            </div>
-
-            <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Result Status</label>
               <select
                 value={filters.status}
                 onChange={e=>setFilters(prev=>({...prev,status:e.target.value}))}
-                style={{
-                  height:36,padding:"0 12px",
-                  background:C.bg("input"),
-                  border:`1px solid ${C.bdr()}`,
-                  borderRadius:8,fontSize:12,
-                  color:C.txt("pri"),outline:"none",
-                  fontFamily:"var(--font-db)",
-                  cursor:"pointer",
-                  appearance:"auto",
-                }}>
+                className="db-filter-input">
                 <option value="">{t("dashboard.allStatus", "All Status")}</option>
                 <option value="OK">{t("dashboard.passOk", "Pass (OK)")}</option>
                 <option value="NG">{t("dashboard.failNg", "Fail (NG)")}</option>
                 <option value="WIP">{t("dashboard.inProgress", "In Progress")}</option>
               </select>
-            </div>
-
-            <div style={{display:"flex", flexDirection:"column", gap:5}}>
-              <label style={{fontSize:10, fontWeight:800, color:C.txt("muted"), textTransform:"uppercase"}}>Shift</label>
               <select
                 value={filters.shiftCode}
                 onChange={e=>setFilters(prev=>({...prev,shiftCode:e.target.value}))}
-                style={{
-                  height:36,padding:"0 12px",
-                  background:C.bg("input"),
-                  border:`1px solid ${C.bdr()}`,
-                  borderRadius:8,fontSize:12,
-                  color:C.txt("pri"),outline:"none",
-                  fontFamily:"var(--font-db)",
-                  cursor:"pointer",
-                  appearance:"auto",
-                }}>
+                className="db-filter-input">
                 <option value="">{t("dashboard.allShifts", "All Shifts")}</option>
-                {(summary.availableShifts||["SHIFT_A","SHIFT_B","SHIFT_C"]).map(s=>(
-                  <option key={typeof s === 'string' ? s : s.shiftCode} value={typeof s === 'string' ? s : s.shiftCode}>
-                    {typeof s === 'string' ? s.replace("_"," ") : (s.shiftName || s.shiftCode)}
+                {(dashboardShifts || []).map(s=>(
+                  <option key={s.shiftCode || s.shift_code} value={s.shiftCode || s.shift_code}>
+                    {s.shiftName || s.shift_name || s.shiftCode || s.shift_code}
                   </option>
                 ))}
               </select>
+              <button
+                onClick={() => {
+                  const range = getCurrentDashboardProductionRange();
+                  setFilters({dateFrom:range.start,dateTo:range.end,plantId:"",lineId:"",lineName:"",machineId:"",partId:"",status:"",shiftCode:""});
+                }}
+                style={{
+                  height:36,padding:"0 18px",borderRadius:8,
+                  border:`1px solid ${C.ng(0.18)}`,background:C.ng(0.05),
+                  color:C.ng(),fontSize:12,fontWeight:800,cursor:"pointer",
+                  display:"inline-flex",alignItems:"center",gap:7,
+                }}
+              >
+                <X size={14} /> Clear
+              </button>
+              <button
+                onClick={loadData}
+                disabled={loading}
+                style={{
+                  height:36,padding:"0 20px",borderRadius:8,border:"none",
+                  background:`linear-gradient(135deg,${C.navy()},${C.steel()})`,
+                  color:C.linen(),fontSize:12,fontWeight:800,cursor:"pointer",
+                  display:"inline-flex",alignItems:"center",gap:7,opacity:loading?0.65:1,
+                  boxShadow:`0 4px 14px ${C.navy(0.18)}`,
+                }}
+              >
+                <RefreshCw size={14} style={{animation:loading?"dbSpin 0.9s linear infinite":"none"}} /> Apply Filters
+              </button>
             </div>
           </div>
         )}
@@ -1544,9 +2099,8 @@ const Dashboard = () => {
               {t("dashboard.activeFilters", "Active Filters")}
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {filters.datePreset && <Badge variant="idle" label={`Range: ${filters.datePreset === "today" ? "Today" : filters.datePreset === "last7" ? "Last 7 Days" : "Last 1 Month"}`} />}
-              {filters.dateFrom && !filters.datePreset && <Badge variant="idle" label={`From: ${new Date(filters.dateFrom).toLocaleString()}`} />}
-              {filters.dateTo && !filters.datePreset && <Badge variant="idle" label={`To: ${new Date(filters.dateTo).toLocaleString()}`} />}
+              {filters.dateFrom && <Badge variant="idle" label={`From: ${new Date(filters.dateFrom).toLocaleString()}`} />}
+              {filters.dateTo && <Badge variant="idle" label={`To: ${new Date(filters.dateTo).toLocaleString()}`} />}
               {filters.lineName && <Badge variant="idle" label={`Line: ${filters.lineName}`} />}
               {filters.machineId && <Badge variant="idle" label={`Machine: ${machines.find(m => String(m.id) === String(filters.machineId))?.machineName || filters.machineId}`} />}
               {filters.partId && <Badge variant="idle" label={`Part: ${filters.partId}`} />}
@@ -1556,7 +2110,8 @@ const Dashboard = () => {
           </div>
           <button 
             onClick={() => {
-              setFilters({dateFrom:"",dateTo:"",datePreset:"",plantId:"",lineId:"",lineName:"",machineId:"",partId:"",status:"",shiftCode:""});
+              const range = getCurrentDashboardProductionRange();
+              setFilters({dateFrom:range.start,dateTo:range.end,plantId:"",lineId:"",lineName:"",machineId:"",partId:"",status:"",shiftCode:""});
             }}
             style={{
               background: "transparent",
@@ -1637,8 +2192,8 @@ const Dashboard = () => {
                         innerRadius={50} outerRadius={75}
                         paddingAngle={3} dataKey="value" strokeWidth={0}
                         labelLine={false}>
-                        {pieData.map((entry) => (
-                          <Cell key={entry.name} fill={entry.name === "Pass" ? C.ok() : C.ng()} />
+                        {pieData.map((entry, index) => (
+                          <Cell key={entry.name} fill={[C.ok(), C.ng(), C.wip()][index] || C.steel()} />
                         ))}
                       </Pie>
                       <Tooltip {...TooltipStyle}/>
@@ -1657,6 +2212,7 @@ const Dashboard = () => {
                 {[
                   { label:t("dashboard.pass", "Pass"),    value:dashboardPartCounts.passed||0,    color:C.ok()    },
                   { label:t("dashboard.fail", "Fail"),    value:dashboardPartCounts.failed||0,    color:C.ng()    },
+                  { label:t("dashboard.inProgress", "In Progress"), value:dashboardPartCounts.inProgress||0, color:C.wip() },
                 ].map(s=>(
                   <div key={s.label} style={{background:C.bg("surf"),
                     border:`1px solid ${C.bdr()}`,borderRadius:10,
@@ -1735,11 +2291,11 @@ const Dashboard = () => {
             </div>
           </div>
 
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}
+          <div style={{display:"grid",gridTemplateColumns:"1fr",gap:16}}
             className="db-grid-2">
             <style>{`@media(max-width:800px){.db-grid-2{grid-template-columns:1fr!important}}`}</style>
 
-            <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
+            {/* <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
               <SectionHead title={t("dashboard.productionByShift", "Production by Shift")} right={<ChartModeToggle mode={chartModeShift} onChange={setChartModeShift} />} />
               <SafeChart height={200} style={{overflow:"visible",position:"relative",zIndex:2}}>
@@ -1751,8 +2307,9 @@ const Dashboard = () => {
                       <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <Tooltip {...TooltipStyle}/>
-                      <Bar dataKey="actual" fill={C.ok()} radius={[4,4,0,0]} barSize={24}/>
-                      <Bar dataKey="target" fill={C.steel(0.7)} radius={[4,4,0,0]} barSize={24}/>
+                      <Bar dataKey="ok" name="Pass" stackId="shift" fill={C.ok()} radius={[4,4,0,0]} barSize={28}/>
+                      <Bar dataKey="ng" name="Fail" stackId="shift" fill={C.ng()} radius={[4,4,0,0]} barSize={28}/>
+                      <Bar dataKey="inProgress" name="In Progress" stackId="shift" fill={C.wip()} radius={[4,4,0,0]} barSize={28}/>
                     </BarChart>
                   )}
                   {chartModeShift === "line" && (
@@ -1761,8 +2318,9 @@ const Dashboard = () => {
                       <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <Tooltip {...TooltipStyle}/>
-                      <Line type="monotone" dataKey="actual" stroke={C.ok()} strokeWidth={2.4} />
-                      <Line type="monotone" dataKey="target" stroke={C.steel()} strokeWidth={2.2} />
+                      <Line type="monotone" dataKey="actual" name="Total" stroke={C.steel()} strokeWidth={2.4} />
+                      <Line type="monotone" dataKey="ok" name="Pass" stroke={C.ok()} strokeWidth={2.2} />
+                      <Line type="monotone" dataKey="ng" name="Fail" stroke={C.ng()} strokeWidth={2.2} />
                     </LineChart>
                   )}
                   {chartModeShift === "area" && (
@@ -1771,35 +2329,35 @@ const Dashboard = () => {
                       <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
                       <Tooltip {...TooltipStyle}/>
-                      <Area type="monotone" dataKey="actual" stroke={C.ok()} fill={C.ok(0.25)} />
-                      <Area type="monotone" dataKey="target" stroke={C.steel()} fill={C.steel(0.2)} />
+                      <Area type="monotone" dataKey="actual" name="Total" stroke={C.steel()} fill={C.steel(0.2)} />
+                      <Area type="monotone" dataKey="ok" name="Pass" stroke={C.ok()} fill={C.ok(0.22)} />
                     </AreaChart>
                   )}
                   </>
                 )}
               </SafeChart>
-            </div>
+            </div> */}
 
             <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
               borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title={t("dashboard.topRejectionReasons", "Top Rejection Reasons")}/>
-              <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                {rejectionAnalysisRows.slice(0,5).map((row,i)=>(
-                  <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-                    padding:"10px 12px",background:C.bg("surf"),borderRadius:10,border:`1px solid ${C.bdr()}`}}>
-                    <div style={{display:"flex",alignItems:"center",gap:10}}>
-                      <div style={{width:8,height:8,borderRadius:"50%",background:C.ng()}}/>
-                        <span style={{fontSize:12,fontWeight:700,color:C.txt("pri")}}>{row.reason || t("dashboard.unknownDefect", "Unknown Defect")}</span>
-                    </div>
-                    <span style={{fontSize:10,fontWeight:800,color:C.txt("muted"),fontFamily:"'DM Mono',monospace"}}>
-                      {row.partId}
-                    </span>
-                  </div>
-                ))}
-                {rejectionAnalysisRows.length === 0 && (
-                  <p style={{fontSize:12, color:C.txt("muted"), textAlign:"center", py:10}}>{t("dashboard.noRejectsFound", "No rejects found in this period.")}</p>
-                )}
-              </div>
+              <SectionHead title="Rejection Pareto"/>
+              {rejectionParetoData.length > 0 ? (
+                <SafeChart height={220} style={{overflow:"visible",position:"relative",zIndex:2}}>
+                  {({ width, height }) => (
+                    <ComposedChart width={width} height={height} data={rejectionParetoData} margin={{ top: 8, right: 8, left: -10, bottom: 0 }}>
+                      <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
+                      <XAxis dataKey="reason" tickFormatter={(_, index)=>`R${index + 1}`} tick={{fontSize:11,fill:C.txt("sec"),fontFamily:"'DM Mono',monospace"}} axisLine={false} tickLine={false}/>
+                      <YAxis yAxisId="left" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
+                      <YAxis yAxisId="right" orientation="right" domain={[0,100]} tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
+                      <Tooltip {...TooltipStyle} formatter={(value, name)=>[name === "cumulative" ? `${value}%` : value, name === "cumulative" ? "Cumulative" : "Rejects"]}/>
+                      <Bar yAxisId="left" dataKey="count" fill={C.ng()} radius={[4,4,0,0]} barSize={28}/>
+                      <Line yAxisId="right" type="monotone" dataKey="cumulative" stroke={C.amber()} strokeWidth={2.5} dot={{r:3,fill:C.amber()}}/>
+                    </ComposedChart>
+                  )}
+                </SafeChart>
+              ) : (
+                <p style={{fontSize:12, color:C.txt("muted"), textAlign:"center", padding:"24px 0"}}>{t("dashboard.noRejectsFound", "No rejects found in this period.")}</p>
+              )}
             </div>
           </div>
         </div>
@@ -1807,7 +2365,7 @@ const Dashboard = () => {
 
       {/* —— TAB: Machines ——————————————————————————————————————————————————————————— */}
       {activeTab==="machines" && (
-        <div className="db-tablet-cards" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:16}}>
+        <div className="db-tablet-cards" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(380px,1fr))",gap:18}}>
           {dashboardMachineCards.map((row)=>(
             <MachineCard
               key={row.machineId}
@@ -1822,35 +2380,39 @@ const Dashboard = () => {
       )}
 
       {activeTab==="oee" && (
-        <div className="db-tablet-oeeoa" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(340px,1fr))",gap:16}}>
+        <div className="db-tablet-oeeoa" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(420px,1fr))",gap:18}}>
           {analysisMachineRows.map((row, idx)=>{
             const oee = Number(row?.oee ?? row?.OEE ?? 0);
             const availability = Number(row?.availability ?? row?.Availability ?? 0);
             const performance = Number(row?.performance ?? row?.Performance ?? 0);
             const quality = Number(row?.quality ?? row?.Quality ?? 0);
-            const stationName = row?.stationNo || row?.station || row?.machineName || `Station ${idx + 1}`;
+            const machineName = row?.machineName || row?.machine_name || `Machine ${idx + 1}`;
+            const stationName = row?.stationNo || row?.station || row?.operationNo || row?.operation_no || "-";
             const oeeClamped = Math.max(0, Math.min(100, oee));
             const makePie = (value) => {
               const v = Math.max(0, Math.min(100, Number(value || 0)));
               return [{ name: "Effective", value: v }, { name: "Loss", value: 100 - v }];
             };
             return (
-              <div key={`${stationName}-${idx}`} className="db-tablet-pad" style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:16,boxShadow:SHADOW}}>
+              <div key={`${machineName}-${stationName}-${idx}`} className="db-tablet-pad" style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW,minHeight:360}}>
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-                  <p style={{fontSize:13,fontWeight:800,color:C.txt("pri"),margin:0}}>{stationName}</p>
+                  <div style={{minWidth:0}}>
+                    <p style={{fontSize:16,fontWeight:850,color:C.txt("pri"),margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{machineName}</p>
+                    <p style={{fontSize:12,fontWeight:750,color:C.txt("muted"),marginTop:4}}>Station {stationName}</p>
+                  </div>
                   <Badge variant={oee>=85 ? "ok" : oee>=60 ? "wip" : "ng"} label={`OEE ${Math.round(oee)}%`} />
                 </div>
                 <div style={{display:"flex",justifyContent:"center",marginBottom:12}}>
                   <div style={{width:150,height:150,position:"relative"}}>
                     <PieChart width={150} height={150}>
-                      <Pie data={makePie(oeeClamped)} dataKey="value" innerRadius={46} outerRadius={66} startAngle={90} endAngle={-270} strokeWidth={0}>
+                      <Pie data={makePie(oeeClamped)} dataKey="value" innerRadius={44} outerRadius={70} startAngle={90} endAngle={-270} strokeWidth={0}>
                         <Cell fill={oeeClamped>=85 ? C.ok() : oeeClamped>=60 ? C.amber() : C.ng()} />
                         <Cell fill={C.bdr(0.18)} />
                       </Pie>
-                      <Tooltip {...TooltipStyle} />
+                      <Tooltip {...CenterTooltipStyle} position={{ x: 18, y: 54 }} />
                     </PieChart>
                     <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
-                      <span style={{fontSize:22,fontWeight:800,color:C.txt("pri"),fontFamily:"'DM Mono',monospace"}}>{Math.round(oeeClamped)}%</span>
+                      <span style={{fontSize:24,fontWeight:850,color:C.txt("pri"),fontFamily:"'DM Mono',monospace"}}>{Math.round(oeeClamped)}%</span>
                       <span style={{fontSize:10,color:C.txt("muted"),textTransform:"uppercase",letterSpacing:"0.06em"}}>Overall OEE</span>
                     </div>
                   </div>
@@ -1864,11 +2426,11 @@ const Dashboard = () => {
                             <Cell fill={m.color} />
                             <Cell fill={C.bdr(0.16)} />
                           </Pie>
-                          <Tooltip {...TooltipStyle} />
+                          <Tooltip {...CenterTooltipStyle} position={{ x: 0, y: 18 }} />
                         </PieChart>
                       </div>
-                      <p style={{fontSize:14,fontWeight:800,color:C.txt("pri"),margin:0,fontFamily:"'DM Mono',monospace"}}>{Math.round(m.value)}%</p>
-                      <p style={{fontSize:9,fontWeight:700,color:C.txt("muted"),marginTop:4,textTransform:"uppercase",letterSpacing:"0.05em"}}>{m.label}</p>
+                      <p style={{fontSize:16,fontWeight:850,color:C.txt("pri"),margin:0,fontFamily:"'DM Mono',monospace"}}>{Math.round(m.value)}%</p>
+                      <p style={{fontSize:10,fontWeight:800,color:C.txt("muted"),marginTop:4,textTransform:"uppercase",letterSpacing:"0.05em"}}>{m.label}</p>
                     </div>
                   ))}
                 </div>
@@ -1878,19 +2440,23 @@ const Dashboard = () => {
         </div>
       )}
       {activeTab==="oa" && (
-        <div className="db-tablet-oeeoa" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(340px,1fr))",gap:16}}>
+        <div className="db-tablet-oeeoa" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(420px,1fr))",gap:18}}>
           {analysisMachineRows.map((row, idx)=>{
             const oa = Number(row?.oa ?? row?.OA ?? 0);
-            const stationName = row?.stationNo || row?.station || row?.machineName || `Station ${idx + 1}`;
+            const machineName = row?.machineName || row?.machine_name || `Machine ${idx + 1}`;
+            const stationName = row?.stationNo || row?.station || row?.operationNo || row?.operation_no || "-";
             const oaClamped = Math.max(0, Math.min(100, oa));
             const makePie = (value) => {
               const v = Math.max(0, Math.min(100, Number(value || 0)));
               return [{ name: "Effective", value: v }, { name: "Loss", value: 100 - v }];
             };
             return (
-              <div key={`${stationName}-oa-${idx}`} className="db-tablet-pad" style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:16,boxShadow:SHADOW}}>
+              <div key={`${machineName}-${stationName}-oa-${idx}`} className="db-tablet-pad" style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,borderRadius:14,padding:20,boxShadow:SHADOW,minHeight:300}}>
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-                  <p style={{fontSize:13,fontWeight:800,color:C.txt("pri"),margin:0}}>{stationName}</p>
+                  <div style={{minWidth:0}}>
+                    <p style={{fontSize:16,fontWeight:850,color:C.txt("pri"),margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{machineName}</p>
+                    <p style={{fontSize:12,fontWeight:750,color:C.txt("muted"),marginTop:4}}>Station {stationName}</p>
+                  </div>
                   <Badge variant={oa>=85 ? "ok" : oa>=60 ? "wip" : "ng"} label={`OA ${Math.round(oa)}%`} />
                 </div>
                 <SafeChart height={180}>
@@ -1900,7 +2466,7 @@ const Dashboard = () => {
                         <Cell fill={oaClamped>=85 ? C.ok() : oaClamped>=60 ? C.amber() : C.ng()} />
                         <Cell fill={C.bdr(0.18)} />
                       </Pie>
-                      <Tooltip {...TooltipStyle} />
+                      <Tooltip {...CenterTooltipStyle} />
                     </PieChart>
                   )}
                 </SafeChart>

@@ -25,6 +25,7 @@ import PlcConfiguration from "./pages/PlcConfiguration";
 import IoMonitor from "./pages/IoMonitor";
 import ReportConfiguration from "./pages/ReportConfiguration";
 import ReportsPage from "./pages/Reports/ReportsPage";
+import RejectionAnalysis from "./pages/RejectionAnalysis";
 import RejectionConfiguration from "./pages/RejectionConfiguration";
 import Plants from "./pages/Plants";
 import Lines from "./pages/Lines";
@@ -73,6 +74,7 @@ const MODULE_REDIRECT_ORDER = [
   { moduleKey: "packing", path: APP_ROUTES.packing },
   { moduleKey: "packing_management", path: APP_ROUTES.packingManagement },
   { moduleKey: "reports", path: APP_ROUTES.reports },
+  { moduleKey: "reports", path: APP_ROUTES.rejectionAnalysis },
   { moduleKey: "traceability", path: APP_ROUTES.traceability },
   { moduleKey: "io_monitor", path: APP_ROUTES.ioMonitor },
   { moduleKey: "part_journey", path: APP_ROUTES.partJourney },
@@ -267,6 +269,14 @@ function App() {
               element={
                 <ModuleRoute moduleKey="reports">
                   <ReportsPage />
+                </ModuleRoute>
+              }
+            />
+            <Route
+              path={APP_ROUTES.rejectionAnalysis.slice(1)}
+              element={
+                <ModuleRoute moduleKey="reports">
+                  <RejectionAnalysis />
                 </ModuleRoute>
               }
             />

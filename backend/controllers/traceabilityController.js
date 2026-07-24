@@ -10,6 +10,7 @@ const Shift = require("../models/Shift");
 const QrFormatRule = require("../models/QrFormatRule");
 const PartCodeMapping = require("../models/PartCodeMapping");
 const MachineRuntimeState = require("../models/MachineRuntimeState");
+const RejectionView = require("../models/RejectionView");
 const { saveScan } = require("../services/scanService");
 const { captureLeakReadingsForScan } = require("../services/leakTestCaptureService");
 const LeakTestReading = require("../models/LeakTestReading");
@@ -20,6 +21,7 @@ const {
   getAllLeaktestReadingsForPart,
   getLeaktestStageState,
   getLeaktestStageStateFromReadings,
+  isLeaktestMachine,
 } = require("../services/leaktestLookupService");
 const { getPlcCircuitSnapshot } = require("../services/plcCommunicationService");
 const plcHandshakeEngine = require("../services/plcHandshakeEngine");
@@ -39,6 +41,7 @@ const { getScannerConnectionSnapshot } = scannerConnectionService;
 const { emitRealtime } = require("../services/realtimeService");
 const { tryAcquireMachineLock, clearMachineLock } = require("../services/machineLockService");
 const { finalizeCycleAfterPlc } = require("../services/cycleFinalizationService");
+const { autoPackReadyPart } = require("../services/packingService");
 const { TIMELINE_EVENTS, recordTimelineEvent } = require("../services/operationTimelineService");
 const {
   getStationFeatureConfig,
@@ -50,7 +53,7 @@ const {
   isMachineBypassEnabled,
 } = require("../services/machineBypassService");
 const { normalizeIp, sameIp } = require("../utils/networkAddress");
-const { normalizeTimeValue, toMinutes: toShiftMinutes } = require("../utils/time");
+const { normalizeTimeValue, toSeconds: toShiftSeconds } = require("../utils/time");
 const {
   getProductionDate,
   resolveShift,
@@ -77,6 +80,10 @@ const ioPlcConnectionStability = new Map();
 const CUSTOMER_QR_ACTIVE_WINDOW_MS = Math.max(
   Number(process.env.CUSTOMER_QR_ACTIVE_WINDOW_MS || 60 * 60 * 1000),
   30 * 1000
+);
+const SCANNER_CONNECTION_GRACE_MS = Math.max(
+  Number(process.env.SCANNER_CONNECTION_GRACE_MS || 180000),
+  3000
 );
 const CUSTOMER_QR_ONLY_FORMAT = "CUSTOMER_QR_ONLY";
 const INVALID_CUSTOMER_QR_VALUES = new Set([
@@ -1429,6 +1436,12 @@ async function emitPackingReadyPopup({ partId, stationNo, machineId, machineName
   if (!station || !partId) return;
   const features = await getStationFeatureConfig(station).catch(() => null);
   if (!features?.finalPacking) return;
+  const autoPackResult = await autoPackReadyPart({
+    partId,
+    stationNo: station,
+    machineId,
+    machineName,
+  });
   emitOperatorPopup("SUCCESS", {
     partId,
     stationNo: "PACKING",
@@ -1440,7 +1453,11 @@ async function emitPackingReadyPopup({ partId, stationNo, machineId, machineName
     status: "READY_FOR_PACKING",
     plcStatus: "READY_FOR_PACKING",
     finalPackingEligible: true,
-    message: `Part ready for packing from ${station}.`,
+    autoPacked: autoPackResult?.success === true,
+    boxNumber: autoPackResult?.session?.box_number || null,
+    message: autoPackResult?.success === true && autoPackResult?.session?.box_number
+      ? `Part auto-mapped to packing box ${autoPackResult.session.box_number}.`
+      : `Part ready for packing from ${station}.`,
   });
   emitRealtime("packing_update", {
     event: "PART_READY_FOR_PACKING",
@@ -1450,6 +1467,8 @@ async function emitPackingReadyPopup({ partId, stationNo, machineId, machineName
     machineId,
     machineName,
     finalPackingEligible: true,
+    autoPacked: autoPackResult?.success === true,
+    boxNumber: autoPackResult?.session?.box_number || null,
     timestamp: new Date().toISOString(),
   });
 }
@@ -1472,6 +1491,10 @@ async function buildScannerHealth(scanner, machineId) {
 
   const connectionSnapshot = await getScannerConnectionSnapshot(scanner.scanner_ip).catch(() => null);
   const connectionConnected = Boolean(connectionSnapshot?.connected);
+  const lastDataMs = connectionSnapshot?.lastDataAt ? new Date(connectionSnapshot.lastDataAt).getTime() : 0;
+  const recentDataConnected = Number.isFinite(lastDataMs) && lastDataMs > 0
+    ? (Date.now() - lastDataMs) <= SCANNER_CONNECTION_GRACE_MS
+    : false;
   const probeReachability = async () => {
     const port = Number(scanner?.scanner_port || 0);
     if (!scanner?.scanner_ip || !Number.isFinite(port) || port <= 0) {
@@ -1486,7 +1509,7 @@ async function buildScannerHealth(scanner, machineId) {
 
   const byIpHealth = getScannerHealthSnapshot({ scannerIp: scanner.scanner_ip });
   if (byIpHealth) {
-    let connected = Boolean(byIpHealth.connected) || connectionConnected;
+    let connected = Boolean(byIpHealth.connected) || connectionConnected || recentDataConnected;
     let reachability = null;
     if (!connected) {
       reachability = await probeReachability();
@@ -1513,7 +1536,7 @@ async function buildScannerHealth(scanner, machineId) {
       null;
 
     if (match) {
-      let connected = Boolean(match.connected) || connectionConnected;
+      let connected = Boolean(match.connected) || connectionConnected || recentDataConnected;
       let reachability = null;
       if (!connected) {
         reachability = await probeReachability();
@@ -1534,7 +1557,7 @@ async function buildScannerHealth(scanner, machineId) {
   }
 
   if (connectionSnapshot) {
-    let connected = Boolean(connectionSnapshot.connected);
+    let connected = Boolean(connectionSnapshot.connected) || recentDataConnected;
     let reachability = null;
     if (!connected) {
       reachability = await probeReachability();
@@ -3469,7 +3492,7 @@ exports.getPartCatalog = async (req, res) => {
         limit: 6000,
       });
       const shifts = shiftCodeFilter ? await getActiveShiftDefinitions() : [];
-      const filteredScopedLogs = shiftCodeFilter ? applyShiftFilter(scopedLogs, shiftCodeFilter, shifts) : scopedLogs;
+      const filteredScopedLogs = shiftCodeFilter ? applyShiftFilter(scopedLogs, shiftCodeFilter, shifts, { from, to }) : scopedLogs;
       scopedPartIds = uniqueStages(filteredScopedLogs.map((row) => String(row.part_id || "").trim()).filter(Boolean));
       if (scopedPartIds.length === 0) {
         return res.json([]);
@@ -3570,6 +3593,44 @@ exports.getPartCatalog = async (req, res) => {
       shifts = await getActiveShiftDefinitions();
     }
 
+    const catalogQrRules = await QrFormatRule.findAll({
+      where: { is_active: true },
+      attributes: ["regex_pattern"],
+      raw: true,
+    });
+    const matchesCatalogQrRule = (value) => {
+      const raw = String(value || "").trim();
+      if (!raw) return false;
+      return catalogQrRules.some((rule) => {
+        const pattern = String(rule.regex_pattern || "").trim();
+        if (!pattern) return false;
+        try {
+          return new RegExp(pattern, "i").test(raw);
+        } catch (_error) {
+          return false;
+        }
+      });
+    };
+    const looksLikePartialTraceabilityId = (value) => {
+      const raw = String(value || "").trim().toUpperCase();
+      if (!raw) return false;
+      if (/^R\d{9}-[A-Z0-9-]{10,}$/.test(raw)) return false;
+      if (/^\d{8}[A-Z0-9]\d{1,6}$/.test(raw)) return false;
+      return (
+        /^[A-Z]?\d{3,6}$/.test(raw) ||
+        /^[A-Z0-9]{1,6}$/.test(raw) ||
+        /^[A-Z0-9]{0,4}54T\d{8}[A-Z]\d{4}$/i.test(raw) ||
+        /^[A-Z0-9]{0,4}T\d{8}[A-Z]\d{4}$/i.test(raw)
+      );
+    };
+    const isUsableCatalogPartId = (value) => {
+      const raw = String(value || "").trim();
+      if (!raw || raw === "-") return false;
+      if (matchesCatalogQrRule(raw)) return true;
+      if (looksLikePartialTraceabilityId(raw)) return false;
+      return catalogQrRules.length === 0 && /^[A-Za-z0-9][A-Za-z0-9\-_/.:]{7,127}$/.test(raw);
+    };
+
     const responseRows = parts
       .filter((part) => productionPartIds.has(String(part.part_id || "").trim()))
       .map((part) => {
@@ -3588,10 +3649,24 @@ exports.getPartCatalog = async (req, res) => {
           String(part.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ||
           Boolean(mappedOldPart && mappedCustomerQr && mappedOldPart.toUpperCase() === mappedCustomerQr.toUpperCase())
         );
-        const displayPartId = isCustomerQrOnly ? "" : canonicalPartId;
+        const validCanonicalPartId = isUsableCatalogPartId(canonicalPartId);
+        const validRawPartId = isUsableCatalogPartId(rawPartId);
+        const validMappedOldPart = isUsableCatalogPartId(mappedOldPart);
+        const safePartIdForDisplay = validCanonicalPartId
+          ? canonicalPartId
+          : validMappedOldPart
+            ? mappedOldPart
+            : validRawPartId
+              ? rawPartId
+              : "";
+        const displayPartId = isCustomerQrOnly ? "" : safePartIdForDisplay;
+        if (!displayPartId && !mappedCustomerQr && looksLikePartialTraceabilityId(rawPartId)) {
+          return null;
+        }
+        const traceabilityPartId = displayPartId || mappedCustomerQr || canonicalPartId;
         return {
-          partId: canonicalPartId,
-          traceabilityPartId: canonicalPartId,
+          partId: traceabilityPartId,
+          traceabilityPartId,
           rawPartId,
           displayPartId,
           mappedPartId: mappedOldPart || null,
@@ -3615,12 +3690,13 @@ exports.getPartCatalog = async (req, res) => {
           operatorId: latest?.user_id || null,
         };
       })
+      .filter(Boolean)
       .filter((row) => {
         if (statusFilter === "OTHER") {
           return row.isCustomerQrOnly === true;
         }
         if (shiftCodeFilter && row.latestAt) {
-          return resolveShiftCodeForDate(row.latestAt, shifts) === shiftCodeFilter;
+          return normalizeShiftAlias(resolveShiftCodeForDate(row.latestAt, shifts)) === normalizeShiftAlias(shiftCodeFilter);
         }
         if (shiftCodeFilter && !row.latestAt) {
           return false;
@@ -3715,12 +3791,12 @@ exports.getMachineStationStats = async (req, res) => {
     const stationLogs = logs.filter((row) => !isJourneyNoiseLog(row));
     const effectiveLogs = stationLogs.length > 0 ? stationLogs : logs;
     const shiftFilteredLogs = effectiveShiftCode
-      ? applyShiftFilter(effectiveLogs, effectiveShiftCode, shifts)
+      ? applyShiftFilter(effectiveLogs, effectiveShiftCode, shifts, { from, to })
       : effectiveLogs;
 
     const summary = getQualitySummaryFromOperationLogs(shiftFilteredLogs, getMappedCustomerQr);
     const selectedShift = effectiveShiftCode
-      ? shifts.find((row) => String(row.shift_code || "").trim().toUpperCase() === effectiveShiftCode) || currentShift
+      ? shifts.find((row) => normalizeShiftAlias(row.shift_code || row.shift_name) === normalizeShiftAlias(effectiveShiftCode)) || currentShift
       : null;
     const targetProduction = selectedShift
       ? computeTargetProduction({ machine, shift: selectedShift })
@@ -4345,6 +4421,8 @@ exports.processScan = async (req, res) => {
       qualityPayload,
       customerCodePattern: stationFeatures.customerCodePattern || "",
       shotValidationPartId: normalizedPartId,
+      enforceQrFormatValidation: !isMappedCustomerQrScan && !isCustomerQrOnlyStart && qrValidationEnabled && !skipAllBypassValidations,
+      enforceSequenceValidation: !isCustomerQrOnlyStart && !skipAllBypassValidations,
       skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateQrFormat,
       skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyTrace || customerQrRequiredAtStation || !validateShotNumber,
       skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
@@ -4895,6 +4973,8 @@ exports.verifyScanForOperator = async (req, res) => {
       qualityPayload,
       customerCodePattern: stationFeatures.customerCodePattern || "",
       shotValidationPartId: finalPartId,
+      enforceQrFormatValidation: !isMappedCustomerQrScan && !isCustomerQrOnlyStart && qrValidationEnabled && !skipAllBypassValidations,
+      enforceSequenceValidation: !isCustomerQrOnlyStart && !skipAllBypassValidations,
       skipQrFormatValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateQrFormat,
       skipShotValidation: isMappedCustomerQrScan || isCustomerQrOnlyTrace || !validateShotNumber,
       skipCustomerCodeValidation: isMappedCustomerQrScan || isCustomerQrOnlyStart || !qrValidationEnabled || !validateCustomerCode || skipAllBypassValidations,
@@ -6117,32 +6197,91 @@ function getDateRangeFromQuery(query) {
   const now = new Date();
   const fromCandidate = query?.dateFrom ? new Date(query.dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const toCandidate = query?.dateTo ? new Date(query.dateTo) : now;
-  const from = Number.isNaN(fromCandidate.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : fromCandidate;
-  const to = Number.isNaN(toCandidate.getTime()) ? now : toCandidate;
+  let from = Number.isNaN(fromCandidate.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : fromCandidate;
+  let to = Number.isNaN(toCandidate.getTime()) ? now : toCandidate;
+
+  if (query?.dateFrom && query?.dateTo && isProductionDatePickerRange(from, to)) {
+    const productionStart = new Date(from);
+    productionStart.setHours(6, 0, 0, 0);
+    const productionEnd = new Date(productionStart);
+    productionEnd.setDate(productionEnd.getDate() + 1);
+    from = productionStart;
+    to = productionEnd;
+  }
+  const currentProductionStart = new Date(now);
+  currentProductionStart.setHours(6, 0, 0, 0);
+  if (now < currentProductionStart) currentProductionStart.setDate(currentProductionStart.getDate() - 1);
+  if (
+    getLocalDateKey(from) === getLocalDateKey(currentProductionStart) &&
+    getLocalSecondOfDay(from) < 6 * 3600
+  ) {
+    from = currentProductionStart;
+  }
+  if (
+    getLocalDateKey(from) === getLocalDateKey(currentProductionStart) &&
+    to > now
+  ) {
+    to = now;
+  }
   return { from, to };
 }
 
-function setDateMinutes(baseDate, minutes) {
+function getLocalDateKey(dateValue) {
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return "";
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function getLocalSecondOfDay(dateValue) {
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
+}
+
+function getLocalDayDiff(from, to) {
+  const a = new Date(from);
+  const b = new Date(to);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0;
+  a.setHours(0, 0, 0, 0);
+  b.setHours(0, 0, 0, 0);
+  return Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function isProductionDatePickerRange(from, to) {
+  const fromSeconds = getLocalSecondOfDay(from);
+  const toSeconds = getLocalSecondOfDay(to);
+  if (fromSeconds === null || toSeconds === null) return false;
+  if (getLocalDateKey(from) === getLocalDateKey(to)) {
+    return fromSeconds < 6 * 3600 && (toSeconds === 0 || toSeconds >= 23 * 3600);
+  }
+  return fromSeconds < 6 * 3600 && getLocalDayDiff(from, to) === 1 && toSeconds <= 6 * 3600;
+}
+
+function setDateSeconds(baseDate, seconds) {
   const date = new Date(baseDate);
-  date.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+  date.setHours(Math.floor(seconds / 3600), Math.floor((seconds % 3600) / 60), seconds % 60, 0);
   return date;
 }
 
 function getShiftWindowForDate(shift, now = new Date()) {
-  const startMinutes = toMinutes(shift?.start_time);
-  const endMinutes = toMinutes(shift?.end_time);
-  if (startMinutes === null || endMinutes === null) {
+  const startSeconds = toShiftSeconds(shift?.start_time);
+  const endSeconds = toShiftSeconds(shift?.end_time);
+  if (startSeconds === null || endSeconds === null) {
     return null;
   }
 
-  const currentMinutes = getMinutesForDate(now);
-  let from = setDateMinutes(now, startMinutes);
-  let to = setDateMinutes(now, endMinutes);
+  const currentSeconds = getSecondsForDate(now);
+  let from = setDateSeconds(now, startSeconds);
+  let to = setDateSeconds(now, endSeconds);
 
-  if (startMinutes === endMinutes) {
+  if (startSeconds === endSeconds) {
     to = new Date(from.getTime() + 24 * 60 * 60 * 1000);
-  } else if (startMinutes > endMinutes) {
-    if (currentMinutes < endMinutes) {
+  } else if (startSeconds > endSeconds) {
+    if (currentSeconds <= endSeconds) {
       from.setDate(from.getDate() - 1);
     } else {
       to.setDate(to.getDate() + 1);
@@ -6154,11 +6293,11 @@ function getShiftWindowForDate(shift, now = new Date()) {
 
 function getProductionDayWindow(shifts = [], now = new Date()) {
   const starts = shifts
-    .map((shift) => toMinutes(shift?.start_time))
+    .map((shift) => toShiftSeconds(shift?.start_time))
     .filter((value) => value !== null);
-  const startMinutes = starts.length ? Math.min(...starts) : 6 * 60;
-  let from = setDateMinutes(now, startMinutes);
-  if (getMinutesForDate(now) < startMinutes) {
+  const startSeconds = starts.length ? Math.min(...starts) : 6 * 3600;
+  let from = setDateSeconds(now, startSeconds);
+  if (getSecondsForDate(now) < startSeconds) {
     from.setDate(from.getDate() - 1);
   }
   const to = new Date(from.getTime() + 24 * 60 * 60 * 1000);
@@ -6170,7 +6309,7 @@ function getOperatorStatsDateRange(query, shifts, effectiveShiftCode, currentShi
     return getDateRangeFromQuery(query);
   }
   if (effectiveShiftCode) {
-    const selectedShift = shifts.find((row) => String(row.shift_code || "").trim().toUpperCase() === effectiveShiftCode) || currentShift;
+    const selectedShift = shifts.find((row) => normalizeShiftAlias(row.shift_code || row.shift_name) === normalizeShiftAlias(effectiveShiftCode)) || currentShift;
     const selectedWindow = getShiftWindowForDate(selectedShift);
     if (selectedWindow) return selectedWindow;
   }
@@ -6286,29 +6425,30 @@ function normalizeReportYear(value) {
   return year;
 }
 
-function toMinutes(timeValue) {
-  return toShiftMinutes(timeValue);
+function toSeconds(timeValue) {
+  return toShiftSeconds(timeValue);
 }
 
-function getMinutesForDate(dateValue) {
+function getSecondsForDate(dateValue) {
   const date = new Date(dateValue);
-  return date.getHours() * 60 + date.getMinutes();
+  if (Number.isNaN(date.getTime())) return null;
+  return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
 }
 
 function isDateInShift(dateValue, shift) {
-  const currentMinutes = getMinutesForDate(dateValue);
-  const start = toMinutes(shift.start_time);
-  const end = toMinutes(shift.end_time);
-  if (start === null || end === null) {
+  const currentSeconds = getSecondsForDate(dateValue);
+  const start = toSeconds(shift.start_time);
+  const end = toSeconds(shift.end_time);
+  if (currentSeconds === null || start === null || end === null) {
     return false;
   }
   if (start === end) {
     return true;
   }
   if (start < end) {
-    return currentMinutes >= start && currentMinutes < end;
+    return currentSeconds >= start && currentSeconds <= end;
   }
-  return currentMinutes >= start || currentMinutes < end;
+  return currentSeconds >= start || currentSeconds <= end;
 }
 
 async function getActiveShiftDefinitions() {
@@ -6322,24 +6462,56 @@ async function getActiveShiftDefinitions() {
 }
 
 function resolveShiftCodeForDate(dateValue, shifts) {
+  const matches = [];
   for (const shift of shifts) {
     if (isDateInShift(dateValue, shift)) {
-      return shift.shift_code;
+      const start = toSeconds(shift.start_time);
+      const end = toSeconds(shift.end_time);
+      const duration = start === end ? 24 * 3600 : start < end ? end - start : (24 * 3600 - start + end);
+      matches.push({ code: shift.shift_code, start, duration });
     }
+  }
+  if (matches.length) {
+    matches.sort((a, b) => (b.start - a.start) || (a.duration - b.duration));
+    return matches[0].code;
   }
   return "UNASSIGNED";
 }
 
-function applyShiftFilter(rows, shiftCode, shifts) {
+function isDateWithinRange(dateValue, range) {
+  if (!range?.from || !range?.to) return true;
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return false;
+  return date >= range.from && date <= range.to;
+}
+
+function applyShiftFilter(rows, shiftCode, shifts, range = null) {
   if (!shiftCode) {
     return rows;
   }
-  const target = String(shiftCode).trim().toUpperCase();
-  return rows.filter((row) => resolveShiftCodeForDate(row.createdAt, shifts) === target);
+  const target = normalizeShiftAlias(shiftCode);
+  if (!target) return rows;
+  return rows.filter((row) => {
+    const timestamp = row.createdAt || row.firstScanAt || row.firstScanCreatedAt || row.updatedAt;
+    return isDateWithinRange(timestamp, range) && normalizeShiftAlias(resolveShiftCodeForDate(timestamp, shifts)) === target;
+  });
 }
 
 function isAllShiftToken(value) {
   return ["ALL", "ALL_SHIFT", "ALL_SHIFTS"].includes(String(value || "").trim().toUpperCase());
+}
+
+function normalizeShiftAlias(value) {
+  const token = String(value || "").trim().toUpperCase().replace(/\s+/g, "_");
+  if (!token || isAllShiftToken(token) || token === "ANY") return "";
+  const parts = token.split("_").filter(Boolean);
+  if (token === "A" || token === "SHIFT_A" || token === "A_SHIFT" || (parts.includes("SHIFT") && parts.includes("A"))) return "SHIFT_A";
+  if (token === "B" || token === "SHIFT_B" || token === "B_SHIFT" || (parts.includes("SHIFT") && parts.includes("B"))) return "SHIFT_B";
+  if (token === "C" || token === "SHIFT_C" || token === "C_SHIFT" || (parts.includes("SHIFT") && parts.includes("C"))) return "SHIFT_C";
+  if (token === "S1" || token === "SHIFT_S1" || token === "S1_SHIFT" || token === "SHIFT_1") return "SHIFT_S1";
+  if (token === "S2" || token === "SHIFT_S2" || token === "S2_SHIFT" || token === "SHIFT_2") return "SHIFT_S2";
+  if (token === "S3" || token === "SHIFT_S3" || token === "S3_SHIFT" || token === "SHIFT_3") return "SHIFT_S3";
+  return token;
 }
 
 function formatHourBucket(dateValue) {
@@ -6462,8 +6634,8 @@ exports.getDashboardSummary = async (req, res) => {
       getActiveShiftDefinitions(),
     ]);
 
-    const filteredQualityRows = applyShiftFilter(qualityRows, shiftCodeFilter, shifts);
-    const filteredRecentRows = applyShiftFilter(recentRows, shiftCodeFilter, shifts).slice(0, 20);
+    const filteredQualityRows = applyShiftFilter(qualityRows, shiftCodeFilter, shifts, { from, to });
+    const filteredRecentRows = applyShiftFilter(recentRows, shiftCodeFilter, shifts, { from, to }).slice(0, 20);
     const okLogs = filteredQualityRows.filter((row) => row.status === "OK").length;
     const ngLogs = filteredQualityRows.filter((row) => row.status === "NG").length;
 
@@ -6587,7 +6759,7 @@ exports.getDashboardTrends = async (req, res) => {
       getActiveShiftDefinitions(),
     ]);
 
-    const filteredRows = applyShiftFilter(rows, shiftCodeFilter, shifts);
+    const filteredRows = applyShiftFilter(rows, shiftCodeFilter, shifts, { from, to });
     const map = filteredRows.reduce((acc, row) => {
       const key = formatHourBucket(row.createdAt);
       if (!acc[key]) {
@@ -6695,10 +6867,10 @@ exports.getDashboardReport = async (req, res) => {
     const productionRows = initialProductionRows;
     const operationRows = initialOperationRows;
 
-    const filteredRows = applyShiftFilter(productionRows, shiftCodeFilter, shifts);
-    const filteredOperationRows = applyShiftFilter(operationRows, shiftCodeFilter, shifts);
+    const filteredRows = applyShiftFilter(productionRows, shiftCodeFilter, shifts, { from, to });
+    const filteredOperationRows = applyShiftFilter(operationRows, shiftCodeFilter, shifts, { from, to });
     const productionOperationRows = filteredOperationRows.filter((row) => !isJourneyNoiseLog(row));
-    const filteredInterlocks = applyShiftFilter(interlocks, shiftCodeFilter, shifts).filter(
+    const filteredInterlocks = applyShiftFilter(interlocks, shiftCodeFilter, shifts, { from, to }).filter(
       (row) => !isJourneyNoiseLog(row)
     );
 
@@ -6922,10 +7094,16 @@ exports.getDashboardReport = async (req, res) => {
         const downtimeEventRatio = downtimeBase > 0 ? Number(((downtimeEvents / downtimeBase) * 100).toFixed(2)) : 0;
         const downtimeTimePct = plannedProductionMinutes > 0 ? Number(((downtimeMinutes / plannedProductionMinutes) * 100).toFixed(2)) : 0;
         const shiftForTarget = shiftCodeFilter
-          ? shifts.find((s) => String(s.shift_code || "").toUpperCase() === String(shiftCodeFilter || "").toUpperCase()) || null
+          ? shifts.find((s) => normalizeShiftAlias(s.shift_code || s.shift_name) === normalizeShiftAlias(shiftCodeFilter)) || null
           : null;
-        const targetQty = computeTargetProduction({ machine: row, shift: shiftForTarget || resolveShift(from, shifts) || shifts[0] || null });
         const idealCycleTimeSeconds = getEffectiveCycleTimeSeconds(row);
+        const rangeDays = Math.max(1, Math.ceil(plannedProductionSeconds / (24 * 3600)));
+        const targetWindowSeconds = shiftForTarget
+          ? getShiftDurationSeconds(shiftForTarget) * rangeDays
+          : plannedProductionSeconds;
+        const targetQty = idealCycleTimeSeconds > 0
+          ? Math.floor(Math.max(0, targetWindowSeconds) / idealCycleTimeSeconds)
+          : computeTargetProduction({ machine: row, shift: shiftForTarget || resolveShift(from, shifts) || shifts[0] || null });
         const calc = computeOeeAndOa({
           totalCount: processedCount,
           goodCount: Number(row.okCount || 0),
@@ -6935,7 +7113,7 @@ exports.getDashboardReport = async (req, res) => {
           downtimeSeconds: downtimeMinutes * 60,
         });
         const shiftResolved = resolveShift(machineLogs[0]?.createdAt || from, shifts);
-        const productionDate = getProductionDate(machineLogs[0]?.createdAt || from);
+        const productionDate = getProductionDate(machineLogs[0]?.createdAt || from, shifts);
         return {
           ...row,
           plcConnected: health.plcConnected ?? null,
@@ -7204,8 +7382,8 @@ exports.getDashboardReport = async (req, res) => {
       return acc;
     }, {});
 
-    const partIdsForCustomerQr = lightMode ? [] : [...new Set(partHistory.slice(0, 3000).map((row) => String(row.part_id || "").trim()).filter(Boolean))];
-    const leaktestIndex = lightMode ? { byPartAndStation: new Map(), byPartAndIp: new Map() } : await buildLeaktestIndex({
+    const partIdsForCustomerQr = [...new Set(partHistory.slice(0, 3000).map((row) => String(row.part_id || "").trim()).filter(Boolean))];
+    const leaktestIndex = await buildLeaktestIndex({
         partIds: partIdsForCustomerQr,
         customerQrByPartId,
         machines: machineRows,
@@ -7339,8 +7517,9 @@ exports.getDashboardReport = async (req, res) => {
       const result = String(row.result || "").trim().toUpperCase();
       const stationNo = normalizeStation(row.station_no || row.operation_no);
       const leakTestReading = getLeakReadingForPart(row.part_id);
-      const leakStageState = stationNo === LEAKTEST_OPERATION && leakTestReading
-        ? getLeaktestStageState(leakTestReading)
+      const leakTestReadings = getAllLeakReadingsForPart(row.part_id);
+      const leakStageState = stationNo === LEAKTEST_OPERATION && (leakTestReadings.length > 0 || leakTestReading)
+        ? getLeaktestStageStateFromReadings(leakTestReadings.length > 0 ? leakTestReadings : [leakTestReading])
         : null;
       const recoveryCompletedByCustomerQr = shouldTreatRecoveryPendingAsPassed(row, mappedCustomerQr);
       let statusLabel = "IDLE";
@@ -7415,6 +7594,7 @@ exports.getDashboardReport = async (req, res) => {
         shotNumber: shotKey || null,
         plcReading,
         leakTestReading,
+        leakTestReadings,
       };
     });
 
@@ -7422,6 +7602,13 @@ exports.getDashboardReport = async (req, res) => {
       machineRows
         .map((machine) => normalizeStation(machine.operation_no))
         .filter(Boolean)
+    );
+    const requiredTraceabilityOperations = uniqueStages(
+      machineRows
+        .filter((machine) => !isLeaktestMachine(machine))
+        .map((machine) => normalizeStation(machine.operation_no))
+        .filter(Boolean)
+        .concat(machineRows.some((machine) => isLeaktestMachine(machine)) ? [LEAKTEST_OPERATION] : [])
     );
     const traceabilityGroupMap = new Map();
     for (const row of partHistory) {
@@ -7447,10 +7634,18 @@ exports.getDashboardReport = async (req, res) => {
 
       const station = normalizeStation(row.station_no || row.operation_no);
       const mappedQr = mappedCustomerQr || getMappedCustomerQrForPart(row.part_id);
+      const leakReadings = station === LEAKTEST_OPERATION ? getAllLeakReadingsForPart(row.part_id) : [];
+      const leakStageState = station === LEAKTEST_OPERATION && leakReadings.length > 0
+        ? getLeaktestStageStateFromReadings(leakReadings)
+        : null;
       const plcStatus = String(row.plc_status || "").trim().toUpperCase();
       const result = String(row.result || "").trim().toUpperCase();
       let normalized = "IN_PROGRESS";
-      if (shouldTreatRecoveryPendingAsPassed(row, mappedQr)) {
+      if (leakStageState === "PASSED") {
+        normalized = "OK";
+      } else if (leakStageState === "FAILED") {
+        normalized = "NG";
+      } else if (shouldTreatRecoveryPendingAsPassed(row, mappedQr)) {
         normalized = "OK";
       } else if (plcStatus === "ENDED_NG" || result === "NG") {
         normalized = "NG";
@@ -7467,21 +7662,51 @@ exports.getDashboardReport = async (req, res) => {
           group.operations.set(station, normalized);
         }
       }
+
+      const allLeakReadings = getAllLeakReadingsForPart(row.part_id);
+      if (allLeakReadings.length > 0) {
+        const aggregateLeakState = getLeaktestStageStateFromReadings(allLeakReadings);
+        const aggregateLeakStatus = aggregateLeakState === "FAILED"
+          ? "NG"
+          : aggregateLeakState === "PASSED"
+            ? "OK"
+            : "IN_PROGRESS";
+        const current = group.operations.get(LEAKTEST_OPERATION);
+        const priority = aggregateLeakStatus === "NG" ? 3 : aggregateLeakStatus === "OK" ? 2 : 1;
+        const currentPriority = current === "NG" ? 3 : current === "OK" ? 2 : 1;
+        if (!current || priority >= currentPriority) {
+          group.operations.set(LEAKTEST_OPERATION, aggregateLeakStatus);
+        }
+      }
     }
 
     const traceabilityCounts = { total: 0, passed: 0, failed: 0, blocked: 0, inProgress: 0 };
+    const traceabilityShiftProduction = shifts.reduce((acc, shift) => {
+      acc[shift.shift_code] = { total: 0, ok: 0, ng: 0, inProgress: 0 };
+      return acc;
+    }, {});
+    traceabilityShiftProduction.UNASSIGNED = { total: 0, ok: 0, ng: 0, inProgress: 0 };
     for (const group of traceabilityGroupMap.values()) {
       traceabilityCounts.total += 1;
-      const values = requiredOperations.map((operation) => group.operations.get(operation)).filter(Boolean);
+      const values = requiredTraceabilityOperations.map((operation) => group.operations.get(operation)).filter(Boolean);
       const latestPartStatus = String(group.latest?.status || "").trim().toUpperCase();
+      const shiftCode = resolveShiftCodeForDate(group.latest?.createdAt || group.latestTs || from, shifts);
+      if (!traceabilityShiftProduction[shiftCode]) {
+        traceabilityShiftProduction[shiftCode] = { total: 0, ok: 0, ng: 0, inProgress: 0 };
+      }
+      traceabilityShiftProduction[shiftCode].total += 1;
       if (values.some((value) => value === "NG") || ["NG", "FAILED", "INTERLOCKED"].includes(latestPartStatus)) {
         traceabilityCounts.failed += 1;
+        traceabilityShiftProduction[shiftCode].ng += 1;
       } else if (group.blocked) {
         traceabilityCounts.blocked += 1;
-      } else if (requiredOperations.length > 0 && values.length >= requiredOperations.length && values.every((value) => value === "OK")) {
+        traceabilityShiftProduction[shiftCode].inProgress += 1;
+      } else if (requiredTraceabilityOperations.length > 0 && values.length >= requiredTraceabilityOperations.length && values.every((value) => value === "OK")) {
         traceabilityCounts.passed += 1;
+        traceabilityShiftProduction[shiftCode].ok += 1;
       } else {
         traceabilityCounts.inProgress += 1;
+        traceabilityShiftProduction[shiftCode].inProgress += 1;
       }
     }
 
@@ -7504,7 +7729,7 @@ exports.getDashboardReport = async (req, res) => {
 
       const shiftObj = resolveShift(row.createdAt, shifts);
       const shiftCode = shiftObj?.shift_code || "UNASSIGNED";
-      const prodDate = getProductionDate(row.createdAt)?.toISOString().slice(0, 10) || null;
+      const prodDate = getProductionDate(row.createdAt, shifts)?.toISOString().slice(0, 10) || null;
       const stationNo = normalizeStation(row.station_no || row.operation_no || m.stationNo || "UNASSIGNED");
 
       const shiftKey = `${prodDate || "NA"}|${shiftCode}`;
@@ -7617,10 +7842,10 @@ exports.getDashboardReport = async (req, res) => {
       stationCards,
       stationWiseMetrics,
       hourlyProduction: hourly,
-      shiftProduction,
+      shiftProduction: traceabilityShiftProduction,
       shiftWiseMetrics,
       dayWiseMetrics,
-      productionDate: getProductionDate(from)?.toISOString().slice(0, 10),
+      productionDate: getProductionDate(from, shifts)?.toISOString().slice(0, 10),
       interlockHistory: filteredInterlocks,
       reworkCount,
       partJourney: pagedHistory,
@@ -7633,6 +7858,165 @@ exports.getDashboardReport = async (req, res) => {
       partsList,
       plcReadingColumns,
       availableLines,
+      availableShifts: shifts.map((shift) => ({
+        shiftCode: shift.shift_code,
+        shiftName: shift.shift_name,
+        startTime: normalizeTimeValue(shift.start_time, { includeSeconds: true }),
+        endTime: normalizeTimeValue(shift.end_time, { includeSeconds: true }),
+      })),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.getRejectionAnalysis = async (req, res) => {
+  try {
+    const SYSTEM_RECOVERY_REASONS = ["RECOVERY_PENDING_AFTER_BACKEND_RESTART"];
+    const now = new Date();
+    const shifts = await getActiveShiftDefinitions();
+    const defaultWindow = getProductionDayWindow(shifts, now);
+    const requestedRange = (req.query.dateFrom || req.query.dateTo) ? getDateRangeFromQuery(req.query) : defaultWindow;
+    const from = requestedRange.from;
+    const to = requestedRange.to;
+    const machineId = Number(req.query.machineId || 0);
+    const plantId = Number(req.query.plantId || 0);
+    const lineId = Number(req.query.lineId || 0);
+    const lineName = String(req.query.lineName || "").trim();
+    const partId = String(req.query.partId || "").trim();
+    const shiftCodeFilter = String(req.query.shiftCode || "").trim().toUpperCase();
+    const categoryFilter = String(req.query.category || "").trim();
+    const viewFilter = String(req.query.view || "").trim();
+    const zoneFilter = String(req.query.zone || "").trim();
+    const reasonFilter = String(req.query.reason || "").trim();
+
+    const machineWhere = {};
+    if (machineId) machineWhere.id = machineId;
+    if (plantId) machineWhere.plant_id = plantId;
+    if (lineId) machineWhere.line_id = lineId;
+    if (lineName) machineWhere.line_name = lineName;
+
+    const where = {
+      createdAt: { [Op.between]: [from, to] },
+      [Op.and]: [
+        {
+          [Op.or]: [
+            { interlock_reason: null },
+            { interlock_reason: { [Op.notIn]: SYSTEM_RECOVERY_REASONS } },
+          ],
+        },
+      ],
+      [Op.or]: [
+        { result: { [Op.in]: ["NG", "FAIL", "FAILED"] } },
+        { plc_status: { [Op.in]: ["ENDED_NG", "COMPLETED_NG", "FAILED"] } },
+        { rejection_reason: { [Op.ne]: null } },
+        { rejection_category: { [Op.ne]: null } },
+        { interlock_reason: { [Op.like]: "%NG%" } },
+      ],
+    };
+    if (partId) {
+      where.part_id = { [Op.like]: `%${partId}%` };
+    }
+    if (categoryFilter) {
+      where.rejection_category = categoryFilter;
+    }
+    if (viewFilter) {
+      where.rejection_view = viewFilter;
+    }
+    if (zoneFilter) {
+      where.rejection_zone = zoneFilter;
+    }
+    if (reasonFilter) {
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        {
+          [Op.or]: [
+            { rejection_reason: reasonFilter },
+            { interlock_reason: reasonFilter },
+          ],
+        },
+      ];
+    }
+
+    const rows = await OperationLog.findAll({
+      where,
+      include: [{
+        model: Machine,
+        required: Object.keys(machineWhere).length > 0,
+        where: machineWhere,
+        attributes: ["id", "machine_name", "line_name", "plant_id", "line_id", "operation_no"],
+      }],
+      order: [["createdAt", "DESC"]],
+      limit: Math.min(Math.max(Number(req.query.limit || 5000), 1), 20000),
+    });
+
+    const partIds = [...new Set(rows.map((row) => String(row.part_id || "").trim()).filter(Boolean))];
+    const mappings = partIds.length
+      ? await PartCodeMapping.findAll({
+          where: { old_part_id: { [Op.in]: partIds }, is_active: true },
+          order: [["updatedAt", "DESC"]],
+          raw: true,
+        }).catch(() => [])
+      : [];
+    const mappingByPart = mappings.reduce((acc, row) => {
+      const key = String(row.old_part_id || "").trim();
+      if (key && !acc[key]) acc[key] = String(row.customer_qr || "").trim();
+      return acc;
+    }, {});
+
+    const configuredPartRows = await RejectionView.findAll({
+      attributes: ["part_name"],
+      group: ["part_name"],
+      raw: true,
+    }).catch(() => []);
+
+    const analysisRows = rows.map((row) => {
+      const plain = row.get({ plain: true });
+      const machine = plain.Machine || {};
+      const shift = resolveShift(plain.createdAt, shifts);
+      const rejectionReason = String(plain.rejection_reason || "").trim();
+      const fallbackReason = String(plain.interlock_reason || "").trim();
+      const cleanReason = SYSTEM_RECOVERY_REASONS.includes(fallbackReason.toUpperCase())
+        ? ""
+        : fallbackReason;
+      return {
+        id: plain.id,
+        partId: plain.part_id || "",
+        customerQrCode: mappingByPart[String(plain.part_id || "").trim()] || null,
+        machineId: plain.machine_id || null,
+        machineName: machine.machine_name || null,
+        lineName: machine.line_name || null,
+        plantId: machine.plant_id || null,
+        lineId: machine.line_id || null,
+        stationNo: normalizeStation(plain.station_no || plain.operation_no || machine.operation_no || ""),
+        result: "NG",
+        plcStatus: plain.plc_status || "",
+        category: plain.rejection_category || "",
+        view: plain.rejection_view || "",
+        zone: plain.rejection_zone || "",
+        reason: rejectionReason || cleanReason || "NG",
+        rejectionReasonOnly: rejectionReason,
+        remark: plain.rejection_remark || "",
+        resultSource: plain.result_source || "",
+        shiftCode: shift?.shift_code || "UNASSIGNED",
+        createdAt: plain.createdAt,
+      };
+    }).filter((row) => !shiftCodeFilter || normalizeShiftAlias(row.shiftCode) === normalizeShiftAlias(shiftCodeFilter));
+
+    res.json({
+      filters: {
+        from,
+        to,
+        machineId: machineId || null,
+        plantId: plantId || null,
+        lineId: lineId || null,
+        lineName: lineName || null,
+        partId: partId || null,
+        shiftCode: shiftCodeFilter || null,
+      },
+      rows: analysisRows,
+      total: analysisRows.length,
+      configuredParts: configuredPartRows.map((row) => String(row.part_name || "").trim()).filter(Boolean),
       availableShifts: shifts.map((shift) => ({
         shiftCode: shift.shift_code,
         shiftName: shift.shift_name,
@@ -7810,7 +8194,7 @@ async function getDashboardExportRows(filters) {
     getActiveShiftDefinitions(),
   ]);
 
-  const shiftFilteredRows = applyShiftFilter(operationRows, shiftCodeFilter, shifts);
+  const shiftFilteredRows = applyShiftFilter(operationRows, shiftCodeFilter, shifts, { from, to });
   const productionRows = shiftFilteredRows.filter((row) => !isJourneyNoiseLog(row));
   const machineIds = uniqueStages(productionRows.map((row) => String(row.machine_id || "")).filter(Boolean))
     .map((entry) => Number(entry))

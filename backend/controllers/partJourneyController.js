@@ -25,6 +25,19 @@ function toUpper(value) {
   return String(value || "").trim().toUpperCase();
 }
 
+function looksLikePartialTraceabilityId(value) {
+  const raw = toUpper(value);
+  if (!raw) return false;
+  if (/^R\d{9}-[A-Z0-9-]{10,}$/.test(raw)) return false;
+  if (/^\d{8}[A-Z0-9]\d{1,6}$/.test(raw)) return false;
+  return (
+    /^[A-Z]?\d{3,6}$/.test(raw) ||
+    /^[A-Z0-9]{1,6}$/.test(raw) ||
+    /^[A-Z0-9]{0,4}54T\d{8}[A-Z]\d{4}$/i.test(raw) ||
+    /^[A-Z0-9]{0,4}T\d{8}[A-Z]\d{4}$/i.test(raw)
+  );
+}
+
 function isQualityOutcomeLog(log) {
   const reason = String(log?.ng_reason || "").trim().toUpperCase();
   return !NON_QUALITY_AUDIT_REASONS.has(reason);
@@ -89,6 +102,12 @@ async function getPartJourney(req, res) {
       attributes: ["old_part_id", "customer_qr", "station_no", "machine_id"],
       raw: true,
     });
+    if (looksLikePartialTraceabilityId(partId) && initialMappings.length === 0) {
+      return res.status(400).json({
+        error: "Invalid or partial part id. Scan/search complete Customer QR or valid Part Serial.",
+        reason: "PARTIAL_TRACEABILITY_ID",
+      });
+    }
     const linkedPartIds = [
       partId,
       ...initialMappings.flatMap((row) => [row.old_part_id, row.customer_qr]),

@@ -14,6 +14,8 @@ let refreshing = false;
 let dbAvailable = false;
 let degradedMode = true;
 const warningThrottleMap = new Map();
+let nextRefreshAllowedAt = 0;
+const CACHE_REFRESH_FAILURE_BACKOFF_MS = Math.max(Number(process.env.INDUSTRIAL_CACHE_REFRESH_FAILURE_BACKOFF_MS || 30000), 5000);
 
 function warnOnce(key, message, throttleMs = 30000) {
   const now = Date.now();
@@ -26,6 +28,7 @@ function warnOnce(key, message, throttleMs = 30000) {
 
 async function refreshIndustrialCaches() {
   if (refreshing) return cache;
+  if (Date.now() < nextRefreshAllowedAt) return cache;
   refreshing = true;
   try {
     const results = await Promise.allSettled([
@@ -70,6 +73,12 @@ async function refreshIndustrialCaches() {
         "scanner_cache_refresh_failed",
         `[IndustrialCache] Scanner cache refresh failed; using last snapshot. ${scannersResult.reason?.message || ""}`
       );
+    }
+
+    if (machinesResult.status === "fulfilled" && scannersResult.status === "fulfilled") {
+      nextRefreshAllowedAt = 0;
+    } else {
+      nextRefreshAllowedAt = Date.now() + CACHE_REFRESH_FAILURE_BACKOFF_MS;
     }
 
     cache.lastRefreshAt = new Date().toISOString();

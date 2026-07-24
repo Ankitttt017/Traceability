@@ -108,6 +108,12 @@ const Sidebar = ({ onClose }) => {
         moduleKey: "reports",
       },
       {
+        name: t("pages.rejectionAnalysis", "Rejection Analysis"),
+        path: APP_ROUTES.rejectionAnalysis,
+        icon: AlertTriangle,
+        moduleKey: "reports",
+      },
+      {
         name: t("pages.packing", "Packing"),
         path: APP_ROUTES.packing,
         icon: Boxes,

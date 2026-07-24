@@ -10,4 +10,3 @@ const LeakTestReading = sequelize.define("LeakTestReading", {
 });
 
 module.exports = LeakTestReading;
-

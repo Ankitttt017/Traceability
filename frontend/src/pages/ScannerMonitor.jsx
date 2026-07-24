@@ -385,14 +385,8 @@ const ScannerMonitor = () => {
       };
     }
 
-    if (socketConnected && recentData) {
+    if (socketConnected || recentData) {
       return { connected: true, label: "Online", variant: "ok", pulse: true };
-    }
-    if (socketConnected) {
-      return { connected: false, label: "Connected / Idle", variant: "warn", pulse: false };
-    }
-    if (recentData) {
-      return { connected: false, label: "Recent Data", variant: "warn", pulse: false };
     }
     return { connected: false, label: "Offline", variant: "ng", pulse: false };
   }, []);

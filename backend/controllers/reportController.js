@@ -7,39 +7,16 @@
 const {
   runIndustrialExport,
   fetchProductionData,
+  fetchProductionFirstScanPartCount,
+  fetchProductionSummaryMetrics,
   getPlcReadingColumns,
   fetchPlcShotSummary,
 } = require("../services/report/reportExportService");
 const { calculateProductionMetrics } = require("../services/report/reportMetricsService");
 const Shift = require("../models/Shift");
 
-const REPORT_CACHE_TTL_MS = Math.max(Number(process.env.REPORT_CACHE_TTL_MS || 60000), 1000);
-const reportDataCache = new Map();
-const reportDataInFlight = new Map();
-
-function reportCacheKey(filters = {}, options = {}) {
-  const source = {
-    ...filters,
-    __includePlcReadings: options.includePlcReadings !== false,
-    __includePlcSummary: options.includePlcSummary !== false,
-    __includeLeaktest: options.includeLeaktest !== false,
-    __maxAnchorParts: options.maxAnchorParts || "",
-    __maxBaseLogs: options.maxBaseLogs || "",
-  };
-  return JSON.stringify(Object.keys(source).sort().reduce((acc, key) => {
-    const value = source[key];
-    if (value !== undefined && value !== null && String(value).trim() !== "") acc[key] = value;
-    return acc;
-  }, {}));
-}
-
-async function getCachedReportBundle(filters = {}, options = {}) {
-  const cleanFilters = stripReportControlFilters(filters);
-  const key = reportCacheKey(cleanFilters, options);
-  const cached = reportDataCache.get(key);
-  if (cached && Date.now() - cached.savedAt < REPORT_CACHE_TTL_MS) return cached.bundle;
-  if (reportDataInFlight.has(key)) return reportDataInFlight.get(key);
-  const request = Promise.all([
+async function getLegacyReportBundle(cleanFilters = {}, options = {}) {
+  const [rows, shifts, plcColumnSet, plcShotSummary] = await Promise.all([
     fetchProductionData(cleanFilters, {
       includePlcReadings: options.includePlcReadings !== false,
       includeLeaktest: options.includeLeaktest !== false,
@@ -54,26 +31,61 @@ async function getCachedReportBundle(filters = {}, options = {}) {
     }),
     options.includePlcReadings === false ? Promise.resolve(new Set()) : getPlcReadingColumns(),
     options.includePlcSummary === false ? Promise.resolve(null) : fetchPlcShotSummary(cleanFilters),
-  ])
-    .then(([rows, shifts, plcColumnSet, plcShotSummary]) => {
-      const metrics = calculateProductionMetrics(rows);
-      metrics.plcShotSummary = options.includePlcSummary !== false
-        ? (plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 })
-        : { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
-      metrics.plcShotSummarySource = options.includePlcSummary === false
-        ? "SKIPPED_FAST"
-        : "PLC_SUMMARY";
-      const bundle = { rows, shifts, plcColumnSet, metrics };
-      reportDataCache.set(key, { bundle, savedAt: Date.now() });
-      if (reportDataCache.size > 40) {
-        const oldestKey = reportDataCache.keys().next().value;
-        reportDataCache.delete(oldestKey);
-      }
-      return bundle;
-    })
-    .finally(() => reportDataInFlight.delete(key));
-  reportDataInFlight.set(key, request);
-  return request;
+  ]);
+  const metrics = calculateProductionMetrics(rows, cleanFilters);
+  metrics.plcShotSummary = options.includePlcSummary !== false
+    ? (plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 })
+    : { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
+  metrics.plcShotSummarySource = options.includePlcSummary === false
+    ? "SKIPPED_FAST"
+    : "PLC_SUMMARY";
+  return { rows, shifts, plcColumnSet, metrics, source: "LEGACY" };
+}
+
+async function getLiveReportBundle(filters = {}, options = {}) {
+  const cleanFilters = stripReportControlFilters(filters);
+  return getLegacyReportBundle(cleanFilters, options);
+}
+
+function stripMetricStatusFilters(filters = {}) {
+  const {
+    status,
+    resultType,
+    statusFilter,
+    ...rest
+  } = filters || {};
+  void status; void resultType; void statusFilter;
+  return rest;
+}
+
+async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
+  const nextMetrics = { ...(metrics || {}) };
+  const productionFilters = stripMetricStatusFilters(filters);
+  const [summaryMetrics, totalProduction] = await Promise.all([
+    fetchProductionSummaryMetrics(filters).catch((error) => {
+      console.warn(`[ReportController] traceability SQL summary skipped: ${error.message}`);
+      return null;
+    }),
+    fetchProductionFirstScanPartCount(productionFilters).catch((error) => {
+      console.warn(`[ReportController] first-scan production total skipped: ${error.message}`);
+      return null;
+    }),
+  ]);
+
+  if (summaryMetrics) {
+    nextMetrics.totalOK = Number(summaryMetrics.totalOK || 0);
+    nextMetrics.totalNG = Number(summaryMetrics.totalNG || 0);
+    nextMetrics.inProgress = Number(summaryMetrics.inProgress || 0);
+    nextMetrics.validationRejects = Number(summaryMetrics.validationRejects || nextMetrics.totalNG || 0);
+    nextMetrics.passRate = Number(summaryMetrics.passRate || 0);
+  }
+
+  const normalizedTotal = Number(totalProduction);
+  if (Number.isFinite(normalizedTotal) && normalizedTotal >= 0) {
+    nextMetrics.traceabilityProduction = normalizedTotal;
+    nextMetrics.totalProduction = normalizedTotal;
+  }
+  return nextMetrics;
 }
 
 function stripPaginationFilters(filters = {}) {
@@ -90,12 +102,17 @@ function stripReportControlFilters(filters = {}) {
     offset,
     fast,
     quick,
+    noCache,
+    refresh,
+    forceFresh,
+    cacheBust,
+    _ts,
     includePlcReadings,
     includePlcSummary,
     includeLeaktest,
     ...rest
   } = filters || {};
-  void page; void pageSize; void limit; void offset; void fast; void quick; void includePlcReadings; void includePlcSummary;
+  void page; void pageSize; void limit; void offset; void fast; void quick; void noCache; void refresh; void forceFresh; void cacheBust; void _ts; void includePlcReadings; void includePlcSummary; void includeLeaktest;
   return rest;
 }
 
@@ -114,14 +131,14 @@ function getReportOptions(query = {}) {
   const fast = !fastDisabled && !hasFocusedPartSearch;
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
   const pageSize = Math.min(Math.max(Number.parseInt(query.pageSize || query.limit, 10) || 50, 10), 10000);
-  const fastAnchorLimit = Math.min(Math.max(page * pageSize * 10, pageSize * 10, 1000), 20000);
+  const fastAnchorLimit = Math.min(Math.max((page + 1) * pageSize, pageSize, 500), 5000);
   return {
     fast,
-    includePlcReadings: !isFalseToken(query.includePlcReadings),
+    includePlcReadings: fast ? isTruthyToken(query.includePlcReadings) : !isFalseToken(query.includePlcReadings),
     includePlcSummary: !isFalseToken(query.includePlcSummary),
-    includeLeaktest: !isFalseToken(query.includeLeaktest),
+    includeLeaktest: fast ? isTruthyToken(query.includeLeaktest) : !isFalseToken(query.includeLeaktest),
     maxAnchorParts: fast ? fastAnchorLimit : null,
-    maxBaseLogs: fast ? Math.min(Math.max(fastAnchorLimit * 8, 5000), 50000) : null,
+    maxBaseLogs: fast ? Math.min(Math.max(fastAnchorLimit * 4, 2000), 20000) : null,
   };
 }
 
@@ -129,14 +146,14 @@ function getReportExportOptions(filters = {}) {
   const hasFocusedPartSearch = Boolean(String(filters.barcode || filters.customerCode || filters.partId || "").trim());
   const fast = isTruthyToken(filters.fast || filters.quick) && !hasFocusedPartSearch;
   const rawLimit = Number.parseInt(filters.exportLimit || filters.maxAnchorParts || filters.pageSize || filters.limit, 10);
-  const exportAnchorLimit = Math.min(Math.max(rawLimit || 10000, 500), 20000);
+  const exportAnchorLimit = Math.min(Math.max(rawLimit || 20000, 500), 50000);
   return {
     fast,
     includePlcReadings: !isFalseToken(filters.includePlcReadings),
     includePlcSummary: fast ? false : !isFalseToken(filters.includePlcSummary),
     includeLeaktest: !isFalseToken(filters.includeLeaktest),
     maxAnchorParts: fast ? exportAnchorLimit : null,
-    maxBaseLogs: fast ? Math.min(Math.max(exportAnchorLimit * 8, 10000), 80000) : null,
+    maxBaseLogs: fast ? Math.min(Math.max(exportAnchorLimit * 6, 10000), 250000) : null,
   };
 }
 
@@ -264,14 +281,15 @@ exports.getReportData = async (req, res) => {
     const options = getReportOptions(req.query || {});
     const filters = stripReportControlFilters(req.query || {});
     const pagination = getPagination(req.query || {});
-    const { rows, shifts, plcColumnSet, metrics } = await getCachedReportBundle(filters, options);
+    const { rows, shifts, plcColumnSet, metrics } = await getLiveReportBundle(filters, options);
     const paged = paginateReportRowsByPart(rows, pagination);
-    metrics.plcShotSummary = metrics.plcShotSummary || {};
-    metrics.plcShotSummarySource = metrics.plcShotSummarySource || "REPORT_ROWS";
+    const responseMetrics = await applyUncappedTraceabilityMetrics(metrics, filters);
+    responseMetrics.plcShotSummary = responseMetrics.plcShotSummary || {};
+    responseMetrics.plcShotSummarySource = responseMetrics.plcShotSummarySource || "REPORT_ROWS";
     
     res.json({
       rows: paged.rows,
-      metrics,
+      metrics: responseMetrics,
       pagination: paged.pagination,
       plcColumns: [...plcColumnSet],
       reportMode: options.fast ? "FAST" : "FULL",
@@ -295,12 +313,13 @@ exports.getReportData = async (req, res) => {
         includeLeaktest: false,
         includePlcSummary: false,
       };
-      const { rows, shifts, plcColumnSet, metrics } = await getCachedReportBundle(filters, fallbackOptions);
+      const { rows, shifts, plcColumnSet, metrics } = await getLiveReportBundle(filters, fallbackOptions);
       const paged = paginateReportRowsByPart(rows, pagination);
+      const responseMetrics = await applyUncappedTraceabilityMetrics(metrics, filters);
       return res.json({
         rows: paged.rows,
         metrics: {
-          ...metrics,
+          ...responseMetrics,
           plcShotSummary: { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 },
           plcShotSummarySource: "SKIPPED_FALLBACK",
         },
@@ -324,6 +343,33 @@ exports.getReportData = async (req, res) => {
   }
 };
 
+exports.getPublicReportData = async (req, res) => {
+  req.query = {
+    ...req.query,
+    fast: req.query.fast ?? "1",
+    includePlcSummary: req.query.includePlcSummary ?? "1",
+    includePlcReadings: req.query.includePlcReadings ?? "1",
+    includeLeaktest: req.query.includeLeaktest ?? "1",
+    noCache: "1",
+  };
+  return exports.getReportData(req, res);
+};
+
+exports.getReportShotSummary = async (req, res) => {
+  try {
+    const filters = stripReportControlFilters(req.query || {});
+    const plcShotSummary = await fetchPlcShotSummary(filters);
+    res.json({
+      plcShotSummary: plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 },
+      plcShotSummarySource: "PLC_SUMMARY",
+    });
+  } catch (error) {
+    const db = summarizeDbError(error);
+    console.error(`[ReportController] getReportShotSummary failed code=${db.code} msg=${db.message}`);
+    res.status(500).json({ error: db.message });
+  }
+};
+
 exports.exportFullReportExcel = async (req, res) => {
   try {
     const { filters = {}, reportConfig = DEFAULT_REPORT_CONFIG } = req.body || {};
@@ -338,7 +384,7 @@ exports.exportFullReportExcel = async (req, res) => {
     });
   } catch (error) {
     console.error("Excel export error:", error);
-    res.status(500).json({ error: error.message });
+    if (!res.headersSent) res.status(500).json({ error: error.message });
   }
 };
 
@@ -357,7 +403,7 @@ exports.exportNGReportExcel = async (req, res) => {
     });
   } catch (error) {
     console.error("NG Excel export error:", error);
-    res.status(500).json({ error: error.message });
+    if (!res.headersSent) res.status(500).json({ error: error.message });
   }
 };
 
@@ -374,7 +420,7 @@ exports.exportPartsReportExcel = async (req, res) => {
       options,
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    if (!res.headersSent) res.status(500).json({ error: error.message });
   }
 };
 
@@ -391,7 +437,7 @@ exports.exportAuditReportExcel = async (req, res) => {
       options,
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    if (!res.headersSent) res.status(500).json({ error: error.message });
   }
 };
 

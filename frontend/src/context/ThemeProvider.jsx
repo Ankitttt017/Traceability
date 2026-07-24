@@ -7,16 +7,14 @@ const LIGHT_THEME = "light";
 
 function resolveInitialTheme() {
   if (typeof window === "undefined") {
-    return DARK_THEME;
+    return LIGHT_THEME;
   }
 
   const storedTheme = localStorage.getItem(STORAGE_KEY);
   const resolvedTheme =
     storedTheme === DARK_THEME || storedTheme === LIGHT_THEME
       ? storedTheme
-      : window.matchMedia?.("(prefers-color-scheme: light)").matches
-    ? LIGHT_THEME
-    : DARK_THEME;
+      : LIGHT_THEME;
 
   document.documentElement.setAttribute("data-theme", resolvedTheme);
   return resolvedTheme;

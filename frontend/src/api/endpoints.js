@@ -101,6 +101,7 @@ export const ENDPOINTS = {
     summary: "/dashboard/summary",
     trends: "/dashboard/trends",
     report: "/dashboard/report",
+    rejectionAnalysis: "/rejection-analysis",
     oee: "/dashboard/oee",
     exportReport: "/dashboard/report/export-full",
     exportFullReport: "/dashboard/report/export-full",
@@ -109,6 +110,7 @@ export const ENDPOINTS = {
   },
   reports: {
     data: "/reports/report/data",
+    shotSummary: "/reports/report/shot-summary",
     exportFull: "/reports/report/export-full",
     exportNG: "/reports/report/export-ng",
     exportParts: "/reports/report/export-parts",
