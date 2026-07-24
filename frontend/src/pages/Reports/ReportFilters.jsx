@@ -232,8 +232,7 @@ const ReportFilters = ({ filters, onFilterChange, onApply, onClear, machines = [
       case 'today':
         from.setHours(6, 0, 0, 0);
         if (now < from) from.setDate(from.getDate() - 1);
-        to = new Date(from);
-        to.setDate(to.getDate() + 1);
+        to = new Date(now);
         break;
       case 'yesterday':
         from.setHours(6, 0, 0, 0);
@@ -246,10 +245,8 @@ const ReportFilters = ({ filters, onFilterChange, onApply, onClear, machines = [
         const shiftStart = new Date(now);
         shiftStart.setHours(6, 0, 0, 0);
         if (now < shiftStart) shiftStart.setDate(shiftStart.getDate() - 1);
-        const shiftEnd = new Date(shiftStart);
-        shiftEnd.setDate(shiftEnd.getDate() + 1);
         from = shiftStart;
-        to = shiftEnd;
+        to = new Date(now);
         break;
       case 'last7days':
         from.setDate(from.getDate() - 7);
@@ -269,10 +266,22 @@ const ReportFilters = ({ filters, onFilterChange, onApply, onClear, machines = [
   };
 
   const handleDateRangeApply = (start, end) => {
+    const normalizedStart = new Date(start);
+    const normalizedEnd = new Date(end || start);
+    normalizedStart.setHours(6, 0, 0, 0);
+    normalizedEnd.setHours(6, 0, 0, 0);
+    normalizedEnd.setDate(normalizedEnd.getDate() + 1);
+    const now = new Date();
+    const currentStart = new Date(now);
+    currentStart.setHours(6, 0, 0, 0);
+    if (now < currentStart) currentStart.setDate(currentStart.getDate() - 1);
+    if (normalizedStart.toDateString() === currentStart.toDateString() && normalizedEnd > now) {
+      normalizedEnd.setTime(now.getTime());
+    }
     onFilterChange({
       ...filters,
-      dateFrom: toDatetimeLocal(start),
-      dateTo: toDatetimeLocal(end),
+      dateFrom: toDatetimeLocal(normalizedStart),
+      dateTo: toDatetimeLocal(normalizedEnd),
     });
   };
 
@@ -354,7 +363,7 @@ const ReportFilters = ({ filters, onFilterChange, onApply, onClear, machines = [
               value={filters.machineId}
               onChange={(e) => onFilterChange({ ...filters, machineId: e.target.value })}
             >
-              <option value="">⚙️ All Machines</option>
+              <option value="">All Quality Gates</option>
               {machines
                 .filter((m) => !filters.plantId || String(m.plantId || m.plant_id || "") === String(filters.plantId))
                 .filter((m) => !filters.lineId || String(m.lineId || m.line_id || "") === String(filters.lineId))

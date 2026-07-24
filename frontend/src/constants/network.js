@@ -89,4 +89,4 @@ export const SOCKET_OPTIONS = Object.freeze({
   reconnectionDelayMax: 5000,
   randomizationFactor: 0.5,
 });
-export const SCANNER_CONNECTION_GRACE_MS = 20000;
+export const SCANNER_CONNECTION_GRACE_MS = 180000;

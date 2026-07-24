@@ -1,6 +1,7 @@
-const { toMinutes } = require("../../utils/time");
+const { toMinutes, toSeconds } = require("../../utils/time");
 
-const PROD_DAY_START_MINUTES = 6 * 60; // 06:00
+const PROD_DAY_START_SECONDS = 6 * 3600; // 06:00:00
+const PROD_DAY_START_MINUTES = PROD_DAY_START_SECONDS / 60; // Backward-compatible export.
 const DEFAULT_PLANNED_BREAK_SECONDS = Number(process.env.PLANNED_BREAK_SECONDS || 0);
 const DEFAULT_PLANNED_DOWNTIME_SECONDS = Number(process.env.PLANNED_DOWNTIME_SECONDS || 0);
 const GAP_THRESHOLD_MS = 5 * 60 * 1000;
@@ -16,48 +17,89 @@ function getMinutesForDate(dateValue) {
   return date.getHours() * 60 + date.getMinutes();
 }
 
-function getProductionDate(dateValue) {
+function getSecondsForDate(dateValue) {
   const date = toDate(dateValue);
   if (!date) return null;
+  return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
+}
+
+function getProductionDayStartSeconds(shifts = []) {
+  const starts = (Array.isArray(shifts) ? shifts : [])
+    .map((shift) => toSeconds(shift?.start_time ?? shift?.startTime))
+    .filter((value) => value !== null);
+  return starts.length ? Math.min(...starts) : PROD_DAY_START_SECONDS;
+}
+
+function getProductionDate(dateValue, shifts = []) {
+  const date = toDate(dateValue);
+  if (!date) return null;
+  const startSeconds = getProductionDayStartSeconds(shifts);
   const out = new Date(date);
-  if (getMinutesForDate(date) < PROD_DAY_START_MINUTES) {
+  if (getSecondsForDate(date) < startSeconds) {
     out.setDate(out.getDate() - 1);
   }
   out.setHours(0, 0, 0, 0);
   return out;
 }
 
+function setDateSeconds(baseDate, seconds) {
+  const date = toDate(baseDate);
+  if (!date) return null;
+  date.setHours(Math.floor(seconds / 3600), Math.floor((seconds % 3600) / 60), seconds % 60, 0);
+  return date;
+}
+
+function getProductionDayRange(dateValue = new Date(), shifts = []) {
+  const productionDate = getProductionDate(dateValue, shifts);
+  if (!productionDate) return null;
+  const startSeconds = getProductionDayStartSeconds(shifts);
+  const start = setDateSeconds(productionDate, startSeconds);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+}
+
 function isDateInShift(dateValue, shift) {
-  const currentMinutes = getMinutesForDate(dateValue);
-  if (currentMinutes === null) return false;
-  const start = toMinutes(shift.start_time);
-  const end = toMinutes(shift.end_time);
+  const currentSeconds = getSecondsForDate(dateValue);
+  if (currentSeconds === null) return false;
+  const start = toSeconds(shift.start_time);
+  const end = toSeconds(shift.end_time);
   if (start === null || end === null) return false;
   if (start === end) return true;
-  if (start < end) return currentMinutes >= start && currentMinutes < end;
-  return currentMinutes >= start || currentMinutes < end;
+  if (start < end) return currentSeconds >= start && currentSeconds <= end;
+  return currentSeconds >= start || currentSeconds <= end;
 }
 
 function resolveShift(dateValue, shifts = []) {
+  const matches = [];
   for (const shift of shifts) {
-    if (isDateInShift(dateValue, shift)) return shift;
+    if (isDateInShift(dateValue, shift)) {
+      const start = toSeconds(shift.start_time);
+      const end = toSeconds(shift.end_time);
+      const duration = start === end ? 24 * 3600 : start < end ? end - start : (24 * 3600 - start + end);
+      matches.push({ shift, start, duration });
+    }
+  }
+  if (matches.length) {
+    matches.sort((a, b) => (b.start - a.start) || (a.duration - b.duration));
+    return matches[0].shift;
   }
   return null;
 }
 
 function getShiftDurationSeconds(shift) {
   if (!shift) return 0;
-  const start = toMinutes(shift.start_time);
-  const end = toMinutes(shift.end_time);
+  const start = toSeconds(shift.start_time);
+  const end = toSeconds(shift.end_time);
   if (start === null || end === null) return 0;
   if (start === end) return 24 * 3600;
-  const mins = start < end ? (end - start) : (24 * 60 - start + end);
-  return Math.max(0, mins * 60);
+  const seconds = start < end ? (end - start) : (24 * 3600 - start + end);
+  return Math.max(0, seconds);
 }
 
 function getEffectiveCycleTimeSeconds(machine = {}) {
-  const std = Number(machine.standard_cycle_time_sec ?? machine.cycle_time ?? 0);
-  const load = Number(machine.loading_time_sec ?? machine.loading_time ?? 0);
+  const std = Number(machine.standard_cycle_time_sec ?? machine.standardCycleTimeSec ?? machine.cycle_time ?? machine.cycleTime ?? 0);
+  const load = Number(machine.loading_time_sec ?? machine.loadingTimeSec ?? machine.loading_time ?? machine.loadingTime ?? 0);
   const effective = std + load;
   return effective > 0 ? effective : 0;
 }
@@ -65,7 +107,7 @@ function getEffectiveCycleTimeSeconds(machine = {}) {
 function computeTargetProduction({ machine, shift, plannedBreakSeconds, plannedDowntimeSeconds }) {
   const effectiveCycleTime = getEffectiveCycleTimeSeconds(machine);
   if (effectiveCycleTime <= 0) {
-    return Math.max(0, Number(machine.daily_target_qty || 0));
+    return Math.max(0, Number(machine.daily_target_qty ?? machine.dailyTargetQty ?? machine.targetQty ?? machine.targetProduction ?? 0));
   }
   const shiftDurationSeconds = getShiftDurationSeconds(shift);
   const plannedBreak = Number.isFinite(plannedBreakSeconds) ? plannedBreakSeconds : DEFAULT_PLANNED_BREAK_SECONDS;
@@ -130,6 +172,8 @@ function computeOeeAndOa({
 module.exports = {
   PROD_DAY_START_MINUTES,
   getProductionDate,
+  getProductionDayStartSeconds,
+  getProductionDayRange,
   resolveShift,
   getShiftDurationSeconds,
   getEffectiveCycleTimeSeconds,

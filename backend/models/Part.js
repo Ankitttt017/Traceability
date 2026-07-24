@@ -36,19 +36,4 @@ const Part = sequelize.define("Part", {
   },
 });
 
-function scheduleFinalProductionRefresh(instance) {
-  const partId = instance?.part_id || instance?.get?.("part_id");
-  if (!partId) return;
-  setImmediate(() => {
-    try {
-      require("../services/report/finalProductionResultService").scheduleMaterializePart(partId);
-    } catch (error) {
-      console.warn(`[FinalProductionResult] part hook skipped: ${error.message}`);
-    }
-  });
-}
-
-Part.addHook("afterCreate", scheduleFinalProductionRefresh);
-Part.addHook("afterUpdate", scheduleFinalProductionRefresh);
-
 module.exports = Part;

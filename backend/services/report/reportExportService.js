@@ -17,12 +17,8 @@ const MachineModel = require("../../models/Machine");
 const { calculateProductionMetrics } = require("./reportMetricsService");
 const { generateIndustrialExcel } = require("./excelTemplateEngine");
 const { resolveIndustrialResult } = require("./reportFormatter");
-const {
-  buildStationPairsFromRows,
-  fetchMaterializedReportRows,
-  fetchMaterializedTraceabilityMetrics,
-} = require("./finalProductionResultService");
-const { toMinutes: parseShiftMinutes } = require("../../utils/time");
+const { buildStationPairsFromRows } = require("./stationPairBuilder");
+const { toSeconds: parseShiftSeconds } = require("../../utils/time");
 const {
   LEAKTEST_OPERATION,
   buildLeaktestIndex,
@@ -160,18 +156,6 @@ function stripMetricStatusFilters(filters = {}) {
 
 async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
   const nextMetrics = { ...(metrics || {}) };
-  const materializedMetrics = process.env.REPORT_USE_FINAL_RESULT_TABLE === "0"
-    ? null
-    : await fetchMaterializedTraceabilityMetrics(filters).catch((error) => {
-      console.warn(`[ReportExport] materialized traceability summary skipped: ${error.message}`);
-      return null;
-    });
-  if (materializedMetrics) {
-    return {
-      ...nextMetrics,
-      ...materializedMetrics,
-    };
-  }
   const [summaryMetrics, totalProduction] = await Promise.all([
     fetchProductionSummaryMetrics(filters).catch((error) => {
       console.warn(`[ReportExport] traceability SQL summary skipped: ${error.message}`);
@@ -476,8 +460,11 @@ function isProductionReportLog(log) {
   const reason = String(log.interlock_reason || "").trim().toUpperCase();
   const result = String(log.result || "").trim().toUpperCase();
   const validationResult = String(log.validation_result || "").trim().toUpperCase();
+  const bypassReason = String(log.bypass_reason || "").trim().toUpperCase();
 
-  if (Boolean(log.is_bypassed)) return result === "OK" || status === "ENDED_OK";
+  if (Boolean(log.is_bypassed) || ["MACHINE_BYPASS_AUTO_OK", "STATION_BYPASS_AUTO_OK", "STATION_OPERATION_DISABLED_AUTO_OK", "MANUAL_BYPASS"].includes(bypassReason)) {
+    return true;
+  }
   if (status === "RESET" || status === "VALIDATION_ONLY") return false;
   if (["FAILED", "DUPLICATE", "BLOCKED"].includes(validationResult)) return false;
   if (NON_PRODUCTION_REASONS.has(reason)) return false;
@@ -729,7 +716,7 @@ function deriveShotCandidates(log) {
   return [...new Set(candidates)];
 }
 
-function getMinutesForDate(dateValue) {
+function getSecondsForDate(dateValue) {
   const date = new Date(dateValue);
   if (Number.isNaN(date.getTime())) return null;
   try {
@@ -737,6 +724,7 @@ function getMinutesForDate(dateValue) {
       timeZone: process.env.REPORT_TIMEZONE || "Asia/Kolkata",
       hour: "2-digit",
       minute: "2-digit",
+      second: "2-digit",
       hour12: false,
     });
     const parts = formatter.formatToParts(date).reduce((acc, part) => {
@@ -745,29 +733,30 @@ function getMinutesForDate(dateValue) {
     }, {});
     const hours = Number(parts.hour);
     const minutes = Number(parts.minute);
-    if (Number.isFinite(hours) && Number.isFinite(minutes)) {
-      return hours * 60 + minutes;
+    const seconds = Number(parts.second || 0);
+    if (Number.isFinite(hours) && Number.isFinite(minutes) && Number.isFinite(seconds)) {
+      return hours * 3600 + minutes * 60 + seconds;
     }
   } catch (_) {
     // Fall back to process-local time if the runtime does not support the configured timezone.
   }
-  return date.getHours() * 60 + date.getMinutes();
+  return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
 }
 
-function toShiftMinutes(timeValue) {
-  return parseShiftMinutes(timeValue);
+function toShiftSeconds(timeValue) {
+  return parseShiftSeconds(timeValue);
 }
 
 function isDateInShift(dateValue, shift) {
-  const currentMinutes = getMinutesForDate(dateValue);
-  const start = toShiftMinutes(shift.start_time);
-  const end = toShiftMinutes(shift.end_time);
-  if (currentMinutes === null || start === null || end === null) return false;
+  const currentSeconds = getSecondsForDate(dateValue);
+  const start = toShiftSeconds(shift.start_time);
+  const end = toShiftSeconds(shift.end_time);
+  if (currentSeconds === null || start === null || end === null) return false;
   if (start === end) return true;
   if (start < end) {
-    return currentMinutes >= start && currentMinutes < end;
+    return currentSeconds >= start && currentSeconds <= end;
   }
-  return currentMinutes >= start || currentMinutes < end;
+  return currentSeconds >= start || currentSeconds <= end;
 }
 
 async function getActiveShiftDefinitions() {
@@ -779,26 +768,53 @@ async function getActiveShiftDefinitions() {
   });
 }
 
-function applyShiftFilter(rows, shiftCode, shifts) {
+function isDateWithinRange(dateValue, range) {
+  if (!range?.from || !range?.to) return true;
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return false;
+  return date >= range.from && date <= range.to;
+}
+
+function applyShiftFilter(rows, shiftCode, shifts, range = null) {
   if (!shiftCode) return rows;
   const target = String(shiftCode).trim().toUpperCase();
   if (!target || ["ALL", "ANY", "ALL_SHIFTS", "ALL SHIFT", "ALL SHIFTS"].includes(target)) return rows;
   const shift = findShiftDefinition(shifts, shiftCode);
   if (!shift) return rows;
   return rows.filter((row) => {
-    const timestamp = row.createdAt || row.updatedAt || row.latestAnchorCreatedAt;
-    return shift && isDateInShift(timestamp, shift);
+    const timestamp = row.createdAt || row.firstScanCreatedAt || row.updatedAt || row.latestAnchorCreatedAt;
+    return shift && isDateWithinRange(timestamp, range) && isDateInShift(timestamp, shift);
   });
 }
 
 function findShiftDefinition(shifts, shiftCode) {
   const target = String(shiftCode || "").trim().toUpperCase();
+  const targetAlias = normalizeShiftAlias(shiftCode);
   if (!target) return null;
   return (shifts || []).find((s) => {
     const code = String(s.shift_code || s.shiftCode || "").trim().toUpperCase();
     const name = String(s.shift_name || s.shiftName || "").trim().toUpperCase();
-    return code === target || name === target;
+    return code === target || name === target || normalizeShiftAlias(code) === targetAlias || normalizeShiftAlias(name) === targetAlias;
   }) || null;
+}
+
+function normalizeShiftAlias(value) {
+  const token = String(value || "").trim().toUpperCase().replace(/\s+/g, "_");
+  if (!token || ["ALL", "ANY", "ALL_SHIFT", "ALL_SHIFTS", "ALL_SHIFT", "ALL_SHIFTS"].includes(token)) return "";
+  const parts = token.split("_").filter(Boolean);
+  if (token === "A" || token === "SHIFT_A" || token === "A_SHIFT" || (parts.includes("SHIFT") && parts.includes("A"))) return "SHIFT_A";
+  if (token === "B" || token === "SHIFT_B" || token === "B_SHIFT" || (parts.includes("SHIFT") && parts.includes("B"))) return "SHIFT_B";
+  if (token === "C" || token === "SHIFT_C" || token === "C_SHIFT" || (parts.includes("SHIFT") && parts.includes("C"))) return "SHIFT_C";
+  if (token === "S1" || token === "SHIFT_S1" || token === "S1_SHIFT" || token === "SHIFT_1") return "SHIFT_S1";
+  if (token === "S2" || token === "SHIFT_S2" || token === "S2_SHIFT" || token === "SHIFT_2") return "SHIFT_S2";
+  if (token === "S3" || token === "SHIFT_S3" || token === "S3_SHIFT" || token === "SHIFT_3") return "SHIFT_S3";
+  return token;
+}
+
+function shiftMatchesFilter(rowShift, filterShift) {
+  const filterCanonical = normalizeShiftAlias(filterShift);
+  if (!filterCanonical) return true;
+  return normalizeShiftAlias(rowShift) === filterCanonical;
 }
 
 async function getPlcReadingColumns() {
@@ -821,10 +837,71 @@ function normalizeReportDateRange(filters = {}) {
   const now = new Date();
   const from = filters.dateFrom ? new Date(filters.dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const to = filters.dateTo ? new Date(filters.dateTo) : now;
+  const safeFrom = Number.isNaN(from.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : from;
+  const safeTo = Number.isNaN(to.getTime()) ? now : to;
+  if (filters.dateFrom && filters.dateTo && isProductionDatePickerRange(safeFrom, safeTo)) {
+    const productionStart = new Date(safeFrom);
+    productionStart.setHours(6, 0, 0, 0);
+    const productionEnd = new Date(productionStart);
+    productionEnd.setDate(productionEnd.getDate() + 1);
+    return { safeFrom: productionStart, safeTo: capCurrentProductionRange(productionStart, productionEnd, now) };
+  }
+  const normalizedSafeFrom = normalizeCurrentProductionStart(safeFrom, now);
   return {
-    safeFrom: Number.isNaN(from.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : from,
-    safeTo: Number.isNaN(to.getTime()) ? now : to,
+    safeFrom: normalizedSafeFrom,
+    safeTo: capCurrentProductionRange(normalizedSafeFrom, safeTo, now),
   };
+}
+
+function getLocalDateKey(dateValue) {
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return "";
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function getLocalSecondOfDay(dateValue) {
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
+}
+
+function getLocalDayDiff(from, to) {
+  const a = new Date(from);
+  const b = new Date(to);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0;
+  a.setHours(0, 0, 0, 0);
+  b.setHours(0, 0, 0, 0);
+  return Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function isProductionDatePickerRange(from, to) {
+  const fromSeconds = getLocalSecondOfDay(from);
+  const toSeconds = getLocalSecondOfDay(to);
+  if (fromSeconds === null || toSeconds === null) return false;
+  if (getLocalDateKey(from) === getLocalDateKey(to)) {
+    return fromSeconds < 6 * 3600 && (toSeconds === 0 || toSeconds >= 23 * 3600);
+  }
+  return fromSeconds < 6 * 3600 && getLocalDayDiff(from, to) === 1 && toSeconds <= 6 * 3600;
+}
+
+function capCurrentProductionRange(from, to, now = new Date()) {
+  const currentProductionStart = new Date(now);
+  currentProductionStart.setHours(6, 0, 0, 0);
+  if (now < currentProductionStart) currentProductionStart.setDate(currentProductionStart.getDate() - 1);
+  return getLocalDateKey(from) === getLocalDateKey(currentProductionStart) && to > now ? now : to;
+}
+
+function normalizeCurrentProductionStart(from, now = new Date()) {
+  const currentProductionStart = new Date(now);
+  currentProductionStart.setHours(6, 0, 0, 0);
+  if (now < currentProductionStart) currentProductionStart.setDate(currentProductionStart.getDate() - 1);
+  return getLocalDateKey(from) === getLocalDateKey(currentProductionStart) && getLocalSecondOfDay(from) < 6 * 3600
+    ? currentProductionStart
+    : from;
 }
 
 function toSqlLocalDateTime(value) {
@@ -859,27 +936,72 @@ function normalizeOptionalToken(value) {
 async function applyPlcShiftWhere(whereParts, replacements, shiftCode) {
   const target = normalizeOptionalToken(shiftCode).toUpperCase();
   if (!target) return;
+  const targetAlias = normalizeShiftAlias(target);
   const shifts = await getActiveShiftDefinitions();
   const shift = shifts.find((row) => {
     const code = String(row.shift_code || row.shiftCode || "").trim().toUpperCase();
     const name = String(row.shift_name || row.shiftName || "").trim().toUpperCase();
-    return code === target || name === target;
+    return code === target || name === target || normalizeShiftAlias(code) === targetAlias || normalizeShiftAlias(name) === targetAlias;
   });
   if (!shift) return;
-  const start = toShiftMinutes(shift.start_time);
-  const end = toShiftMinutes(shift.end_time);
+  const start = toShiftSeconds(shift.start_time);
+  const end = toShiftSeconds(shift.end_time);
   if (start === null || end === null) return;
-  const localMinuteExpr = "(DATEPART(HOUR, recorded_at) * 60 + DATEPART(MINUTE, recorded_at))";
-  const istMinuteExpr = `(DATEPART(HOUR, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at)) * 60 + DATEPART(MINUTE, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at)))`;
+  const localSecondExpr = "(DATEPART(HOUR, recorded_at) * 3600 + DATEPART(MINUTE, recorded_at) * 60 + DATEPART(SECOND, recorded_at))";
+  const istSecondExpr = `(DATEPART(HOUR, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at)) * 3600 + DATEPART(MINUTE, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at)) * 60 + DATEPART(SECOND, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at)))`;
   if (start === end) return;
-  replacements.shiftStartMinutes = start;
-  replacements.shiftEndMinutes = end;
+  replacements.shiftStartSeconds = start;
+  replacements.shiftEndSeconds = end;
   const directShiftClause = start < end
-    ? `(${localMinuteExpr} >= :shiftStartMinutes AND ${localMinuteExpr} < :shiftEndMinutes)`
-    : `(${localMinuteExpr} >= :shiftStartMinutes OR ${localMinuteExpr} < :shiftEndMinutes)`;
+    ? `(${localSecondExpr} >= :shiftStartSeconds AND ${localSecondExpr} <= :shiftEndSeconds)`
+    : `(${localSecondExpr} >= :shiftStartSeconds OR ${localSecondExpr} <= :shiftEndSeconds)`;
   const istShiftClause = start < end
-    ? `(${istMinuteExpr} >= :shiftStartMinutes AND ${istMinuteExpr} < :shiftEndMinutes)`
-    : `(${istMinuteExpr} >= :shiftStartMinutes OR ${istMinuteExpr} < :shiftEndMinutes)`;
+    ? `(${istSecondExpr} >= :shiftStartSeconds AND ${istSecondExpr} <= :shiftEndSeconds)`
+    : `(${istSecondExpr} >= :shiftStartSeconds OR ${istSecondExpr} <= :shiftEndSeconds)`;
+  whereParts.push(`(${directShiftClause} OR ${istShiftClause})`);
+}
+
+async function applyOperationLogShiftWhere(whereParts, replacements, shiftCode) {
+  const target = normalizeOptionalToken(shiftCode).toUpperCase();
+  if (!target) return;
+  const targetAlias = normalizeShiftAlias(target);
+  const shifts = await getActiveShiftDefinitions();
+  const shift = shifts.find((row) => {
+    const code = String(row.shift_code || row.shiftCode || "").trim().toUpperCase();
+    const name = String(row.shift_name || row.shiftName || "").trim().toUpperCase();
+    return code === target || name === target || normalizeShiftAlias(code) === targetAlias || normalizeShiftAlias(name) === targetAlias;
+  });
+  if (!shift) return;
+  const start = toShiftSeconds(shift.start_time);
+  const end = toShiftSeconds(shift.end_time);
+  if (start === null || end === null || start === end) return;
+
+  const rangeFrom = replacements.dateFrom ? new Date(replacements.dateFrom) : null;
+  const rangeTo = replacements.dateTo ? new Date(replacements.dateTo) : null;
+  if (rangeFrom && rangeTo && !Number.isNaN(rangeFrom.getTime()) && !Number.isNaN(rangeTo.getTime())) {
+    const shiftFrom = new Date(rangeFrom);
+    shiftFrom.setHours(Math.floor(start / 3600), Math.floor((start % 3600) / 60), start % 60, 0);
+    const shiftTo = new Date(rangeFrom);
+    shiftTo.setHours(Math.floor(end / 3600), Math.floor((end % 3600) / 60), end % 60, 999);
+    if (start > end) {
+      shiftTo.setDate(shiftTo.getDate() + 1);
+    }
+    if (shiftTo < rangeFrom || shiftFrom > rangeTo) {
+      whereParts.push("1 = 0");
+      return;
+    }
+  }
+
+  replacements.operationShiftStartSeconds = start;
+  replacements.operationShiftEndSeconds = end;
+  const localSecondExpr = "(DATEPART(HOUR, ol.createdAt) * 3600 + DATEPART(MINUTE, ol.createdAt) * 60 + DATEPART(SECOND, ol.createdAt))";
+  const istSecondExpr = `(DATEPART(HOUR, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, ol.createdAt)) * 3600 + DATEPART(MINUTE, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, ol.createdAt)) * 60 + DATEPART(SECOND, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, ol.createdAt)))`;
+  const directShiftClause = start < end
+    ? `(${localSecondExpr} >= :operationShiftStartSeconds AND ${localSecondExpr} <= :operationShiftEndSeconds)`
+    : `(${localSecondExpr} >= :operationShiftStartSeconds OR ${localSecondExpr} <= :operationShiftEndSeconds)`;
+  const istShiftClause = start < end
+    ? `(${istSecondExpr} >= :operationShiftStartSeconds AND ${istSecondExpr} <= :operationShiftEndSeconds)`
+    : `(${istSecondExpr} >= :operationShiftStartSeconds OR ${istSecondExpr} <= :operationShiftEndSeconds)`;
   whereParts.push(`(${directShiftClause} OR ${istShiftClause})`);
 }
 
@@ -1237,24 +1359,7 @@ async function findAllWithRetry(queryFn, retries = 1, waitMs = 1200) {
 
 async function runIndustrialExport(res, { filters, reportConfig, type = "full", options = {} }) {
   // 1. Resolve Data
-  let rows = [];
-  let usedFinalResultTable = false;
-  if (process.env.REPORT_USE_FINAL_RESULT_TABLE !== "0" && options.preferMaterialized !== false && !options.maxAnchorParts && !options.maxBaseLogs) {
-    try {
-      const materializedRows = await fetchMaterializedReportRows(filters);
-      const liveCount = await fetchProductionPartCount(filters).catch(() => 0);
-      const materializedCount = countReportGroups(materializedRows);
-      if (materializedRows.length && (!liveCount || materializedCount >= liveCount)) {
-        rows = materializedRows;
-        usedFinalResultTable = true;
-      }
-    } catch (error) {
-      console.warn(`[FinalProductionResult] export read skipped: ${error.message}`);
-    }
-  }
-  if (!usedFinalResultTable) {
-    rows = await fetchProductionData(filters, options);
-  }
+  const rows = await fetchProductionData(filters, options);
   const stationPairs = await buildStationPairsFromRows(rows, filters);
 
   // 2. Calculate Metrics
@@ -1275,11 +1380,7 @@ async function runIndustrialExport(res, { filters, reportConfig, type = "full", 
 async function buildProductionCountScope(filters = {}, options = {}) {
   const includeDateRange = options.includeDateRange !== false;
   const includeStatusFilter = options.includeStatusFilter !== false;
-  const now = new Date();
-  const from = filters.dateFrom ? new Date(filters.dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const to = filters.dateTo ? new Date(filters.dateTo) : now;
-  const safeFrom = Number.isNaN(from.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : from;
-  const safeTo = Number.isNaN(to.getTime()) ? now : to;
+  const { safeFrom, safeTo } = normalizeReportDateRange(filters);
   const whereParts = [
     "NULLIF(LTRIM(RTRIM(CAST(ol.part_id AS NVARCHAR(255)))), '') IS NOT NULL",
     "(ol.plc_status IS NULL OR ol.plc_status NOT IN ('RESET', 'VALIDATION_ONLY'))",
@@ -1365,7 +1466,34 @@ async function buildProductionCountScope(filters = {}, options = {}) {
     }
   }
 
+  await applyOperationLogShiftWhere(whereParts, replacements, filters.shiftCode || filters.shift_code);
+
   return { whereParts, joins, replacements };
+}
+
+async function resolveRequiredOperationCount(filters = {}) {
+  const where = { is_active: true };
+  if (filters.machineId) where.id = filters.machineId;
+  if (filters.plantId) where.plant_id = filters.plantId;
+  if (filters.lineId) where.line_id = filters.lineId;
+  else if (filters.lineName) where.line_name = filters.lineName;
+
+  const stationToken = String(filters.operationNo || filters.station || "").trim().toUpperCase();
+  if (stationToken) {
+    where.operation_no = stationToken;
+  }
+
+  const rows = await Machine.findAll({
+    where,
+    attributes: ["operation_no"],
+    raw: true,
+  }).catch(() => []);
+  const operations = new Set(
+    (rows || [])
+      .map((row) => String(row.operation_no || "").trim().toUpperCase())
+      .filter(Boolean)
+  );
+  return Math.max(operations.size || (stationToken ? 1 : 0), 1);
 }
 
 async function fetchProductionPartCount(filters = {}) {
@@ -1408,21 +1536,52 @@ async function fetchProductionFirstScanPartCount(filters = {}) {
 
 async function fetchProductionSummaryMetrics(filters = {}) {
   const { whereParts, joins, replacements } = await buildProductionCountScope(filters);
+  const stationScoped = Boolean(filters.machineId || filters.operationNo || filters.station);
+  replacements.stationScoped = stationScoped ? 1 : 0;
+  replacements.requiredOpsCount = await resolveRequiredOperationCount(filters);
   const [rows] = await sequelize.query(
     `
-      WITH FilteredParts AS (
-        SELECT ol.part_id, MAX(ol.createdAt) AS latestAt
+      WITH FilteredPartStatus AS (
+        SELECT
+          ol.part_id,
+          MAX(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('OK', 'PASSED', 'COMPLETED') THEN 1 ELSE 0 END) AS partFinalOK,
+          MAX(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('NG', 'FAILED', 'REJECTED', 'INTERLOCKED') THEN 1 ELSE 0 END) AS partFinalNG,
+          MAX(CASE WHEN (
+            UPPER(LTRIM(RTRIM(COALESCE(ol.plc_status, '')))) IN ('ENDED_NG', 'COMPLETED_NG', 'FAILED', 'INTERLOCKED')
+            OR UPPER(LTRIM(RTRIM(COALESCE(ol.result, '')))) IN ('NG', 'FAIL', 'FAILED', 'BLOCK')
+            OR UPPER(LTRIM(RTRIM(COALESCE(ol.operation_result, '')))) IN ('FAILED', 'INTERLOCKED')
+            OR ol.rejection_reason IS NOT NULL
+            OR ol.rejection_category IS NOT NULL
+          ) THEN 1 ELSE 0 END) AS hasNG,
+          COUNT(DISTINCT CASE WHEN (
+            ol.is_bypassed = 1
+            OR UPPER(LTRIM(RTRIM(COALESCE(ol.bypass_reason, '')))) IN ('MACHINE_BYPASS_AUTO_OK', 'STATION_BYPASS_AUTO_OK', 'STATION_OPERATION_DISABLED_AUTO_OK', 'MANUAL_BYPASS')
+            OR UPPER(LTRIM(RTRIM(COALESCE(ol.plc_status, '')))) IN ('ENDED_OK', 'COMPLETED_OK')
+            OR UPPER(LTRIM(RTRIM(COALESCE(ol.result, '')))) IN ('OK', 'PASS', 'PASSED')
+            OR UPPER(LTRIM(RTRIM(COALESCE(ol.operation_result, '')))) = 'PASSED'
+          ) THEN UPPER(LTRIM(RTRIM(COALESCE(NULLIF(ol.operation_no, ''), ol.station_no, 'UNKNOWN')))) ELSE NULL END) AS okOpCount
         FROM OperationLogs ol
+        LEFT JOIN Parts p ON p.part_id = ol.part_id
         ${joins.join("\n")}
         WHERE ${whereParts.join("\n          AND ")}
         GROUP BY ol.part_id
       )
       SELECT
         COUNT(*) AS totalProduction,
-        SUM(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('OK', 'PASSED', 'PASS', 'COMPLETED', 'COMPLETED_OK', 'ENDED_OK') THEN 1 ELSE 0 END) AS totalOK,
-        SUM(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('NG', 'FAILED', 'FAIL', 'REJECTED', 'INTERLOCKED', 'COMPLETED_NG', 'ENDED_NG') THEN 1 ELSE 0 END) AS totalNG
-      FROM FilteredParts fp
-      LEFT JOIN Parts p ON p.part_id = fp.part_id
+        SUM(CASE WHEN (
+          partFinalOK = 1
+          OR (partFinalNG = 0 AND hasNG = 0 AND :stationScoped = 1 AND okOpCount > 0)
+          OR (partFinalNG = 0 AND hasNG = 0 AND :stationScoped = 0 AND okOpCount >= :requiredOpsCount)
+        ) THEN 1 ELSE 0 END) AS totalOK,
+        SUM(CASE WHEN partFinalNG = 1 OR (partFinalOK = 0 AND hasNG = 1) THEN 1 ELSE 0 END) AS totalNG,
+        SUM(CASE WHEN NOT (
+          partFinalOK = 1
+          OR partFinalNG = 1
+          OR hasNG = 1
+          OR (:stationScoped = 1 AND okOpCount > 0)
+          OR (:stationScoped = 0 AND okOpCount >= :requiredOpsCount)
+        ) THEN 1 ELSE 0 END) AS inProgress
+      FROM FilteredPartStatus
     `,
     { replacements }
   );
@@ -1430,7 +1589,7 @@ async function fetchProductionSummaryMetrics(filters = {}) {
   const totalProduction = Number(first.totalProduction || 0);
   const totalOK = Number(first.totalOK || 0);
   const totalNG = Number(first.totalNG || 0);
-  const inProgress = Math.max(0, totalProduction - totalOK - totalNG);
+  const inProgress = Number(first.inProgress || 0);
   const productionBase = totalOK + totalNG;
   return {
     totalProduction,
@@ -1472,13 +1631,12 @@ async function fetchProductionData(filters = {}, options = {}) {
   const filterDieCastingMachine = String(filters.dieCastingMachine || filters.die_casting_machine || "").trim().toUpperCase();
 
   // Safe date defaults — always query last 24 hours if nothing specified
-  const now = new Date();
-  const from = dateFrom ? new Date(dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const to   = dateTo   ? new Date(dateTo)   : now;
-
-  // Guard invalid dates
-  const safeFrom = isNaN(from.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : from;
-  const safeTo   = isNaN(to.getTime())   ? now : to;
+  const { safeFrom, safeTo } = normalizeReportDateRange({ dateFrom, dateTo });
+  const activeShifts = await getActiveShiftDefinitions();
+  const resolveReportShiftCode = (dateValue, fallbackCode = "") => {
+    const shift = activeShifts.find((row) => isDateInShift(dateValue, row));
+    return shift?.shift_code || fallbackCode || "";
+  };
 
   const buildWhere = async ({ includeDateRange = true } = {}) => {
     const nextWhere = {};
@@ -1556,12 +1714,11 @@ async function fetchProductionData(filters = {}, options = {}) {
   let productionLogs = logs.filter(isProductionReportLog);
   if (shiftCode) {
     const target = String(shiftCode).trim().toUpperCase();
-    const shifts = await getActiveShiftDefinitions();
-    const shift = findShiftDefinition(shifts, shiftCode);
+    const shift = findShiftDefinition(activeShifts, shiftCode);
     productionLogs = shift
-      ? applyShiftFilter(productionLogs, shiftCode, shifts)
+      ? applyShiftFilter(productionLogs, shiftCode, activeShifts, { from: safeFrom, to: safeTo })
       : productionLogs.filter(
-          (row) => String(row.shift_code || row.shiftCode || "").trim().toUpperCase() === target
+          (row) => shiftMatchesFilter(row.shift_code || row.shiftCode, target)
         );
   }
 
@@ -1604,7 +1761,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       limit: 5000,
     });
     const scopedParts = shiftCode
-      ? applyShiftFilter(parts, shiftCode, await getActiveShiftDefinitions())
+      ? applyShiftFilter(parts, shiftCode, activeShifts, { from: safeFrom, to: safeTo })
       : parts;
     if (!scopedParts.length) return [];
 
@@ -1961,6 +2118,12 @@ async function fetchProductionData(filters = {}, options = {}) {
     const plcPartDie = splitPlcPartDie(plcReadingFromDb?.part_name || "");
 
     const firstScanLog = earliestLogByPart.get(canonicalPartId) || earliestLogByPart.get(partIdValue) || earliestLogByPart.get(mappedCustomerQr) || log;
+    const firstScanCreatedAt = earliestScanByPart.get(canonicalPartId) || earliestScanByPart.get(partIdValue) || earliestScanByPart.get(mappedCustomerQr) || log.createdAt || null;
+    const latestAnchorLog = latestAnchorLogByPart.get(canonicalPartId) || latestAnchorLogByPart.get(partIdValue) || latestAnchorLogByPart.get(mappedCustomerQr) || log;
+    const latestAnchorCreatedAt = latestAnchorScanByPart.get(canonicalPartId) || latestAnchorScanByPart.get(partIdValue) || latestAnchorScanByPart.get(mappedCustomerQr) || log.createdAt || null;
+    const resolvedFirstScanShiftCode = resolveReportShiftCode(firstScanCreatedAt, firstScanLog?.shift_code || log.shift_code || "");
+    const resolvedAnchorShiftCode = resolveReportShiftCode(latestAnchorCreatedAt, latestAnchorLog?.shift_code || log.shift_code || "");
+    const resolvedRowShiftCode = resolveReportShiftCode(log.createdAt, log.shift_code || "");
 
     return {
       ...log,
@@ -1970,13 +2133,13 @@ async function fetchProductionData(filters = {}, options = {}) {
       traceabilityPartId: canonicalPartId || partIdValue || "-",
       displayPartId,
       isCustomerQrOnly: customerQrOnlyPart,
-      firstScanCreatedAt: earliestScanByPart.get(canonicalPartId) || earliestScanByPart.get(partIdValue) || earliestScanByPart.get(mappedCustomerQr) || log.createdAt || null,
-      firstScanShiftCode: firstScanLog?.shift_code || log.shift_code || "",
-      latestAnchorCreatedAt: latestAnchorScanByPart.get(canonicalPartId) || latestAnchorScanByPart.get(partIdValue) || latestAnchorScanByPart.get(mappedCustomerQr) || log.createdAt || null,
-      anchorMachineName: latestAnchorLogByPart.get(canonicalPartId)?.Machine?.machine_name || latestAnchorLogByPart.get(partIdValue)?.Machine?.machine_name || latestAnchorLogByPart.get(mappedCustomerQr)?.Machine?.machine_name || log.Machine?.machine_name || "-",
-      anchorLineName: latestAnchorLogByPart.get(canonicalPartId)?.Machine?.line_name || latestAnchorLogByPart.get(partIdValue)?.Machine?.line_name || latestAnchorLogByPart.get(mappedCustomerQr)?.Machine?.line_name || log.Machine?.line_name || "-",
-      anchorShiftCode: latestAnchorLogByPart.get(canonicalPartId)?.shift_code || latestAnchorLogByPart.get(partIdValue)?.shift_code || latestAnchorLogByPart.get(mappedCustomerQr)?.shift_code || log.shift_code || "A",
-      isAnchorMachineRow: Number((latestAnchorLogByPart.get(canonicalPartId) || latestAnchorLogByPart.get(partIdValue) || latestAnchorLogByPart.get(mappedCustomerQr))?.machine_id || 0) === Number(log.machine_id || 0),
+      firstScanCreatedAt,
+      firstScanShiftCode: resolvedFirstScanShiftCode,
+      latestAnchorCreatedAt,
+      anchorMachineName: latestAnchorLog?.Machine?.machine_name || log.Machine?.machine_name || "-",
+      anchorLineName: latestAnchorLog?.Machine?.line_name || log.Machine?.line_name || "-",
+      anchorShiftCode: resolvedAnchorShiftCode || "UNASSIGNED",
+      isAnchorMachineRow: Number(latestAnchorLog?.machine_id || 0) === Number(log.machine_id || 0),
       customerCode: mappedCustomerQr || "-",
       customerQrCode: mappedCustomerQr || "-",
       shotNumber: displayPartId ? (plcReadingFromDb?.shot_number || fallbackShotNumber || log.shot_number || "-") : "-",
@@ -1991,7 +2154,7 @@ async function fetchProductionData(filters = {}, options = {}) {
       partName: plcPartDie.partName || "",
       dieName: plcPartDie.dieName || "",
       partDieLabel: plcPartDie.label || "",
-      shiftCode:    log.shift_code || "A",
+      shiftCode:    resolvedRowShiftCode || "UNASSIGNED",
       cycleStartTime: cycleStartTime ? new Date(cycleStartTime).toLocaleString() : "-",
       cycleEndTime:   !waitingForCustomerQr && (leakTestReading?.cycleEndTime || cycleEndTime) ? new Date(leakTestReading?.cycleEndTime || cycleEndTime).toLocaleString()   : "-",
       cycleTime:    waitingForCustomerQr ? "0.00" : (stationNo === LEAKTEST_OPERATION && leakTestReading?.cycleTime != null ? String(leakTestReading.cycleTime) : (cycleTime ? Number(cycleTime).toFixed(2) : "0.00")),
@@ -2038,10 +2201,13 @@ async function fetchProductionData(filters = {}, options = {}) {
       if (!shiftCode) return true;
       const targetShift = String(shiftCode || "").trim().toUpperCase();
       return entries.some((row) => {
-        const rowShift = firstScanInRange
-          ? (row.firstScanShiftCode || row.shiftCode || row.shift_code || "")
-          : (row.shiftCode || row.shift_code || row.firstScanShiftCode || "");
-        return String(rowShift || "").trim().toUpperCase() === targetShift;
+        const candidateShifts = [
+          row.shiftCode,
+          row.shift_code,
+          row.anchorShiftCode,
+          row.firstScanShiftCode,
+        ];
+        return candidateShifts.some((rowShift) => shiftMatchesFilter(rowShift, targetShift));
       });
     })
     .flat();

@@ -72,21 +72,6 @@ const OperationLog = sequelize.define("OperationLog", {
   },
 });
 
-function scheduleFinalProductionRefresh(instance) {
-  const partId = instance?.part_id || instance?.get?.("part_id");
-  if (!partId) return;
-  setImmediate(() => {
-    try {
-      require("../services/report/finalProductionResultService").scheduleMaterializePart(partId);
-    } catch (error) {
-      console.warn(`[FinalProductionResult] operation log hook skipped: ${error.message}`);
-    }
-  });
-}
-
-OperationLog.addHook("afterCreate", scheduleFinalProductionRefresh);
-OperationLog.addHook("afterUpdate", scheduleFinalProductionRefresh);
-
 const Machine = require("./Machine");
 OperationLog.belongsTo(Machine, { foreignKey: "machine_id" });
 

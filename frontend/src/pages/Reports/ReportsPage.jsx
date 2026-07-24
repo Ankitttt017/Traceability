@@ -982,12 +982,12 @@ const ReportsPage = () => {
     const start = new Date(now);
     start.setHours(6, 0, 0, 0);
     if (now < start) start.setDate(start.getDate() - 1);
-    const end = new Date(start);
-    end.setDate(end.getDate() + 1);
+    const end = new Date(now);
     return { start, end };
   }, []);
 
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [loadProgress, setLoadProgress] = useState(0);
   const [shotSummaryLoading, setShotSummaryLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
@@ -1006,6 +1006,7 @@ const ReportsPage = () => {
   const [reportConfig, setReportConfig] = useState(() => loadReportConfig());
   const reportAbortRef = useRef(null);
   const shotSummarySeqRef = useRef(0);
+  const dataRowsCountRef = useRef(0);
   
   const [filters, setFilters] = useState(() => {
     const r = (() => {
@@ -1013,8 +1014,7 @@ const ReportsPage = () => {
       const start = new Date(now);
       start.setHours(6, 0, 0, 0);
       if (now < start) start.setDate(start.getDate() - 1);
-      const end = new Date(start);
-      end.setDate(end.getDate() + 1);
+      const end = new Date(now);
       return { start, end };
     })();
     return {
@@ -1039,6 +1039,10 @@ const ReportsPage = () => {
       operationNo: ''
     };
   });
+
+  useEffect(() => {
+    dataRowsCountRef.current = Array.isArray(data.rows) ? data.rows.length : 0;
+  }, [data.rows]);
   const [appliedFilters, setAppliedFilters] = useState(filters);
   const [quickRange, setQuickRange] = useState("today");
   const [isFilterExpanded, setIsFilterExpanded] = useState(true);
@@ -1085,7 +1089,9 @@ const ReportsPage = () => {
       page: reportPage.page,
       pageSize: reportPage.pageSize,
     };
-    setLoading(true);
+    const hasExistingRows = Number(dataRowsCountRef.current || 0) > 0;
+    setLoading(!hasExistingRows);
+    setRefreshing(hasExistingRows);
     setLoadProgress(8);
     const progressTimer = window.setInterval(() => {
       setLoadProgress((prev) => {
@@ -1096,7 +1102,7 @@ const ReportsPage = () => {
       });
     }, 550);
     try {
-      const response = await reportApi.getData(requestPayload, { signal: controller.signal });
+      const response = await reportApi.getData(requestPayload, { signal: controller.signal, suppressGlobalError: true });
       setLoadProgress(100);
       const pageData = {
         reportMode: response.reportMode || "",
@@ -1111,7 +1117,7 @@ const ReportsPage = () => {
       shotSummarySeqRef.current = summarySeq;
       const summaryFilters = { ...appliedFilters, fast: "1", noCache: "1" };
       setShotSummaryLoading(true);
-      reportApi.getShotSummary(summaryFilters)
+      reportApi.getShotSummary(summaryFilters, { suppressGlobalError: true })
         .then((summary) => {
           if (shotSummarySeqRef.current !== summarySeq) return;
           const nextShotSummary = {
@@ -1147,6 +1153,7 @@ const ReportsPage = () => {
       if (reportAbortRef.current === controller) {
         window.setTimeout(() => {
           setLoading(false);
+          setRefreshing(false);
           setLoadProgress(0);
         }, 250);
         reportAbortRef.current = null;
@@ -1271,10 +1278,22 @@ const ReportsPage = () => {
   };
 
   const handleDateRangeApply = (start, end) => {
+    const normalizedStart = new Date(start);
+    const normalizedEnd = new Date(end || start);
+    normalizedStart.setHours(6, 0, 0, 0);
+    normalizedEnd.setHours(6, 0, 0, 0);
+    normalizedEnd.setDate(normalizedEnd.getDate() + 1);
+    const currentRange = getMesDayRange();
+    if (
+      normalizedStart.toDateString() === currentRange.start.toDateString() &&
+      normalizedEnd > currentRange.end
+    ) {
+      normalizedEnd.setTime(currentRange.end.getTime());
+    }
     setFilters((prev) => ({
       ...prev,
-      dateFrom: toDatetimeLocal(start),
-      dateTo: toDatetimeLocal(end),
+      dateFrom: toDatetimeLocal(normalizedStart),
+      dateTo: toDatetimeLocal(normalizedEnd),
     }));
     setQuickRange("custom");
   };
@@ -1295,10 +1314,11 @@ const ReportsPage = () => {
         const machineName = String(m.machineName || m.machine_name || "").trim();
         const op = String(m.operationNo || m.operation_no || m.stationNo || m.station_no || "").trim();
         if (!machineName || !op) return null;
+        const bypassed = Boolean(m.bypassEnabled || m.bypass_enabled || m.isBypassed || m.is_bypassed);
         if (String(op).trim().toUpperCase() === LEAK_TEST_OPERATION) {
-          return { key: LEAK_TEST_SHARED_KEY, machineName: "Leak Test", op, label: "Leak Test OP150", sharedLeakOperation: true };
+          return { key: LEAK_TEST_SHARED_KEY, machineName: "Leak Test", op, label: "Leak Test OP150", sharedLeakOperation: true, bypassed };
         }
-        return { key: op.toUpperCase(), machineName, op, label: `${machineName} + ${op.toUpperCase()}` };
+        return { key: op.toUpperCase(), machineName, op, label: `${machineName} + ${op.toUpperCase()}`, bypassed };
       })
       .filter(Boolean);
     const machineStationMap = new Map(machineStationPairs.map((x) => [x.key, x]));
@@ -1321,6 +1341,13 @@ const ReportsPage = () => {
     const stationPairs = Array.from(machineStationMap.values()).sort((a, b) =>
       a.op.localeCompare(b.op, undefined, { numeric: true, sensitivity: "base" }) || a.machineName.localeCompare(b.machineName)
     );
+    const configuredBypassedStationKeys = stationPairs.reduce((acc, station) => {
+      if (station.bypassed) {
+        acc.add(String(station.op || station.key || "").trim().toUpperCase());
+        acc.add(String(station.key || station.op || "").trim().toUpperCase());
+      }
+      return acc;
+    }, new Set());
     const requiredOperations = Array.from(
       new Set(
         stationPairs
@@ -1540,6 +1567,15 @@ const ReportsPage = () => {
         ? "IN_PROGRESS"
         : overallStatus;
       const displayFinalResultRaw = displayOverallStatus === "IN_PROGRESS" ? null : finalResultRaw;
+      const bypassedStationKeys = entries.reduce((acc, row) => {
+        const bypassStatus = Boolean(row?.bypassStatus || row?.is_bypassed || row?.isBypassed);
+        const bypassReason = String(row?.bypassReason || row?.bypass_reason || "").trim().toUpperCase();
+        const stationOp = String(row.operationNo || row.stationNo || "").trim().toUpperCase();
+        if (stationOp && (bypassStatus || ["MACHINE_BYPASS_AUTO_OK", "STATION_BYPASS_AUTO_OK", "STATION_OPERATION_DISABLED_AUTO_OK", "MANUAL_BYPASS"].includes(bypassReason))) {
+          acc.add(stationOp);
+        }
+        return acc;
+      }, new Set());
       const shaped = {
         reportGroupKey: partKey,
         traceabilityPartId: partKey,
@@ -1589,7 +1625,17 @@ const ReportsPage = () => {
             text: stationDisplayValues[s.key] || "-",
           };
         } else {
-          shaped[`station_${s.key}`] = normResult(stationResults[s.key]) || "-";
+          const normalizedStationValue = normResult(stationResults[s.key]);
+          const stationToken = String(s.op || s.key || "").trim().toUpperCase();
+          const stationKeyToken = String(s.key || s.op || "").trim().toUpperCase();
+          shaped[`station_${s.key}`] = normalizedStationValue || (
+            bypassedStationKeys.has(stationToken) ||
+            bypassedStationKeys.has(stationKeyToken) ||
+            configuredBypassedStationKeys.has(stationToken) ||
+            configuredBypassedStationKeys.has(stationKeyToken)
+              ? "OK"
+              : "-"
+          );
         }
         shaped[`cycle_${s.key}`] = stationCycleTimes[s.key] || "-";
       });
@@ -1740,19 +1786,19 @@ const ReportsPage = () => {
                 <span className="w-px h-4 bg-[rgba(var(--pk-bdr),0.2)]" />
                 <span className="inline-flex items-center gap-1 text-xs">
                   <Activity size={12} className="text-[rgb(var(--pk-txt-muted))]" />
-                  {loading ? t("reports.loading", "Loading...") : t("reports.productionAnalytics", "Production Analytics")}
+                  {loading ? t("reports.loading", "Loading...") : refreshing ? t("reports.refreshing", "Refreshing...") : t("reports.productionAnalytics", "Production Analytics")}
                 </span>
               </p>
             </div>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
             <button
-              disabled={loading}
+              disabled={loading || refreshing}
               onClick={refreshReportData}
               className="reports-btn-secondary"
             >
-              <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
-              <span className="hidden sm:inline">{loading ? t("reports.refreshing", "Refreshing...") : t("reports.refresh", "Refresh")}</span>
+              <RefreshCw size={13} className={(loading || refreshing) ? "animate-spin" : ""} />
+              <span className="hidden sm:inline">{(loading || refreshing) ? t("reports.refreshing", "Refreshing...") : t("reports.refresh", "Refresh")}</span>
             </button>
             <button
               disabled={exportLoading}
@@ -1873,9 +1919,10 @@ const ReportsPage = () => {
           <div className="flex items-center gap-1.5 col-span-1 md:col-span-2 lg:col-span-1">
             <button
               onClick={() => {
+                const todayRange = getMesDayRange();
                 const nextFilters = {
-                  dateFrom: toDatetimeLocal(getMesDayRange().start),
-                  dateTo: toDatetimeLocal(getMesDayRange().end),
+                  dateFrom: toDatetimeLocal(todayRange.start),
+                  dateTo: toDatetimeLocal(todayRange.end),
                   plantId: '', lineId: '', machineId: '', partName: '', dieName: '', dieCastingMachine: '', lineName: '', shiftCode: '', status: '', partType: '', station: '', barcode: '', customerCode: '',
                   operatorId: '', resultType: '', modelCode: '', operationNo: ''
                 };
@@ -1916,6 +1963,28 @@ const ReportsPage = () => {
           )}
         </div>
       </div>
+
+      {(loading || refreshing || shotSummaryLoading) && (
+        <div className="mt-3 rounded-xl border border-[rgba(var(--pk-steel),0.18)] bg-[rgba(var(--pk-steel),0.06)] px-4 py-3 shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <RefreshCw size={14} className="animate-spin text-[rgb(var(--pk-steel))] flex-shrink-0" />
+              <span className="text-xs font-bold text-[rgb(var(--pk-txt-pri))] truncate">
+                {refreshing ? "Refreshing latest report data" : loading ? "Loading report data" : "Updating shot summary"}
+              </span>
+            </div>
+            <span className="text-[10px] font-black text-[rgb(var(--pk-steel))] font-mono">
+              {Math.max(0, Math.min(100, Math.round(loadProgress || (shotSummaryLoading ? 92 : 0))))}%
+            </span>
+          </div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/70">
+            <div
+              className="h-full rounded-full bg-[rgb(var(--pk-steel))] transition-all duration-300"
+              style={{ width: `${Math.max(8, Math.min(100, loadProgress || (shotSummaryLoading ? 92 : 12)))}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* ── Summary Cards ── */}
       <ReportSummaryCards metrics={reportSummaryMetrics} loading={loading} shotSummaryLoading={shotSummaryLoading} />

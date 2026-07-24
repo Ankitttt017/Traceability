@@ -21,6 +21,7 @@ const {
   getAllLeaktestReadingsForPart,
   getLeaktestStageState,
   getLeaktestStageStateFromReadings,
+  isLeaktestMachine,
 } = require("../services/leaktestLookupService");
 const { getPlcCircuitSnapshot } = require("../services/plcCommunicationService");
 const plcHandshakeEngine = require("../services/plcHandshakeEngine");
@@ -52,7 +53,7 @@ const {
   isMachineBypassEnabled,
 } = require("../services/machineBypassService");
 const { normalizeIp, sameIp } = require("../utils/networkAddress");
-const { normalizeTimeValue, toMinutes: toShiftMinutes } = require("../utils/time");
+const { normalizeTimeValue, toSeconds: toShiftSeconds } = require("../utils/time");
 const {
   getProductionDate,
   resolveShift,
@@ -79,6 +80,10 @@ const ioPlcConnectionStability = new Map();
 const CUSTOMER_QR_ACTIVE_WINDOW_MS = Math.max(
   Number(process.env.CUSTOMER_QR_ACTIVE_WINDOW_MS || 60 * 60 * 1000),
   30 * 1000
+);
+const SCANNER_CONNECTION_GRACE_MS = Math.max(
+  Number(process.env.SCANNER_CONNECTION_GRACE_MS || 180000),
+  3000
 );
 const CUSTOMER_QR_ONLY_FORMAT = "CUSTOMER_QR_ONLY";
 const INVALID_CUSTOMER_QR_VALUES = new Set([
@@ -1486,6 +1491,10 @@ async function buildScannerHealth(scanner, machineId) {
 
   const connectionSnapshot = await getScannerConnectionSnapshot(scanner.scanner_ip).catch(() => null);
   const connectionConnected = Boolean(connectionSnapshot?.connected);
+  const lastDataMs = connectionSnapshot?.lastDataAt ? new Date(connectionSnapshot.lastDataAt).getTime() : 0;
+  const recentDataConnected = Number.isFinite(lastDataMs) && lastDataMs > 0
+    ? (Date.now() - lastDataMs) <= SCANNER_CONNECTION_GRACE_MS
+    : false;
   const probeReachability = async () => {
     const port = Number(scanner?.scanner_port || 0);
     if (!scanner?.scanner_ip || !Number.isFinite(port) || port <= 0) {
@@ -1500,7 +1509,7 @@ async function buildScannerHealth(scanner, machineId) {
 
   const byIpHealth = getScannerHealthSnapshot({ scannerIp: scanner.scanner_ip });
   if (byIpHealth) {
-    let connected = Boolean(byIpHealth.connected) || connectionConnected;
+    let connected = Boolean(byIpHealth.connected) || connectionConnected || recentDataConnected;
     let reachability = null;
     if (!connected) {
       reachability = await probeReachability();
@@ -1527,7 +1536,7 @@ async function buildScannerHealth(scanner, machineId) {
       null;
 
     if (match) {
-      let connected = Boolean(match.connected) || connectionConnected;
+      let connected = Boolean(match.connected) || connectionConnected || recentDataConnected;
       let reachability = null;
       if (!connected) {
         reachability = await probeReachability();
@@ -1548,7 +1557,7 @@ async function buildScannerHealth(scanner, machineId) {
   }
 
   if (connectionSnapshot) {
-    let connected = Boolean(connectionSnapshot.connected);
+    let connected = Boolean(connectionSnapshot.connected) || recentDataConnected;
     let reachability = null;
     if (!connected) {
       reachability = await probeReachability();
@@ -3483,7 +3492,7 @@ exports.getPartCatalog = async (req, res) => {
         limit: 6000,
       });
       const shifts = shiftCodeFilter ? await getActiveShiftDefinitions() : [];
-      const filteredScopedLogs = shiftCodeFilter ? applyShiftFilter(scopedLogs, shiftCodeFilter, shifts) : scopedLogs;
+      const filteredScopedLogs = shiftCodeFilter ? applyShiftFilter(scopedLogs, shiftCodeFilter, shifts, { from, to }) : scopedLogs;
       scopedPartIds = uniqueStages(filteredScopedLogs.map((row) => String(row.part_id || "").trim()).filter(Boolean));
       if (scopedPartIds.length === 0) {
         return res.json([]);
@@ -3687,7 +3696,7 @@ exports.getPartCatalog = async (req, res) => {
           return row.isCustomerQrOnly === true;
         }
         if (shiftCodeFilter && row.latestAt) {
-          return resolveShiftCodeForDate(row.latestAt, shifts) === shiftCodeFilter;
+          return normalizeShiftAlias(resolveShiftCodeForDate(row.latestAt, shifts)) === normalizeShiftAlias(shiftCodeFilter);
         }
         if (shiftCodeFilter && !row.latestAt) {
           return false;
@@ -3782,12 +3791,12 @@ exports.getMachineStationStats = async (req, res) => {
     const stationLogs = logs.filter((row) => !isJourneyNoiseLog(row));
     const effectiveLogs = stationLogs.length > 0 ? stationLogs : logs;
     const shiftFilteredLogs = effectiveShiftCode
-      ? applyShiftFilter(effectiveLogs, effectiveShiftCode, shifts)
+      ? applyShiftFilter(effectiveLogs, effectiveShiftCode, shifts, { from, to })
       : effectiveLogs;
 
     const summary = getQualitySummaryFromOperationLogs(shiftFilteredLogs, getMappedCustomerQr);
     const selectedShift = effectiveShiftCode
-      ? shifts.find((row) => String(row.shift_code || "").trim().toUpperCase() === effectiveShiftCode) || currentShift
+      ? shifts.find((row) => normalizeShiftAlias(row.shift_code || row.shift_name) === normalizeShiftAlias(effectiveShiftCode)) || currentShift
       : null;
     const targetProduction = selectedShift
       ? computeTargetProduction({ machine, shift: selectedShift })
@@ -6188,32 +6197,91 @@ function getDateRangeFromQuery(query) {
   const now = new Date();
   const fromCandidate = query?.dateFrom ? new Date(query.dateFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const toCandidate = query?.dateTo ? new Date(query.dateTo) : now;
-  const from = Number.isNaN(fromCandidate.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : fromCandidate;
-  const to = Number.isNaN(toCandidate.getTime()) ? now : toCandidate;
+  let from = Number.isNaN(fromCandidate.getTime()) ? new Date(now.getTime() - 24 * 60 * 60 * 1000) : fromCandidate;
+  let to = Number.isNaN(toCandidate.getTime()) ? now : toCandidate;
+
+  if (query?.dateFrom && query?.dateTo && isProductionDatePickerRange(from, to)) {
+    const productionStart = new Date(from);
+    productionStart.setHours(6, 0, 0, 0);
+    const productionEnd = new Date(productionStart);
+    productionEnd.setDate(productionEnd.getDate() + 1);
+    from = productionStart;
+    to = productionEnd;
+  }
+  const currentProductionStart = new Date(now);
+  currentProductionStart.setHours(6, 0, 0, 0);
+  if (now < currentProductionStart) currentProductionStart.setDate(currentProductionStart.getDate() - 1);
+  if (
+    getLocalDateKey(from) === getLocalDateKey(currentProductionStart) &&
+    getLocalSecondOfDay(from) < 6 * 3600
+  ) {
+    from = currentProductionStart;
+  }
+  if (
+    getLocalDateKey(from) === getLocalDateKey(currentProductionStart) &&
+    to > now
+  ) {
+    to = now;
+  }
   return { from, to };
 }
 
-function setDateMinutes(baseDate, minutes) {
+function getLocalDateKey(dateValue) {
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return "";
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function getLocalSecondOfDay(dateValue) {
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
+}
+
+function getLocalDayDiff(from, to) {
+  const a = new Date(from);
+  const b = new Date(to);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0;
+  a.setHours(0, 0, 0, 0);
+  b.setHours(0, 0, 0, 0);
+  return Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function isProductionDatePickerRange(from, to) {
+  const fromSeconds = getLocalSecondOfDay(from);
+  const toSeconds = getLocalSecondOfDay(to);
+  if (fromSeconds === null || toSeconds === null) return false;
+  if (getLocalDateKey(from) === getLocalDateKey(to)) {
+    return fromSeconds < 6 * 3600 && (toSeconds === 0 || toSeconds >= 23 * 3600);
+  }
+  return fromSeconds < 6 * 3600 && getLocalDayDiff(from, to) === 1 && toSeconds <= 6 * 3600;
+}
+
+function setDateSeconds(baseDate, seconds) {
   const date = new Date(baseDate);
-  date.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+  date.setHours(Math.floor(seconds / 3600), Math.floor((seconds % 3600) / 60), seconds % 60, 0);
   return date;
 }
 
 function getShiftWindowForDate(shift, now = new Date()) {
-  const startMinutes = toMinutes(shift?.start_time);
-  const endMinutes = toMinutes(shift?.end_time);
-  if (startMinutes === null || endMinutes === null) {
+  const startSeconds = toShiftSeconds(shift?.start_time);
+  const endSeconds = toShiftSeconds(shift?.end_time);
+  if (startSeconds === null || endSeconds === null) {
     return null;
   }
 
-  const currentMinutes = getMinutesForDate(now);
-  let from = setDateMinutes(now, startMinutes);
-  let to = setDateMinutes(now, endMinutes);
+  const currentSeconds = getSecondsForDate(now);
+  let from = setDateSeconds(now, startSeconds);
+  let to = setDateSeconds(now, endSeconds);
 
-  if (startMinutes === endMinutes) {
+  if (startSeconds === endSeconds) {
     to = new Date(from.getTime() + 24 * 60 * 60 * 1000);
-  } else if (startMinutes > endMinutes) {
-    if (currentMinutes < endMinutes) {
+  } else if (startSeconds > endSeconds) {
+    if (currentSeconds <= endSeconds) {
       from.setDate(from.getDate() - 1);
     } else {
       to.setDate(to.getDate() + 1);
@@ -6225,11 +6293,11 @@ function getShiftWindowForDate(shift, now = new Date()) {
 
 function getProductionDayWindow(shifts = [], now = new Date()) {
   const starts = shifts
-    .map((shift) => toMinutes(shift?.start_time))
+    .map((shift) => toShiftSeconds(shift?.start_time))
     .filter((value) => value !== null);
-  const startMinutes = starts.length ? Math.min(...starts) : 6 * 60;
-  let from = setDateMinutes(now, startMinutes);
-  if (getMinutesForDate(now) < startMinutes) {
+  const startSeconds = starts.length ? Math.min(...starts) : 6 * 3600;
+  let from = setDateSeconds(now, startSeconds);
+  if (getSecondsForDate(now) < startSeconds) {
     from.setDate(from.getDate() - 1);
   }
   const to = new Date(from.getTime() + 24 * 60 * 60 * 1000);
@@ -6241,7 +6309,7 @@ function getOperatorStatsDateRange(query, shifts, effectiveShiftCode, currentShi
     return getDateRangeFromQuery(query);
   }
   if (effectiveShiftCode) {
-    const selectedShift = shifts.find((row) => String(row.shift_code || "").trim().toUpperCase() === effectiveShiftCode) || currentShift;
+    const selectedShift = shifts.find((row) => normalizeShiftAlias(row.shift_code || row.shift_name) === normalizeShiftAlias(effectiveShiftCode)) || currentShift;
     const selectedWindow = getShiftWindowForDate(selectedShift);
     if (selectedWindow) return selectedWindow;
   }
@@ -6357,29 +6425,30 @@ function normalizeReportYear(value) {
   return year;
 }
 
-function toMinutes(timeValue) {
-  return toShiftMinutes(timeValue);
+function toSeconds(timeValue) {
+  return toShiftSeconds(timeValue);
 }
 
-function getMinutesForDate(dateValue) {
+function getSecondsForDate(dateValue) {
   const date = new Date(dateValue);
-  return date.getHours() * 60 + date.getMinutes();
+  if (Number.isNaN(date.getTime())) return null;
+  return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
 }
 
 function isDateInShift(dateValue, shift) {
-  const currentMinutes = getMinutesForDate(dateValue);
-  const start = toMinutes(shift.start_time);
-  const end = toMinutes(shift.end_time);
-  if (start === null || end === null) {
+  const currentSeconds = getSecondsForDate(dateValue);
+  const start = toSeconds(shift.start_time);
+  const end = toSeconds(shift.end_time);
+  if (currentSeconds === null || start === null || end === null) {
     return false;
   }
   if (start === end) {
     return true;
   }
   if (start < end) {
-    return currentMinutes >= start && currentMinutes < end;
+    return currentSeconds >= start && currentSeconds <= end;
   }
-  return currentMinutes >= start || currentMinutes < end;
+  return currentSeconds >= start || currentSeconds <= end;
 }
 
 async function getActiveShiftDefinitions() {
@@ -6393,24 +6462,56 @@ async function getActiveShiftDefinitions() {
 }
 
 function resolveShiftCodeForDate(dateValue, shifts) {
+  const matches = [];
   for (const shift of shifts) {
     if (isDateInShift(dateValue, shift)) {
-      return shift.shift_code;
+      const start = toSeconds(shift.start_time);
+      const end = toSeconds(shift.end_time);
+      const duration = start === end ? 24 * 3600 : start < end ? end - start : (24 * 3600 - start + end);
+      matches.push({ code: shift.shift_code, start, duration });
     }
+  }
+  if (matches.length) {
+    matches.sort((a, b) => (b.start - a.start) || (a.duration - b.duration));
+    return matches[0].code;
   }
   return "UNASSIGNED";
 }
 
-function applyShiftFilter(rows, shiftCode, shifts) {
+function isDateWithinRange(dateValue, range) {
+  if (!range?.from || !range?.to) return true;
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return false;
+  return date >= range.from && date <= range.to;
+}
+
+function applyShiftFilter(rows, shiftCode, shifts, range = null) {
   if (!shiftCode) {
     return rows;
   }
-  const target = String(shiftCode).trim().toUpperCase();
-  return rows.filter((row) => resolveShiftCodeForDate(row.createdAt, shifts) === target);
+  const target = normalizeShiftAlias(shiftCode);
+  if (!target) return rows;
+  return rows.filter((row) => {
+    const timestamp = row.createdAt || row.firstScanAt || row.firstScanCreatedAt || row.updatedAt;
+    return isDateWithinRange(timestamp, range) && normalizeShiftAlias(resolveShiftCodeForDate(timestamp, shifts)) === target;
+  });
 }
 
 function isAllShiftToken(value) {
   return ["ALL", "ALL_SHIFT", "ALL_SHIFTS"].includes(String(value || "").trim().toUpperCase());
+}
+
+function normalizeShiftAlias(value) {
+  const token = String(value || "").trim().toUpperCase().replace(/\s+/g, "_");
+  if (!token || isAllShiftToken(token) || token === "ANY") return "";
+  const parts = token.split("_").filter(Boolean);
+  if (token === "A" || token === "SHIFT_A" || token === "A_SHIFT" || (parts.includes("SHIFT") && parts.includes("A"))) return "SHIFT_A";
+  if (token === "B" || token === "SHIFT_B" || token === "B_SHIFT" || (parts.includes("SHIFT") && parts.includes("B"))) return "SHIFT_B";
+  if (token === "C" || token === "SHIFT_C" || token === "C_SHIFT" || (parts.includes("SHIFT") && parts.includes("C"))) return "SHIFT_C";
+  if (token === "S1" || token === "SHIFT_S1" || token === "S1_SHIFT" || token === "SHIFT_1") return "SHIFT_S1";
+  if (token === "S2" || token === "SHIFT_S2" || token === "S2_SHIFT" || token === "SHIFT_2") return "SHIFT_S2";
+  if (token === "S3" || token === "SHIFT_S3" || token === "S3_SHIFT" || token === "SHIFT_3") return "SHIFT_S3";
+  return token;
 }
 
 function formatHourBucket(dateValue) {
@@ -6533,8 +6634,8 @@ exports.getDashboardSummary = async (req, res) => {
       getActiveShiftDefinitions(),
     ]);
 
-    const filteredQualityRows = applyShiftFilter(qualityRows, shiftCodeFilter, shifts);
-    const filteredRecentRows = applyShiftFilter(recentRows, shiftCodeFilter, shifts).slice(0, 20);
+    const filteredQualityRows = applyShiftFilter(qualityRows, shiftCodeFilter, shifts, { from, to });
+    const filteredRecentRows = applyShiftFilter(recentRows, shiftCodeFilter, shifts, { from, to }).slice(0, 20);
     const okLogs = filteredQualityRows.filter((row) => row.status === "OK").length;
     const ngLogs = filteredQualityRows.filter((row) => row.status === "NG").length;
 
@@ -6658,7 +6759,7 @@ exports.getDashboardTrends = async (req, res) => {
       getActiveShiftDefinitions(),
     ]);
 
-    const filteredRows = applyShiftFilter(rows, shiftCodeFilter, shifts);
+    const filteredRows = applyShiftFilter(rows, shiftCodeFilter, shifts, { from, to });
     const map = filteredRows.reduce((acc, row) => {
       const key = formatHourBucket(row.createdAt);
       if (!acc[key]) {
@@ -6766,10 +6867,10 @@ exports.getDashboardReport = async (req, res) => {
     const productionRows = initialProductionRows;
     const operationRows = initialOperationRows;
 
-    const filteredRows = applyShiftFilter(productionRows, shiftCodeFilter, shifts);
-    const filteredOperationRows = applyShiftFilter(operationRows, shiftCodeFilter, shifts);
+    const filteredRows = applyShiftFilter(productionRows, shiftCodeFilter, shifts, { from, to });
+    const filteredOperationRows = applyShiftFilter(operationRows, shiftCodeFilter, shifts, { from, to });
     const productionOperationRows = filteredOperationRows.filter((row) => !isJourneyNoiseLog(row));
-    const filteredInterlocks = applyShiftFilter(interlocks, shiftCodeFilter, shifts).filter(
+    const filteredInterlocks = applyShiftFilter(interlocks, shiftCodeFilter, shifts, { from, to }).filter(
       (row) => !isJourneyNoiseLog(row)
     );
 
@@ -6993,10 +7094,16 @@ exports.getDashboardReport = async (req, res) => {
         const downtimeEventRatio = downtimeBase > 0 ? Number(((downtimeEvents / downtimeBase) * 100).toFixed(2)) : 0;
         const downtimeTimePct = plannedProductionMinutes > 0 ? Number(((downtimeMinutes / plannedProductionMinutes) * 100).toFixed(2)) : 0;
         const shiftForTarget = shiftCodeFilter
-          ? shifts.find((s) => String(s.shift_code || "").toUpperCase() === String(shiftCodeFilter || "").toUpperCase()) || null
+          ? shifts.find((s) => normalizeShiftAlias(s.shift_code || s.shift_name) === normalizeShiftAlias(shiftCodeFilter)) || null
           : null;
-        const targetQty = computeTargetProduction({ machine: row, shift: shiftForTarget || resolveShift(from, shifts) || shifts[0] || null });
         const idealCycleTimeSeconds = getEffectiveCycleTimeSeconds(row);
+        const rangeDays = Math.max(1, Math.ceil(plannedProductionSeconds / (24 * 3600)));
+        const targetWindowSeconds = shiftForTarget
+          ? getShiftDurationSeconds(shiftForTarget) * rangeDays
+          : plannedProductionSeconds;
+        const targetQty = idealCycleTimeSeconds > 0
+          ? Math.floor(Math.max(0, targetWindowSeconds) / idealCycleTimeSeconds)
+          : computeTargetProduction({ machine: row, shift: shiftForTarget || resolveShift(from, shifts) || shifts[0] || null });
         const calc = computeOeeAndOa({
           totalCount: processedCount,
           goodCount: Number(row.okCount || 0),
@@ -7006,7 +7113,7 @@ exports.getDashboardReport = async (req, res) => {
           downtimeSeconds: downtimeMinutes * 60,
         });
         const shiftResolved = resolveShift(machineLogs[0]?.createdAt || from, shifts);
-        const productionDate = getProductionDate(machineLogs[0]?.createdAt || from);
+        const productionDate = getProductionDate(machineLogs[0]?.createdAt || from, shifts);
         return {
           ...row,
           plcConnected: health.plcConnected ?? null,
@@ -7275,8 +7382,8 @@ exports.getDashboardReport = async (req, res) => {
       return acc;
     }, {});
 
-    const partIdsForCustomerQr = lightMode ? [] : [...new Set(partHistory.slice(0, 3000).map((row) => String(row.part_id || "").trim()).filter(Boolean))];
-    const leaktestIndex = lightMode ? { byPartAndStation: new Map(), byPartAndIp: new Map() } : await buildLeaktestIndex({
+    const partIdsForCustomerQr = [...new Set(partHistory.slice(0, 3000).map((row) => String(row.part_id || "").trim()).filter(Boolean))];
+    const leaktestIndex = await buildLeaktestIndex({
         partIds: partIdsForCustomerQr,
         customerQrByPartId,
         machines: machineRows,
@@ -7410,8 +7517,9 @@ exports.getDashboardReport = async (req, res) => {
       const result = String(row.result || "").trim().toUpperCase();
       const stationNo = normalizeStation(row.station_no || row.operation_no);
       const leakTestReading = getLeakReadingForPart(row.part_id);
-      const leakStageState = stationNo === LEAKTEST_OPERATION && leakTestReading
-        ? getLeaktestStageState(leakTestReading)
+      const leakTestReadings = getAllLeakReadingsForPart(row.part_id);
+      const leakStageState = stationNo === LEAKTEST_OPERATION && (leakTestReadings.length > 0 || leakTestReading)
+        ? getLeaktestStageStateFromReadings(leakTestReadings.length > 0 ? leakTestReadings : [leakTestReading])
         : null;
       const recoveryCompletedByCustomerQr = shouldTreatRecoveryPendingAsPassed(row, mappedCustomerQr);
       let statusLabel = "IDLE";
@@ -7486,6 +7594,7 @@ exports.getDashboardReport = async (req, res) => {
         shotNumber: shotKey || null,
         plcReading,
         leakTestReading,
+        leakTestReadings,
       };
     });
 
@@ -7493,6 +7602,13 @@ exports.getDashboardReport = async (req, res) => {
       machineRows
         .map((machine) => normalizeStation(machine.operation_no))
         .filter(Boolean)
+    );
+    const requiredTraceabilityOperations = uniqueStages(
+      machineRows
+        .filter((machine) => !isLeaktestMachine(machine))
+        .map((machine) => normalizeStation(machine.operation_no))
+        .filter(Boolean)
+        .concat(machineRows.some((machine) => isLeaktestMachine(machine)) ? [LEAKTEST_OPERATION] : [])
     );
     const traceabilityGroupMap = new Map();
     for (const row of partHistory) {
@@ -7518,10 +7634,18 @@ exports.getDashboardReport = async (req, res) => {
 
       const station = normalizeStation(row.station_no || row.operation_no);
       const mappedQr = mappedCustomerQr || getMappedCustomerQrForPart(row.part_id);
+      const leakReadings = station === LEAKTEST_OPERATION ? getAllLeakReadingsForPart(row.part_id) : [];
+      const leakStageState = station === LEAKTEST_OPERATION && leakReadings.length > 0
+        ? getLeaktestStageStateFromReadings(leakReadings)
+        : null;
       const plcStatus = String(row.plc_status || "").trim().toUpperCase();
       const result = String(row.result || "").trim().toUpperCase();
       let normalized = "IN_PROGRESS";
-      if (shouldTreatRecoveryPendingAsPassed(row, mappedQr)) {
+      if (leakStageState === "PASSED") {
+        normalized = "OK";
+      } else if (leakStageState === "FAILED") {
+        normalized = "NG";
+      } else if (shouldTreatRecoveryPendingAsPassed(row, mappedQr)) {
         normalized = "OK";
       } else if (plcStatus === "ENDED_NG" || result === "NG") {
         normalized = "NG";
@@ -7538,21 +7662,51 @@ exports.getDashboardReport = async (req, res) => {
           group.operations.set(station, normalized);
         }
       }
+
+      const allLeakReadings = getAllLeakReadingsForPart(row.part_id);
+      if (allLeakReadings.length > 0) {
+        const aggregateLeakState = getLeaktestStageStateFromReadings(allLeakReadings);
+        const aggregateLeakStatus = aggregateLeakState === "FAILED"
+          ? "NG"
+          : aggregateLeakState === "PASSED"
+            ? "OK"
+            : "IN_PROGRESS";
+        const current = group.operations.get(LEAKTEST_OPERATION);
+        const priority = aggregateLeakStatus === "NG" ? 3 : aggregateLeakStatus === "OK" ? 2 : 1;
+        const currentPriority = current === "NG" ? 3 : current === "OK" ? 2 : 1;
+        if (!current || priority >= currentPriority) {
+          group.operations.set(LEAKTEST_OPERATION, aggregateLeakStatus);
+        }
+      }
     }
 
     const traceabilityCounts = { total: 0, passed: 0, failed: 0, blocked: 0, inProgress: 0 };
+    const traceabilityShiftProduction = shifts.reduce((acc, shift) => {
+      acc[shift.shift_code] = { total: 0, ok: 0, ng: 0, inProgress: 0 };
+      return acc;
+    }, {});
+    traceabilityShiftProduction.UNASSIGNED = { total: 0, ok: 0, ng: 0, inProgress: 0 };
     for (const group of traceabilityGroupMap.values()) {
       traceabilityCounts.total += 1;
-      const values = requiredOperations.map((operation) => group.operations.get(operation)).filter(Boolean);
+      const values = requiredTraceabilityOperations.map((operation) => group.operations.get(operation)).filter(Boolean);
       const latestPartStatus = String(group.latest?.status || "").trim().toUpperCase();
+      const shiftCode = resolveShiftCodeForDate(group.latest?.createdAt || group.latestTs || from, shifts);
+      if (!traceabilityShiftProduction[shiftCode]) {
+        traceabilityShiftProduction[shiftCode] = { total: 0, ok: 0, ng: 0, inProgress: 0 };
+      }
+      traceabilityShiftProduction[shiftCode].total += 1;
       if (values.some((value) => value === "NG") || ["NG", "FAILED", "INTERLOCKED"].includes(latestPartStatus)) {
         traceabilityCounts.failed += 1;
+        traceabilityShiftProduction[shiftCode].ng += 1;
       } else if (group.blocked) {
         traceabilityCounts.blocked += 1;
-      } else if (requiredOperations.length > 0 && values.length >= requiredOperations.length && values.every((value) => value === "OK")) {
+        traceabilityShiftProduction[shiftCode].inProgress += 1;
+      } else if (requiredTraceabilityOperations.length > 0 && values.length >= requiredTraceabilityOperations.length && values.every((value) => value === "OK")) {
         traceabilityCounts.passed += 1;
+        traceabilityShiftProduction[shiftCode].ok += 1;
       } else {
         traceabilityCounts.inProgress += 1;
+        traceabilityShiftProduction[shiftCode].inProgress += 1;
       }
     }
 
@@ -7575,7 +7729,7 @@ exports.getDashboardReport = async (req, res) => {
 
       const shiftObj = resolveShift(row.createdAt, shifts);
       const shiftCode = shiftObj?.shift_code || "UNASSIGNED";
-      const prodDate = getProductionDate(row.createdAt)?.toISOString().slice(0, 10) || null;
+      const prodDate = getProductionDate(row.createdAt, shifts)?.toISOString().slice(0, 10) || null;
       const stationNo = normalizeStation(row.station_no || row.operation_no || m.stationNo || "UNASSIGNED");
 
       const shiftKey = `${prodDate || "NA"}|${shiftCode}`;
@@ -7688,10 +7842,10 @@ exports.getDashboardReport = async (req, res) => {
       stationCards,
       stationWiseMetrics,
       hourlyProduction: hourly,
-      shiftProduction,
+      shiftProduction: traceabilityShiftProduction,
       shiftWiseMetrics,
       dayWiseMetrics,
-      productionDate: getProductionDate(from)?.toISOString().slice(0, 10),
+      productionDate: getProductionDate(from, shifts)?.toISOString().slice(0, 10),
       interlockHistory: filteredInterlocks,
       reworkCount,
       partJourney: pagedHistory,
@@ -7720,8 +7874,11 @@ exports.getRejectionAnalysis = async (req, res) => {
   try {
     const SYSTEM_RECOVERY_REASONS = ["RECOVERY_PENDING_AFTER_BACKEND_RESTART"];
     const now = new Date();
-    const from = req.query.dateFrom ? new Date(req.query.dateFrom) : new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const to = req.query.dateTo ? new Date(req.query.dateTo) : now;
+    const shifts = await getActiveShiftDefinitions();
+    const defaultWindow = getProductionDayWindow(shifts, now);
+    const requestedRange = (req.query.dateFrom || req.query.dateTo) ? getDateRangeFromQuery(req.query) : defaultWindow;
+    const from = requestedRange.from;
+    const to = requestedRange.to;
     const machineId = Number(req.query.machineId || 0);
     const plantId = Number(req.query.plantId || 0);
     const lineId = Number(req.query.lineId || 0);
@@ -7793,7 +7950,6 @@ exports.getRejectionAnalysis = async (req, res) => {
       limit: Math.min(Math.max(Number(req.query.limit || 5000), 1), 20000),
     });
 
-    const shifts = await Shift.findAll({ order: [["start_time", "ASC"]] }).catch(() => []);
     const partIds = [...new Set(rows.map((row) => String(row.part_id || "").trim()).filter(Boolean))];
     const mappings = partIds.length
       ? await PartCodeMapping.findAll({
@@ -7845,7 +8001,7 @@ exports.getRejectionAnalysis = async (req, res) => {
         shiftCode: shift?.shift_code || "UNASSIGNED",
         createdAt: plain.createdAt,
       };
-    }).filter((row) => !shiftCodeFilter || String(row.shiftCode || "").toUpperCase() === shiftCodeFilter);
+    }).filter((row) => !shiftCodeFilter || normalizeShiftAlias(row.shiftCode) === normalizeShiftAlias(shiftCodeFilter));
 
     res.json({
       filters: {
@@ -8038,7 +8194,7 @@ async function getDashboardExportRows(filters) {
     getActiveShiftDefinitions(),
   ]);
 
-  const shiftFilteredRows = applyShiftFilter(operationRows, shiftCodeFilter, shifts);
+  const shiftFilteredRows = applyShiftFilter(operationRows, shiftCodeFilter, shifts, { from, to });
   const productionRows = shiftFilteredRows.filter((row) => !isJourneyNoiseLog(row));
   const machineIds = uniqueStages(productionRows.map((row) => String(row.machine_id || "")).filter(Boolean))
     .map((entry) => Number(entry))

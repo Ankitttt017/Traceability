@@ -44,7 +44,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { dashboardApi, machineApi, rejectionConfigApi } from "../api/services";
+import { dashboardApi, machineApi, rejectionConfigApi, shiftApi } from "../api/services";
 import SafeChart from "../components/charts/SafeChart";
 import { toDatetimeLocal } from "../utils/time";
 import ExcelJS from "exceljs";
@@ -629,6 +629,42 @@ function getSeverityLevel(count, max) {
 }
 
 // ── Custom Date Range Picker ──────────────────────────────────────────────
+function getMesDayRange(anchor = new Date()) {
+  const start = new Date(anchor);
+  start.setHours(6, 0, 0, 0);
+  if (anchor < start) start.setDate(start.getDate() - 1);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+}
+
+function getProductionDateRange(startDate, endDate = startDate) {
+  const start = new Date(startDate);
+  const end = new Date(endDate || startDate);
+  start.setHours(6, 0, 0, 0);
+  end.setHours(6, 0, 0, 0);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+}
+
+function buildInitialFilters() {
+  const range = getMesDayRange();
+  return {
+    dateFrom: toDatetimeLocal(range.start),
+    dateTo: toDatetimeLocal(range.end),
+    datePreset: "today",
+    machineId: "",
+    lineName: "",
+    partId: "",
+    shiftCode: "",
+    category: "",
+    view: "",
+    zone: "",
+    reason: "",
+    configPart: "",
+  };
+}
+
 const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select Date Range" }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [currentMonth, setCurrentMonth] = useState(new Date());
@@ -1062,6 +1098,7 @@ export default function RejectionAnalysis() {
   
   const [rows, setRows] = useState([]);
   const [machines, setMachines] = useState([]);
+  const [availableShifts, setAvailableShifts] = useState([]);
   const [configuredParts, setConfiguredParts] = useState([]);
   const [heatMapConfig, setHeatMapConfig] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -1071,20 +1108,7 @@ export default function RejectionAnalysis() {
   const [selectedZone, setSelectedZone] = useState(null);
   const [selectedParetoReason, setSelectedParetoReason] = useState("");
   const [selectedHourSlot, setSelectedHourSlot] = useState("");
-  const [filters, setFilters] = useState({
-    dateFrom: "",
-    dateTo: "",
-    datePreset: "today",
-    machineId: "",
-    lineName: "",
-    partId: "",
-    shiftCode: "",
-    category: "",
-    view: "",
-    zone: "",
-    reason: "",
-    configPart: "",
-  });
+  const [filters, setFilters] = useState(buildInitialFilters);
 
   // ── Query ─────────────────────────────────────────────────────────────
   const query = useMemo(() => {
@@ -1134,12 +1158,23 @@ export default function RejectionAnalysis() {
 
   useEffect(() => {
     let active = true;
-    machineApi.list({ timeout: 20000, suppressGlobalError: true })
-      .then((machineRows) => {
-        if (active) setMachines(machineRows || []);
+    Promise.allSettled([
+      machineApi.list({ timeout: 20000, suppressGlobalError: true }),
+      shiftApi.list(undefined, { timeout: 20000, suppressGlobalError: true }),
+    ])
+      .then(([machineResult, shiftResult]) => {
+        if (!active) return;
+        setMachines(machineResult.status === "fulfilled" ? (machineResult.value || []) : []);
+        setAvailableShifts(
+          shiftResult.status === "fulfilled" && Array.isArray(shiftResult.value)
+            ? shiftResult.value.filter((row) => row?.isActive !== false)
+            : []
+        );
       })
       .catch(() => {
-        if (active) setMachines([]);
+        if (!active) return;
+        setMachines([]);
+        setAvailableShifts([]);
       });
     return () => { active = false; };
   }, []);
@@ -1174,9 +1209,17 @@ export default function RejectionAnalysis() {
       view: values("view"),
       zone: values("zone"),
       reason: values("reason"),
-      shift: Array.from(new Set(analysisRows.map((row) => row.shiftCode).filter(Boolean))).sort(),
+      shift: availableShifts.length
+        ? availableShifts
+            .map((row) => ({
+              code: String(row.shiftCode || row.shift_code || "").trim(),
+              label: String(row.shiftName || row.shift_name || row.shiftCode || row.shift_code || "").trim(),
+            }))
+            .filter((row) => row.code)
+        : Array.from(new Set(analysisRows.map((row) => row.shiftCode).filter(Boolean))).sort()
+            .map((code) => ({ code, label: code })),
     };
-  }, [analysisRows]);
+  }, [analysisRows, availableShifts]);
 
   // ── Chart Data ──────────────────────────────────────────────────────
   const pieData = useMemo(() => {
@@ -1462,20 +1505,19 @@ export default function RejectionAnalysis() {
 
   // ── Handlers ──────────────────────────────────────────────────────
   const handleDateRangeApply = (start, end) => {
+    const range = getProductionDateRange(start, end);
     setFilters((prev) => ({
       ...prev,
-      dateFrom: toDatetimeLocal(start),
-      dateTo: toDatetimeLocal(end),
+      dateFrom: toDatetimeLocal(range.start),
+      dateTo: toDatetimeLocal(range.end),
       datePreset: "",
     }));
   };
 
   const handleDateRangeClear = () => {
     setFilters((prev) => ({
-      ...prev,
-      dateFrom: '',
-      dateTo: '',
-      datePreset: "today",
+      ...buildInitialFilters(),
+      configPart: prev.configPart,
     }));
   };
 
@@ -1498,34 +1540,25 @@ export default function RejectionAnalysis() {
 
   const handlePreset = (key) => {
     const now = new Date();
-    let from = new Date(now);
-    let to = new Date(now);
+    const mesRange = getMesDayRange(now);
+    const from = new Date(mesRange.start);
+    const to = new Date(mesRange.end);
 
     switch(key) {
       case 'today':
-        from.setHours(0, 0, 0, 0);
-        to.setHours(23, 59, 59, 999);
         break;
       case 'yesterday':
         from.setDate(from.getDate() - 1);
-        from.setHours(0, 0, 0, 0);
         to.setDate(to.getDate() - 1);
-        to.setHours(23, 59, 59, 999);
         break;
       case 'last7':
         from.setDate(from.getDate() - 7);
-        from.setHours(0, 0, 0, 0);
-        to.setHours(23, 59, 59, 999);
         break;
       case 'last30':
         from.setDate(from.getDate() - 30);
-        from.setHours(0, 0, 0, 0);
-        to.setHours(23, 59, 59, 999);
         break;
       case 'last90':
         from.setDate(from.getDate() - 90);
-        from.setHours(0, 0, 0, 0);
-        to.setHours(23, 59, 59, 999);
         break;
       default:
         return;
@@ -1587,7 +1620,7 @@ export default function RejectionAnalysis() {
       filters.dateFrom && filters.dateTo
         ? `Date: ${new Date(filters.dateFrom).toLocaleString("en-IN")} - ${new Date(filters.dateTo).toLocaleString("en-IN")}`
         : "Date: All",
-      filters.machineId ? `Machine: ${filters.machineId}` : "Machine: All",
+      filters.machineId ? `Quality Gate: ${filters.machineId}` : "Quality Gate: All",
       filters.lineName ? `Line: ${filters.lineName}` : "Line: All",
       filters.partId ? `Part/QR: ${filters.partId}` : "Part/QR: All",
       filters.shiftCode ? `Shift: ${filters.shiftCode}` : "Shift: All",
@@ -1796,7 +1829,7 @@ export default function RejectionAnalysis() {
             onChange={(e) => setFilters((p) => ({ ...p, machineId: e.target.value }))}
             className="rej-filter-select"
           >
-            <option value="">🏭 All Machines</option>
+            <option value="">🏭 All Quality Gates</option>
             {machines.map((m) => <option key={m.id} value={m.id}>{m.machineName || m.machine_name}</option>)}
           </select>
           
@@ -1822,7 +1855,9 @@ export default function RejectionAnalysis() {
             className="rej-filter-select"
           >
             <option value="">🕐 All Shifts</option>
-            {filterOptions.shift.map((v) => <option key={v} value={v}>{v}</option>)}
+            {filterOptions.shift.map((shift) => (
+              <option key={shift.code} value={shift.code}>{shift.label || shift.code}</option>
+            ))}
           </select>
           
           <select 
@@ -1863,10 +1898,10 @@ export default function RejectionAnalysis() {
           
           <button 
             onClick={() => setFilters((p) => ({ 
-              ...p, 
+              ...buildInitialFilters(),
+              configPart: p.configPart,
               category: "", view: "", zone: "", reason: "", 
               machineId: "", lineName: "", partId: "", shiftCode: "",
-              dateFrom: "", dateTo: "", datePreset: "today",
             }))}
             className="rej-btn-clear"
           >
@@ -1896,7 +1931,7 @@ export default function RejectionAnalysis() {
                 <Calendar size={11} /> 
                 {new Date(filters.dateFrom).toLocaleDateString()} → {new Date(filters.dateTo).toLocaleDateString()}
                 <span className="remove" onClick={() => {
-                  setFilters((p) => ({ ...p, dateFrom: "", dateTo: "", datePreset: "today" }));
+                  setFilters((p) => ({ ...buildInitialFilters(), configPart: p.configPart }));
                 }}>✕</span>
               </span>
             )}

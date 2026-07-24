@@ -29,23 +29,4 @@ const PartCodeMapping = sequelize.define("PartCodeMapping", {
   tableName: "PartCodeMappings",
 });
 
-function scheduleFinalProductionRefresh(instance) {
-  const partIds = [
-    instance?.old_part_id || instance?.get?.("old_part_id"),
-    instance?.customer_qr || instance?.get?.("customer_qr"),
-  ].map((value) => String(value || "").trim()).filter(Boolean);
-  if (!partIds.length) return;
-  setImmediate(() => {
-    try {
-      const { scheduleMaterializePart } = require("../services/report/finalProductionResultService");
-      partIds.forEach((partId) => scheduleMaterializePart(partId));
-    } catch (error) {
-      console.warn(`[FinalProductionResult] QR mapping hook skipped: ${error.message}`);
-    }
-  });
-}
-
-PartCodeMapping.addHook("afterCreate", scheduleFinalProductionRefresh);
-PartCodeMapping.addHook("afterUpdate", scheduleFinalProductionRefresh);
-
 module.exports = PartCodeMapping;

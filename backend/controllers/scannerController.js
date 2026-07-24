@@ -10,7 +10,7 @@ const {
   ensureMachineQrScannerUniqueness,
   ensureScannerIpCanBeShared,
 } = require("../services/machineSchemaService");
-const CONNECTION_GRACE_MS = Math.max(Number(process.env.SCANNER_CONNECTION_GRACE_MS || 15000), 3000);
+const CONNECTION_GRACE_MS = Math.max(Number(process.env.SCANNER_CONNECTION_GRACE_MS || 180000), 3000);
 
 function toInt(value) {
   if (value === undefined || value === null || value === "") {

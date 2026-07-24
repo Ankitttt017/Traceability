@@ -2,14 +2,50 @@ const { Op } = require("sequelize");
 const FinalProductionResult = require("../../models/FinalProductionResult");
 const Machine = require("../../models/Machine");
 const OperationLog = require("../../models/OperationLog");
+const PartCodeMapping = require("../../models/PartCodeMapping");
 
 const MATERIALIZER_LOOKBACK_DAYS = Math.max(Number(process.env.REPORT_MATERIALIZER_LOOKBACK_DAYS || 90), 1);
 const MATERIALIZER_BATCH_SIZE = Math.max(Number(process.env.REPORT_MATERIALIZER_BATCH_SIZE || 50), 1);
 const MATERIALIZER_DEBOUNCE_MS = Math.max(Number(process.env.REPORT_MATERIALIZER_DEBOUNCE_MS || 0), 0);
 
 const pendingPartIds = new Map();
+const retryPartIds = new Map();
 let materializerTimer = null;
 let materializerRunning = false;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isSqlDeadlockError(error) {
+  const message = String(error?.message || error?.parent?.message || error?.original?.message || "").toLowerCase();
+  const code = String(error?.code || error?.parent?.code || error?.original?.code || "");
+  const number = Number(error?.number || error?.parent?.number || error?.original?.number || 0);
+  return (
+    number === 1205 ||
+    code === "EREQUEST" && message.includes("deadlock") ||
+    message.includes("deadlock victim") ||
+    message.includes("was deadlocked on lock resources")
+  );
+}
+
+async function withDeadlockRetry(label, task, options = {}) {
+  const attempts = Math.max(Number(options.attempts || process.env.DB_DEADLOCK_RETRY_ATTEMPTS || 4), 1);
+  const baseDelayMs = Math.max(Number(options.baseDelayMs || process.env.DB_DEADLOCK_RETRY_BASE_MS || 120), 25);
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await task();
+    } catch (error) {
+      lastError = error;
+      if (!isSqlDeadlockError(error) || attempt >= attempts) throw error;
+      const delay = baseDelayMs * attempt + Math.floor(Math.random() * baseDelayMs);
+      console.warn(`[FinalProductionResult] ${label} deadlocked; retry ${attempt}/${attempts - 1} in ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}
 
 function normalizeText(value) {
   return String(value ?? "").trim();
@@ -17,6 +53,82 @@ function normalizeText(value) {
 
 function normalizeUpper(value) {
   return normalizeText(value).toUpperCase();
+}
+
+function isAllShiftToken(value) {
+  return ["ALL", "ANY", "ALL_SHIFT", "ALL_SHIFTS", "ALL SHIFT", "ALL SHIFTS"].includes(normalizeUpper(value));
+}
+
+function normalizeShiftAlias(value) {
+  const token = normalizeUpper(value).replace(/\s+/g, "_");
+  if (!token || isAllShiftToken(token)) return "";
+  if (token === "A" || token === "SHIFT_A" || token === "SHIFT_A_SHIFT") return "SHIFT_A";
+  if (token === "B" || token === "SHIFT_B" || token === "SHIFT_B_SHIFT") return "SHIFT_B";
+  if (token === "C" || token === "SHIFT_C" || token === "SHIFT_C_SHIFT") return "SHIFT_C";
+  if (token === "S1" || token === "SHIFT_S1") return "SHIFT_A";
+  if (token === "S2" || token === "SHIFT_S2") return "SHIFT_B";
+  if (token === "S3" || token === "SHIFT_S3") return "SHIFT_C";
+  return token;
+}
+
+function getShiftAliasVariants(value) {
+  const canonical = normalizeShiftAlias(value);
+  if (!canonical) return [];
+  if (canonical === "SHIFT_A") return ["SHIFT_A", "A", "S1", "SHIFT_S1", "Shift A"];
+  if (canonical === "SHIFT_B") return ["SHIFT_B", "B", "S2", "SHIFT_S2", "Shift B"];
+  if (canonical === "SHIFT_C") return ["SHIFT_C", "C", "S3", "SHIFT_S3", "Shift C"];
+  return [canonical, normalizeText(value)].filter(Boolean);
+}
+
+function shiftMatchesFilter(rowShift, filterShift) {
+  const filterCanonical = normalizeShiftAlias(filterShift);
+  if (!filterCanonical) return true;
+  return normalizeShiftAlias(rowShift) === filterCanonical;
+}
+
+function hasStationScope(filters = {}) {
+  return Boolean(filters.machineId || filters.operationNo || filters.station);
+}
+
+function getRowShiftCode(row = {}) {
+  return row.firstScanShiftCode || row.first_scan_shift_code || row.shiftCode || row.shift_code || row.anchorShiftCode || row.anchor_shift_code || "";
+}
+
+function getRowActivityTimestamp(row = {}) {
+  return row.createdAt || row.created_at || row.latestAnchorCreatedAt || row.updatedAt || getRowResultTimestamp(row) || getRowFirstScanTimestamp(row);
+}
+
+const INVALID_CUSTOMER_QR_VALUES = new Set([
+  "-",
+  "CUSTOMER QR PENDING",
+  "PENDING",
+  "IN_PROGRESS",
+  "WAITING",
+  "UNKNOWN",
+  "NULL",
+  "UNDEFINED",
+]);
+
+function sanitizeCustomerQrValue(value) {
+  const raw = normalizeText(value);
+  if (!raw || INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
+  return raw;
+}
+
+function normalizeKey(value) {
+  return normalizeUpper(value).replace(/[^A-Z0-9]/g, "");
+}
+
+function isSameCode(a, b) {
+  const left = normalizeKey(a);
+  const right = normalizeKey(b);
+  return Boolean(left && right && left === right);
+}
+
+function compactDistinctCode(value, excludedValues = []) {
+  const raw = normalizeText(value);
+  if (!raw) return "";
+  return excludedValues.some((excluded) => isSameCode(raw, excluded)) ? "" : raw;
 }
 
 function safeJson(value, fallback = null) {
@@ -234,14 +346,79 @@ function deriveGroupSummary(rows = []) {
   };
 }
 
-function buildMaterializedRecord(groupKey, rows = []) {
+function getCustomerQrFromRows(rows = [], excludedValues = []) {
+  for (const row of rows) {
+    const customerQr = sanitizeCustomerQrValue(row.customerQrCode || row.customerCode || row.customer_qr_code || row.customer_qr);
+    const distinctCustomerQr = compactDistinctCode(customerQr, excludedValues);
+    if (distinctCustomerQr) return distinctCustomerQr;
+  }
+  return "";
+}
+
+async function lookupPartCodeMapping(candidates = []) {
+  const values = [...new Set(candidates.map((value) => normalizeText(value)).filter(Boolean))];
+  if (!values.length) return null;
+  const mapping = await PartCodeMapping.findOne({
+    where: {
+      [Op.or]: [
+        { old_part_id: { [Op.in]: values } },
+        { customer_qr: { [Op.in]: values } },
+      ],
+    },
+    raw: true,
+  }).catch(() => null);
+  return mapping || null;
+}
+
+async function buildMaterializedRecord(groupKey, rows = []) {
   const summary = deriveGroupSummary(rows);
   const firstRow = summary.firstScanRow || rows[0] || {};
   const latestRow = summary.latestRow || rows[0] || {};
   const plc = summary.plcReading || {};
   const rejection = summary.rejectionRow || {};
-  const partSerial = normalizeText(latestRow.displayPartId || latestRow.partId || latestRow.part_id || firstRow.displayPartId || firstRow.partId || firstRow.part_id);
-  const customerQr = normalizeText(latestRow.customerQrCode || latestRow.customerCode || firstRow.customerQrCode || firstRow.customerCode);
+  const rawPartSerial = normalizeText(latestRow.displayPartId || latestRow.partId || latestRow.part_id || firstRow.displayPartId || firstRow.partId || firstRow.part_id);
+  const candidateCodes = [
+    rawPartSerial,
+    latestRow.traceabilityPartId,
+    latestRow.traceability_part_id,
+    latestRow.partId,
+    latestRow.part_id,
+    firstRow.traceabilityPartId,
+    firstRow.traceability_part_id,
+    firstRow.partId,
+    firstRow.part_id,
+    groupKey,
+  ];
+  const mapping = await lookupPartCodeMapping(candidateCodes);
+  const mappedOldPart = normalizeText(mapping?.old_part_id);
+  const mappedCustomerQr = sanitizeCustomerQrValue(mapping?.customer_qr);
+  const partSerial = mappedOldPart || rawPartSerial;
+  const identityValues = [
+    partSerial,
+    rawPartSerial,
+    latestRow.traceabilityPartId,
+    latestRow.traceability_part_id,
+    latestRow.partId,
+    latestRow.part_id,
+    firstRow.traceabilityPartId,
+    firstRow.traceability_part_id,
+    firstRow.partId,
+    firstRow.part_id,
+    groupKey,
+  ];
+  const customerQr = compactDistinctCode(mappedCustomerQr, identityValues) || getCustomerQrFromRows(rows, identityValues);
+  const rawTraceabilityPartId = normalizeText(latestRow.traceabilityPartId || latestRow.traceability_part_id || partSerial || groupKey);
+  const traceabilityPartId = compactDistinctCode(rawTraceabilityPartId, [partSerial, groupKey]);
+  const rowsWithCustomerQr = customerQr
+    ? rows.map((row) => ({
+      ...row,
+      customerCode: customerQr,
+      customerQrCode: customerQr,
+      customer_qr_code: customerQr,
+      customerQrPending: false,
+      customer_qr_pending: false,
+    }))
+    : rows;
   const shotNumber = normalizeText(plc.shot_number || latestRow.shotNumber || latestRow.shot_number || firstRow.shotNumber || firstRow.shot_number);
   const stationResults = summary.stationResults || {};
   const rejectionJson = {
@@ -256,15 +433,15 @@ function buildMaterializedRecord(groupKey, rows = []) {
 
   return {
     report_group_key: groupKey,
-    traceability_part_id: normalizeText(latestRow.traceabilityPartId || latestRow.traceability_part_id || partSerial || groupKey),
+    traceability_part_id: traceabilityPartId || null,
     part_serial_no: partSerial || null,
-    customer_qr_code: customerQr && customerQr !== "-" ? customerQr : null,
+    customer_qr_code: customerQr || null,
     shot_number: shotNumber && shotNumber !== "-" ? shotNumber : null,
     first_scan_at: toDate(summary.firstScanAt),
     final_result_at: toDate(summary.finalResultAt),
     last_activity_at: summary.lastActivityAt,
     production_date: toDateOnly(summary.firstScanAt),
-    shift_code: normalizeText(firstRow.firstScanShiftCode || firstRow.shiftCode || firstRow.anchorShiftCode || latestRow.shiftCode || latestRow.anchorShiftCode) || null,
+    shift_code: normalizeShiftAlias(firstRow.firstScanShiftCode || firstRow.shiftCode || firstRow.anchorShiftCode || latestRow.shiftCode || latestRow.anchorShiftCode) || null,
     final_status: summary.finalStatus || "IN_PROGRESS",
     part_status: normalizeText(latestRow.partStatus || latestRow.part_status || latestRow.status) || null,
     plant_id: Number(latestRow.plant_id || firstRow.plant_id) || null,
@@ -294,7 +471,7 @@ function buildMaterializedRecord(groupKey, rows = []) {
     shot_details_json: safeJson(plc, "{}"),
     plc_shot_json: safeJson(plc, "{}"),
     rejection_json: safeJson(rejectionJson, "{}"),
-    report_rows_json: safeJson(rows, "[]"),
+    report_rows_json: safeJson(rowsWithCustomerQr, "[]"),
   };
 }
 
@@ -309,8 +486,8 @@ async function upsertMaterializedReportRows(rows = []) {
 
   let upserted = 0;
   for (const [groupKey, groupRows] of grouped.entries()) {
-    const record = buildMaterializedRecord(groupKey, groupRows);
-    await FinalProductionResult.upsert(record);
+    const record = await buildMaterializedRecord(groupKey, groupRows);
+    await withDeadlockRetry(`upsert ${groupKey}`, () => FinalProductionResult.upsert(record));
     upserted += 1;
   }
   return { upserted };
@@ -427,8 +604,8 @@ function buildMaterializedWhere(filters = {}) {
   } else {
     where[Op.or] = activityRange;
   }
-  if (filters.shiftCode && !["ALL", "ALL_SHIFTS", "ALL SHIFT", "ALL SHIFTS"].includes(normalizeUpper(filters.shiftCode))) {
-    where.shift_code = normalizeText(filters.shiftCode);
+  if (!hasStationScope(filters) && filters.shiftCode && !isAllShiftToken(filters.shiftCode)) {
+    where.shift_code = { [Op.in]: getShiftAliasVariants(filters.shiftCode) };
   }
   if (filters.lineId) where.line_id = filters.lineId;
   if (filters.plantId) where.plant_id = filters.plantId;
@@ -456,8 +633,8 @@ function buildMaterializedWhere(filters = {}) {
 }
 
 function appendMaterializedDimensionFilters(where = {}, filters = {}) {
-  if (filters.shiftCode && !["ALL", "ALL_SHIFTS", "ALL SHIFT", "ALL SHIFTS"].includes(normalizeUpper(filters.shiftCode))) {
-    where.shift_code = normalizeText(filters.shiftCode);
+  if (!hasStationScope(filters) && filters.shiftCode && !isAllShiftToken(filters.shiftCode)) {
+    where.shift_code = { [Op.in]: getShiftAliasVariants(filters.shiftCode) };
   }
   if (filters.lineId) where.line_id = filters.lineId;
   if (filters.plantId) where.plant_id = filters.plantId;
@@ -491,6 +668,11 @@ function mergeMaterializedWhere(...parts) {
 }
 
 async function fetchMaterializedTraceabilityMetrics(filters = {}) {
+  if (filters.machineId || filters.operationNo || filters.station) {
+    const records = await fetchMaterializedRecords(filters, { limit: Number(filters.metricsLimit || 50000) });
+    return calculateMaterializedMetrics(records, filters);
+  }
+
   const { from, to } = getMaterializedDateRange(filters);
   const status = normalizeStatusFilter(filters.status || filters.resultType);
   const baseWhere = appendMaterializedDimensionFilters({}, filters);
@@ -502,7 +684,10 @@ async function fetchMaterializedTraceabilityMetrics(filters = {}) {
       range("last_activity_at"),
     ],
   };
-  const countOrZero = async (where) => Number(await FinalProductionResult.count({ where }).catch(() => 0)) || 0;
+  const countOrZero = async (where) => Number(await withDeadlockRetry(
+    "metric count",
+    () => FinalProductionResult.count({ where })
+  )) || 0;
   const [totalProduction, passed, failed, inProgress] = await Promise.all([
     countOrZero(mergeMaterializedWhere(baseWhere, range("first_scan_at"))),
     status && status !== "PASSED" ? Promise.resolve(0) : countOrZero(mergeMaterializedWhere(baseWhere, getFinalStatusWhere("PASSED"), range("final_result_at"))),
@@ -574,10 +759,12 @@ function recordMatchesMaterializedFilters(record = {}, filters = {}) {
   const machineId = normalizeText(filters.machineId);
   const operationNo = normalizeUpper(filters.operationNo || filters.station);
   if (!recordMatchesFinalStatus(record, filters)) return false;
+  if (!hasStationScope(filters) && filters.shiftCode && !shiftMatchesFilter(record.shift_code, filters.shiftCode)) return false;
   if (!machineId && !operationNo) return true;
   return getRecordRows(record).some((row) => {
     if (machineId && String(row.machine_id || row.machineId || "").trim() !== machineId) return false;
     if (operationNo && getStationOperation(row) !== operationNo) return false;
+    if (filters.shiftCode && !shiftMatchesFilter(getRowShiftCode(row), filters.shiftCode)) return false;
     return true;
   });
 }
@@ -589,16 +776,25 @@ function rowsFromMaterializedRecords(records = [], filters = {}) {
   for (const record of records) {
     if (!recordMatchesFinalStatus(record, filters)) continue;
     const computedStatus = getRecordComputedStatus(record);
+    const recordCustomerQr = sanitizeCustomerQrValue(record.customer_qr_code);
     const groupRows = getRecordRows(record).map((row) => ({
       ...row,
       partStatus: computedStatus,
       part_status: computedStatus,
       overallStatus: computedStatus,
       statusLabel: computedStatus,
+      ...(recordCustomerQr ? {
+        customerCode: recordCustomerQr,
+        customerQrCode: recordCustomerQr,
+        customer_qr_code: recordCustomerQr,
+        customerQrPending: false,
+        customer_qr_pending: false,
+      } : {}),
     }));
     const filteredRows = groupRows.filter((row) => {
       if (machineId && String(row.machine_id || row.machineId || "").trim() !== machineId) return false;
       if (operationNo && getStationOperation(row) !== operationNo) return false;
+      if (filters.shiftCode && !shiftMatchesFilter(getRowShiftCode(row), filters.shiftCode)) return false;
       return true;
     });
     if ((machineId || operationNo) && !filteredRows.length) continue;
@@ -612,7 +808,7 @@ async function fetchMaterializedRecords(filters = {}, options = {}) {
   const requestedLimit = Number(options.limit || filters.limit || 0) > 0 ? Number(options.limit || filters.limit) : null;
   const limit = requestedLimit ? Math.min(requestedLimit, 200000) : 200000;
   const offset = Number(options.offset || 0) > 0 ? Number(options.offset) : 0;
-  return FinalProductionResult.findAll({
+  return withDeadlockRetry("fetch records", () => FinalProductionResult.findAll({
     where,
     order: [
       ["first_scan_at", "DESC"],
@@ -622,7 +818,7 @@ async function fetchMaterializedRecords(filters = {}, options = {}) {
     ...(limit ? { limit } : {}),
     ...(offset ? { offset } : {}),
     raw: true,
-  });
+  }));
 }
 
 async function fetchMaterializedReportRows(filters = {}, options = {}) {
@@ -638,7 +834,96 @@ function isWithinDate(value, from, to) {
   return true;
 }
 
+function getScopedRecordRows(record = {}, filters = {}) {
+  const machineId = normalizeText(filters.machineId);
+  const operationNo = normalizeUpper(filters.operationNo || filters.station);
+  return getRecordRows(record).filter((row) => {
+    if (machineId && String(row.machine_id || row.machineId || "").trim() !== machineId) return false;
+    if (operationNo && getStationOperation(row) !== operationNo) return false;
+    if (filters.shiftCode && !shiftMatchesFilter(getRowShiftCode(row), filters.shiftCode)) return false;
+    return true;
+  });
+}
+
+function calculateScopedMaterializedMetrics(records = [], filters = {}) {
+  const { from, to } = getMaterializedDateRange(filters);
+  const metrics = {
+    totalProduction: 0,
+    traceabilityProduction: 0,
+    completedProduction: 0,
+    totalOK: 0,
+    totalNG: 0,
+    inProgress: 0,
+    validationRejects: 0,
+    passRate: 0,
+    byMachine: {},
+    byShift: {},
+    byLine: {},
+  };
+
+  for (const record of records) {
+    const scopedRows = getScopedRecordRows(record, filters);
+    if (!scopedRows.length) continue;
+
+    const rowsInRange = scopedRows.filter((row) => isWithinDate(getRowActivityTimestamp(row), from, to));
+    if (!rowsInRange.length) continue;
+
+    let status = "";
+    let machineName = record.anchor_machine_name || "Unknown Machine";
+    let shiftCode = record.shift_code || "Unknown Shift";
+    let lineName = record.line_name || "Unknown Line";
+    for (const row of rowsInRange) {
+      machineName = row.machineName || row.machine_name || machineName;
+      shiftCode = getRowShiftCode(row) || shiftCode;
+      lineName = row.lineName || row.line_name || lineName;
+      const candidate = normalizeStationResult(row.industrialResult || row.statusLabel || row.result || row.plc_status, row.reason || row.interlock_reason, row);
+      status = pickStationResult(status, candidate || "IN_PROGRESS");
+    }
+
+    if (!metrics.byMachine[machineName]) metrics.byMachine[machineName] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
+    if (!metrics.byShift[shiftCode]) metrics.byShift[shiftCode] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
+    if (!metrics.byLine[lineName]) metrics.byLine[lineName] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
+
+    metrics.traceabilityProduction += 1;
+    metrics.byMachine[machineName].total += 1;
+    metrics.byShift[shiftCode].total += 1;
+    metrics.byLine[lineName].total += 1;
+
+    if (status === "OK") {
+      metrics.completedProduction += 1;
+      metrics.totalOK += 1;
+      metrics.byMachine[machineName].ok += 1;
+      metrics.byShift[shiftCode].ok += 1;
+      metrics.byLine[lineName].ok += 1;
+    } else if (status === "NG") {
+      metrics.completedProduction += 1;
+      metrics.totalNG += 1;
+      metrics.validationRejects += 1;
+      metrics.byMachine[machineName].ng += 1;
+      metrics.byShift[shiftCode].ng += 1;
+      metrics.byLine[lineName].ng += 1;
+      metrics.byMachine[machineName].rejects += 1;
+      metrics.byShift[shiftCode].rejects += 1;
+      metrics.byLine[lineName].rejects += 1;
+    } else {
+      metrics.inProgress += 1;
+      metrics.byMachine[machineName].inProgress += 1;
+      metrics.byShift[shiftCode].inProgress += 1;
+      metrics.byLine[lineName].inProgress += 1;
+    }
+  }
+
+  const productionBase = metrics.totalOK + metrics.totalNG;
+  metrics.totalProduction = metrics.traceabilityProduction;
+  metrics.passRate = productionBase > 0 ? Number(((metrics.totalOK / productionBase) * 100).toFixed(2)) : 0;
+  return metrics;
+}
+
 function calculateMaterializedMetrics(records = [], filters = {}) {
+  if (hasStationScope(filters)) {
+    return calculateScopedMaterializedMetrics(records, filters);
+  }
+
   const { from, to } = getMaterializedDateRange(filters);
   const metrics = {
     totalProduction: 0,
@@ -711,7 +996,7 @@ function calculateMaterializedMetrics(records = [], filters = {}) {
 
 async function getMaterializedGroupCount(filters = {}) {
   if (!filters.machineId && !filters.operationNo && !filters.station) {
-    return FinalProductionResult.count({ where: buildMaterializedWhere(filters) });
+    return withDeadlockRetry("group count", () => FinalProductionResult.count({ where: buildMaterializedWhere(filters) }));
   }
   const records = await fetchMaterializedRecords(filters, { limit: Number(filters.countLimit || 50000) });
   return records.filter((record) => recordMatchesMaterializedFilters(record, filters)).length;
@@ -757,13 +1042,18 @@ async function materializePartFromCurrentReport(partId) {
   const token = normalizeText(partId);
   if (!token) return { upserted: 0 };
   const { fetchProductionData } = require("./reportExportService");
-  const rows = await fetchProductionData({
+  const rows = await withDeadlockRetry(`source read ${token}`, () => fetchProductionData({
     exactPartId: token,
   }, {
     includePlcReadings: true,
     includeLeaktest: true,
     includePlcSummary: false,
-  });
+  }));
+  if (!Array.isArray(rows) || rows.length === 0) {
+    const error = new Error(`No source rows available yet for ${token}`);
+    error.code = "FINAL_RESULT_SOURCE_PENDING";
+    throw error;
+  }
   return upsertMaterializedReportRows(rows);
 }
 
@@ -781,18 +1071,50 @@ async function refreshRecentMaterializedParts(filters = {}, options = {}) {
       { station_no: normalizeUpper(filters.station) },
     ];
   }
-  const rows = await OperationLog.findAll({
+  const rows = await withDeadlockRetry("recent operation log read", () => OperationLog.findAll({
     where,
     attributes: ["part_id", "createdAt", "updatedAt"],
     order: [["createdAt", "DESC"], ["updatedAt", "DESC"]],
     limit: limit * 3,
     raw: true,
-  }).catch(() => []);
+  })).catch((error) => {
+    console.warn(`[FinalProductionResult] recent operation log read skipped: ${error.message}`);
+    return [];
+  });
   const partIds = [...new Set(rows.map((row) => normalizeText(row.part_id)).filter(Boolean))].slice(0, limit);
   for (const partId of partIds) {
     await materializePartFromCurrentReport(partId);
   }
   return { refreshed: partIds.length };
+}
+
+async function queueRecentMaterializedParts(filters = {}, options = {}) {
+  const limit = Math.min(Math.max(Number(options.limit || 10), 1), 50);
+  const { from, to } = getMaterializedDateRange(filters);
+  const where = {
+    createdAt: { [Op.gte]: from, [Op.lte]: to },
+  };
+  if (filters.machineId) where.machine_id = filters.machineId;
+  if (filters.operationNo) where.operation_no = normalizeUpper(filters.operationNo);
+  if (filters.station) {
+    where[Op.or] = [
+      { operation_no: normalizeUpper(filters.station) },
+      { station_no: normalizeUpper(filters.station) },
+    ];
+  }
+  const rows = await withDeadlockRetry("recent operation log queue read", () => OperationLog.findAll({
+    where,
+    attributes: ["part_id", "createdAt", "updatedAt"],
+    order: [["createdAt", "DESC"], ["updatedAt", "DESC"]],
+    limit: limit * 3,
+    raw: true,
+  })).catch((error) => {
+    console.warn(`[FinalProductionResult] recent queue read skipped: ${error.message}`);
+    return [];
+  });
+  const partIds = [...new Set(rows.map((row) => normalizeText(row.part_id)).filter(Boolean))].slice(0, limit);
+  partIds.forEach(scheduleMaterializePart);
+  return { queued: partIds.length };
 }
 
 function scheduleMaterializePart(partId) {
@@ -806,12 +1128,35 @@ function scheduleMaterializePart(partId) {
   }
 }
 
+function scheduleMaterializerFlush(delayMs = MATERIALIZER_DEBOUNCE_MS) {
+  if (materializerTimer) return;
+  materializerTimer = delayMs > 0
+    ? setTimeout(flushMaterializerQueue, delayMs)
+    : setImmediate(flushMaterializerQueue);
+}
+
+function flushMaterializerQueueSoon() {
+  scheduleMaterializerFlush(0);
+}
+
+function getMaterializerQueueStatus() {
+  return {
+    pending: pendingPartIds.size,
+    retry: retryPartIds.size,
+    running: materializerRunning,
+  };
+}
+
 async function flushMaterializerQueue() {
   materializerTimer = null;
   if (materializerRunning) {
     materializerTimer = setTimeout(flushMaterializerQueue, MATERIALIZER_DEBOUNCE_MS);
     return;
   }
+  retryPartIds.forEach((queuedAt, partId) => {
+    if (!pendingPartIds.has(partId)) pendingPartIds.set(partId, queuedAt);
+  });
+  retryPartIds.clear();
   const batch = [...pendingPartIds.keys()].slice(0, MATERIALIZER_BATCH_SIZE);
   batch.forEach((partId) => pendingPartIds.delete(partId));
   if (!batch.length) return;
@@ -823,14 +1168,13 @@ async function flushMaterializerQueue() {
         await materializePartFromCurrentReport(partId);
       } catch (error) {
         console.warn(`[FinalProductionResult] materialize failed for ${partId}: ${error.message}`);
+        retryPartIds.set(partId, Date.now());
       }
     }
   } finally {
     materializerRunning = false;
-    if (pendingPartIds.size) {
-      materializerTimer = MATERIALIZER_DEBOUNCE_MS > 0
-        ? setTimeout(flushMaterializerQueue, MATERIALIZER_DEBOUNCE_MS)
-        : setImmediate(flushMaterializerQueue);
+    if (pendingPartIds.size || retryPartIds.size) {
+      scheduleMaterializerFlush(Math.max(MATERIALIZER_DEBOUNCE_MS, 30000));
     }
   }
 }
@@ -871,7 +1215,10 @@ module.exports = {
   fetchMaterializedTraceabilityMetrics,
   getMaterializedGroupCount,
   refreshRecentMaterializedParts,
+  queueRecentMaterializedParts,
   materializePartFromCurrentReport,
   scheduleMaterializePart,
+  flushMaterializerQueueSoon,
+  getMaterializerQueueStatus,
   buildStationPairsFromRows,
 };

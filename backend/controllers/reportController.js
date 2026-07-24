@@ -13,11 +13,6 @@ const {
   fetchPlcShotSummary,
 } = require("../services/report/reportExportService");
 const { calculateProductionMetrics } = require("../services/report/reportMetricsService");
-const {
-  fetchMaterializedReportPage,
-  fetchMaterializedTraceabilityMetrics,
-  refreshRecentMaterializedParts,
-} = require("../services/report/finalProductionResultService");
 const Shift = require("../models/Shift");
 
 async function getLegacyReportBundle(cleanFilters = {}, options = {}) {
@@ -66,20 +61,6 @@ function stripMetricStatusFilters(filters = {}) {
 async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
   const nextMetrics = { ...(metrics || {}) };
   const productionFilters = stripMetricStatusFilters(filters);
-  const materializedMetrics = process.env.REPORT_USE_FINAL_RESULT_TABLE === "0"
-    ? null
-    : await fetchMaterializedTraceabilityMetrics(filters).catch((error) => {
-      console.warn(`[ReportController] materialized traceability summary skipped: ${error.message}`);
-      return null;
-    });
-  if (materializedMetrics) {
-    return {
-      ...nextMetrics,
-      ...materializedMetrics,
-      plcShotSummary: nextMetrics.plcShotSummary,
-      plcShotSummarySource: nextMetrics.plcShotSummarySource,
-    };
-  }
   const [summaryMetrics, totalProduction] = await Promise.all([
     fetchProductionSummaryMetrics(filters).catch((error) => {
       console.warn(`[ReportController] traceability SQL summary skipped: ${error.message}`);
@@ -105,37 +86,6 @@ async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
     nextMetrics.totalProduction = normalizedTotal;
   }
   return nextMetrics;
-}
-
-async function getMaterializedPreviewPage(filters = {}, pagination = {}, options = {}) {
-  if (process.env.REPORT_USE_FINAL_RESULT_TABLE === "0") return null;
-
-  await refreshRecentMaterializedParts(filters, { limit: 25 }).catch((error) => {
-    console.warn(`[FinalProductionResult] recent preview refresh skipped: ${error.message}`);
-  });
-
-  const materializedPage = await fetchMaterializedReportPage(filters, pagination).catch((error) => {
-    console.warn(`[FinalProductionResult] preview read skipped: ${error.message}`);
-    return null;
-  });
-  if (!materializedPage) return null;
-
-  const [shifts, plcColumnSet, plcShotSummary] = await Promise.all([
-    Shift.findAll({
-      where: { is_active: true },
-      attributes: ["id", "shift_name", "shift_code", "start_time", "end_time"],
-      order: [["start_time", "ASC"]],
-      raw: true,
-    }),
-    options.includePlcReadings === false ? Promise.resolve(new Set()) : getPlcReadingColumns(),
-    options.includePlcSummary === false ? Promise.resolve(null) : fetchPlcShotSummary(filters).catch(() => null),
-  ]);
-  materializedPage.metrics.plcShotSummary = options.includePlcSummary !== false
-    ? (plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 })
-    : { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
-  materializedPage.metrics.plcShotSummarySource = options.includePlcSummary === false ? "SKIPPED_FAST" : "PLC_SUMMARY";
-  materializedPage.metrics = await applyUncappedTraceabilityMetrics(materializedPage.metrics, filters);
-  return { ...materializedPage, shifts, plcColumnSet };
 }
 
 function stripPaginationFilters(filters = {}) {
@@ -331,23 +281,6 @@ exports.getReportData = async (req, res) => {
     const options = getReportOptions(req.query || {});
     const filters = stripReportControlFilters(req.query || {});
     const pagination = getPagination(req.query || {});
-    const materializedPreview = await getMaterializedPreviewPage(filters, pagination, options);
-    if (materializedPreview) {
-      return res.json({
-        rows: materializedPreview.rows,
-        metrics: materializedPreview.metrics,
-        pagination: materializedPreview.pagination,
-        plcColumns: [...materializedPreview.plcColumnSet],
-        reportMode: "FINAL_RESULT_TABLE_PAGE",
-        availableShifts: materializedPreview.shifts.map((shift) => ({
-          id: shift.id,
-          shiftName: shift.shift_name,
-          shiftCode: shift.shift_code,
-          startTime: shift.start_time,
-          endTime: shift.end_time,
-        })),
-      });
-    }
     const { rows, shifts, plcColumnSet, metrics } = await getLiveReportBundle(filters, options);
     const paged = paginateReportRowsByPart(rows, pagination);
     const responseMetrics = await applyUncappedTraceabilityMetrics(metrics, filters);
@@ -408,6 +341,18 @@ exports.getReportData = async (req, res) => {
       res.status(500).json({ error: fallbackDb.message });
     }
   }
+};
+
+exports.getPublicReportData = async (req, res) => {
+  req.query = {
+    ...req.query,
+    fast: req.query.fast ?? "1",
+    includePlcSummary: req.query.includePlcSummary ?? "1",
+    includePlcReadings: req.query.includePlcReadings ?? "1",
+    includeLeaktest: req.query.includeLeaktest ?? "1",
+    noCache: "1",
+  };
+  return exports.getReportData(req, res);
 };
 
 exports.getReportShotSummary = async (req, res) => {

@@ -1,7 +1,7 @@
 const { emitRealtime } = require("./realtimeService");
 const { normalizeIp } = require("../utils/networkAddress");
 
-const HEARTBEAT_STALE_MS = Math.max(Number(process.env.SCANNER_HEARTBEAT_STALE_MS || 30000), 5000);
+const HEARTBEAT_STALE_MS = Math.max(Number(process.env.SCANNER_HEARTBEAT_STALE_MS || 180000), 5000);
 const HEARTBEAT_RETAIN_MS = Math.max(Number(process.env.SCANNER_HEARTBEAT_RETAIN_MS || 6 * 60 * 60 * 1000), HEARTBEAT_STALE_MS * 2);
 
 const scannerStateMap = new Map();

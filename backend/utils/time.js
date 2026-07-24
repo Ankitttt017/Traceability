@@ -105,7 +105,30 @@ function toMinutes(value) {
   return parsed.hours * 60 + parsed.minutes;
 }
 
+function toSeconds(value) {
+  const parsed = parseTimeParts(value);
+  if (!parsed) {
+    return null;
+  }
+  return parsed.hours * 3600 + parsed.minutes * 60 + parsed.seconds;
+}
+
 function isMinuteWithinShift(current, start, end, { inclusiveEnd = false } = {}) {
+  if (current === null || start === null || end === null) {
+    return false;
+  }
+  if (start === end) {
+    return true;
+  }
+  if (start < end) {
+    return inclusiveEnd
+      ? current >= start && current <= end
+      : current >= start && current < end;
+  }
+  return inclusiveEnd ? current >= start || current <= end : current >= start || current < end;
+}
+
+function isSecondWithinShift(current, start, end, { inclusiveEnd = true } = {}) {
   if (current === null || start === null || end === null) {
     return false;
   }
@@ -124,5 +147,7 @@ module.exports = {
   parseTimeParts,
   normalizeTimeValue,
   toMinutes,
+  toSeconds,
   isMinuteWithinShift,
+  isSecondWithinShift,
 };

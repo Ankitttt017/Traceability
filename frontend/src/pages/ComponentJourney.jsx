@@ -1,11 +1,9 @@
 // ============================================================
-//  ComponentJourney.jsx — IndusTrace Enhanced
-//  Changes:
-//  ✓ QR Feed & Last QR Result removed from header
-//  ✓ Parts list: QR code popup + Delete/Reset part button
-//  ✓ Cleaner header — search + 3 KPI cards only
-//  ✓ Latest QR shown inline on each station card instead
-//  ✓ Professional, easy to understand layout
+//  ComponentJourney.jsx — IndusTrace Professional Edition
+//  ✅ Professional Navy/Steel/Amber theme
+//  ✅ Working custom date range picker with emojis
+//  ✅ Responsive design
+//  ✅ Clean, attractive UI with proper emojis
 // ============================================================
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
@@ -14,7 +12,9 @@ import { saveAs } from "file-saver";
 import {
   AlertTriangle, CheckCircle2, Clock3, RefreshCw, RotateCcw,
   Search, X, XCircle, Activity, Layers, ChevronRight,
-  MapPin, Zap, Package, QrCode, Trash2, Eye, EyeOff, Download,
+  MapPin, Zap, Package, QrCode, Trash2, Download,
+  Calendar, ChevronDown, ChevronLeft, ChevronRight as ChevronRightIcon,
+  Sparkles, TrendingUp, Shield, Award, Target, Anchor,
 } from "lucide-react";
 import { machineApi, shiftApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
@@ -28,41 +28,329 @@ const FALLBACK_POLL_INTERVAL    = 30000;
 const CATALOG_SYNC_INTERVAL     = 60000;
 const QR_DEDUPE_MS              = 3000;
 
-// ── CSS Design Tokens ──────────────────────────────────────────────────────
+const toLocalDateTimeInput = (dateValue) => {
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+};
+
+const getProductionDateRange = (startDate, endDate = startDate) => {
+  const start = new Date(startDate);
+  const end = new Date(endDate || startDate);
+  start.setHours(6, 0, 0, 0);
+  end.setHours(6, 0, 0, 0);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+};
+
+const getCurrentProductionDateRange = (anchor = new Date()) => {
+  const start = new Date(anchor);
+  start.setHours(6, 0, 0, 0);
+  if (anchor < start) start.setDate(start.getDate() - 1);
+  const end = new Date(anchor);
+  return { start, end };
+};
+
+// ── Professional Theme ────────────────────────────────────────────────────
 const THEME_STYLES = `
   :root {
-    --navy:    26,50,99;   --steel:  84,119,146;
-    --amber:   250,185,91; --linen:  232,226,219;
-    --ok-rgb:  34,197,94;  --ng-rgb: 239,68,68;
-    --wip-rgb: 249,115,22; --idle-rgb:148,163,184;
+    --navy: 26,50,99; --steel: 84,119,146;
+    --amber: 250,185,91; --linen: 232,226,219;
+    --ok: 34,197,94; --ng: 239,68,68;
+    --wip: 249,115,22; --idle: 148,163,184;
+    --gold: 218,165,32; --purple: 139,92,246;
   }
   [data-theme="light"] {
-    --bg-base:    255,255,255; --bg-surface: 248,246,243;
-    --bg-card:    255,255,255; --bg-input:   255,255,255;
-    --bg-hover:   232,226,219;
-    --txt-primary:26,50,99;   --txt-secondary:84,119,146;
-    --txt-muted:  140,160,180;
-    --border:     84,119,146; --border-op: 0.14;
-    --shadow:     0 2px 12px rgba(26,50,99,0.08),0 1px 3px rgba(26,50,99,0.05);
-    --shadow-md:  0 4px 20px rgba(26,50,99,0.12),0 2px 6px rgba(26,50,99,0.06);
+    --bg-base: 248,250,252; --bg-surface: 241,244,248;
+    --bg-card: 255,255,255; --bg-input: 255,255,255;
+    --bg-hover: 232,236,242;
+    --txt-primary: 26,50,99; --txt-secondary: 84,119,146;
+    --txt-muted: 148,163,184;
+    --border: 84,119,146; --border-op: 0.12;
+    --shadow: 0 2px 16px rgba(26,50,99,0.06),0 1px 4px rgba(26,50,99,0.04);
+    --shadow-md: 0 8px 32px rgba(26,50,99,0.10),0 2px 8px rgba(26,50,99,0.06);
+    --shadow-lg: 0 16px 48px rgba(26,50,99,0.14),0 4px 16px rgba(26,50,99,0.08);
   }
   [data-theme="dark"] {
-    --bg-base:    10,18,36;   --bg-surface: 16,26,50;
-    --bg-card:    20,34,62;   --bg-input:   14,22,44;
-    --bg-hover:   26,42,74;
-    --txt-primary:232,226,219; --txt-secondary:120,160,190;
-    --txt-muted:  84,119,146;
-    --border:     84,119,146; --border-op: 0.2;
-    --shadow:     0 2px 12px rgba(0,0,0,0.3),0 1px 3px rgba(0,0,0,0.2);
-    --shadow-md:  0 4px 20px rgba(0,0,0,0.4),0 2px 8px rgba(0,0,0,0.25);
+    --bg-base: 10,18,36; --bg-surface: 16,26,50;
+    --bg-card: 20,34,62; --bg-input: 14,22,44;
+    --bg-hover: 26,42,74;
+    --txt-primary: 232,226,219; --txt-secondary: 160,190,210;
+    --txt-muted: 84,119,146;
+    --border: 84,119,146; --border-op: 0.18;
+    --shadow: 0 2px 16px rgba(0,0,0,0.25),0 1px 4px rgba(0,0,0,0.2);
+    --shadow-md: 0 8px 32px rgba(0,0,0,0.35),0 2px 8px rgba(0,0,0,0.25);
+    --shadow-lg: 0 16px 48px rgba(0,0,0,0.45),0 4px 16px rgba(0,0,0,0.3);
   }
-`;
-const KEYFRAMES = `
-  @keyframes itSpin    { to { transform: rotate(360deg); } }
-  @keyframes itPulse   { 0%,100%{opacity:1} 50%{opacity:0.4} }
-  @keyframes itFadeIn  { from{opacity:0;transform:translateY(-4px)} to{opacity:1;transform:translateY(0)} }
-  @keyframes itSlideIn { from{opacity:0;transform:translateX(-6px)} to{opacity:1;transform:translateX(0)} }
-  @keyframes itScale   { from{opacity:0;transform:scale(0.95)} to{opacity:1;transform:scale(1)} }
+  .cj-container { animation: cjFadeIn 0.4s ease; }
+  .cj-gradient-bar {
+    height: 3px;
+    background: linear-gradient(90deg, rgb(var(--navy)), rgb(var(--steel)), rgb(var(--amber)), rgb(var(--steel)), rgb(var(--navy)));
+    background-size: 200% 100%;
+    animation: cjShimmer 3s ease-in-out infinite;
+  }
+  @keyframes cjFadeIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes cjShimmer { 0% { background-position: -200% center; } 100% { background-position: 200% center; } }
+  @keyframes cjSpin { to { transform: rotate(360deg); } }
+  @keyframes cjPulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  @keyframes cjSlideIn { from { opacity:0; transform:translateX(-8px); } to { opacity:1; transform:translateX(0); } }
+  @keyframes cjScale { from { opacity:0; transform:scale(0.95); } to { opacity:1; transform:scale(1); } }
+  @keyframes cjGlow { 0%,100% { box-shadow: 0 0 20px rgba(250,185,91,0.1); } 50% { box-shadow: 0 0 40px rgba(250,185,91,0.2); } }
+  
+  .cj-card {
+    background: rgb(var(--bg-card));
+    border: 1px solid rgba(var(--border), var(--border-op));
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    transition: all 0.25s ease;
+  }
+  .cj-card:hover { box-shadow: var(--shadow-md); }
+  
+  .cj-filter-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 12px; border-radius: 99px;
+    font-size: 10px; font-weight: 700;
+    background: rgba(84,119,146,0.08);
+    border: 1px solid rgba(84,119,146,0.15);
+    color: rgb(84,119,146);
+    transition: all 0.15s ease;
+  }
+  .cj-filter-chip:hover { background: rgba(84,119,146,0.15); border-color: rgba(84,119,146,0.3); }
+  .cj-filter-chip .remove { cursor: pointer; opacity: 0.5; transition: opacity 0.15s ease; margin-left: 2px; }
+  .cj-filter-chip .remove:hover { opacity: 1; color: rgb(239,68,68); }
+  .cj-filter-chip.date-chip { background: rgba(250,185,91,0.12); border-color: rgba(250,185,91,0.25); color: rgb(250,185,91); }
+  
+  .cj-preset-btn {
+    padding: 6px 14px; border-radius: 8px;
+    border: 1px solid rgba(84,119,146,0.2);
+    background: transparent;
+    color: rgb(84,119,146);
+    font-size: 10px; font-weight: 600;
+    cursor: pointer; transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+  .cj-preset-btn:hover { border-color: rgb(84,119,146); background: rgba(84,119,146,0.08); }
+  .cj-preset-btn.active { border-color: rgb(26,50,99); background: rgb(26,50,99); color: #fff; font-weight: 800; }
+  
+  .cj-filter-select {
+    width: 100%; min-height: 38px; border-radius: 10px;
+    border: 1px solid rgba(84,119,146,0.2);
+    background: #ffffff; color: rgb(26,50,99);
+    padding: 8px 14px; font-size: 12px; font-weight: 600;
+    outline: none; transition: all 0.15s ease;
+    cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .cj-filter-select:focus { border-color: rgb(84,119,146); box-shadow: 0 0 0 3px rgba(84,119,146,0.1); }
+  .cj-filter-input {
+    width: 100%; min-height: 38px; border-radius: 10px;
+    border: 1px solid rgba(84,119,146,0.2);
+    background: #ffffff; color: rgb(26,50,99);
+    padding: 8px 14px; font-size: 12px; font-weight: 600;
+    outline: none; transition: all 0.15s ease;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .cj-filter-input:focus { border-color: rgb(84,119,146); box-shadow: 0 0 0 3px rgba(84,119,146,0.1); }
+  .cj-filter-input::placeholder { color: rgba(84,119,146,0.5); font-weight: 400; }
+
+  .reports-filter-input {
+    width: 100%;
+    height: 36px;
+    min-width: 0;
+    border-radius: 8px;
+    border: 1px solid rgba(var(--border), 0.2);
+    background: rgb(var(--bg-input));
+    padding: 0 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: rgb(var(--txt-primary));
+    outline: none;
+    transition: all 0.15s ease;
+  }
+  .reports-filter-input:focus {
+    border-color: rgba(var(--steel), 0.5);
+    box-shadow: 0 0 0 3px rgba(var(--steel), 0.08);
+  }
+  .reports-filter-input::placeholder {
+    color: rgba(var(--txt-muted), 0.6);
+    font-weight: 400;
+  }
+
+  .date-picker-container {
+    position: relative;
+    animation: cjScale 0.2s ease;
+  }
+  .date-picker-dropdown {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    background: rgb(var(--bg-card));
+    border: 1px solid rgba(var(--border), 0.2);
+    border-radius: 12px;
+    box-shadow: 0 12px 48px rgba(var(--navy), 0.15), 0 2px 8px rgba(var(--navy), 0.06);
+    padding: 16px;
+    z-index: 1000;
+    min-width: 280px;
+    max-width: 340px;
+    animation: cjScale 0.2s ease;
+  }
+  .date-picker-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .date-picker-header button {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid rgba(var(--border), 0.1);
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgb(var(--txt-secondary));
+    transition: all 0.15s ease;
+  }
+  .date-picker-header button:hover {
+    background: rgba(var(--steel), 0.08);
+    border-color: rgba(var(--steel), 0.2);
+  }
+  .date-picker-header span {
+    font-size: 13px;
+    font-weight: 700;
+    color: rgb(var(--txt-primary));
+  }
+  .date-picker-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 3px;
+  }
+  .date-picker-weekday {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: rgba(var(--txt-muted), 0.7);
+    padding: 4px 0;
+    text-align: center;
+  }
+  .date-picker-day {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 600;
+    color: rgb(var(--txt-primary));
+    cursor: pointer;
+    transition: all 0.12s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  .date-picker-day:hover { background: rgba(var(--steel), 0.08); }
+  .date-picker-day.selected {
+    background: linear-gradient(135deg, rgb(var(--navy)), rgb(var(--steel)));
+    color: rgb(var(--linen));
+    box-shadow: 0 2px 8px rgba(var(--navy), 0.25);
+  }
+  .date-picker-day.in-range {
+    background: rgba(var(--steel), 0.12);
+    color: rgb(var(--txt-primary));
+  }
+  .date-picker-day.range-start {
+    background: linear-gradient(135deg, rgb(var(--navy)), rgb(var(--steel)));
+    color: rgb(var(--linen));
+    box-shadow: 0 2px 8px rgba(var(--navy), 0.25);
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .date-picker-day.range-end {
+    background: linear-gradient(135deg, rgb(var(--navy)), rgb(var(--steel)));
+    color: rgb(var(--linen));
+    box-shadow: 0 2px 8px rgba(var(--navy), 0.25);
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+  }
+  .date-picker-day.range-middle {
+    background: rgba(var(--steel), 0.12);
+    border-radius: 0;
+  }
+  .date-picker-day.other-month { color: rgba(var(--txt-muted), 0.3); }
+  .date-picker-day.today { border: 2px solid rgba(var(--amber), 0.4); }
+  .date-picker-day.today.selected,
+  .date-picker-day.today.range-start,
+  .date-picker-day.today.range-end {
+    border-color: rgba(var(--linen), 0.3);
+  }
+  .date-picker-footer {
+    display: flex;
+    gap: 6px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(var(--border), 0.08);
+  }
+  .date-picker-footer button {
+    flex: 1;
+    height: 30px;
+    border-radius: 6px;
+    border: none;
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .date-picker-footer .clear-btn {
+    background: rgba(var(--ng), 0.06);
+    color: rgb(var(--ng));
+    border: 1px solid rgba(var(--ng), 0.1);
+  }
+  .date-picker-footer .clear-btn:hover { background: rgba(var(--ng), 0.12); }
+  .date-picker-footer .apply-btn {
+    background: linear-gradient(135deg, rgb(var(--navy)), rgb(var(--steel)));
+    color: rgb(var(--linen));
+  }
+  .date-picker-footer .apply-btn:hover { opacity: 0.9; }
+  
+  .cj-btn-clear {
+    display: inline-flex; align-items: center; gap: 6px;
+    min-height: 38px; padding: 0 16px; border-radius: 10px;
+    border: 1px solid rgba(239,68,68,0.25);
+    background: rgba(239,68,68,0.05);
+    color: rgb(239,68,68);
+    font-size: 12px; font-weight: 700;
+    cursor: pointer; transition: all 0.15s ease;
+  }
+  .cj-btn-clear:hover { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.4); }
+  
+  .cj-badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 10px; border-radius: 99px;
+    font-size: 10px; font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+  
+  @media (max-width: 992px) { .cj-main-layout { grid-template-columns: 1fr !important; } }
+  @media (max-width: 768px) {
+    .cj-filters-grid { grid-template-columns: 1fr 1fr !important; }
+    .cj-date-row { grid-template-columns: 1fr !important; }
+    .cj-date-presets { justify-content: flex-start !important; }
+    .date-picker-dropdown { left: -50%; min-width: 260px; }
+    .cj-parts-list { max-height: 300px !important; position: relative !important; top: 0 !important; }
+    .cj-timeline { max-height: 500px !important; }
+    .cj-header-stats { grid-template-columns: 1fr 1fr !important; }
+  }
+  @media (max-width: 480px) {
+    .cj-filters-grid { grid-template-columns: 1fr !important; }
+    .cj-date-row { grid-template-columns: 1fr !important; }
+    .cj-header-stats { grid-template-columns: 1fr !important; }
+    .date-picker-dropdown { left: -100%; min-width: 240px; max-width: 280px; }
+    .date-picker-day { width: 28px; height: 28px; font-size: 11px; }
+  }
 `;
 
 let themeInjected = false;
@@ -72,64 +360,221 @@ function injectTheme() {
   if (!document.documentElement.hasAttribute("data-theme"))
     document.documentElement.setAttribute("data-theme","dark");
 }
-let kfInjected = false;
-function injectKeyframes() {
-  if (kfInjected) return; kfInjected = true;
-  const s = document.createElement("style"); s.textContent = KEYFRAMES; document.head.appendChild(s);
-}
 
-// ── Color helpers ──────────────────────────────────────────────────────────
+// ── Color System ──────────────────────────────────────────────────────────
 const C = {
-  navy:   (o=1) => `rgba(var(--navy),${o})`,
-  steel:  (o=1) => `rgba(var(--steel),${o})`,
-  amber:  (o=1) => `rgba(var(--amber),${o})`,
-  linen:  (o=1) => `rgba(var(--linen),${o})`,
-  ok:     (o=1) => `rgba(var(--ok-rgb),${o})`,
-  ng:     (o=1) => `rgba(var(--ng-rgb),${o})`,
-  wip:    (o=1) => `rgba(var(--wip-rgb),${o})`,
-  idle:   (o=1) => `rgba(var(--idle-rgb),${o})`,
-  info:   (o=1) => `rgba(var(--steel),${o})`,
-  bg:     (v="base")      => `rgb(var(--bg-${v}))`,
-  txt:    (v="primary")   => `rgb(var(--txt-${v}))`,
-  border: (o)             => `rgba(var(--border),${o||"var(--border-op)"})`,
+  navy: (o=1) => `rgba(var(--navy),${o})`,
+  steel: (o=1) => `rgba(var(--steel),${o})`,
+  amber: (o=1) => `rgba(var(--amber),${o})`,
+  linen: (o=1) => `rgba(var(--linen),${o})`,
+  ok: (o=1) => `rgba(var(--ok),${o})`,
+  ng: (o=1) => `rgba(var(--ng),${o})`,
+  wip: (o=1) => `rgba(var(--wip),${o})`,
+  idle: (o=1) => `rgba(var(--idle),${o})`,
+  info: (o=1) => `rgba(var(--steel),${o})`,
+  gold: (o=1) => `rgba(var(--gold),${o})`,
+  purple: (o=1) => `rgba(var(--purple),${o})`,
+  bg: (v="card") => `rgb(var(--bg-${v}))`,
+  txt: (v="primary") => `rgb(var(--txt-${v}))`,
+  muted: "rgb(var(--txt-muted))",
+  border: (o) => `rgba(var(--border),${o||"var(--border-op)"})`,
 };
 
 const STATUS = {
-  ok:   { fg:C.ok(),   bgLight:C.ok(0.1),   border:C.ok(0.25)   },
-  ng:   { fg:C.ng(),   bgLight:C.ng(0.1),   border:C.ng(0.25)   },
-  wip:  { fg:C.wip(),  bgLight:C.wip(0.1),  border:C.wip(0.25)  },
-  idle: { fg:C.idle(), bgLight:C.idle(0.08),border:C.idle(0.2)  },
+  ok: { fg: C.ok(), bgLight: C.ok(0.1), border: C.ok(0.25), emoji: "✅" },
+  ng: { fg: C.ng(), bgLight: C.ng(0.1), border: C.ng(0.25), emoji: "❌" },
+  wip: { fg: C.wip(), bgLight: C.wip(0.1), border: C.wip(0.25), emoji: "" },
+  idle: { fg: C.idle(), bgLight: C.idle(0.08), border: C.idle(0.2), emoji: "" },
 };
 
-// ── Unchanged utility functions ────────────────────────────────────────────
+// ── Custom Date Range Picker ──────────────────────────────────────────────
+const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select Date Range" }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [tempStart, setTempStart] = useState(null);
+  const [tempEnd, setTempEnd] = useState(null);
+  const pickerRef = useRef(null);
+
+  useEffect(() => {
+    if (startDate) { const start = new Date(startDate); setTempStart(start); } else { setTempStart(null); }
+    if (endDate) { const end = new Date(endDate); setTempEnd(end); } else { setTempEnd(null); }
+  }, [startDate, endDate]);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (pickerRef.current && !pickerRef.current.contains(event.target)) { setIsOpen(false); }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const formatDateDisplay = (date) => {
+    if (!date) return '';
+    return date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+
+  const getDaysInMonth = (year, month) => new Date(year, month + 1, 0).getDate();
+  const getFirstDayOfMonth = (year, month) => new Date(year, month, 1).getDay();
+
+  const handleDayClick = (day, month, year) => {
+    const clickedDate = new Date(year, month, day);
+    clickedDate.setHours(0, 0, 0, 0);
+    if (!tempStart || (tempStart && tempEnd)) {
+      setTempStart(clickedDate);
+      setTempEnd(null);
+    } else if (tempStart && !tempEnd) {
+      if (clickedDate < tempStart) {
+        setTempStart(clickedDate);
+        setTempEnd(tempStart);
+      } else {
+        setTempEnd(clickedDate);
+      }
+    }
+  };
+
+  const handleApply = () => {
+    if (tempStart) {
+      const end = tempEnd || tempStart;
+      const formattedStart = new Date(tempStart);
+      formattedStart.setHours(0, 0, 0, 0);
+      const formattedEnd = new Date(end);
+      formattedEnd.setHours(23, 59, 59, 999);
+      onApply(formattedStart, formattedEnd);
+      setIsOpen(false);
+    }
+  };
+
+  const handleClear = () => {
+    setTempStart(null);
+    setTempEnd(null);
+    onClear();
+    setIsOpen(false);
+  };
+
+  const renderCalendar = () => {
+    const year = currentMonth.getFullYear();
+    const month = currentMonth.getMonth();
+    const daysInMonth = getDaysInMonth(year, month);
+    const firstDay = getFirstDayOfMonth(year, month);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const days = [];
+    const weekdays = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+    weekdays.forEach((day) => {
+      days.push(
+        <div key={`weekday-${day}`} className="date-picker-weekday">
+          {day}
+        </div>
+      );
+    });
+
+    for (let i = 0; i < firstDay; i++) { days.push(<div key={`empty-${i}`} />); }
+
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = new Date(year, month, day);
+      date.setHours(0, 0, 0, 0);
+      const isToday = date.getTime() === today.getTime();
+      const isStart = tempStart && date.getTime() === tempStart.getTime();
+      const isEnd = tempEnd && date.getTime() === tempEnd.getTime();
+      const isInRange = tempStart && tempEnd && date > tempStart && date < tempEnd;
+      const isSelected = isStart || isEnd;
+      let className = 'date-picker-day';
+      if (isToday) className += ' today';
+      if (isSelected) className += ' selected';
+      if (isStart) className += ' range-start';
+      if (isEnd) className += ' range-end';
+      if (isInRange) className += ' range-middle in-range';
+
+      days.push(
+        <button
+          key={`day-${day}`}
+          onClick={() => handleDayClick(day, month, year)}
+          className={className}
+        >
+          {day}
+        </button>
+      );
+    }
+    return days;
+  };
+
+  const getDateRangeText = () => {
+    if (tempStart && tempEnd) return `${formatDateDisplay(tempStart)} - ${formatDateDisplay(tempEnd)}`;
+    if (tempStart) return `${formatDateDisplay(tempStart)} - Select end date`;
+    return label;
+  };
+
+  const hasSelection = tempStart !== null;
+
+  return (
+    <div className="date-picker-container" ref={pickerRef} style={{ width: '100%', minWidth: 0 }}>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="reports-filter-input"
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          gap: 8, minWidth: 220, cursor: 'pointer',
+          borderColor: hasSelection ? C.navy(0.5) : undefined,
+          boxShadow: hasSelection ? `0 0 0 2px ${C.navy(0.12)}` : undefined,
+        }}
+      >
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden', minWidth: 0 }}>
+          <Calendar size={14} style={{ color: hasSelection ? C.navy() : C.muted, flexShrink: 0 }} />
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hasSelection ? C.navy() : C.txt("muted") }}>
+            {getDateRangeText()}
+          </span>
+        </span>
+        <ChevronDown size={14} style={{ color: C.muted, flexShrink: 0, transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s ease' }} />
+      </button>
+
+      {isOpen && (
+        <div className="date-picker-dropdown">
+          <div className="date-picker-header">
+            <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1))}
+            >
+              <ChevronLeft size={14} />
+            </button>
+            <span>
+              {currentMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}
+            </span>
+            <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1))}
+            >
+              <ChevronRightIcon size={14} />
+            </button>
+          </div>
+
+          <div className="date-picker-grid">
+            {renderCalendar()}
+          </div>
+
+          <div className="date-picker-footer">
+            <button className="clear-btn" onClick={handleClear}>
+              Clear
+            </button>
+            <button className="apply-btn" onClick={handleApply}>
+              Apply Range
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── Helper Functions ──────────────────────────────────────────────────────
 function normalizePartId(v) { return String(v||"").trim(); }
-const INVALID_CUSTOMER_QR_VALUES = new Set([
-  "ERROR",
-  "ERR",
-  "FAILED",
-  "FAIL",
-  "NG",
-  "WAIT",
-  "WAITING",
-  "PENDING",
-  "IN_PROGRESS",
-  "RUNNING",
-  "PLC_COMM_ERROR",
-  "COMM_ERROR",
-  "TIMEOUT",
-  "NULL",
-  "UNDEFINED",
-]);
 function sanitizeCustomerQrValue(v) {
   const raw = String(v || "").trim();
   if (!raw || raw === "-") return "";
-  if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
+  const invalid = new Set(["ERROR","ERR","FAILED","FAIL","NG","WAIT","WAITING","PENDING","IN_PROGRESS","RUNNING","PLC_COMM_ERROR","COMM_ERROR","TIMEOUT","NULL","UNDEFINED"]);
+  if (invalid.has(raw.toUpperCase())) return "";
   return raw;
 }
 function extractQrDecision(payload={}) {
-  const p=String(payload.qrResult||payload.decision||payload.outcome||payload.scanOutcome||payload.qrDecision||payload.qrStatus||"").trim().toUpperCase();
+  const p = String(payload.qrResult||payload.decision||payload.outcome||payload.scanOutcome||payload.qrDecision||payload.qrStatus||"").trim().toUpperCase();
   if (p) return p;
-  const f=String(payload.reason||payload.result||"").trim().toUpperCase();
+  const f = String(payload.reason||payload.result||"").trim().toUpperCase();
   if (["PASS","OK","ALLOW"].includes(f)) return "ALLOW";
   if (["FAIL","NG","BLOCK","REJECT"].includes(f)) return "BLOCK";
   return "";
@@ -138,34 +583,44 @@ function hasQrDecision(payload={}) {
   return ["ALLOW","PASS","OK","ACCEPT","VALID","BLOCK","FAIL","NG","REJECT","INVALID"].includes(extractQrDecision(payload));
 }
 function toQrSignal(payload={}) {
-  const d=extractQrDecision(payload);
-  const isPass=["ALLOW","PASS","OK","ACCEPT","VALID"].includes(d);
-  const isFail=["BLOCK","FAIL","NG","REJECT","INVALID"].includes(d);
+  const d = extractQrDecision(payload);
+  const isPass = ["ALLOW","PASS","OK","ACCEPT","VALID"].includes(d);
+  const isFail = ["BLOCK","FAIL","NG","REJECT","INVALID"].includes(d);
   return {
-    id:`${Date.now()}-${Math.random()}`,label:isPass?"QR PASS":isFail?"QR FAIL":"QR WAIT",
-    variant:isPass?"ok":isFail?"ng":"idle",
-    partId:normalizePartId(payload.partId||payload.part_id),
-    stationNo:String(payload.stationNo||payload.station_no||"").trim().toUpperCase(),
-    decision:d,reason:String(payload.reason||payload.qrReason||"").trim(),
-    message:String(payload.message||"").trim(),timestamp:payload.timestamp||new Date().toISOString(),
+    id: `${Date.now()}-${Math.random()}`,
+    label: isPass ? "✅ QR PASS" : isFail ? "❌ QR FAIL" : " QR WAIT",
+    variant: isPass ? "ok" : isFail ? "ng" : "idle",
+    partId: normalizePartId(payload.partId||payload.part_id),
+    stationNo: String(payload.stationNo||payload.station_no||"").trim().toUpperCase(),
+    decision: d,
+    reason: String(payload.reason||payload.qrReason||"").trim(),
+    message: String(payload.message||"").trim(),
+    timestamp: payload.timestamp || new Date().toISOString(),
   };
 }
-function toDerivedPassSignal(partId,stationNo,timestamp) {
-  return {id:`${Date.now()}-${Math.random()}`,label:"QR PASS",variant:"ok",
-    partId:normalizePartId(partId),stationNo:String(stationNo||"").trim().toUpperCase(),
-    decision:"ALLOW",reason:"QR_VALIDATED",message:"Validated from journey",
-    timestamp:timestamp||new Date().toISOString()};
+function toDerivedPassSignal(partId, stationNo, timestamp) {
+  return {
+    id: `${Date.now()}-${Math.random()}`,
+    label: "✅ QR PASS",
+    variant: "ok",
+    partId: normalizePartId(partId),
+    stationNo: String(stationNo||"").trim().toUpperCase(),
+    decision: "ALLOW",
+    reason: "QR_VALIDATED",
+    message: "Validated from journey",
+    timestamp: timestamp || new Date().toISOString(),
+  };
 }
 function getLatestAttempt(station={}) {
-  const a=Array.isArray(station.attempts)?station.attempts:[];
-  return a.length?a[a.length-1]:null;
+  const a = Array.isArray(station.attempts) ? station.attempts : [];
+  return a.length ? a[a.length-1] : null;
 }
 function hasDerivedQrSignal(station={}) {
-  const la=getLatestAttempt(station);
+  const la = getLatestAttempt(station);
   if (!la) return false;
   if (la.isBypassed) return true;
-  const s=String(la.plcStatus||station.latestStatus||"").trim().toUpperCase();
-  return s&&s!=="RESET";
+  const s = String(la.plcStatus||station.latestStatus||"").trim().toUpperCase();
+  return s && s !== "RESET";
 }
 function isStationBypassed(station={}) {
   return Array.isArray(station.attempts) && station.attempts.some((att) => att?.isBypassed === true);
@@ -173,14 +628,12 @@ function isStationBypassed(station={}) {
 function normalizeLeakResult(value) {
   const token = String(value || "").trim().toUpperCase();
   if (!token) return "";
-  if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(token)) return "NG";
-  if (["OK", "PASS", "PASSED", "GOOD"].includes(token)) return "OK";
+  if (["NG","NOK","NOT_OK","NOT OK","FAIL","FAILED","REJECT","REJECTED"].includes(token)) return "NG";
+  if (["OK","PASS","PASSED","GOOD"].includes(token)) return "OK";
   return "";
 }
 function getLeakStationState(station={}) {
-  const readings = station.leakTestReadings?.length > 0
-    ? station.leakTestReadings
-    : (station.leakTestReading ? [station.leakTestReading] : []);
+  const readings = station.leakTestReadings?.length > 0 ? station.leakTestReadings : (station.leakTestReading ? [station.leakTestReading] : []);
   if (!readings.length) return "";
   const results = readings.map((reading) => normalizeLeakResult(reading?.Result || reading?.result)).filter(Boolean);
   if (results.some((result) => result === "NG")) return "FAILED";
@@ -198,66 +651,41 @@ function getJourneyStationState(station={}, qrMeta=null, settings={}) {
   const liveQrLabel = String(qrMeta?.label || "").trim().toUpperCase();
   const hasPassQrSignal = qrState === "PASS" || liveQrLabel.includes("QR PASS");
   const opState = String(station.operation || "").trim().toUpperCase();
-  const opFailLike = ["FAIL", "FAILED", "NG", "COMM", "COMM_ERROR", "PLC_COMM_ERROR", "TIMEOUT", "PLC_TIMEOUT"].includes(opState);
-  const qrFailLike = ["FAIL", "FAILED", "NG", "BLOCK", "REJECT", "INVALID"].includes(qrState);
-  const forcePassForAutoStations =
-    settings.manualResult !== true &&
-    hasPassQrSignal &&
-    !opFailLike &&
-    !qrFailLike;
+  const opFailLike = ["FAIL","FAILED","NG","COMM","COMM_ERROR","PLC_COMM_ERROR","TIMEOUT","PLC_TIMEOUT"].includes(opState);
+  const qrFailLike = ["FAIL","FAILED","NG","BLOCK","REJECT","INVALID"].includes(qrState);
+  const forcePassForAutoStations = settings.manualResult !== true && hasPassQrSignal && !opFailLike && !qrFailLike;
   return forcePassForAutoStations ? "COMPLETED" : station.stageState;
 }
 function deriveJourneyPartStatus(part={}, stationTimeline=[], qrByStation={}, stationSettings={}) {
-  const states = (stationTimeline || [])
-    .map((station) => String(getJourneyStationState(
-      station,
-      qrByStation[station.stationNo],
-      getStationFeatures(station.stationNo, stationSettings)
-    ) || "").trim().toUpperCase())
-    .filter(Boolean);
-  if (states.some((state) => ["FAILED", "INTERLOCKED", "ENDED_NG", "NG", "COMPLETED_NG", "COMM_ERROR"].includes(state))) {
-    return "NG";
-  }
+  const states = (stationTimeline || []).map((station) => String(getJourneyStationState(station, qrByStation[station.stationNo], getStationFeatures(station.stationNo, stationSettings)) || "").trim().toUpperCase()).filter(Boolean);
+  if (states.some((state) => ["FAILED","INTERLOCKED","ENDED_NG","NG","COMPLETED_NG","COMM_ERROR"].includes(state))) return "NG";
   const rawStatus = String(part?.status || "").trim().toUpperCase();
-  if (["NG", "INTERLOCKED", "FAILED", "COMPLETED_NG", "ENDED_NG"].includes(rawStatus)) return "NG";
-  if (states.length && states.every((state) => ["PASSED", "COMPLETED", "COMPLETED_OK"].includes(state))) return "COMPLETED";
-  if (states.some((state) => ["IN_PROGRESS", "RUNNING", "REWORK", "STARTED"].includes(state))) return "IN_PROGRESS";
+  if (["NG","INTERLOCKED","FAILED","COMPLETED_NG","ENDED_NG"].includes(rawStatus)) return "NG";
+  if (states.length && states.every((state) => ["PASSED","COMPLETED","COMPLETED_OK"].includes(state))) return "COMPLETED";
+  if (states.some((state) => ["IN_PROGRESS","RUNNING","REWORK","STARTED"].includes(state))) return "IN_PROGRESS";
   return rawStatus || "IN_PROGRESS";
 }
 function formatTime(v) {
   if (!v) return "—";
-  const d=new Date(v);
+  const d = new Date(v);
   if (isNaN(d.getTime())) return "—";
-  return d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 function formatDate(v) {
   if (!v) return "—";
-  const d=new Date(v);
+  const d = new Date(v);
   if (isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString([],{day:"2-digit",month:"short"})+" "+formatTime(v);
+  return d.toLocaleDateString([], { day: "2-digit", month: "short" }) + " " + formatTime(v);
 }
 function getStationMeta(status) {
-  const s=String(status||"PENDING").toUpperCase();
-  if (["PASSED","ENDED_OK","COMPLETED","COMPLETED_OK"].includes(s))    return {variant:"ok",  label:"Pass",       icon:CheckCircle2};
-  if (["FAILED","INTERLOCKED","ENDED_NG","NG","COMPLETED_NG"].includes(s)) return {variant:"ng",  label:"Fail",       icon:XCircle};
-  if (["COMM_ERROR","PLC_COMM_ERROR","PLC_TIMEOUT","TIMEOUT","PLC_ERROR","ACK_TIMEOUT","RUNNING_TIMEOUT","END_TIMEOUT","RESET_TIMEOUT"].includes(s)) return {variant:"ng", label:"Error", icon:AlertTriangle};
-  if (["RUNNING","IN_PROGRESS","STARTED","REWORK"].includes(s)) return {variant:"wip",label:"In Progress",icon:Clock3};
-  return {variant:"idle",label:"Waiting",icon:Clock3};
+  const s = String(status||"PENDING").toUpperCase();
+  if (["PASSED","ENDED_OK","COMPLETED","COMPLETED_OK"].includes(s)) return { variant: "ok", label: "✅ Pass", icon: CheckCircle2 };
+  if (["FAILED","INTERLOCKED","ENDED_NG","NG","COMPLETED_NG"].includes(s)) return { variant: "ng", label: "❌ Fail", icon: XCircle };
+  if (["COMM_ERROR","PLC_COMM_ERROR","PLC_TIMEOUT","TIMEOUT","PLC_ERROR","ACK_TIMEOUT","RUNNING_TIMEOUT","END_TIMEOUT","RESET_TIMEOUT"].includes(s)) return { variant: "ng", label: "⚠️ Error", icon: AlertTriangle };
+  if (["RUNNING","IN_PROGRESS","STARTED","REWORK"].includes(s)) return { variant: "wip", label: " In Progress", icon: Clock3 };
+  return { variant: "idle", label: " Waiting", icon: Clock3 };
 }
-const LEAK_TEST_FIELDS = [
-  ["Machine Name", "Machine"],
-  ["Part QR", "Part_QR_Code"],
-  ["Result", "Result"],
-  ["Body Leak Value", "Body_Leak_Value"],
-  ["Gall_1", "Gall_1"],
-  ["Gall_2", "Gall_2"],
-  ["Cycle Time", "Cycle_Time"],
-  ["Running Mode", "Running_Mode"],
-  ["Manual", "Manual"],
-  ["Dry", "Dry"],
-  ["Wey", "Wey"],
-  ["Both", "Both"],
-];
+const LEAK_TEST_FIELDS = [["Machine Name","Machine"],["Part QR","Part_QR_Code"],["Result","Result"],["Body Leak Value","Body_Leak_Value"],["Gall_1","Gall_1"],["Gall_2","Gall_2"],["Cycle Time","Cycle_Time"],["Running Mode","Running_Mode"],["Manual","Manual"],["Dry","Dry"],["Wey","Wey"],["Both","Both"]];
 function formatLeakFieldValue(reading, key) {
   if (!reading) return "—";
   if (key === "Machine") return reading.Machine || reading.machineName || reading.matchedMachineName || "—";
@@ -271,45 +699,35 @@ function formatLeakFieldValue(reading, key) {
 }
 function getLeakResultMeta(reading) {
   const result = normalizeLeakResult(reading?.Result || reading?.result);
-  if (result === "OK") return { variant: "ok", label: "Leak OK" };
-  if (result === "NG") return { variant: "ng", label: "Leak NG" };
-  return { variant: "idle", label: "Leak -" };
+  if (result === "OK") return { variant: "ok", label: "✅ Leak OK" };
+  if (result === "NG") return { variant: "ng", label: "❌ Leak NG" };
+  return { variant: "idle", label: " Leak -" };
 }
 function getStationDisplayLabel(station) {
   const stationNo = String(station?.stationNo || station?.operationNo || "").trim();
   const machineName = String(station?.machineName || station?.stationName || station?.matchedMachineName || "").trim();
   const operationNo = String(station?.operationNo || stationNo || "").trim();
   if (operationNo.toUpperCase() === "OP150") {
-    return "Leak Test + OP150";
+    return "🔬 Leak Test + OP150";
   }
-  if (machineName && operationNo) return `${machineName} + ${operationNo}`;
-  if (machineName) return machineName;
-  return stationNo || "Station";
+  if (machineName && operationNo) return ` ${machineName} + ${operationNo}`;
+  if (machineName) return ` ${machineName}`;
+  return `📍 ${stationNo || "Station"}`;
 }
 function getPartMeta(status) {
   const s=String(status||"").trim().toUpperCase();
-  if (["COMPLETED", "PASSED", "COMPLETED_OK"].includes(s)) return {label:"Pass", variant:"ok"};
-  if (["NG", "INTERLOCKED", "FAILED", "COMPLETED_NG", "ENDED_NG"].includes(s)) return {label:"Fail", variant:"ng"};
-  if (["IN_PROGRESS", "REWORK", "RUNNING", "STARTED", "SCANNED", "VALIDATED", "START_SENT", "WAITING_ACK", "ACK_RECEIVED", "WAITING_RUNNING", "WAITING_END"].includes(s)) return {label:"In Progress", variant:"wip"};
-  if (["PLC_COMM_ERROR", "COMM_ERROR", "PLC_TIMEOUT", "PLC_ERROR"].includes(s)) return {label:"Error", variant:"ng"};
-  return {label:"Waiting",variant:"idle"};
+  if (["COMPLETED", "PASSED", "COMPLETED_OK"].includes(s)) return {label:"✅ Pass", variant:"ok"};
+  if (["NG", "INTERLOCKED", "FAILED", "COMPLETED_NG", "ENDED_NG"].includes(s)) return {label:"❌ Fail", variant:"ng"};
+  if (["IN_PROGRESS", "REWORK", "RUNNING", "STARTED", "SCANNED", "VALIDATED", "START_SENT", "WAITING_ACK", "ACK_RECEIVED", "WAITING_RUNNING", "WAITING_END"].includes(s)) return {label:" In Progress", variant:"wip"};
+  if (["PLC_COMM_ERROR", "COMM_ERROR", "PLC_TIMEOUT", "PLC_ERROR"].includes(s)) return {label:"⚠️ Error", variant:"ng"};
+  return {label:" Waiting",variant:"idle"};
 }
-// ── Mini QR code SVG generator (no external lib needed) ───────────────────
-// Generates a simple visual QR-like pattern from the part ID string
+
 function generateQrPattern(text, size=80) {
-  // Deterministic hash → grid pattern
   let hash = 0;
   for (let i=0;i<text.length;i++) hash=((hash<<5)-hash)+text.charCodeAt(i), hash|=0;
   const cells = 7; const cell = Math.floor(size/cells);
   const squares = [];
-  // Finder patterns (corners)
-  const finder = (ox,oy) => {
-    squares.push(<rect key={`f${ox}${oy}`} x={ox} y={oy} width={cell*7} height={cell*7} fill="none" stroke="currentColor" strokeWidth={cell*0.5}/>);
-    squares.push(<rect key={`fi${ox}${oy}`} x={ox+cell} y={oy+cell} width={cell*5} height={cell*5} fill="currentColor"/>);
-    squares.push(<rect key={`fc${ox}${oy}`} x={ox+cell*2} y={oy+cell*2} width={cell*3} height={cell*3} fill="white"/>);
-    squares.push(<rect key={`fcc${ox}${oy}`} x={ox+cell*3-cell/3} y={oy+cell*3-cell/3} width={cell*1.6} height={cell*1.6} fill="currentColor"/>);
-  };
-  // Data modules
   for (let r=0;r<cells;r++) for (let c=0;c<cells;c++) {
     const isFinderZone=(r<3&&c<3)||(r<3&&c>=cells-3)||(r>=cells-3&&c<3);
     if (!isFinderZone) {
@@ -322,22 +740,18 @@ function generateQrPattern(text, size=80) {
   return (
     <svg viewBox={`0 0 ${cells*cell} ${cells*cell}`} width={size} height={size}
       style={{color:"currentColor",display:"block"}}>
-      {/* Top-left finder */}
       <rect x={0} y={0} width={cell*3} height={cell*3} fill="currentColor"/>
       <rect x={cell} y={cell} width={cell} height={cell} fill="white"/>
-      {/* Top-right finder */}
       <rect x={(cells-3)*cell} y={0} width={cell*3} height={cell*3} fill="currentColor"/>
       <rect x={(cells-2)*cell} y={cell} width={cell} height={cell} fill="white"/>
-      {/* Bottom-left finder */}
       <rect x={0} y={(cells-3)*cell} width={cell*3} height={cell*3} fill="currentColor"/>
       <rect x={cell} y={(cells-2)*cell} width={cell} height={cell} fill="white"/>
-      {/* Data modules */}
       {squares}
     </svg>
   );
 }
 
-// ── Atoms ──────────────────────────────────────────────────────────────────
+// ── Components ─────────────────────────────────────────────────────────────
 const Badge = ({ variant="idle", label, dot=true, pulse=false }) => {
   const s=STATUS[variant]||STATUS.idle;
   return (
@@ -345,7 +759,7 @@ const Badge = ({ variant="idle", label, dot=true, pulse=false }) => {
       borderRadius:99,fontSize:11,fontWeight:700,letterSpacing:"0.04em",
       color:s.fg,background:s.bgLight,border:`1px solid ${s.border}`,whiteSpace:"nowrap"}}>
       {dot&&<span style={{width:6,height:6,borderRadius:"50%",background:s.fg,flexShrink:0,
-        animation:pulse&&variant==="wip"?"itPulse 1.4s ease-in-out infinite":"none"}}/>}
+        animation:pulse&&variant==="wip"?"cjPulse 1.4s ease-in-out infinite":"none"}}/>}
       {label}
     </span>
   );
@@ -399,7 +813,7 @@ const Btn = ({ children, onClick, disabled, variant="ghost", loading, style:sx={
         borderRadius:8,fontSize:12,fontWeight:700,cursor:disabled?"not-allowed":"pointer",
         opacity:disabled?0.45:1,transition:"all 0.15s ease",border:"none",outline:"none",
         ...(styles[variant]||styles.ghost),...sx}}>
-      {loading?<RefreshCw size={12} style={{animation:"itSpin 0.9s linear infinite"}}/>:children}
+      {loading?<RefreshCw size={12} style={{animation:"cjSpin 0.9s linear infinite"}}/>:children}
     </button>
   );
 };
@@ -413,9 +827,6 @@ const Divider = ({ label }) => (
   </div>
 );
 
-// ── Part Action Button — always clearly visible ───────────────────────────
-// Used in parts list for QR and Delete — has background + border so it's
-// always visible regardless of theme, not just on hover
 const PartActionBtn = ({ icon, label, color, bgColor, borderColor, hoverBg, onClick }) => {
   const [h, setH] = useState(false);
   return (
@@ -440,7 +851,6 @@ const PartActionBtn = ({ icon, label, color, bgColor, borderColor, hoverBg, onCl
   );
 };
 
-// ── QR Modal ──────────────────────────────────────────────────────────────
 const QrModal = ({ partId, onClose, onDeletePart }) => {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting,      setDeleting]      = useState(false);
@@ -463,12 +873,8 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
       justifyContent:"center",padding:16,background:"rgba(0,0,0,0.75)",backdropFilter:"blur(6px)"}}>
       <div style={{width:"100%",maxWidth:400,background:C.bg("card"),
         border:`1px solid ${C.border()}`,borderRadius:18,overflow:"hidden",
-        boxShadow:"0 24px 64px rgba(0,0,0,0.5)",animation:"itScale 0.2s ease"}}>
-
-        {/* Accent bar */}
+        boxShadow:"0 24px 64px rgba(0,0,0,0.5)",animation:"cjScale 0.2s ease"}}>
         <div style={{height:3,background:`linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`}}/>
-
-        {/* Header */}
         <div style={{padding:"14px 18px",borderBottom:`1px solid ${C.border()}`,
           background:C.bg("surface"),display:"flex",alignItems:"center",
           justifyContent:"space-between"}}>
@@ -480,7 +886,7 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
             </div>
             <div>
               <p style={{fontSize:9,fontWeight:800,textTransform:"uppercase",
-                letterSpacing:"0.1em",color:C.txt("muted"),marginBottom:1}}>Part QR Code</p>
+                letterSpacing:"0.1em",color:C.txt("muted"),marginBottom:1}}> Part QR Code</p>
               <p style={{fontSize:13,fontWeight:700,color:C.txt("primary")}}>
                 {partId}
               </p>
@@ -492,10 +898,7 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
             <X size={13} color={C.txt("muted")}/>
           </button>
         </div>
-
-        {/* QR code display */}
         <div style={{padding:"24px",display:"flex",flexDirection:"column",alignItems:"center",gap:16}}>
-          {/* White card mimicking a real label */}
           <div style={{background:"white",borderRadius:12,padding:"20px",
             boxShadow:"0 4px 20px rgba(0,0,0,0.15)",display:"flex",
             flexDirection:"column",alignItems:"center",gap:10,
@@ -508,14 +911,11 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
               {partId}
             </p>
             <p style={{fontSize:9,color:"rgba(84,119,146,0.8)",textTransform:"uppercase",
-              letterSpacing:"0.1em"}}>IndusTrace MES</p>
+              letterSpacing:"0.1em"}}> IndusTrace MES</p>
           </div>
-
           <p style={{fontSize:11,color:C.txt("muted"),textAlign:"center",lineHeight:1.5}}>
-            Scan this code to look up the part's full production journey.
+            🔍 Scan this code to look up the part's full production journey.
           </p>
-
-          {/* Delete section */}
           {!confirmDelete ? (
             <button onClick={() => { setDeleteError(""); setConfirmDelete(true); }}
               style={{display:"flex",alignItems:"center",gap:6,
@@ -525,13 +925,13 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
                 transition:"all .15s",width:"100%",justifyContent:"center"}}
               onMouseEnter={e=>e.currentTarget.style.background=C.ng(0.14)}
               onMouseLeave={e=>e.currentTarget.style.background=C.ng(0.08)}>
-              <Trash2 size={13}/> Remove This Part from System
+              <Trash2 size={13}/> 🗑️ Remove This Part from System
             </button>
           ) : (
             <div style={{width:"100%",background:C.ng(0.07),border:`1px solid ${C.ng(0.25)}`,
-              borderRadius:10,padding:"14px",animation:"itFadeIn .15s ease"}}>
+              borderRadius:10,padding:"14px",animation:"cjFadeIn .15s ease"}}>
               <p style={{fontSize:12,fontWeight:700,color:C.ng(),marginBottom:4}}>
-                ⚠ Remove Part from System?
+                ⚠️ Remove Part from System?
               </p>
               <p style={{fontSize:11,color:C.txt("muted"),lineHeight:1.5,marginBottom:12}}>
                 This will remove <strong style={{color:C.txt("primary"),fontFamily:"'DM Mono',monospace"}}>{partId}</strong> and
@@ -565,21 +965,24 @@ const QrModal = ({ partId, onClose, onDeletePart }) => {
 //  MAIN COMPONENT
 // ══════════════════════════════════════════════════════════════════════════
 const ComponentJourney = () => {
-  useEffect(()=>{ injectTheme(); injectKeyframes(); },[]);
+  useEffect(()=>{ injectTheme(); },[]);
 
   const [searchTerm,       setSearchTerm]       = useState("");
-  const [filters,          setFilters]          = useState({
-    dateFrom:"",
-    dateTo:"",
-    partId:"",
-    plantId:"",
-    lineId:"",
-    machineId:"",
-    stationNo:"",
-    status:"",
-    operatorId:"",
-    shiftCode:"",
-    lineName:"",
+  const [filters,          setFilters]          = useState(() => {
+    const range = getCurrentProductionDateRange();
+    return {
+      dateFrom: toLocalDateTimeInput(range.start),
+      dateTo: toLocalDateTimeInput(range.end),
+      partId:"",
+      plantId:"",
+      lineId:"",
+      machineId:"",
+      stationNo:"",
+      status:"",
+      operatorId:"",
+      shiftCode:"",
+      lineName:"",
+    };
   });
   const [parts,            setParts]            = useState([]);
   const [machines,         setMachines]         = useState([]);
@@ -595,7 +998,6 @@ const ComponentJourney = () => {
   const [qrFeed,           setQrFeed]           = useState([]);
   const [qrByStation,      setQrByStation]      = useState({});
   const [stationSettings,  setStationSettings]  = useState(()=>getStationFeatureSettings());
-  // NEW: QR modal state
   const [qrModalPartId,    setQrModalPartId]    = useState(null);
 
   const selectedPartIdRef      = useRef("");
@@ -631,7 +1033,7 @@ const ComponentJourney = () => {
     return acc;
   },{passed:0,failed:0,inProgress:0,pending:0}),[stationTimeline, qrByStation, stationSettings]);
 
-  // ── Data / socket logic (100% unchanged logic) ─────────────────────────
+  // ── Data Loading ─────────────────────────────────────────────────────
   const loadPartCatalog = useCallback(async(search)=>{
     const rows=await traceabilityApi.partCatalog({
       search,
@@ -785,61 +1187,41 @@ const ComponentJourney = () => {
     try {
       const workbook = new ExcelJS.Workbook();
       const sheet = workbook.addWorksheet("Traceability Report");
-
-      // Set column widths
       sheet.columns = [
-        { header: "Part ID", key: "partId", width: 25 },
-        { header: "Station", key: "stationNo", width: 15 },
-        { header: "State", key: "stageState", width: 15 },
-        { header: "Latest Status", key: "latestStatus", width: 20 },
-        { header: "Result", key: "latestResult", width: 15 },
-        { header: "Remark", key: "interlockReason", width: 35 },
-        { header: "Cycle Start", key: "cycleStartTime", width: 25 },
-        { header: "Cycle End", key: "cycleEndTime", width: 25 },
-        { header: "Duration", key: "cycleDuration", width: 15 },
-        { header: "Timestamp", key: "completedAt", width: 25 }
+        { header: " Part ID", key: "partId", width: 25 },
+        { header: " Station", key: "stationNo", width: 15 },
+        { header: " State", key: "stageState", width: 15 },
+        { header: " Latest Status", key: "latestStatus", width: 20 },
+        { header: " Result", key: "latestResult", width: 15 },
+        { header: " Remark", key: "interlockReason", width: 35 },
+        { header: "⏱ Cycle Start", key: "cycleStartTime", width: 25 },
+        { header: "⏱ Cycle End", key: "cycleEndTime", width: 25 },
+        { header: " Duration", key: "cycleDuration", width: 15 },
+        { header: " Timestamp", key: "completedAt", width: 25 }
       ];
-
-      // Add Title
-      sheet.insertRow(1, ["Industrial Traceability System - Part Journey Report"]);
+      sheet.insertRow(1, [" Industrial Traceability System - Part Journey Report"]);
       sheet.mergeCells("A1:G1");
       const titleRow = sheet.getRow(1);
       titleRow.font = { name: "Arial", family: 4, size: 16, bold: true, color: { argb: "FF1A3263" } };
       titleRow.alignment = { horizontal: "center", vertical: "middle" };
       titleRow.height = 30;
-
-      sheet.insertRow(2, [`Report Generated: ${new Date().toLocaleString()}`, "", "", "", "", "", `Total Stations: ${rows.length}`]);
+      sheet.insertRow(2, [`📅 Report Generated: ${new Date().toLocaleString()}`, "", "", "", "", "", `📊 Total Stations: ${rows.length}`]);
       sheet.mergeCells("A2:E2");
       sheet.mergeCells("F2:G2");
       const subTitleRow = sheet.getRow(2);
       subTitleRow.font = { name: "Arial", size: 10, italic: true, color: { argb: "FF666666" } };
       subTitleRow.getCell(6).alignment = { horizontal: "right" };
       subTitleRow.height = 20;
-
-      sheet.insertRow(3, []); // Empty row
-
-      // Header Row Styling (now row 4)
+      sheet.insertRow(3, []);
       const headerRow = sheet.getRow(4);
-      headerRow.values = ["Part ID", "Station", "State", "Latest Status", "Result", "Remark", "Cycle Start", "Cycle End", "Duration", "Timestamp"];
+      headerRow.values = ["📦 Part ID", "📍 Station", "📊 State", " Latest Status", "✅ Result", "📝 Remark", " Cycle Start", " Cycle End", " Duration", " Timestamp"];
       headerRow.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
       headerRow.alignment = { horizontal: "center", vertical: "middle" };
       headerRow.height = 25;
-      
       headerRow.eachCell((cell) => {
-        cell.fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: "FF1A3263" } // Navy Blue
-        };
-        cell.border = {
-          top: { style: 'thin', color: { argb: "FFCCCCCC" } },
-          left: { style: 'thin', color: { argb: "FFCCCCCC" } },
-          bottom: { style: 'thin', color: { argb: "FFCCCCCC" } },
-          right: { style: 'thin', color: { argb: "FFCCCCCC" } }
-        };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1A3263" } };
+        cell.border = { top: { style: 'thin', color: { argb: "FFCCCCCC" } }, left: { style: 'thin', color: { argb: "FFCCCCCC" } }, bottom: { style: 'thin', color: { argb: "FFCCCCCC" } }, right: { style: 'thin', color: { argb: "FFCCCCCC" } } };
       });
-
-      // Add Data Rows
       rows.forEach((row, index) => {
         const dataRow = sheet.addRow({
           partId: selectedPartId || "",
@@ -853,56 +1235,30 @@ const ComponentJourney = () => {
           cycleDuration: row.cycleDuration,
           completedAt: row.completedAt ? new Date(row.completedAt).toLocaleString() : ""
         });
-
-        // Alternate row shading
         if (index % 2 === 0) {
           dataRow.eachCell(cell => {
             cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8F9FA" } };
           });
         }
-
-        // Apply borders and alignment to all cells
         dataRow.eachCell((cell, colNumber) => {
-          cell.border = {
-            top: { style: 'thin', color: { argb: "FFEEEEEE" } },
-            left: { style: 'thin', color: { argb: "FFEEEEEE" } },
-            bottom: { style: 'thin', color: { argb: "FFEEEEEE" } },
-            right: { style: 'thin', color: { argb: "FFEEEEEE" } }
-          };
-          if (colNumber !== 6) { // Center everything except remarks
-            cell.alignment = { horizontal: "center", vertical: "middle" };
-          } else {
-            cell.alignment = { horizontal: "left", vertical: "middle", wrapText: true };
-          }
+          cell.border = { top: { style: 'thin', color: { argb: "FFEEEEEE" } }, left: { style: 'thin', color: { argb: "FFEEEEEE" } }, bottom: { style: 'thin', color: { argb: "FFEEEEEE" } }, right: { style: 'thin', color: { argb: "FFEEEEEE" } } };
+          if (colNumber !== 6) { cell.alignment = { horizontal: "center", vertical: "middle" }; } else { cell.alignment = { horizontal: "left", vertical: "middle", wrapText: true }; }
         });
-
-        // Color coding for State (Column 3)
         const stateCell = dataRow.getCell(3);
         const state = String(row.stageState).toUpperCase();
-        if (state === "PASSED" || state === "COMPLETED") {
-          stateCell.font = { color: { argb: "FF15803D" }, bold: true }; // Green
-        } else if (state === "FAILED" || state === "NG") {
-          stateCell.font = { color: { argb: "FFDC2626" }, bold: true }; // Red
-        } else if (state === "IN_PROGRESS" || state === "RUN") {
-          stateCell.font = { color: { argb: "FFD97706" }, bold: true }; // Orange
-        }
-
-        // Color coding for Result (Column 5)
+        if (state === "PASSED" || state === "COMPLETED") { stateCell.font = { color: { argb: "FF15803D" }, bold: true }; }
+        else if (state === "FAILED" || state === "NG") { stateCell.font = { color: { argb: "FFDC2626" }, bold: true }; }
+        else if (state === "IN_PROGRESS" || state === "RUN") { stateCell.font = { color: { argb: "FFD97706" }, bold: true }; }
         const resultCell = dataRow.getCell(5);
         const result = String(row.latestResult).toUpperCase();
-        if (["PASS", "OK", "ALLOW"].includes(result)) {
-          resultCell.font = { color: { argb: "FF15803D" }, bold: true };
-        } else if (["FAIL", "NG", "BLOCK"].includes(result)) {
-          resultCell.font = { color: { argb: "FFDC2626" }, bold: true };
-        }
+        if (["PASS", "OK", "ALLOW"].includes(result)) { resultCell.font = { color: { argb: "FF15803D" }, bold: true }; }
+        else if (["FAIL", "NG", "BLOCK"].includes(result)) { resultCell.font = { color: { argb: "FFDC2626" }, bold: true }; }
       });
-
       const buffer = await workbook.xlsx.writeBuffer();
       const pad = (v) => String(v).padStart(2, "0");
       const now = new Date();
       const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
       saveAs(new Blob([buffer]), `Traceability_Report_${stamp}.xlsx`);
-
     } catch (e) {
       setPopup({ type:"ERROR", title:"Export Failed", message:"Failed to generate Excel file." });
     }
@@ -927,7 +1283,6 @@ const ComponentJourney = () => {
     finally { setResettingStation("");setResetConfirm(null); }
   },[resetConfirm,selectedPartId,refreshJourneyNow,loadPartCatalog]);
 
-  // NEW: Remove part from local list
   const handleDeletePart = useCallback((partId)=>{
     setParts(prev=>prev.filter(p=>p.partId!==partId));
     if (selectedPartId===partId) {
@@ -935,6 +1290,7 @@ const ComponentJourney = () => {
     }
   },[selectedPartId]);
 
+  // ── Effects ─────────────────────────────────────────────────────────
   useEffect(()=>{ selectedPartIdRef.current=selectedPartId; },[selectedPartId]);
   useEffect(()=>{ setLastQrSignal(null);setQrFeed([]);setQrByStation({});setResetConfirm(null); lastQrEventRef.current={key:"",at:0}; },[selectedPartId]);
   useEffect(()=>{
@@ -961,6 +1317,7 @@ const ComponentJourney = () => {
   },[searchTerm,loadPartCatalog]);
   useEffect(()=>{ refreshJourneyNow(true); },[selectedPartId,refreshJourneyNow]);
 
+  // ── Socket ──────────────────────────────────────────────────────────
   useEffect(()=>{
     const socket=io(SOCKET_URL,{...SOCKET_OPTIONS,reconnectionDelay:500,reconnectionDelayMax:2000,timeout:10000});
     socketRef.current=socket;
@@ -1031,16 +1388,56 @@ const ComponentJourney = () => {
       }
     };
     loadFilterSources();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
-  // ─────────────────────────────────────────────────────────────────────
-  //  RENDER
-  // ─────────────────────────────────────────────────────────────────────
+  // ── Handlers ──────────────────────────────────────────────────────
+  const handleDateRangeApply = (start, end) => {
+    const range = getProductionDateRange(start, end);
+    const currentRange = getCurrentProductionDateRange();
+    if (
+      range.start.toDateString() === currentRange.start.toDateString() &&
+      range.end > currentRange.end
+    ) {
+      range.end.setTime(currentRange.end.getTime());
+    }
+    setFilters((prev) => ({
+      ...prev,
+      dateFrom: toLocalDateTimeInput(range.start),
+      dateTo: toLocalDateTimeInput(range.end),
+    }));
+  };
+
+  const handleDateRangeClear = () => {
+    const range = getCurrentProductionDateRange();
+    setFilters((prev) => ({
+      ...prev,
+      dateFrom: toLocalDateTimeInput(range.start),
+      dateTo: toLocalDateTimeInput(range.end),
+    }));
+  };
+
+  const removeFilter = (key) => {
+    setFilters((prev) => ({ ...prev, [key]: "" }));
+  };
+
+  const clearAllFilters = () => {
+    const range = getCurrentProductionDateRange();
+    setFilters({
+      dateFrom: toLocalDateTimeInput(range.start), dateTo: toLocalDateTimeInput(range.end), partId: "", plantId: "",
+      lineId: "", machineId: "", stationNo: "", status: "",
+      operatorId: "", shiftCode: "", lineName: "",
+    });
+  };
+
+  const activeFilters = Object.entries(filters).filter(([key, value]) => {
+    if (['dateFrom', 'dateTo'].includes(key)) return false;
+    return value && String(value).trim();
+  });
+
+  // ── Render ──────────────────────────────────────────────────────────
   return (
-    <div style={{display:"flex",flexDirection:"column",gap:20,padding:"4px 2px"}}>
+    <div className="cj-container" style={{display:"flex",flexDirection:"column",gap:20,padding:"4px 2px"}}>
 
       {/* ── QR Modal ─────────────────────────────────────────────────── */}
       {qrModalPartId && (
@@ -1057,7 +1454,7 @@ const ComponentJourney = () => {
           justifyContent:"center",padding:16,background:"rgba(0,0,0,0.75)",backdropFilter:"blur(6px)"}}>
           <div style={{width:"100%",maxWidth:440,background:C.bg("card"),
             border:`1px solid ${C.border()}`,borderRadius:16,
-            boxShadow:"0 24px 64px rgba(0,0,0,0.5)",overflow:"hidden",animation:"itFadeIn 0.2s ease"}}>
+            boxShadow:"0 24px 64px rgba(0,0,0,0.5)",overflow:"hidden",animation:"cjFadeIn 0.2s ease"}}>
             <div style={{height:3,background:`linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`}}/>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
               padding:"14px 18px",borderBottom:`1px solid ${C.border()}`,background:C.bg("surface")}}>
@@ -1066,7 +1463,7 @@ const ComponentJourney = () => {
                   display:"flex",alignItems:"center",justifyContent:"center"}}>
                   <AlertTriangle size={16} color={C.ng()}/>
                 </div>
-                <p style={{fontSize:14,fontWeight:700,color:C.txt("primary")}}>Confirm Station Reset</p>
+                <p style={{fontSize:14,fontWeight:700,color:C.txt("primary")}}>⚠️ Confirm Station Reset</p>
               </div>
               <button onClick={()=>setResetConfirm(null)} style={{width:28,height:28,borderRadius:6,
                 background:C.bg("hover"),border:`1px solid ${C.border()}`,cursor:"pointer",
@@ -1079,18 +1476,18 @@ const ComponentJourney = () => {
                 borderRadius:10,padding:"12px 14px",marginBottom:14}}>
                 <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
                   <span style={{fontSize:11,fontWeight:700,textTransform:"uppercase",
-                    letterSpacing:"0.07em",color:C.txt("muted")}}>Part Serial</span>
+                    letterSpacing:"0.07em",color:C.txt("muted")}}>📦 Part Serial</span>
                   <span style={{fontFamily:"'DM Mono',monospace",fontSize:12,fontWeight:700,
                     color:C.txt("primary")}}>{resetConfirm.partId}</span>
                 </div>
                 <div style={{display:"flex",justifyContent:"space-between"}}>
                   <span style={{fontSize:11,fontWeight:700,textTransform:"uppercase",
-                    letterSpacing:"0.07em",color:C.txt("muted")}}>Station</span>
+                    letterSpacing:"0.07em",color:C.txt("muted")}}>📍 Station</span>
                   <span style={{fontSize:12,fontWeight:700,color:C.amber()}}>{resetConfirm.stationNo}</span>
                 </div>
               </div>
               <p style={{fontSize:12,color:C.txt("muted"),lineHeight:1.6,marginBottom:16}}>
-                This clears all downstream progress from the selected station. A re-scan will be required.
+                 This clears all downstream progress from the selected station. A re-scan will be required.
               </p>
               <div style={{display:"flex",gap:10}}>
                 <Btn onClick={()=>setResetConfirm(null)} style={{flex:1,justifyContent:"center",padding:"9px 0"}}>Cancel</Btn>
@@ -1106,10 +1503,9 @@ const ComponentJourney = () => {
       )}
 
       {/* ── Page Header ─────────────────────────────────────────────── */}
-      {/* CLEAN: only title + search + 3 KPI cards. QR Feed removed. */}
       <div style={{background:C.bg("card"),border:`1px solid ${C.border()}`,
-        borderRadius:16,boxShadow:"var(--shadow)",overflow:"hidden"}}>
-        <div style={{height:3,background:`linear-gradient(90deg,${C.navy()},${C.steel()},${C.amber()})`}}/>
+        borderRadius:16,boxShadow:"var(--shadow)",overflow:"visible",position:"relative",zIndex:20}}>
+        <div className="cj-gradient-bar" />
         <div style={{padding:"18px 20px 18px"}}>
 
           {/* Title + refresh */}
@@ -1124,19 +1520,19 @@ const ComponentJourney = () => {
               </div>
               <div>
                 <h1 style={{fontSize:18,fontWeight:800,color:C.txt("primary"),
-                  letterSpacing:"-0.02em",lineHeight:1.2}}>Part Journey</h1>
+                  letterSpacing:"-0.02em",lineHeight:1.2}}>🔍 Part Journey</h1>
                 <p style={{fontSize:12,color:C.txt("muted"),marginTop:3}}>
-                  Real-time station tracking &amp; QR genealogy
+                   Real-time station tracking &amp; QR genealogy
                 </p>
               </div>
             </div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <Btn variant="ghost" onClick={exportJourneyReport} disabled={!stationTimeline.length}>
-                <Download size={13}/> Export Report
+                <Download size={13}/> 📊 Export Report
               </Btn>
               <Btn variant="ghost" onClick={handleRefresh} disabled={refreshing||loading} loading={refreshing}>
                 {!refreshing&&<RefreshCw size={13}/>}
-                {refreshing?"Refreshing…":"Refresh"}
+                {refreshing?" Refreshing…":" Refresh"}
               </Btn>
             </div>
           </div>
@@ -1145,54 +1541,42 @@ const ComponentJourney = () => {
           <div style={{marginBottom:14}}>
             <p style={{fontSize:10,fontWeight:800,textTransform:"uppercase",
               letterSpacing:"0.08em",color:C.txt("muted"),marginBottom:6}}>
-              Search Customer QR / Part ID / Shot Number
+              🔎 Search Customer QR / Part ID / Shot Number
             </p>
             <div style={{position:"relative"}}>
               <Search size={14} color={C.txt("muted")} style={{position:"absolute",left:12,
                 top:"50%",transform:"translateY(-50%)"}}/>
               <input value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
-                placeholder="Scan Customer QR or enter Part ID / Shot Number…"
-                style={{width:"100%",height:40,paddingLeft:36,paddingRight:12,
-                  background:C.bg("input"),border:`1px solid ${C.border()}`,
-                  borderRadius:10,fontSize:13,color:C.txt("primary"),
-                  fontFamily:"'DM Sans',sans-serif",outline:"none",
-                  transition:"border-color 0.15s",boxSizing:"border-box"}}
-                onFocus={e=>{e.target.style.borderColor=C.steel();e.target.style.boxShadow=`0 0 0 3px ${C.steel(0.1)}`;}}
-                onBlur={e=>{e.target.style.borderColor=C.border();e.target.style.boxShadow="none";}}
+                placeholder="🔍 Scan Customer QR or enter Part ID / Shot Number…"
+                className="cj-filter-input"
+                style={{paddingLeft:36}}
               />
             </div>
           </div>
 
-          <div style={{
+          {/* ── Professional Filters ── */}
+          <div className="cj-filters-grid" style={{
             display:"grid",
-            gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",
+            gridTemplateColumns:"minmax(220px,340px) repeat(3,minmax(150px,1fr)) minmax(160px,220px)",
             gap:10,
-            marginBottom:14,
-            padding:12,
-            border:`1px solid ${C.border()}`,
-            borderRadius:12,
-            background:C.bg("surface"),
-            alignItems:"start",
-            overflow:"visible",
+            marginBottom:12,
+            alignItems:"center",
+            position:"relative",
+            zIndex:30,
           }}>
-            <input
-              type="date"
-              value={filters.dateFrom}
-              onChange={(e)=>setFilters((prev)=>({...prev,dateFrom:e.target.value}))}
-              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
-            />
-            <input
-              type="date"
-              value={filters.dateTo}
-              onChange={(e)=>setFilters((prev)=>({...prev,dateTo:e.target.value}))}
-              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
+            <DateRangePicker
+              startDate={filters.dateFrom}
+              endDate={filters.dateTo}
+              onApply={handleDateRangeApply}
+              onClear={handleDateRangeClear}
+              label="Select Date Range"
             />
             <select
               value={filters.machineId}
               onChange={(e)=>setFilters((prev)=>({...prev,machineId:e.target.value}))}
-              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
+              className="cj-filter-select"
             >
-              <option value="">All Quality Gates</option>
+              <option value=""> All Machines</option>
               {machines
                 .filter((machine)=>!filters.plantId || String(machine.plantId || "") === String(filters.plantId))
                 .filter((machine)=>!filters.lineId || String(machine.lineId || "") === String(filters.lineId))
@@ -1204,49 +1588,86 @@ const ComponentJourney = () => {
             <select
               value={filters.status}
               onChange={(e)=>setFilters((prev)=>({...prev,status:e.target.value}))}
-              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
+              className="cj-filter-select"
             >
-              <option value="">All Status</option>
-              <option value="IN_PROGRESS">RUNNING</option>
-              <option value="COMPLETED">PASSED</option>
-              <option value="NG">FAILED</option>
-              <option value="INTERLOCKED">BLOCKED</option>
-              <option value="OTHER">OTHER CATEGORY</option>
+              <option value="">📊 All Status</option>
+              <option value="IN_PROGRESS"> Running</option>
+              <option value="COMPLETED">✅ Passed</option>
+              <option value="NG">❌ Failed</option>
+              <option value="INTERLOCKED">🔒 Blocked</option>
             </select>
             <select
               value={filters.shiftCode}
               onChange={(e)=>setFilters((prev)=>({...prev,shiftCode:e.target.value}))}
-              style={{width:"100%",height:36,padding:"0 10px",borderRadius:8,border:`1px solid ${C.border()}`,background:C.bg("input"),color:C.txt("primary"),fontSize:12,boxSizing:"border-box"}}
+              className="cj-filter-select"
             >
-              <option value="">All Shifts</option>
+              <option value=""> All Shifts</option>
               {availableShifts.map((shift)=>(
                 <option key={shift.shiftCode} value={shift.shiftCode}>{shift.shiftName}</option>
               ))}
             </select>
             <button
-              onClick={()=>setFilters({dateFrom:"",dateTo:"",partId:"",plantId:"",lineId:"",machineId:"",stationNo:"",status:"",operatorId:"",shiftCode:"",lineName:""})}
-              style={{width:"100%",height:36,padding:"0 12px",borderRadius:8,border:`1px solid ${C.ng(0.25)}`,background:C.ng(0.08),color:C.ng(),fontSize:12,fontWeight:700,cursor:"pointer",boxSizing:"border-box"}}
+              onClick={clearAllFilters}
+              className="cj-btn-clear"
+              style={{justifyContent:"center"}}
             >
-              Clear Filters
+              <X size={14} />  Clear All
             </button>
           </div>
 
-          {/* 3 KPI stat cards — only shown when a part is selected */}
+          {/* Active Filters Chips */}
+          {(activeFilters.length > 0 || (filters.dateFrom && filters.dateTo)) && (
+            <div style={{
+              display:"flex",
+              flexWrap:"wrap",
+              gap:6,
+              paddingTop:12,
+              borderTop:`1px solid ${C.border()}`,
+            }}>
+              {activeFilters.map(([key, value]) => (
+                <span key={key} className="cj-filter-chip">
+                  <span style={{opacity:0.6,fontWeight:600}}>{key}:</span>
+                  <span style={{fontWeight:600}}>{String(value).slice(0,30)}</span>
+                  <span className="remove" onClick={() => removeFilter(key)}>✕</span>
+                </span>
+              ))}
+              {filters.dateFrom && filters.dateTo && (
+                <span className="cj-filter-chip date-chip">
+                  <Calendar size={11} />
+                   {new Date(filters.dateFrom).toLocaleDateString()} → {new Date(filters.dateTo).toLocaleDateString()}
+                  <span className="remove" onClick={() => {
+                    setFilters((p) => ({ ...p, dateFrom: "", dateTo: "" }));
+                  }}>✕</span>
+                </span>
+              )}
+              <span style={{
+                fontSize:9,
+                color:C.muted,
+                fontWeight:600,
+                marginLeft:"auto",
+                padding:"4px 8px",
+              }}>
+                🔢 {activeFilters.length + (filters.dateFrom && filters.dateTo ? 1 : 0)} active filters
+              </span>
+            </div>
+          )}
+
+          {/* 3 KPI stat cards */}
           {stationTimeline.length>0&&(
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
-              <StatCard label="Stations Passed"      value={statusSummary.passed}     variant="ok"   icon={CheckCircle2}/>
-              <StatCard label="Stations Failed"      value={statusSummary.failed}     variant="ng"   icon={XCircle}/>
-              <StatCard label="In Progress"          value={statusSummary.inProgress} variant="wip"  icon={Activity}/>
+            <div className="cj-header-stats" style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginTop:14}}>
+              <StatCard label="✅ Stations Passed"      value={statusSummary.passed}     variant="ok"   icon={CheckCircle2}/>
+              <StatCard label="❌ Stations Failed"      value={statusSummary.failed}     variant="ng"   icon={XCircle}/>
+              <StatCard label=" In Progress"          value={statusSummary.inProgress} variant="wip"  icon={Activity}/>
             </div>
           )}
         </div>
       </div>
 
       {/* ── Main content: parts list + timeline ─────────────────────── */}
-      <div style={{display:"grid",gridTemplateColumns:"290px 1fr",gap:16,alignItems:"start"}}>
+      <div className="cj-main-layout" style={{display:"grid",gridTemplateColumns:"290px 1fr",gap:16,alignItems:"start"}}>
 
         {/* ── Parts List ────────────────────────────────────────────── */}
-        <div style={{
+        <div className="cj-parts-list" style={{
           background:C.bg("card"),border:`1px solid ${C.border()}`,
           borderRadius:16,boxShadow:"var(--shadow)",
           position:"sticky",top:16,
@@ -1255,27 +1676,26 @@ const ComponentJourney = () => {
         }}>
 
           <SectionHead
-            subtitle="Part Catalog"
-            title="All Parts"
+            subtitle=" Part Catalog"
+            title="📦 All Parts"
             accent
             right={
               <span style={{fontSize:11,fontWeight:700,color:C.txt("muted"),
                 background:C.bg("hover"),padding:"3px 8px",borderRadius:6,
                 border:`1px solid ${C.border()}`}}>
-                {parts.length}
+                📊 {parts.length}
               </span>
             }
           />
 
-          {/* Scrollable list area */}
           <div style={{flex:1,overflowY:"auto",padding:"8px",
             display:"flex",flexDirection:"column",gap:6,minHeight:0}}>
 
             {parts.length===0 && (
               <div style={{textAlign:"center",padding:"32px 16px",color:C.txt("muted"),fontSize:13}}>
                 <Package size={28} color={C.txt("muted")} style={{margin:"0 auto 10px"}}/>
-                <p>No parts found.</p>
-                <p style={{fontSize:11,marginTop:4}}>Try a different search term.</p>
+                <p>📭 No parts found.</p>
+                <p style={{fontSize:11,marginTop:4}}>🔍 Try a different search term.</p>
               </div>
             )}
 
@@ -1290,11 +1710,9 @@ const ComponentJourney = () => {
                   background: active ? C.navy(0.08) : C.bg("surface"),
                   boxShadow: active?`0 0 0 3px ${C.navy(0.08)}`:"none",
                   transition:"all 0.15s ease",
-                  animation:"itSlideIn 0.18s ease",
-                  flexShrink: 0,          /* never compress — always full height */
+                  animation:"cjSlideIn 0.18s ease",
+                  flexShrink: 0,
                 }}>
-
-                  {/* ── Clickable top area ── */}
                   <button
                     onClick={()=>setSelectedPartId(part.partId)}
                     style={{
@@ -1304,8 +1722,6 @@ const ComponentJourney = () => {
                       cursor:"pointer",display:"block",
                       borderRadius:"10px 10px 0 0",
                     }}>
-
-                    {/* Part ID + chevron */}
                     <div style={{display:"flex",alignItems:"flex-start",
                       justifyContent:"space-between",gap:4,marginBottom:6}}>
                       <span style={{
@@ -1313,35 +1729,29 @@ const ComponentJourney = () => {
                         color:active?C.navy():C.txt("primary"),
                         wordBreak:"break-all",lineHeight:1.35,flex:1,
                       }}>
-                        {visiblePartId}
+                        🔹 {visiblePartId}
                       </span>
                       {active&&(
                         <ChevronRight size={13} color={C.amber()} style={{flexShrink:0,marginTop:1}}/>
                       )}
                     </div>
-
-                    {/* Status badge + station */}
                     <div style={{display:"flex",alignItems:"center",
                       justifyContent:"space-between",gap:4}}>
                       <Badge variant={meta.variant} label={meta.label}/>
                       {part.currentStation&&(
                         <span style={{fontSize:10,color:C.txt("muted"),
                           display:"flex",alignItems:"center",gap:3,flexShrink:0}}>
-                          <MapPin size={9}/>{part.currentStation}
+                          <MapPin size={9}/> 📍 {part.currentStation}
                         </span>
                       )}
                     </div>
-
-                    {/* Timestamp */}
                     {part.updatedAt&&(
                       <p style={{fontSize:10,color:C.txt("muted"),marginTop:4,
                         fontFamily:"'DM Mono',monospace"}}>
-                        {formatTime(part.updatedAt)}
+                         {formatTime(part.updatedAt)}
                       </p>
                     )}
                   </button>
-
-                  {/* ── Single action button ── */}
                   <div style={{
                     padding:"5px 8px 7px",
                     borderTop:`1px solid ${C.border()}`,
@@ -1350,7 +1760,7 @@ const ComponentJourney = () => {
                   }}>
                     <PartActionBtn
                       icon={<QrCode size={12}/>}
-                      label="QR & Remove"
+                      label=" QR & Remove"
                       color={C.steel()}
                       bgColor={C.steel(0.1)}
                       borderColor={C.steel(0.3)}
@@ -1365,27 +1775,27 @@ const ComponentJourney = () => {
         </div>
 
         {/* ── Station Timeline ──────────────────────────────────────── */}
-        <div style={{background:C.bg("card"),border:`1px solid ${C.border()}`,
-          borderRadius:16,boxShadow:"var(--shadow)",overflow:"hidden"}}>
+        <div className="cj-timeline" style={{background:C.bg("card"),border:`1px solid ${C.border()}`,
+          borderRadius:16,boxShadow:"var(--shadow)",overflow:"hidden",maxHeight:"calc(100vh - 120px)"}}>
 
           <SectionHead
-            subtitle="Station Timeline"
-            title={selectedPartId ? selectedPartDisplayId : "Select a part from the list"}
+            subtitle=" Station Timeline"
+            title={selectedPartId ? ` ${selectedPartDisplayId}` : "🔍 Select a part from the list"}
             accent
             right={
               selectedPart&&(
-                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
                   {selectedCustomerQrCode && (
                     <span style={{fontSize:10,fontWeight:800,color:C.info(),
                       background:C.info(0.12),padding:"2px 6px",borderRadius:5}}>
-                      Customer QR: {selectedCustomerQrCode}
+                       Customer QR: {selectedCustomerQrCode}
                     </span>
                   )}
                   {selectedPart.currentStation && (
                     <>
                       <Zap size={12} color={C.amber()}/>
                       <span style={{fontSize:11,fontWeight:700,color:C.amber()}}>
-                        {selectedPart.currentStation}
+                        📍 {selectedPart.currentStation}
                       </span>
                     </>
                   )}
@@ -1401,12 +1811,12 @@ const ComponentJourney = () => {
                 <div key={i} style={{borderRadius:12,border:`1px solid ${C.border()}`,
                   padding:16,background:C.bg("surface")}}>
                   <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
-                    <div style={{width:28,height:28,borderRadius:8,background:C.bg("hover"),animation:"itPulse 1.2s ease-in-out infinite"}}/>
-                    <div style={{height:14,width:120,borderRadius:4,background:C.bg("hover"),animation:"itPulse 1.2s ease-in-out infinite"}}/>
+                    <div style={{width:28,height:28,borderRadius:8,background:C.bg("hover"),animation:"cjPulse 1.2s ease-in-out infinite"}}/>
+                    <div style={{height:14,width:120,borderRadius:4,background:C.bg("hover"),animation:"cjPulse 1.2s ease-in-out infinite"}}/>
                   </div>
                   <div style={{display:"flex",gap:8}}>
-                    <div style={{height:24,width:70,borderRadius:6,background:C.bg("hover"),animation:"itPulse 1.2s ease-in-out infinite"}}/>
-                    <div style={{height:24,width:70,borderRadius:6,background:C.bg("hover"),animation:"itPulse 1.2s ease-in-out infinite"}}/>
+                    <div style={{height:24,width:70,borderRadius:6,background:C.bg("hover"),animation:"cjPulse 1.2s ease-in-out infinite"}}/>
+                    <div style={{height:24,width:70,borderRadius:6,background:C.bg("hover"),animation:"cjPulse 1.2s ease-in-out infinite"}}/>
                   </div>
                 </div>
               ))}
@@ -1422,12 +1832,12 @@ const ComponentJourney = () => {
                 <Layers size={24} color={C.txt("muted")}/>
               </div>
               <p style={{fontSize:14,fontWeight:600,color:C.txt("secondary"),marginBottom:6}}>
-                {selectedPartId?"No station data available":"Select a part to view its journey"}
+                {selectedPartId?"📭 No station data available":"🔍 Select a part to view its journey"}
               </p>
               <p style={{fontSize:12,color:C.txt("muted")}}>
                 {selectedPartId
-                  ?"This part has no recorded station history yet."
-                  :"Click any part in the list on the left to see its full station-by-station journey."}
+                  ?" This part has no recorded station history yet."
+                  :"🖱️ Click any part in the list on the left to see its full station-by-station journey."}
               </p>
             </div>
           )}
@@ -1435,7 +1845,7 @@ const ComponentJourney = () => {
           {/* Timeline */}
           {!loading&&stationTimeline.length>0&&(
             <div style={{padding:"12px 14px",display:"flex",flexDirection:"column",
-              gap:8,maxHeight:720,overflowY:"auto"}}>
+              gap:8,overflowY:"auto",maxHeight:"calc(100vh - 320px)"}}>
 
               {/* Progress bar */}
               <div style={{background:C.bg("surface"),border:`1px solid ${C.border()}`,
@@ -1443,11 +1853,11 @@ const ComponentJourney = () => {
                 <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
                   <span style={{fontSize:11,fontWeight:700,color:C.txt("muted"),
                     textTransform:"uppercase",letterSpacing:"0.07em"}}>
-                    Journey Progress
+                     Journey Progress
                   </span>
                   <span style={{fontSize:11,fontWeight:800,color:C.txt("secondary"),
                     fontFamily:"'DM Mono',monospace"}}>
-                    {statusSummary.passed}/{stationTimeline.length} stations passed
+                    ✅ {statusSummary.passed}/{stationTimeline.length} stations passed
                   </span>
                 </div>
                 <div style={{height:6,borderRadius:99,background:C.bg("hover"),overflow:"hidden"}}>
@@ -1456,7 +1866,6 @@ const ComponentJourney = () => {
                     width:`${stationTimeline.length?(statusSummary.passed/stationTimeline.length)*100:0}%`,
                     transition:"width 0.4s ease"}}/>
                 </div>
-                {/* Dot indicators */}
                 <div style={{display:"flex",gap:4,marginTop:6,flexWrap:"wrap"}}>
                   {stationTimeline.map((st,i)=>{
                     const m=getStationMeta(getJourneyStationState(st, qrByStation[st.stationNo], getStationFeatures(st.stationNo, stationSettings)));
@@ -1479,13 +1888,12 @@ const ComponentJourney = () => {
                 const meta     = getStationMeta(effectiveStageState);
                 const sColor   = STATUS[meta.variant]||STATUS.idle;
                 const stationCustomerQrCode = sanitizeCustomerQrValue(station.customerQrCode);
-                // leakMeta is dynamically extracted during map
                 const isReset  = resettingStation===station.stationNo;
                 const bypassed = isStationBypassed(station);
                 const modules  = [
-                  settings.qr          ?"QR Scan"  :null,
-                  settings.operation   ?"Operation":null,
-                  settings.rejectionBin?"Rej. Bin" :null,
+                  settings.qr          ?" QR Scan"  :null,
+                  settings.operation   ?" Operation":null,
+                  settings.rejectionBin?"🗑️ Rej. Bin" :null,
                 ].filter(Boolean);
 
                 return (
@@ -1495,20 +1903,19 @@ const ComponentJourney = () => {
                     background:meta.variant==="idle"?C.bg("surface"):sColor.bgLight,
                     padding:"14px 16px",
                     transition:"all 0.2s ease",
-                    animation:"itFadeIn 0.25s ease",
+                    animation:"cjFadeIn 0.25s ease",
                   }}>
 
                     {/* Station header */}
                     <div style={{display:"flex",alignItems:"flex-start",
                       justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:8}}>
 
-                      {/* Left: number + name + time */}
                       <div style={{display:"flex",alignItems:"center",gap:10}}>
                         <div style={{width:32,height:32,borderRadius:9,flexShrink:0,
                           background:sColor.bgLight,border:`1px solid ${sColor.border}`,
                           display:"flex",alignItems:"center",justifyContent:"center",
                           fontSize:12,fontWeight:800,color:sColor.fg}}>
-                          {idx+1}
+                          #{idx+1}
                         </div>
                         <div>
                           <p style={{fontSize:13,fontWeight:800,color:C.txt("primary"),letterSpacing:"0.01em"}}>
@@ -1516,22 +1923,22 @@ const ComponentJourney = () => {
                           </p>
                           <p style={{fontSize:11,color:C.txt("muted"),marginTop:2,
                             fontFamily:"'DM Mono',monospace"}}>
-                            {bypassed ? "Bypassed / auto passed" : station.latestAt ? `Last: ${formatDate(station.latestAt)}` : "Not started"}
+                            {bypassed ? " Bypassed / auto passed" : station.latestAt ? ` Last: ${formatDate(station.latestAt)}` : " Not started"}
                           </p>
                           {station.cycleStartTime && (
-                            <div style={{display:"flex",gap:8,marginTop:4}}>
+                            <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap"}}>
                               <p style={{fontSize:10,color:C.txt("muted"),display:"flex",alignItems:"center",gap:3}}>
-                                <Clock3 size={10}/> Start: {formatDate(station.cycleStartTime)}
+                                <Clock3 size={10}/>  Start: {formatDate(station.cycleStartTime)}
                               </p>
                               {station.cycleEndTime && (
                                 <p style={{fontSize:10,color:C.ok(),fontWeight:700,display:"flex",alignItems:"center",gap:3}}>
-                                  <CheckCircle2 size={10}/> End: {formatDate(station.cycleEndTime)}
+                                  <CheckCircle2 size={10}/> ✅ End: {formatDate(station.cycleEndTime)}
                                 </p>
                               )}
                               {station.cycleDurationSec > 0 && (
                                 <span style={{fontSize:10,fontWeight:800,color:C.amber(),
                                   background:C.amber(0.12),padding:"1px 5px",borderRadius:4}}>
-                                  {station.cycleDurationSec.toFixed(2)}s
+                                   {station.cycleDurationSec.toFixed(2)}s
                                 </span>
                               )}
                             </div>
@@ -1540,10 +1947,10 @@ const ComponentJourney = () => {
                             <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap"}}>
                               <span style={{fontSize:10,fontWeight:800,color:C.info(),
                                 background:C.info(0.12),padding:"2px 6px",borderRadius:5}}>
-                                Customer QR: {stationCustomerQrCode}
+                                 Customer QR: {stationCustomerQrCode}
                               </span>
                               <span style={{fontSize:10,color:C.txt("muted"),display:"flex",alignItems:"center",gap:3}}>
-                                <Clock3 size={10}/> Read: {formatDate(station.customerQrMappedAt)}
+                                <Clock3 size={10}/>  Read: {formatDate(station.customerQrMappedAt)}
                               </span>
                             </div>
                           )}
@@ -1551,7 +1958,7 @@ const ComponentJourney = () => {
                             <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap"}}>
                               <span style={{fontSize:10,fontWeight:800,color:C.amber(),
                                 background:C.amber(0.12),padding:"2px 6px",borderRadius:5}}>
-                                Waiting Customer QR
+                                 Waiting Customer QR
                               </span>
                             </div>
                           )}
@@ -1561,7 +1968,7 @@ const ComponentJourney = () => {
                               <div key={rIdx} style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap",alignItems:"center"}}>
                                 <span style={{fontSize:10,fontWeight:800,color:C.steel(),
                                   background:C.steel(0.12),padding:"2px 6px",borderRadius:5}}>
-                                  Leak Machine: {reading.matchedMachineName || reading.Machine || "—"}
+                                  🔬 Leak Machine: {reading.matchedMachineName || reading.Machine || "—"}
                                 </span>
                                 {lMeta && <Badge variant={lMeta.variant} label={lMeta.label} />}
                               </div>
@@ -1570,24 +1977,20 @@ const ComponentJourney = () => {
                         </div>
                       </div>
 
-                      {/* Right: QR + Op status + Reset */}
                       <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                        {/* QR status — shown inline on station */}
                         {qrMeta && (
                           <Badge variant={qrMeta.variant} label={qrMeta.label} pulse={qrMeta.variant==="wip"}/>
                         )}
                         {bypassed && (
-                          <Badge variant="ok" label="Bypassed" />
+                          <Badge variant="ok" label=" Bypassed" />
                         )}
-                        {/* Operation status */}
-                        <Badge variant={meta.variant} label={`Op: ${meta.label}`} pulse={meta.variant==="wip"}/>
-                        {/* Reset button */}
+                        <Badge variant={meta.variant} label={` ${meta.label}`} pulse={meta.variant==="wip"}/>
                         <Btn variant="ghost" onClick={()=>handleResetStation(station.stationNo)}
                           disabled={!selectedPartId||Boolean(resettingStation)}
                           loading={isReset}
                           style={{padding:"4px 10px",fontSize:11}}>
                           {!isReset&&<RotateCcw size={10}/>}
-                          {isReset?"Resetting…":"Reset"}
+                          {isReset?" Resetting…":"Reset"}
                         </Btn>
                       </div>
                     </div>
@@ -1607,7 +2010,7 @@ const ComponentJourney = () => {
                     {/* Attempt history */}
                     {Array.isArray(station.attempts)&&station.attempts.length>1&&(
                       <div style={{marginBottom:8}}>
-                        <Divider label={`${station.attempts.length} scan attempts`}/>
+                        <Divider label={` ${station.attempts.length} scan attempts`}/>
                         <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:6}}>
                           {station.attempts.map((att,ai)=>{
                             const am=getStationMeta(att.plcStatus||att.status);
@@ -1619,7 +2022,7 @@ const ComponentJourney = () => {
                                   border:`1px solid ${STATUS[am.variant]?.border||C.border()}`,
                                   color:STATUS[am.variant]?.fg||C.txt("muted")}}>
                                 <span style={{fontFamily:"monospace"}}>#{ai+1}</span>
-                                <span style={{opacity:0.8}}>{formatDate(att.createdAt)}</span>
+                                <span style={{opacity:0.8}}> {formatDate(att.createdAt)}</span>
                               </div>
                             );
                           })}
@@ -1634,14 +2037,14 @@ const ComponentJourney = () => {
                         background:C.ng(0.08),border:`1px solid ${C.ng(0.25)}`}}>
                         <AlertTriangle size={13} color={C.ng()} style={{flexShrink:0,marginTop:1}}/>
                         <span style={{fontSize:12,color:C.ng(0.9),lineHeight:1.5}}>
-                          {station.latestInterlockReason||"Rejection / NG detected at this station"}
+                          ⚠️ {station.latestInterlockReason||"Rejection / NG detected at this station"}
                         </span>
                       </div>
                     )}
                     {(station.leakTestReadings?.length > 0 ? station.leakTestReadings : (station.leakTestReading ? [station.leakTestReading] : [])).map((reading, rIdx) => (
                       <div key={rIdx} style={{marginTop:8,borderRadius:8,padding:"10px 12px",background:C.info(0.08),border:`1px solid ${C.info(0.25)}`}}>
                         <p style={{fontSize:10,fontWeight:800,color:C.info(),textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>
-                          Leak Test Details — {reading.matchedMachineName || reading.Machine || "—"}
+                          🔬 Leak Test Details — {reading.matchedMachineName || reading.Machine || "—"}
                         </p>
                         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:8}}>
                           {LEAK_TEST_FIELDS.map(([label, key]) => (
@@ -1667,4 +2070,3 @@ const ComponentJourney = () => {
 };
 
 export default ComponentJourney;
-
