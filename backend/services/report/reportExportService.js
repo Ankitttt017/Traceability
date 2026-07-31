@@ -673,6 +673,10 @@ function normalizeMachineScopeToken(value) {
     .replace(/O(?=\d)/g, "0")
     .replace(/[^A-Z0-9]/g, "");
 }
+function getSqlMachineScopeExpr(columnName = "machine_name") {
+  const compact = `REPLACE(REPLACE(REPLACE(UPPER(LTRIM(RTRIM(CAST(${columnName} AS NVARCHAR(255))))), ' ', ''), '-', ''), '_', '')`;
+  return `REPLACE(${compact}, 'O', '0')`;
+}
 function splitPlcPartDie(value) {
   const raw = normalizePartToken(value);
   if (!raw) return { partName: "", dieName: "", label: "" };
@@ -1142,19 +1146,19 @@ async function fetchPlcShotSummary(filters = {}) {
         }
       }
       const machineOrIpParts = [];
-      if (rowMachine) {
-        const key = `assignmentMachine${index}`;
-        replacements[key] = rowMachine;
-        if (hasColumn("machine_name")) {
-          machineOrIpParts.push(`UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))) = :${key}`);
-        }
-      }
-      if (rowIp) {
+      if (rowIp && hasColumn("plc_ip")) {
         const key = `assignmentIp${index}`;
         replacements[key] = rowIp;
-        if (hasColumn("plc_ip")) {
-          machineOrIpParts.push(`LTRIM(RTRIM(CAST(plc_ip AS NVARCHAR(255)))) = :${key}`);
-        }
+        machineOrIpParts.push(`LTRIM(RTRIM(CAST(plc_ip AS NVARCHAR(255)))) = :${key}`);
+      } else if (rowMachine && hasColumn("machine_name")) {
+        const key = `assignmentMachine${index}`;
+        const compactKey = `assignmentMachineCompact${index}`;
+        replacements[key] = rowMachine;
+        replacements[compactKey] = normalizeMachineScopeToken(rowMachine);
+        machineOrIpParts.push(`(
+          UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))) = :${key}
+          OR ${getSqlMachineScopeExpr("machine_name")} = :${compactKey}
+        )`);
       }
       if (machineOrIpParts.length) parts.push(`(${machineOrIpParts.join(" OR ")})`);
       if (parts.length) clauses.push(`(${parts.join(" AND ")})`);
@@ -1164,7 +1168,7 @@ async function fetchPlcShotSummary(filters = {}) {
     if (hasColumn("machine_name")) {
       const placeholders = uniqueMachineNames.map((_, index) => `:machineName${index}`).join(", ");
       const compactPlaceholders = uniqueMachineNames.map((_, index) => `:machineNameCompact${index}`).join(", ");
-      const compactMachineExpr = "REPLACE(REPLACE(REPLACE(UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))), ' ', ''), '-', ''), '_', '')";
+      const compactMachineExpr = getSqlMachineScopeExpr("machine_name");
       whereParts.push(`(
         UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))) IN (${placeholders})
         OR ${compactMachineExpr} IN (${compactPlaceholders})
