@@ -1,1395 +1,353 @@
 {
   "info": {
     "name": "Reports",
-    "description": "Clean report-data collection for Postman.\n\nRun Login first. Login stores TOKEN in environment and globals so this separate Reports collection can use it.\nDefault date is 30 Jul 2026 full day because that is the current production screen date being verified.\nThe first request uses clean=1, so Postman shows a professional response with records, summary, pagination, PLC shot details, OP150 leak-test data, and shot summary without duplicate frontend aliases.\nOptional filters are present but disabled by default. Enable only the filter you want in Postman.",
+    "description": "Simple professional report API collection.\n\nRun Login first. Login saves TOKEN.\n\nKeep filters simple:\n- DATE_FROM / DATE_TO for production day range\n- SHIFT_CODE = ALL, SHIFT_A, SHIFT_B, etc.\n- Oil Pan K-12 request uses lineName + partName + dieCastingMachine\n- Search request accepts part ID, customer QR, or shot number in SEARCH_VALUE\n\nAll report-data requests use clean=1 so Postman response is easy to read: records, summary, pagination, shot details, leak test, and rejection fields.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     {
       "key": "BASE_URL",
       "value": "http://192.168.100.136:9090/api/v1",
-      "description": "Server base URL."
+      "description": "Backend API base URL"
+    },
+    {
+      "key": "TOKEN",
+      "value": "",
+      "description": "Saved by Login collection"
     },
     {
       "key": "DATE_FROM",
-      "value": "2026-07-30T00:00:00",
-      "description": "Default full-day start for current verification date."
+      "value": "2026-07-31T06:00:00",
+      "description": "Production day start"
     },
     {
       "key": "DATE_TO",
-      "value": "2026-07-30T23:59:59",
-      "description": "Default full-day end for current verification date."
-    },
-    {
-      "key": "PAGE",
-      "value": "1",
-      "description": "Page number."
-    },
-    {
-      "key": "PAGE_SIZE",
-      "value": "100",
-      "description": "Records per page. Increase only if needed."
-    },
-    {
-      "key": "PART_ID",
-      "value": "",
-      "description": "Paste internal part ID here, then run Search by Part ID."
-    },
-    {
-      "key": "CUSTOMER_CODE",
-      "value": "",
-      "description": "Paste customer QR/customer code here, then run Search by Customer QR."
-    },
-    {
-      "key": "SHOT_NUMBER",
-      "value": "",
-      "description": "Paste PLC shot number here, then run Search by Shot Number."
-    },
-    {
-      "key": "PART_NAME",
-      "value": "OILPAN",
-      "description": "Part filter example."
-    },
-    {
-      "key": "DIE_NAME",
-      "value": "K-12",
-      "description": "Die filter example."
-    },
-    {
-      "key": "DIE_CASTING_MACHINE",
-      "value": "UBE 850 T - O2",
-      "description": "Die casting machine filter example."
+      "value": "2026-08-01T06:00:00",
+      "description": "Production day end"
     },
     {
       "key": "SHIFT_CODE",
-      "value": "SHIFT_A",
-      "description": "Shift filter example."
+      "value": "ALL",
+      "description": "Use ALL, SHIFT_A, SHIFT_B, etc."
     },
     {
-      "key": "STATUS",
-      "value": "NG",
-      "description": "Status filter example."
+      "key": "PAGE",
+      "value": "1"
+    },
+    {
+      "key": "PAGE_SIZE",
+      "value": "50"
+    },
+    {
+      "key": "LINE_NAME",
+      "value": "OIL PAN K-12"
+    },
+    {
+      "key": "PART_NAME",
+      "value": "OPK12"
+    },
+    {
+      "key": "DIE_CASTING_MACHINE",
+      "value": "UBE 850 T - 02"
+    },
+    {
+      "key": "SEARCH_VALUE",
+      "value": "",
+      "description": "Part ID, customer QR, or shot number"
     }
   ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{TOKEN}}",
+        "type": "string"
+      }
+    ]
+  },
   "item": [
     {
-      "name": "1. Report Records - Same As Report Page",
-      "description": "Start here. This fetches records exactly like a professional report API response: rows, metrics, pagination, PLC columns, available shifts, PLC shot summary, and leak-test details.",
-      "item": [
-        {
-          "name": "All Records - Full Details",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{TOKEN}}",
-                "description": "Run Login first. Token is stored in environment/global TOKEN."
-              }
-            ],
-            "url": {
-              "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&fast=false&full=1&clean=1&includePlcReadings=1&includeLeaktest=1&includePlcSummary=1&noCache=1&page={{PAGE}}&pageSize={{PAGE_SIZE}}",
-              "host": [
-                "{{BASE_URL}}"
-              ],
-              "path": [
-                "reports",
-                "report",
-                "data"
-              ],
-              "query": [
-                {
-                  "key": "dateFrom",
-                  "value": "{{DATE_FROM}}",
-                  "description": "Start datetime. Default is 30 Jul 2026 full day."
-                },
-                {
-                  "key": "dateTo",
-                  "value": "{{DATE_TO}}",
-                  "description": "End datetime. Default is 30 Jul 2026 23:59:59."
-                },
-                {
-                  "key": "fast",
-                  "value": "false",
-                  "description": "false/full mode gives report-page style enriched rows."
-                },
-                {
-                  "key": "full",
-                  "value": "1",
-                  "description": "Force full detail mode."
-                },
-                {
-                  "key": "clean",
-                  "value": "1",
-                  "description": "Professional API response. Does not affect report page because frontend does not send this."
-                },
-                {
-                  "key": "includePlcReadings",
-                  "value": "1",
-                  "description": "Include PlcCycleReadings shot parameters."
-                },
-                {
-                  "key": "includeLeaktest",
-                  "value": "1",
-                  "description": "Include OP150 leak-test readings."
-                },
-                {
-                  "key": "includePlcSummary",
-                  "value": "1",
-                  "description": "Include machine shot statistics."
-                },
-                {
-                  "key": "noCache",
-                  "value": "1",
-                  "description": "Always fetch fresh data."
-                },
-                {
-                  "key": "page",
-                  "value": "{{PAGE}}",
-                  "description": "Page number."
-                },
-                {
-                  "key": "pageSize",
-                  "value": "{{PAGE_SIZE}}",
-                  "description": "Rows per page."
-                },
-                {
-                  "key": "partName",
-                  "value": "{{PART_NAME}}",
-                  "description": "Optional part filter, e.g. OILPAN.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieName",
-                  "value": "{{DIE_NAME}}",
-                  "description": "Optional die filter, e.g. K-12.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieCastingMachine",
-                  "value": "{{DIE_CASTING_MACHINE}}",
-                  "description": "Optional die casting machine filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "shiftCode",
-                  "value": "{{SHIFT_CODE}}",
-                  "description": "Optional shift filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "status",
-                  "value": "{{STATUS}}",
-                  "description": "Optional status filter: OK, NG, IN_PROGRESS.",
-                  "disabled": true
-                },
-                {
-                  "key": "barcode",
-                  "value": "{{PART_ID}}",
-                  "description": "Optional part ID or shot number search.",
-                  "disabled": true
-                },
-                {
-                  "key": "customerCode",
-                  "value": "{{CUSTOMER_CODE}}",
-                  "description": "Optional customer QR/customer code search.",
-                  "disabled": true
-                }
-              ]
+      "name": "1. Report - Date + Shift",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&shiftCode={{SHIFT_CODE}}&page={{PAGE}}&pageSize={{PAGE_SIZE}}&clean=1&full=1&fast=false&includePlcReadings=1&includeLeaktest=1&includePlcSummary=1&noCache=1",
+          "host": [
+            "{{BASE_URL}}"
+          ],
+          "path": [
+            "reports",
+            "report",
+            "data"
+          ],
+          "query": [
+            {
+              "key": "dateFrom",
+              "value": "{{DATE_FROM}}"
             },
-            "description": "Fetch all report records for the date range. Optional filters are disabled by default so data will come immediately after login."
-          },
-          "event": [
             {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "pm.test('records[] exists', () => pm.expect(body.records).to.be.an('array'));",
-                  "pm.test('summary exists', () => pm.expect(body.summary).to.be.an('object'));",
-                  "pm.test('pagination exists', () => pm.expect(body.pagination).to.be.an('object'));",
-                  "pm.test('shot summary exists', () => pm.expect(body.summary.shotSummary).to.be.an('object'));",
-                  "console.log('records:', (body.records || []).length, 'totalRows:', body.pagination && body.pagination.totalRows);",
-                  "console.log('production:', body.summary && body.summary.totalProduction, 'passed:', body.summary && body.summary.passed, 'failed:', body.summary && body.summary.failed, 'inProgress:', body.summary && body.summary.inProgress);",
-                  "console.log('shotSummary:', body.summary && body.summary.shotSummary);"
-                ]
-              }
-            }
-          ],
-          "response": [
-            {
-              "name": "200 Professional Response Shape",
-              "status": "OK",
-              "code": 200,
-              "_postman_previewlanguage": "json",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                }
-              ],
-              "cookie": [],
-              "body": "{\n  \"records\": [\n    {\n      \"serialNo\": 1,\n      \"part\": {\n        \"id\": \"0730103024744\",\n        \"customerQr\": \"R437111511-54T00300726A0405\",\n        \"name\": \"OPK12\",\n        \"die\": \"S14\",\n        \"label\": \"OPK12-S14\",\n        \"status\": \"NG\"\n      },\n      \"production\": {\n        \"firstScanAt\": \"2026-07-30T08:22:28.178Z\",\n        \"firstScanShift\": \"SHIFT_A\",\n        \"latestActivityAt\": \"2026-07-30T08:22:59.589Z\",\n        \"line\": \"OIL PAN K-12\"\n      },\n      \"station\": {\n        \"operation\": \"OP110\",\n        \"name\": \"Laser Marking\",\n        \"result\": \"OK\",\n        \"cycleStartAt\": \"7/30/2026, 1:52:28 PM\",\n        \"cycleEndAt\": \"7/30/2026, 1:52:41 PM\",\n        \"cycleTime\": \"13.19\"\n      },\n      \"shot\": {\n        \"number\": 4744,\n        \"status\": \"OK\",\n        \"recordedAt\": \"2026-07-30T10:30:39.000Z\",\n        \"machine\": \"UBE 850 T - 02\",\n        \"partDie\": \"OPK12-S14\",\n        \"date\": \"2026-07-30\",\n        \"time\": \"10:30:39\",\n        \"parameters\": {\n          \"cycleTime\": 74,\n          \"metalPressure\": 70.6,\n          \"furnaceMetalTemp\": 638,\n          \"stroke\": 750\n        }\n      },\n      \"leakTest\": null,\n      \"rejection\": {\n        \"category\": null,\n        \"view\": null,\n        \"zone\": null,\n        \"subZone\": null,\n        \"reason\": null,\n        \"remark\": null\n      }\n    }\n  ],\n  \"summary\": {\n    \"totalProduction\": 552,\n    \"passed\": 240,\n    \"failed\": 54,\n    \"inProgress\": 544,\n    \"passRate\": 81.63,\n    \"shotSummary\": {\n      \"totalShots\": 552,\n      \"okShots\": 500,\n      \"warmUpShots\": 0,\n      \"ngShots\": 52,\n      \"source\": \"PLC_SUMMARY\"\n    }\n  },\n  \"pagination\": {\n    \"page\": 1,\n    \"pageSize\": 100,\n    \"totalRows\": 552,\n    \"totalPages\": 6\n  },\n  \"reportMode\": \"FULL\",\n  \"availableShifts\": []\n}"
-            }
-          ],
-          "description": "Clean mode fields: records[], summary, pagination, reportMode, availableShifts."
-        },
-        {
-          "name": "Oilpan K-12 - Full Details",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{TOKEN}}",
-                "description": "Run Login first. Token is stored in environment/global TOKEN."
-              }
-            ],
-            "url": {
-              "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&fast=false&full=1&clean=1&includePlcReadings=1&includeLeaktest=1&includePlcSummary=1&noCache=1&page={{PAGE}}&pageSize={{PAGE_SIZE}}&partName={{PART_NAME}}&dieName={{DIE_NAME}}&dieCastingMachine={{DIE_CASTING_MACHINE}}",
-              "host": [
-                "{{BASE_URL}}"
-              ],
-              "path": [
-                "reports",
-                "report",
-                "data"
-              ],
-              "query": [
-                {
-                  "key": "dateFrom",
-                  "value": "{{DATE_FROM}}",
-                  "description": "Start datetime. Default is 30 Jul 2026 full day."
-                },
-                {
-                  "key": "dateTo",
-                  "value": "{{DATE_TO}}",
-                  "description": "End datetime. Default is 30 Jul 2026 23:59:59."
-                },
-                {
-                  "key": "fast",
-                  "value": "false",
-                  "description": "false/full mode gives report-page style enriched rows."
-                },
-                {
-                  "key": "full",
-                  "value": "1",
-                  "description": "Force full detail mode."
-                },
-                {
-                  "key": "clean",
-                  "value": "1",
-                  "description": "Professional API response. Does not affect report page because frontend does not send this."
-                },
-                {
-                  "key": "includePlcReadings",
-                  "value": "1",
-                  "description": "Include PlcCycleReadings shot parameters."
-                },
-                {
-                  "key": "includeLeaktest",
-                  "value": "1",
-                  "description": "Include OP150 leak-test readings."
-                },
-                {
-                  "key": "includePlcSummary",
-                  "value": "1",
-                  "description": "Include machine shot statistics."
-                },
-                {
-                  "key": "noCache",
-                  "value": "1",
-                  "description": "Always fetch fresh data."
-                },
-                {
-                  "key": "page",
-                  "value": "{{PAGE}}",
-                  "description": "Page number."
-                },
-                {
-                  "key": "pageSize",
-                  "value": "{{PAGE_SIZE}}",
-                  "description": "Rows per page."
-                },
-                {
-                  "key": "partName",
-                  "value": "{{PART_NAME}}",
-                  "description": "Optional part filter, e.g. OILPAN.",
-                  "disabled": false
-                },
-                {
-                  "key": "dieName",
-                  "value": "{{DIE_NAME}}",
-                  "description": "Optional die filter, e.g. K-12.",
-                  "disabled": false
-                },
-                {
-                  "key": "dieCastingMachine",
-                  "value": "{{DIE_CASTING_MACHINE}}",
-                  "description": "Optional die casting machine filter.",
-                  "disabled": false
-                },
-                {
-                  "key": "shiftCode",
-                  "value": "{{SHIFT_CODE}}",
-                  "description": "Optional shift filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "status",
-                  "value": "{{STATUS}}",
-                  "description": "Optional status filter: OK, NG, IN_PROGRESS.",
-                  "disabled": true
-                },
-                {
-                  "key": "barcode",
-                  "value": "{{PART_ID}}",
-                  "description": "Optional part ID or shot number search.",
-                  "disabled": true
-                },
-                {
-                  "key": "customerCode",
-                  "value": "{{CUSTOMER_CODE}}",
-                  "description": "Optional customer QR/customer code search.",
-                  "disabled": true
-                }
-              ]
+              "key": "dateTo",
+              "value": "{{DATE_TO}}"
             },
-            "description": "Fetch OILPAN K-12 records with PLC shot details and leak-test data. Change DIE_CASTING_MACHINE if needed."
-          },
-          "event": [
             {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "pm.test('records[] exists', () => pm.expect(body.records).to.be.an('array'));",
-                  "pm.test('summary exists', () => pm.expect(body.summary).to.be.an('object'));",
-                  "pm.test('pagination exists', () => pm.expect(body.pagination).to.be.an('object'));",
-                  "pm.test('shot summary exists', () => pm.expect(body.summary.shotSummary).to.be.an('object'));",
-                  "console.log('records:', (body.records || []).length, 'totalRows:', body.pagination && body.pagination.totalRows);",
-                  "console.log('production:', body.summary && body.summary.totalProduction, 'passed:', body.summary && body.summary.passed, 'failed:', body.summary && body.summary.failed, 'inProgress:', body.summary && body.summary.inProgress);",
-                  "console.log('shotSummary:', body.summary && body.summary.shotSummary);"
-                ]
-              }
-            }
-          ],
-          "response": [
-            {
-              "name": "200 Professional Response Shape",
-              "status": "OK",
-              "code": 200,
-              "_postman_previewlanguage": "json",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                }
-              ],
-              "cookie": [],
-              "body": "{\n  \"records\": [\n    {\n      \"serialNo\": 1,\n      \"part\": {\n        \"id\": \"0730103024744\",\n        \"customerQr\": \"R437111511-54T00300726A0405\",\n        \"name\": \"OPK12\",\n        \"die\": \"S14\",\n        \"label\": \"OPK12-S14\",\n        \"status\": \"NG\"\n      },\n      \"production\": {\n        \"firstScanAt\": \"2026-07-30T08:22:28.178Z\",\n        \"firstScanShift\": \"SHIFT_A\",\n        \"latestActivityAt\": \"2026-07-30T08:22:59.589Z\",\n        \"line\": \"OIL PAN K-12\"\n      },\n      \"station\": {\n        \"operation\": \"OP110\",\n        \"name\": \"Laser Marking\",\n        \"result\": \"OK\",\n        \"cycleStartAt\": \"7/30/2026, 1:52:28 PM\",\n        \"cycleEndAt\": \"7/30/2026, 1:52:41 PM\",\n        \"cycleTime\": \"13.19\"\n      },\n      \"shot\": {\n        \"number\": 4744,\n        \"status\": \"OK\",\n        \"recordedAt\": \"2026-07-30T10:30:39.000Z\",\n        \"machine\": \"UBE 850 T - 02\",\n        \"partDie\": \"OPK12-S14\",\n        \"date\": \"2026-07-30\",\n        \"time\": \"10:30:39\",\n        \"parameters\": {\n          \"cycleTime\": 74,\n          \"metalPressure\": 70.6,\n          \"furnaceMetalTemp\": 638,\n          \"stroke\": 750\n        }\n      },\n      \"leakTest\": null,\n      \"rejection\": {\n        \"category\": null,\n        \"view\": null,\n        \"zone\": null,\n        \"subZone\": null,\n        \"reason\": null,\n        \"remark\": null\n      }\n    }\n  ],\n  \"summary\": {\n    \"totalProduction\": 552,\n    \"passed\": 240,\n    \"failed\": 54,\n    \"inProgress\": 544,\n    \"passRate\": 81.63,\n    \"shotSummary\": {\n      \"totalShots\": 552,\n      \"okShots\": 500,\n      \"warmUpShots\": 0,\n      \"ngShots\": 52,\n      \"source\": \"PLC_SUMMARY\"\n    }\n  },\n  \"pagination\": {\n    \"page\": 1,\n    \"pageSize\": 100,\n    \"totalRows\": 552,\n    \"totalPages\": 6\n  },\n  \"reportMode\": \"FULL\",\n  \"availableShifts\": []\n}"
-            }
-          ],
-          "description": "Clean mode fields: records[], summary, pagination, reportMode, availableShifts."
-        },
-        {
-          "name": "Shift Wise - First Scan Production",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{TOKEN}}",
-                "description": "Run Login first. Token is stored in environment/global TOKEN."
-              }
-            ],
-            "url": {
-              "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&fast=false&full=1&clean=1&includePlcReadings=1&includeLeaktest=1&includePlcSummary=1&noCache=1&page={{PAGE}}&pageSize={{PAGE_SIZE}}&shiftCode={{SHIFT_CODE}}",
-              "host": [
-                "{{BASE_URL}}"
-              ],
-              "path": [
-                "reports",
-                "report",
-                "data"
-              ],
-              "query": [
-                {
-                  "key": "dateFrom",
-                  "value": "{{DATE_FROM}}",
-                  "description": "Start datetime. Default is 30 Jul 2026 full day."
-                },
-                {
-                  "key": "dateTo",
-                  "value": "{{DATE_TO}}",
-                  "description": "End datetime. Default is 30 Jul 2026 23:59:59."
-                },
-                {
-                  "key": "fast",
-                  "value": "false",
-                  "description": "false/full mode gives report-page style enriched rows."
-                },
-                {
-                  "key": "full",
-                  "value": "1",
-                  "description": "Force full detail mode."
-                },
-                {
-                  "key": "clean",
-                  "value": "1",
-                  "description": "Professional API response. Does not affect report page because frontend does not send this."
-                },
-                {
-                  "key": "includePlcReadings",
-                  "value": "1",
-                  "description": "Include PlcCycleReadings shot parameters."
-                },
-                {
-                  "key": "includeLeaktest",
-                  "value": "1",
-                  "description": "Include OP150 leak-test readings."
-                },
-                {
-                  "key": "includePlcSummary",
-                  "value": "1",
-                  "description": "Include machine shot statistics."
-                },
-                {
-                  "key": "noCache",
-                  "value": "1",
-                  "description": "Always fetch fresh data."
-                },
-                {
-                  "key": "page",
-                  "value": "{{PAGE}}",
-                  "description": "Page number."
-                },
-                {
-                  "key": "pageSize",
-                  "value": "{{PAGE_SIZE}}",
-                  "description": "Rows per page."
-                },
-                {
-                  "key": "partName",
-                  "value": "{{PART_NAME}}",
-                  "description": "Optional part filter, e.g. OILPAN.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieName",
-                  "value": "{{DIE_NAME}}",
-                  "description": "Optional die filter, e.g. K-12.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieCastingMachine",
-                  "value": "{{DIE_CASTING_MACHINE}}",
-                  "description": "Optional die casting machine filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "shiftCode",
-                  "value": "{{SHIFT_CODE}}",
-                  "description": "Optional shift filter.",
-                  "disabled": false
-                },
-                {
-                  "key": "status",
-                  "value": "{{STATUS}}",
-                  "description": "Optional status filter: OK, NG, IN_PROGRESS.",
-                  "disabled": true
-                },
-                {
-                  "key": "barcode",
-                  "value": "{{PART_ID}}",
-                  "description": "Optional part ID or shot number search.",
-                  "disabled": true
-                },
-                {
-                  "key": "customerCode",
-                  "value": "{{CUSTOMER_CODE}}",
-                  "description": "Optional customer QR/customer code search.",
-                  "disabled": true
-                }
-              ]
+              "key": "shiftCode",
+              "value": "{{SHIFT_CODE}}",
+              "description": "ALL means no shift filter"
             },
-            "description": "Verify total production by first scan time for selected shift. This should match report/dashboard first-scan production logic."
-          },
-          "event": [
             {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "pm.test('records[] exists', () => pm.expect(body.records).to.be.an('array'));",
-                  "pm.test('summary exists', () => pm.expect(body.summary).to.be.an('object'));",
-                  "pm.test('pagination exists', () => pm.expect(body.pagination).to.be.an('object'));",
-                  "pm.test('shot summary exists', () => pm.expect(body.summary.shotSummary).to.be.an('object'));",
-                  "console.log('records:', (body.records || []).length, 'totalRows:', body.pagination && body.pagination.totalRows);",
-                  "console.log('production:', body.summary && body.summary.totalProduction, 'passed:', body.summary && body.summary.passed, 'failed:', body.summary && body.summary.failed, 'inProgress:', body.summary && body.summary.inProgress);",
-                  "console.log('shotSummary:', body.summary && body.summary.shotSummary);"
-                ]
-              }
-            }
-          ],
-          "response": [
-            {
-              "name": "200 Professional Response Shape",
-              "status": "OK",
-              "code": 200,
-              "_postman_previewlanguage": "json",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                }
-              ],
-              "cookie": [],
-              "body": "{\n  \"records\": [\n    {\n      \"serialNo\": 1,\n      \"part\": {\n        \"id\": \"0730103024744\",\n        \"customerQr\": \"R437111511-54T00300726A0405\",\n        \"name\": \"OPK12\",\n        \"die\": \"S14\",\n        \"label\": \"OPK12-S14\",\n        \"status\": \"NG\"\n      },\n      \"production\": {\n        \"firstScanAt\": \"2026-07-30T08:22:28.178Z\",\n        \"firstScanShift\": \"SHIFT_A\",\n        \"latestActivityAt\": \"2026-07-30T08:22:59.589Z\",\n        \"line\": \"OIL PAN K-12\"\n      },\n      \"station\": {\n        \"operation\": \"OP110\",\n        \"name\": \"Laser Marking\",\n        \"result\": \"OK\",\n        \"cycleStartAt\": \"7/30/2026, 1:52:28 PM\",\n        \"cycleEndAt\": \"7/30/2026, 1:52:41 PM\",\n        \"cycleTime\": \"13.19\"\n      },\n      \"shot\": {\n        \"number\": 4744,\n        \"status\": \"OK\",\n        \"recordedAt\": \"2026-07-30T10:30:39.000Z\",\n        \"machine\": \"UBE 850 T - 02\",\n        \"partDie\": \"OPK12-S14\",\n        \"date\": \"2026-07-30\",\n        \"time\": \"10:30:39\",\n        \"parameters\": {\n          \"cycleTime\": 74,\n          \"metalPressure\": 70.6,\n          \"furnaceMetalTemp\": 638,\n          \"stroke\": 750\n        }\n      },\n      \"leakTest\": null,\n      \"rejection\": {\n        \"category\": null,\n        \"view\": null,\n        \"zone\": null,\n        \"subZone\": null,\n        \"reason\": null,\n        \"remark\": null\n      }\n    }\n  ],\n  \"summary\": {\n    \"totalProduction\": 552,\n    \"passed\": 240,\n    \"failed\": 54,\n    \"inProgress\": 544,\n    \"passRate\": 81.63,\n    \"shotSummary\": {\n      \"totalShots\": 552,\n      \"okShots\": 500,\n      \"warmUpShots\": 0,\n      \"ngShots\": 52,\n      \"source\": \"PLC_SUMMARY\"\n    }\n  },\n  \"pagination\": {\n    \"page\": 1,\n    \"pageSize\": 100,\n    \"totalRows\": 552,\n    \"totalPages\": 6\n  },\n  \"reportMode\": \"FULL\",\n  \"availableShifts\": []\n}"
-            }
-          ],
-          "description": "Clean mode fields: records[], summary, pagination, reportMode, availableShifts."
-        },
-        {
-          "name": "NG Records Only",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{TOKEN}}",
-                "description": "Run Login first. Token is stored in environment/global TOKEN."
-              }
-            ],
-            "url": {
-              "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&fast=false&full=1&clean=1&includePlcReadings=1&includeLeaktest=1&includePlcSummary=1&noCache=1&page={{PAGE}}&pageSize={{PAGE_SIZE}}&status={{STATUS}}",
-              "host": [
-                "{{BASE_URL}}"
-              ],
-              "path": [
-                "reports",
-                "report",
-                "data"
-              ],
-              "query": [
-                {
-                  "key": "dateFrom",
-                  "value": "{{DATE_FROM}}",
-                  "description": "Start datetime. Default is 30 Jul 2026 full day."
-                },
-                {
-                  "key": "dateTo",
-                  "value": "{{DATE_TO}}",
-                  "description": "End datetime. Default is 30 Jul 2026 23:59:59."
-                },
-                {
-                  "key": "fast",
-                  "value": "false",
-                  "description": "false/full mode gives report-page style enriched rows."
-                },
-                {
-                  "key": "full",
-                  "value": "1",
-                  "description": "Force full detail mode."
-                },
-                {
-                  "key": "clean",
-                  "value": "1",
-                  "description": "Professional API response. Does not affect report page because frontend does not send this."
-                },
-                {
-                  "key": "includePlcReadings",
-                  "value": "1",
-                  "description": "Include PlcCycleReadings shot parameters."
-                },
-                {
-                  "key": "includeLeaktest",
-                  "value": "1",
-                  "description": "Include OP150 leak-test readings."
-                },
-                {
-                  "key": "includePlcSummary",
-                  "value": "1",
-                  "description": "Include machine shot statistics."
-                },
-                {
-                  "key": "noCache",
-                  "value": "1",
-                  "description": "Always fetch fresh data."
-                },
-                {
-                  "key": "page",
-                  "value": "{{PAGE}}",
-                  "description": "Page number."
-                },
-                {
-                  "key": "pageSize",
-                  "value": "{{PAGE_SIZE}}",
-                  "description": "Rows per page."
-                },
-                {
-                  "key": "partName",
-                  "value": "{{PART_NAME}}",
-                  "description": "Optional part filter, e.g. OILPAN.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieName",
-                  "value": "{{DIE_NAME}}",
-                  "description": "Optional die filter, e.g. K-12.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieCastingMachine",
-                  "value": "{{DIE_CASTING_MACHINE}}",
-                  "description": "Optional die casting machine filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "shiftCode",
-                  "value": "{{SHIFT_CODE}}",
-                  "description": "Optional shift filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "status",
-                  "value": "{{STATUS}}",
-                  "description": "Optional status filter: OK, NG, IN_PROGRESS.",
-                  "disabled": false
-                },
-                {
-                  "key": "barcode",
-                  "value": "{{PART_ID}}",
-                  "description": "Optional part ID or shot number search.",
-                  "disabled": true
-                },
-                {
-                  "key": "customerCode",
-                  "value": "{{CUSTOMER_CODE}}",
-                  "description": "Optional customer QR/customer code search.",
-                  "disabled": true
-                }
-              ]
+              "key": "page",
+              "value": "{{PAGE}}"
             },
-            "description": "Fetch final NG/rejected records for the date range."
-          },
-          "event": [
             {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "pm.test('records[] exists', () => pm.expect(body.records).to.be.an('array'));",
-                  "pm.test('summary exists', () => pm.expect(body.summary).to.be.an('object'));",
-                  "pm.test('pagination exists', () => pm.expect(body.pagination).to.be.an('object'));",
-                  "pm.test('shot summary exists', () => pm.expect(body.summary.shotSummary).to.be.an('object'));",
-                  "console.log('records:', (body.records || []).length, 'totalRows:', body.pagination && body.pagination.totalRows);",
-                  "console.log('production:', body.summary && body.summary.totalProduction, 'passed:', body.summary && body.summary.passed, 'failed:', body.summary && body.summary.failed, 'inProgress:', body.summary && body.summary.inProgress);",
-                  "console.log('shotSummary:', body.summary && body.summary.shotSummary);"
-                ]
-              }
-            }
-          ],
-          "response": [
-            {
-              "name": "200 Professional Response Shape",
-              "status": "OK",
-              "code": 200,
-              "_postman_previewlanguage": "json",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                }
-              ],
-              "cookie": [],
-              "body": "{\n  \"records\": [\n    {\n      \"serialNo\": 1,\n      \"part\": {\n        \"id\": \"0730103024744\",\n        \"customerQr\": \"R437111511-54T00300726A0405\",\n        \"name\": \"OPK12\",\n        \"die\": \"S14\",\n        \"label\": \"OPK12-S14\",\n        \"status\": \"NG\"\n      },\n      \"production\": {\n        \"firstScanAt\": \"2026-07-30T08:22:28.178Z\",\n        \"firstScanShift\": \"SHIFT_A\",\n        \"latestActivityAt\": \"2026-07-30T08:22:59.589Z\",\n        \"line\": \"OIL PAN K-12\"\n      },\n      \"station\": {\n        \"operation\": \"OP110\",\n        \"name\": \"Laser Marking\",\n        \"result\": \"OK\",\n        \"cycleStartAt\": \"7/30/2026, 1:52:28 PM\",\n        \"cycleEndAt\": \"7/30/2026, 1:52:41 PM\",\n        \"cycleTime\": \"13.19\"\n      },\n      \"shot\": {\n        \"number\": 4744,\n        \"status\": \"OK\",\n        \"recordedAt\": \"2026-07-30T10:30:39.000Z\",\n        \"machine\": \"UBE 850 T - 02\",\n        \"partDie\": \"OPK12-S14\",\n        \"date\": \"2026-07-30\",\n        \"time\": \"10:30:39\",\n        \"parameters\": {\n          \"cycleTime\": 74,\n          \"metalPressure\": 70.6,\n          \"furnaceMetalTemp\": 638,\n          \"stroke\": 750\n        }\n      },\n      \"leakTest\": null,\n      \"rejection\": {\n        \"category\": null,\n        \"view\": null,\n        \"zone\": null,\n        \"subZone\": null,\n        \"reason\": null,\n        \"remark\": null\n      }\n    }\n  ],\n  \"summary\": {\n    \"totalProduction\": 552,\n    \"passed\": 240,\n    \"failed\": 54,\n    \"inProgress\": 544,\n    \"passRate\": 81.63,\n    \"shotSummary\": {\n      \"totalShots\": 552,\n      \"okShots\": 500,\n      \"warmUpShots\": 0,\n      \"ngShots\": 52,\n      \"source\": \"PLC_SUMMARY\"\n    }\n  },\n  \"pagination\": {\n    \"page\": 1,\n    \"pageSize\": 100,\n    \"totalRows\": 552,\n    \"totalPages\": 6\n  },\n  \"reportMode\": \"FULL\",\n  \"availableShifts\": []\n}"
-            }
-          ],
-          "description": "Clean mode fields: records[], summary, pagination, reportMode, availableShifts."
-        }
-      ]
-    },
-    {
-      "name": "2. Search One Record",
-      "description": "Use these when you know a part ID, customer QR, or PLC shot number.",
-      "item": [
-        {
-          "name": "Search by Part ID",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{TOKEN}}",
-                "description": "Run Login first. Token is stored in environment/global TOKEN."
-              }
-            ],
-            "url": {
-              "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&fast=false&full=1&clean=1&includePlcReadings=1&includeLeaktest=1&includePlcSummary=1&noCache=1&page={{PAGE}}&pageSize={{PAGE_SIZE}}&barcode={{PART_ID}}",
-              "host": [
-                "{{BASE_URL}}"
-              ],
-              "path": [
-                "reports",
-                "report",
-                "data"
-              ],
-              "query": [
-                {
-                  "key": "dateFrom",
-                  "value": "{{DATE_FROM}}",
-                  "description": "Start datetime. Default is 30 Jul 2026 full day."
-                },
-                {
-                  "key": "dateTo",
-                  "value": "{{DATE_TO}}",
-                  "description": "End datetime. Default is 30 Jul 2026 23:59:59."
-                },
-                {
-                  "key": "fast",
-                  "value": "false",
-                  "description": "false/full mode gives report-page style enriched rows."
-                },
-                {
-                  "key": "full",
-                  "value": "1",
-                  "description": "Force full detail mode."
-                },
-                {
-                  "key": "clean",
-                  "value": "1",
-                  "description": "Professional API response. Does not affect report page because frontend does not send this."
-                },
-                {
-                  "key": "includePlcReadings",
-                  "value": "1",
-                  "description": "Include PlcCycleReadings shot parameters."
-                },
-                {
-                  "key": "includeLeaktest",
-                  "value": "1",
-                  "description": "Include OP150 leak-test readings."
-                },
-                {
-                  "key": "includePlcSummary",
-                  "value": "1",
-                  "description": "Include machine shot statistics."
-                },
-                {
-                  "key": "noCache",
-                  "value": "1",
-                  "description": "Always fetch fresh data."
-                },
-                {
-                  "key": "page",
-                  "value": "{{PAGE}}",
-                  "description": "Page number."
-                },
-                {
-                  "key": "pageSize",
-                  "value": "{{PAGE_SIZE}}",
-                  "description": "Rows per page."
-                },
-                {
-                  "key": "partName",
-                  "value": "{{PART_NAME}}",
-                  "description": "Optional part filter, e.g. OILPAN.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieName",
-                  "value": "{{DIE_NAME}}",
-                  "description": "Optional die filter, e.g. K-12.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieCastingMachine",
-                  "value": "{{DIE_CASTING_MACHINE}}",
-                  "description": "Optional die casting machine filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "shiftCode",
-                  "value": "{{SHIFT_CODE}}",
-                  "description": "Optional shift filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "status",
-                  "value": "{{STATUS}}",
-                  "description": "Optional status filter: OK, NG, IN_PROGRESS.",
-                  "disabled": true
-                },
-                {
-                  "key": "barcode",
-                  "value": "{{PART_ID}}",
-                  "description": "Optional part ID or shot number search.",
-                  "disabled": false
-                },
-                {
-                  "key": "customerCode",
-                  "value": "{{CUSTOMER_CODE}}",
-                  "description": "Optional customer QR/customer code search.",
-                  "disabled": true
-                }
-              ]
+              "key": "pageSize",
+              "value": "{{PAGE_SIZE}}"
             },
-            "description": "Paste PART_ID in variables and run. Backend uses barcode as common search for part ID."
-          },
-          "event": [
             {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "pm.test('records[] exists', () => pm.expect(body.records).to.be.an('array'));",
-                  "pm.test('summary exists', () => pm.expect(body.summary).to.be.an('object'));",
-                  "pm.test('pagination exists', () => pm.expect(body.pagination).to.be.an('object'));",
-                  "pm.test('shot summary exists', () => pm.expect(body.summary.shotSummary).to.be.an('object'));",
-                  "console.log('records:', (body.records || []).length, 'totalRows:', body.pagination && body.pagination.totalRows);",
-                  "console.log('production:', body.summary && body.summary.totalProduction, 'passed:', body.summary && body.summary.passed, 'failed:', body.summary && body.summary.failed, 'inProgress:', body.summary && body.summary.inProgress);",
-                  "console.log('shotSummary:', body.summary && body.summary.shotSummary);"
-                ]
-              }
-            }
-          ],
-          "response": [
-            {
-              "name": "200 Professional Response Shape",
-              "status": "OK",
-              "code": 200,
-              "_postman_previewlanguage": "json",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                }
-              ],
-              "cookie": [],
-              "body": "{\n  \"records\": [\n    {\n      \"serialNo\": 1,\n      \"part\": {\n        \"id\": \"0730103024744\",\n        \"customerQr\": \"R437111511-54T00300726A0405\",\n        \"name\": \"OPK12\",\n        \"die\": \"S14\",\n        \"label\": \"OPK12-S14\",\n        \"status\": \"NG\"\n      },\n      \"production\": {\n        \"firstScanAt\": \"2026-07-30T08:22:28.178Z\",\n        \"firstScanShift\": \"SHIFT_A\",\n        \"latestActivityAt\": \"2026-07-30T08:22:59.589Z\",\n        \"line\": \"OIL PAN K-12\"\n      },\n      \"station\": {\n        \"operation\": \"OP110\",\n        \"name\": \"Laser Marking\",\n        \"result\": \"OK\",\n        \"cycleStartAt\": \"7/30/2026, 1:52:28 PM\",\n        \"cycleEndAt\": \"7/30/2026, 1:52:41 PM\",\n        \"cycleTime\": \"13.19\"\n      },\n      \"shot\": {\n        \"number\": 4744,\n        \"status\": \"OK\",\n        \"recordedAt\": \"2026-07-30T10:30:39.000Z\",\n        \"machine\": \"UBE 850 T - 02\",\n        \"partDie\": \"OPK12-S14\",\n        \"date\": \"2026-07-30\",\n        \"time\": \"10:30:39\",\n        \"parameters\": {\n          \"cycleTime\": 74,\n          \"metalPressure\": 70.6,\n          \"furnaceMetalTemp\": 638,\n          \"stroke\": 750\n        }\n      },\n      \"leakTest\": null,\n      \"rejection\": {\n        \"category\": null,\n        \"view\": null,\n        \"zone\": null,\n        \"subZone\": null,\n        \"reason\": null,\n        \"remark\": null\n      }\n    }\n  ],\n  \"summary\": {\n    \"totalProduction\": 552,\n    \"passed\": 240,\n    \"failed\": 54,\n    \"inProgress\": 544,\n    \"passRate\": 81.63,\n    \"shotSummary\": {\n      \"totalShots\": 552,\n      \"okShots\": 500,\n      \"warmUpShots\": 0,\n      \"ngShots\": 52,\n      \"source\": \"PLC_SUMMARY\"\n    }\n  },\n  \"pagination\": {\n    \"page\": 1,\n    \"pageSize\": 100,\n    \"totalRows\": 552,\n    \"totalPages\": 6\n  },\n  \"reportMode\": \"FULL\",\n  \"availableShifts\": []\n}"
-            }
-          ],
-          "description": "Clean mode fields: records[], summary, pagination, reportMode, availableShifts."
-        },
-        {
-          "name": "Search by Customer QR Code",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{TOKEN}}",
-                "description": "Run Login first. Token is stored in environment/global TOKEN."
-              }
-            ],
-            "url": {
-              "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&fast=false&full=1&clean=1&includePlcReadings=1&includeLeaktest=1&includePlcSummary=1&noCache=1&page={{PAGE}}&pageSize={{PAGE_SIZE}}&customerCode={{CUSTOMER_CODE}}",
-              "host": [
-                "{{BASE_URL}}"
-              ],
-              "path": [
-                "reports",
-                "report",
-                "data"
-              ],
-              "query": [
-                {
-                  "key": "dateFrom",
-                  "value": "{{DATE_FROM}}",
-                  "description": "Start datetime. Default is 30 Jul 2026 full day."
-                },
-                {
-                  "key": "dateTo",
-                  "value": "{{DATE_TO}}",
-                  "description": "End datetime. Default is 30 Jul 2026 23:59:59."
-                },
-                {
-                  "key": "fast",
-                  "value": "false",
-                  "description": "false/full mode gives report-page style enriched rows."
-                },
-                {
-                  "key": "full",
-                  "value": "1",
-                  "description": "Force full detail mode."
-                },
-                {
-                  "key": "clean",
-                  "value": "1",
-                  "description": "Professional API response. Does not affect report page because frontend does not send this."
-                },
-                {
-                  "key": "includePlcReadings",
-                  "value": "1",
-                  "description": "Include PlcCycleReadings shot parameters."
-                },
-                {
-                  "key": "includeLeaktest",
-                  "value": "1",
-                  "description": "Include OP150 leak-test readings."
-                },
-                {
-                  "key": "includePlcSummary",
-                  "value": "1",
-                  "description": "Include machine shot statistics."
-                },
-                {
-                  "key": "noCache",
-                  "value": "1",
-                  "description": "Always fetch fresh data."
-                },
-                {
-                  "key": "page",
-                  "value": "{{PAGE}}",
-                  "description": "Page number."
-                },
-                {
-                  "key": "pageSize",
-                  "value": "{{PAGE_SIZE}}",
-                  "description": "Rows per page."
-                },
-                {
-                  "key": "partName",
-                  "value": "{{PART_NAME}}",
-                  "description": "Optional part filter, e.g. OILPAN.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieName",
-                  "value": "{{DIE_NAME}}",
-                  "description": "Optional die filter, e.g. K-12.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieCastingMachine",
-                  "value": "{{DIE_CASTING_MACHINE}}",
-                  "description": "Optional die casting machine filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "shiftCode",
-                  "value": "{{SHIFT_CODE}}",
-                  "description": "Optional shift filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "status",
-                  "value": "{{STATUS}}",
-                  "description": "Optional status filter: OK, NG, IN_PROGRESS.",
-                  "disabled": true
-                },
-                {
-                  "key": "barcode",
-                  "value": "{{PART_ID}}",
-                  "description": "Optional part ID or shot number search.",
-                  "disabled": true
-                },
-                {
-                  "key": "customerCode",
-                  "value": "{{CUSTOMER_CODE}}",
-                  "description": "Optional customer QR/customer code search.",
-                  "disabled": false
-                }
-              ]
+              "key": "clean",
+              "value": "1"
             },
-            "description": "Paste CUSTOMER_CODE in variables and run."
-          },
-          "event": [
             {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "pm.test('records[] exists', () => pm.expect(body.records).to.be.an('array'));",
-                  "pm.test('summary exists', () => pm.expect(body.summary).to.be.an('object'));",
-                  "pm.test('pagination exists', () => pm.expect(body.pagination).to.be.an('object'));",
-                  "pm.test('shot summary exists', () => pm.expect(body.summary.shotSummary).to.be.an('object'));",
-                  "console.log('records:', (body.records || []).length, 'totalRows:', body.pagination && body.pagination.totalRows);",
-                  "console.log('production:', body.summary && body.summary.totalProduction, 'passed:', body.summary && body.summary.passed, 'failed:', body.summary && body.summary.failed, 'inProgress:', body.summary && body.summary.inProgress);",
-                  "console.log('shotSummary:', body.summary && body.summary.shotSummary);"
-                ]
-              }
-            }
-          ],
-          "response": [
-            {
-              "name": "200 Professional Response Shape",
-              "status": "OK",
-              "code": 200,
-              "_postman_previewlanguage": "json",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                }
-              ],
-              "cookie": [],
-              "body": "{\n  \"records\": [\n    {\n      \"serialNo\": 1,\n      \"part\": {\n        \"id\": \"0730103024744\",\n        \"customerQr\": \"R437111511-54T00300726A0405\",\n        \"name\": \"OPK12\",\n        \"die\": \"S14\",\n        \"label\": \"OPK12-S14\",\n        \"status\": \"NG\"\n      },\n      \"production\": {\n        \"firstScanAt\": \"2026-07-30T08:22:28.178Z\",\n        \"firstScanShift\": \"SHIFT_A\",\n        \"latestActivityAt\": \"2026-07-30T08:22:59.589Z\",\n        \"line\": \"OIL PAN K-12\"\n      },\n      \"station\": {\n        \"operation\": \"OP110\",\n        \"name\": \"Laser Marking\",\n        \"result\": \"OK\",\n        \"cycleStartAt\": \"7/30/2026, 1:52:28 PM\",\n        \"cycleEndAt\": \"7/30/2026, 1:52:41 PM\",\n        \"cycleTime\": \"13.19\"\n      },\n      \"shot\": {\n        \"number\": 4744,\n        \"status\": \"OK\",\n        \"recordedAt\": \"2026-07-30T10:30:39.000Z\",\n        \"machine\": \"UBE 850 T - 02\",\n        \"partDie\": \"OPK12-S14\",\n        \"date\": \"2026-07-30\",\n        \"time\": \"10:30:39\",\n        \"parameters\": {\n          \"cycleTime\": 74,\n          \"metalPressure\": 70.6,\n          \"furnaceMetalTemp\": 638,\n          \"stroke\": 750\n        }\n      },\n      \"leakTest\": null,\n      \"rejection\": {\n        \"category\": null,\n        \"view\": null,\n        \"zone\": null,\n        \"subZone\": null,\n        \"reason\": null,\n        \"remark\": null\n      }\n    }\n  ],\n  \"summary\": {\n    \"totalProduction\": 552,\n    \"passed\": 240,\n    \"failed\": 54,\n    \"inProgress\": 544,\n    \"passRate\": 81.63,\n    \"shotSummary\": {\n      \"totalShots\": 552,\n      \"okShots\": 500,\n      \"warmUpShots\": 0,\n      \"ngShots\": 52,\n      \"source\": \"PLC_SUMMARY\"\n    }\n  },\n  \"pagination\": {\n    \"page\": 1,\n    \"pageSize\": 100,\n    \"totalRows\": 552,\n    \"totalPages\": 6\n  },\n  \"reportMode\": \"FULL\",\n  \"availableShifts\": []\n}"
-            }
-          ],
-          "description": "Clean mode fields: records[], summary, pagination, reportMode, availableShifts."
-        },
-        {
-          "name": "Search by Shot Number",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{TOKEN}}",
-                "description": "Run Login first. Token is stored in environment/global TOKEN."
-              }
-            ],
-            "url": {
-              "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&fast=false&full=1&clean=1&includePlcReadings=1&includeLeaktest=1&includePlcSummary=1&noCache=1&page={{PAGE}}&pageSize={{PAGE_SIZE}}&barcode={{SHOT_NUMBER}}",
-              "host": [
-                "{{BASE_URL}}"
-              ],
-              "path": [
-                "reports",
-                "report",
-                "data"
-              ],
-              "query": [
-                {
-                  "key": "dateFrom",
-                  "value": "{{DATE_FROM}}",
-                  "description": "Start datetime. Default is 30 Jul 2026 full day."
-                },
-                {
-                  "key": "dateTo",
-                  "value": "{{DATE_TO}}",
-                  "description": "End datetime. Default is 30 Jul 2026 23:59:59."
-                },
-                {
-                  "key": "fast",
-                  "value": "false",
-                  "description": "false/full mode gives report-page style enriched rows."
-                },
-                {
-                  "key": "full",
-                  "value": "1",
-                  "description": "Force full detail mode."
-                },
-                {
-                  "key": "clean",
-                  "value": "1",
-                  "description": "Professional API response. Does not affect report page because frontend does not send this."
-                },
-                {
-                  "key": "includePlcReadings",
-                  "value": "1",
-                  "description": "Include PlcCycleReadings shot parameters."
-                },
-                {
-                  "key": "includeLeaktest",
-                  "value": "1",
-                  "description": "Include OP150 leak-test readings."
-                },
-                {
-                  "key": "includePlcSummary",
-                  "value": "1",
-                  "description": "Include machine shot statistics."
-                },
-                {
-                  "key": "noCache",
-                  "value": "1",
-                  "description": "Always fetch fresh data."
-                },
-                {
-                  "key": "page",
-                  "value": "{{PAGE}}",
-                  "description": "Page number."
-                },
-                {
-                  "key": "pageSize",
-                  "value": "{{PAGE_SIZE}}",
-                  "description": "Rows per page."
-                },
-                {
-                  "key": "partName",
-                  "value": "{{PART_NAME}}",
-                  "description": "Optional part filter, e.g. OILPAN.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieName",
-                  "value": "{{DIE_NAME}}",
-                  "description": "Optional die filter, e.g. K-12.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieCastingMachine",
-                  "value": "{{DIE_CASTING_MACHINE}}",
-                  "description": "Optional die casting machine filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "shiftCode",
-                  "value": "{{SHIFT_CODE}}",
-                  "description": "Optional shift filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "status",
-                  "value": "{{STATUS}}",
-                  "description": "Optional status filter: OK, NG, IN_PROGRESS.",
-                  "disabled": true
-                },
-                {
-                  "key": "barcode",
-                  "value": "{{SHOT_NUMBER}}",
-                  "description": "PLC shot number search.",
-                  "disabled": false
-                },
-                {
-                  "key": "customerCode",
-                  "value": "{{CUSTOMER_CODE}}",
-                  "description": "Optional customer QR/customer code search.",
-                  "disabled": true
-                }
-              ]
+              "key": "full",
+              "value": "1"
             },
-            "description": "Paste SHOT_NUMBER in variables and run. Response includes PLC cycle parameters when matched."
-          },
-          "event": [
             {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "pm.test('records[] exists', () => pm.expect(body.records).to.be.an('array'));",
-                  "pm.test('summary exists', () => pm.expect(body.summary).to.be.an('object'));",
-                  "pm.test('pagination exists', () => pm.expect(body.pagination).to.be.an('object'));",
-                  "pm.test('shot summary exists', () => pm.expect(body.summary.shotSummary).to.be.an('object'));",
-                  "console.log('records:', (body.records || []).length, 'totalRows:', body.pagination && body.pagination.totalRows);",
-                  "console.log('production:', body.summary && body.summary.totalProduction, 'passed:', body.summary && body.summary.passed, 'failed:', body.summary && body.summary.failed, 'inProgress:', body.summary && body.summary.inProgress);",
-                  "console.log('shotSummary:', body.summary && body.summary.shotSummary);"
-                ]
-              }
-            }
-          ],
-          "response": [
-            {
-              "name": "200 Professional Response Shape",
-              "status": "OK",
-              "code": 200,
-              "_postman_previewlanguage": "json",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                }
-              ],
-              "cookie": [],
-              "body": "{\n  \"records\": [\n    {\n      \"serialNo\": 1,\n      \"part\": {\n        \"id\": \"0730103024744\",\n        \"customerQr\": \"R437111511-54T00300726A0405\",\n        \"name\": \"OPK12\",\n        \"die\": \"S14\",\n        \"label\": \"OPK12-S14\",\n        \"status\": \"NG\"\n      },\n      \"production\": {\n        \"firstScanAt\": \"2026-07-30T08:22:28.178Z\",\n        \"firstScanShift\": \"SHIFT_A\",\n        \"latestActivityAt\": \"2026-07-30T08:22:59.589Z\",\n        \"line\": \"OIL PAN K-12\"\n      },\n      \"station\": {\n        \"operation\": \"OP110\",\n        \"name\": \"Laser Marking\",\n        \"result\": \"OK\",\n        \"cycleStartAt\": \"7/30/2026, 1:52:28 PM\",\n        \"cycleEndAt\": \"7/30/2026, 1:52:41 PM\",\n        \"cycleTime\": \"13.19\"\n      },\n      \"shot\": {\n        \"number\": 4744,\n        \"status\": \"OK\",\n        \"recordedAt\": \"2026-07-30T10:30:39.000Z\",\n        \"machine\": \"UBE 850 T - 02\",\n        \"partDie\": \"OPK12-S14\",\n        \"date\": \"2026-07-30\",\n        \"time\": \"10:30:39\",\n        \"parameters\": {\n          \"cycleTime\": 74,\n          \"metalPressure\": 70.6,\n          \"furnaceMetalTemp\": 638,\n          \"stroke\": 750\n        }\n      },\n      \"leakTest\": null,\n      \"rejection\": {\n        \"category\": null,\n        \"view\": null,\n        \"zone\": null,\n        \"subZone\": null,\n        \"reason\": null,\n        \"remark\": null\n      }\n    }\n  ],\n  \"summary\": {\n    \"totalProduction\": 552,\n    \"passed\": 240,\n    \"failed\": 54,\n    \"inProgress\": 544,\n    \"passRate\": 81.63,\n    \"shotSummary\": {\n      \"totalShots\": 552,\n      \"okShots\": 500,\n      \"warmUpShots\": 0,\n      \"ngShots\": 52,\n      \"source\": \"PLC_SUMMARY\"\n    }\n  },\n  \"pagination\": {\n    \"page\": 1,\n    \"pageSize\": 100,\n    \"totalRows\": 552,\n    \"totalPages\": 6\n  },\n  \"reportMode\": \"FULL\",\n  \"availableShifts\": []\n}"
-            }
-          ],
-          "description": "Clean mode fields: records[], summary, pagination, reportMode, availableShifts."
-        }
-      ]
-    },
-    {
-      "name": "3. Machine Shot Statistics",
-      "description": "Dedicated endpoint used by report page shot-stat cards.",
-      "item": [
-        {
-          "name": "Shot Summary - Current Filters",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{TOKEN}}",
-                "description": "Run Login first. Token is stored in environment/global TOKEN."
-              }
-            ],
-            "url": {
-              "raw": "{{BASE_URL}}/reports/report/shot-summary?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&noCache=1",
-              "host": [
-                "{{BASE_URL}}"
-              ],
-              "path": [
-                "reports",
-                "report",
-                "shot-summary"
-              ],
-              "query": [
-                {
-                  "key": "dateFrom",
-                  "value": "{{DATE_FROM}}",
-                  "description": "Start datetime."
-                },
-                {
-                  "key": "dateTo",
-                  "value": "{{DATE_TO}}",
-                  "description": "End datetime."
-                },
-                {
-                  "key": "noCache",
-                  "value": "1",
-                  "description": "Always fresh."
-                },
-                {
-                  "key": "partName",
-                  "value": "{{PART_NAME}}",
-                  "description": "Optional part filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieName",
-                  "value": "{{DIE_NAME}}",
-                  "description": "Optional die filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "dieCastingMachine",
-                  "value": "{{DIE_CASTING_MACHINE}}",
-                  "description": "Optional die casting machine filter.",
-                  "disabled": true
-                },
-                {
-                  "key": "shiftCode",
-                  "value": "{{SHIFT_CODE}}",
-                  "description": "Optional shift filter.",
-                  "disabled": true
-                }
-              ]
+              "key": "fast",
+              "value": "false"
             },
-            "description": "Use this if report shot cards are zero. It returns only plcShotSummary."
-          },
-          "event": [
             {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "pm.test('plcShotSummary exists', () => pm.expect(body.plcShotSummary).to.be.an('object'));",
-                  "console.log('shotSummary:', body.plcShotSummary);"
-                ]
-              }
-            }
-          ],
-          "response": [
+              "key": "includePlcReadings",
+              "value": "1"
+            },
             {
-              "name": "200 Professional Response Shape",
-              "status": "OK",
-              "code": 200,
-              "_postman_previewlanguage": "json",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                }
-              ],
-              "cookie": [],
-              "body": "{\n  \"plcShotSummary\": {\n    \"totalProduction\": 0,\n    \"okShot\": 0,\n    \"warmUpShot\": 0,\n    \"offShot\": 0\n  },\n  \"plcShotSummarySource\": \"PLC_SUMMARY\"\n}"
+              "key": "includeLeaktest",
+              "value": "1"
+            },
+            {
+              "key": "includePlcSummary",
+              "value": "1"
+            },
+            {
+              "key": "noCache",
+              "value": "1"
             }
           ]
+        },
+        "description": "Basic report records with date and shift only. Response includes records[], summary, pagination, and shot details."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "const json = pm.response.json();",
+              "pm.test('Clean response has records and summary', () => {",
+              "  pm.expect(json).to.have.property('records');",
+              "  pm.expect(json).to.have.property('summary');",
+              "});"
+            ]
+          }
         }
       ]
     },
     {
-      "name": "4. Rejection Analysis",
-      "description": "Rejection page API with first-scan production and report-aligned rejection count.",
-      "item": [
-        {
-          "name": "Rejection Analysis - Date Wise",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{TOKEN}}",
-                "description": "Run Login first. Token is stored in environment/global TOKEN."
-              }
-            ],
-            "url": {
-              "raw": "{{BASE_URL}}/rejection-analysis?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}",
-              "host": [
-                "{{BASE_URL}}"
-              ],
-              "path": [
-                "rejection-analysis"
-              ],
-              "query": [
-                {
-                  "key": "dateFrom",
-                  "value": "{{DATE_FROM}}",
-                  "description": "Start datetime."
-                },
-                {
-                  "key": "dateTo",
-                  "value": "{{DATE_TO}}",
-                  "description": "End datetime."
-                },
-                {
-                  "key": "partId",
-                  "value": "{{PART_ID}}",
-                  "description": "Optional part/customer search.",
-                  "disabled": true
-                },
-                {
-                  "key": "shiftCode",
-                  "value": "{{SHIFT_CODE}}",
-                  "description": "Optional shift filter.",
-                  "disabled": true
-                }
-              ]
-            },
-            "description": "Shows today total production by first scan and total rejects aligned with report totalNG."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "pm.test('rows[] exists', () => pm.expect(body.rows).to.be.an('array'));",
-                  "pm.test('productionTotal exists', () => pm.expect(body).to.have.property('productionTotal'));",
-                  "pm.test('total rejects exists', () => pm.expect(body).to.have.property('total'));",
-                  "console.log('productionTotal:', body.productionTotal, 'totalRejects:', body.total, 'rowCount:', body.rowCount);"
-                ]
-              }
-            }
+      "name": "2. Report - Oil Pan K-12",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&shiftCode={{SHIFT_CODE}}&lineName={{LINE_NAME}}&partName={{PART_NAME}}&dieCastingMachine={{DIE_CASTING_MACHINE}}&page={{PAGE}}&pageSize={{PAGE_SIZE}}&clean=1&full=1&fast=false&includePlcReadings=1&includeLeaktest=1&includePlcSummary=1&noCache=1",
+          "host": [
+            "{{BASE_URL}}"
           ],
-          "response": [
+          "path": [
+            "reports",
+            "report",
+            "data"
+          ],
+          "query": [
             {
-              "name": "200 Professional Response Shape",
-              "status": "OK",
-              "code": 200,
-              "_postman_previewlanguage": "json",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                }
-              ],
-              "cookie": [],
-              "body": "{\n  \"productionTotal\": \"first-scan production count\",\n  \"total\": \"report-aligned rejects\",\n  \"rowCount\": \"visible rejection rows\",\n  \"rows\": []\n}"
+              "key": "dateFrom",
+              "value": "{{DATE_FROM}}"
+            },
+            {
+              "key": "dateTo",
+              "value": "{{DATE_TO}}"
+            },
+            {
+              "key": "shiftCode",
+              "value": "{{SHIFT_CODE}}"
+            },
+            {
+              "key": "lineName",
+              "value": "{{LINE_NAME}}"
+            },
+            {
+              "key": "partName",
+              "value": "{{PART_NAME}}"
+            },
+            {
+              "key": "dieCastingMachine",
+              "value": "{{DIE_CASTING_MACHINE}}"
+            },
+            {
+              "key": "page",
+              "value": "{{PAGE}}"
+            },
+            {
+              "key": "pageSize",
+              "value": "{{PAGE_SIZE}}"
+            },
+            {
+              "key": "clean",
+              "value": "1"
+            },
+            {
+              "key": "full",
+              "value": "1"
+            },
+            {
+              "key": "fast",
+              "value": "false"
+            },
+            {
+              "key": "includePlcReadings",
+              "value": "1"
+            },
+            {
+              "key": "includeLeaktest",
+              "value": "1"
+            },
+            {
+              "key": "includePlcSummary",
+              "value": "1"
+            },
+            {
+              "key": "noCache",
+              "value": "1"
             }
           ]
-        }
-      ]
+        },
+        "description": "Oil Pan K-12 report with PLC shot details. Kept simple: date, shift, line, part, and die-casting machine."
+      }
+    },
+    {
+      "name": "3. Report - Search Part / Customer / Shot",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{BASE_URL}}/reports/report/data?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&shiftCode={{SHIFT_CODE}}&barcode={{SEARCH_VALUE}}&page=1&pageSize=20&clean=1&full=1&fast=false&includePlcReadings=1&includeLeaktest=1&includePlcSummary=1&noCache=1",
+          "host": [
+            "{{BASE_URL}}"
+          ],
+          "path": [
+            "reports",
+            "report",
+            "data"
+          ],
+          "query": [
+            {
+              "key": "dateFrom",
+              "value": "{{DATE_FROM}}"
+            },
+            {
+              "key": "dateTo",
+              "value": "{{DATE_TO}}"
+            },
+            {
+              "key": "shiftCode",
+              "value": "{{SHIFT_CODE}}"
+            },
+            {
+              "key": "barcode",
+              "value": "{{SEARCH_VALUE}}",
+              "description": "Part ID, customer QR, or shot number"
+            },
+            {
+              "key": "page",
+              "value": "1"
+            },
+            {
+              "key": "pageSize",
+              "value": "20"
+            },
+            {
+              "key": "clean",
+              "value": "1"
+            },
+            {
+              "key": "full",
+              "value": "1"
+            },
+            {
+              "key": "fast",
+              "value": "false"
+            },
+            {
+              "key": "includePlcReadings",
+              "value": "1"
+            },
+            {
+              "key": "includeLeaktest",
+              "value": "1"
+            },
+            {
+              "key": "includePlcSummary",
+              "value": "1"
+            },
+            {
+              "key": "noCache",
+              "value": "1"
+            }
+          ]
+        },
+        "description": "Paste part ID, customer QR, or shot number into SEARCH_VALUE. Same clean response format."
+      }
+    },
+    {
+      "name": "4. Shot Summary - Machine",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{BASE_URL}}/reports/report/shot-summary?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&shiftCode={{SHIFT_CODE}}&dieCastingMachine={{DIE_CASTING_MACHINE}}&noCache=1",
+          "host": [
+            "{{BASE_URL}}"
+          ],
+          "path": [
+            "reports",
+            "report",
+            "shot-summary"
+          ],
+          "query": [
+            {
+              "key": "dateFrom",
+              "value": "{{DATE_FROM}}"
+            },
+            {
+              "key": "dateTo",
+              "value": "{{DATE_TO}}"
+            },
+            {
+              "key": "shiftCode",
+              "value": "{{SHIFT_CODE}}"
+            },
+            {
+              "key": "dieCastingMachine",
+              "value": "{{DIE_CASTING_MACHINE}}"
+            },
+            {
+              "key": "noCache",
+              "value": "1"
+            }
+          ]
+        },
+        "description": "Only the machine shot cards: total, OK, warm-up, NG."
+      }
     }
   ]
 }

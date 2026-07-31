@@ -1076,6 +1076,7 @@ async function fetchPlcShotSummary(filters = {}) {
   };
   const partName = normalizePartToken(filters.partName || filters.part_name);
   const dieName = normalizePartToken(filters.dieName || filters.die_name);
+  const hasPartOrDieFilter = Boolean(partName || dieName);
   const dieCastingMachine = String(filters.dieCastingMachine || filters.die_casting_machine || "").trim().toUpperCase();
   const dieCastingMachineToken = normalizeMachineScopeToken(dieCastingMachine);
 
@@ -1138,7 +1139,7 @@ async function fetchPlcShotSummary(filters = {}) {
       const rowIp = String(row.ip_address || "").trim();
       if (!rowPart && !rowMachine && !rowIp) return;
       const parts = [];
-      if (rowPart) {
+      if (hasPartOrDieFilter && rowPart) {
         const key = `assignmentPart${index}`;
         replacements[key] = rowDie ? `${rowPart}-${rowDie}%` : `${rowPart}%`;
         if (hasColumn("part_name")) {
