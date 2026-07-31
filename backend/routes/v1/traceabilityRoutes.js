@@ -6,44 +6,51 @@ const { requireAnyModuleAccess, requireModuleAccess } = require("../../middlewar
 
 const router = express.Router();
 
-router.get("/rejection-config/parts", verifyToken, requireModuleAccess("master_settings", "view"), rejectionConfigController.listParts);
-router.put("/rejection-config/parts", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updatePart);
-router.delete("/rejection-config/parts/:name", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deletePart);
-router.post("/rejection-config/delete-part", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deletePart);
+const rejectionConfigReadAccess = [
+  { moduleKey: "rejection_config", mode: "view" },
+  { moduleKey: "dashboard", mode: "view" },
+  { moduleKey: "rejection_analysis", mode: "view" },
+  { moduleKey: "operator_view", mode: "view" },
+];
+
+router.get("/rejection-config/parts", verifyToken, requireAnyModuleAccess(rejectionConfigReadAccess), rejectionConfigController.listParts);
+router.put("/rejection-config/parts", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.updatePart);
+router.delete("/rejection-config/parts/:name", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deletePart);
+router.post("/rejection-config/delete-part", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deletePart);
 router.get(
   "/rejection-config/operator-config",
   verifyToken,
   requireAnyModuleAccess([
     { moduleKey: "operator_view", mode: "view" },
     { moduleKey: "operator_view", mode: "operate" },
-    { moduleKey: "master_settings", mode: "view" },
+    ...rejectionConfigReadAccess,
   ]),
   rejectionConfigController.getOperatorConfig
 );
-router.post("/rejection-config/categories", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.createCategory);
-router.put("/rejection-config/categories", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateCategory);
-router.delete("/rejection-config/categories/:id", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteCategory);
-router.post("/rejection-config/delete-category", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteCategory);
-router.post("/rejection-config/reasons", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.addReasons);
-router.put("/rejection-config/reasons", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateReason);
-router.delete("/rejection-config/reasons/:id", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteReason);
-router.post("/rejection-config/delete-reason", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteReason);
-router.post("/rejection-config/views", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.createView);
-router.put("/rejection-config/views", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateView);
-router.delete("/rejection-config/views/:id", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteView);
-router.post("/rejection-config/delete-view", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteView);
-router.post("/rejection-config/zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.addZones);
-router.put("/rejection-config/zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateZone);
-router.delete("/rejection-config/zones/:id", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteZone);
-router.post("/rejection-config/delete-zone", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteZone);
-router.post("/rejection-config/sub-zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.addSubZones);
-router.put("/rejection-config/sub-zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateSubZone);
-router.delete("/rejection-config/sub-zones/:id", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteSubZone);
-router.post("/rejection-config/delete-sub-zone", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.deleteSubZone);
-router.post("/rejection-config/zone-reasons", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.setZoneReasons);
-router.post("/rejection-config/ensure-defaults", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.ensureDefaults);
-router.post("/rejection-config/apply-reasons-all-zones", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.applyReasonsToAllZones);
-router.post("/rejection-config/view-image", verifyToken, requireModuleAccess("master_settings", "edit"), rejectionConfigController.updateViewImage);
+router.post("/rejection-config/categories", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.createCategory);
+router.put("/rejection-config/categories", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.updateCategory);
+router.delete("/rejection-config/categories/:id", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deleteCategory);
+router.post("/rejection-config/delete-category", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deleteCategory);
+router.post("/rejection-config/reasons", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.addReasons);
+router.put("/rejection-config/reasons", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.updateReason);
+router.delete("/rejection-config/reasons/:id", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deleteReason);
+router.post("/rejection-config/delete-reason", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deleteReason);
+router.post("/rejection-config/views", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.createView);
+router.put("/rejection-config/views", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.updateView);
+router.delete("/rejection-config/views/:id", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deleteView);
+router.post("/rejection-config/delete-view", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deleteView);
+router.post("/rejection-config/zones", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.addZones);
+router.put("/rejection-config/zones", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.updateZone);
+router.delete("/rejection-config/zones/:id", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deleteZone);
+router.post("/rejection-config/delete-zone", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deleteZone);
+router.post("/rejection-config/sub-zones", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.addSubZones);
+router.put("/rejection-config/sub-zones", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.updateSubZone);
+router.delete("/rejection-config/sub-zones/:id", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deleteSubZone);
+router.post("/rejection-config/delete-sub-zone", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.deleteSubZone);
+router.post("/rejection-config/zone-reasons", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.setZoneReasons);
+router.post("/rejection-config/ensure-defaults", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.ensureDefaults);
+router.post("/rejection-config/apply-reasons-all-zones", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.applyReasonsToAllZones);
+router.post("/rejection-config/view-image", verifyToken, requireModuleAccess("rejection_config", "edit"), rejectionConfigController.updateViewImage);
 
 router.get("/traceability/operations", verifyToken, requireModuleAccess("traceability", "view"), traceabilityController.getOperationSequence);
 router.get("/traceability/process-flow", verifyToken, requireModuleAccess("process_flow", "view"), traceabilityController.getProcessFlow);

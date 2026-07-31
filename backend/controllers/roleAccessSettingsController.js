@@ -3,6 +3,7 @@ const {
   getRoleAccessSettings,
   invalidateRoleAccessCache,
   normalizeSettingsInput,
+  roleMapToRow,
 } = require("../services/roleAccessService");
 
 exports.getSettings = async (_req, res) => {
@@ -26,12 +27,7 @@ exports.saveSettings = async (req, res) => {
     await Promise.all(
       modules.map((moduleKey) =>
         RoleAccessSetting.upsert({
-          module_key: moduleKey,
-          admin_access: payload[moduleKey].admin,
-          engineer_access: payload[moduleKey].engineer,
-          supervisor_access: payload[moduleKey].supervisor,
-          operator_access: payload[moduleKey].operator,
-          other_access: payload[moduleKey].other,
+          ...roleMapToRow(moduleKey, payload[moduleKey]),
           updated_by: req.user?.id || null,
         })
       )

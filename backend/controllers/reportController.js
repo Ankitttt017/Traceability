@@ -60,6 +60,18 @@ function stripMetricStatusFilters(filters = {}) {
 
 async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
   const nextMetrics = { ...(metrics || {}) };
+  const hasEnrichedPartScope = Boolean(
+    filters.partName ||
+    filters.part_name ||
+    filters.dieName ||
+    filters.die_name ||
+    filters.dieCastingMachine ||
+    filters.die_casting_machine ||
+    filters.partType
+  );
+  if (hasEnrichedPartScope) {
+    return nextMetrics;
+  }
   const productionFilters = stripMetricStatusFilters(filters);
   const [summaryMetrics, totalProduction] = await Promise.all([
     fetchProductionSummaryMetrics(filters).catch((error) => {
@@ -110,9 +122,12 @@ function stripReportControlFilters(filters = {}) {
     includePlcReadings,
     includePlcSummary,
     includeLeaktest,
+    clean,
+    professional,
+    format,
     ...rest
   } = filters || {};
-  void page; void pageSize; void limit; void offset; void fast; void quick; void noCache; void refresh; void forceFresh; void cacheBust; void _ts; void includePlcReadings; void includePlcSummary; void includeLeaktest;
+  void page; void pageSize; void limit; void offset; void fast; void quick; void noCache; void refresh; void forceFresh; void cacheBust; void _ts; void includePlcReadings; void includePlcSummary; void includeLeaktest; void clean; void professional; void format;
   return rest;
 }
 
@@ -257,6 +272,154 @@ function summarizeDbError(error) {
   return { code, message: msg };
 }
 
+function wantsCleanReportResponse(query = {}) {
+  const format = String(query.format || "").trim().toUpperCase();
+  return isTruthyToken(query.clean || query.professional) || ["CLEAN", "PROFESSIONAL", "PUBLIC"].includes(format);
+}
+
+function cleanValue(value, fallback = null) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return value;
+}
+
+function cleanStatus(value) {
+  const token = String(value || "").trim().toUpperCase();
+  if (!token) return null;
+  if (["OK", "PASS", "PASSED", "COMPLETED", "ENDED_OK", "COMPLETED_OK"].includes(token)) return "OK";
+  if (["NG", "NOK", "FAIL", "FAILED", "REJECTED", "INTERLOCKED", "ENDED_NG", "COMPLETED_NG"].includes(token)) return "NG";
+  if (token.includes("IN_PROGRESS") || token.includes("IN PROGRESS")) return "IN_PROGRESS";
+  return token;
+}
+
+function cleanShotStatus(value) {
+  const raw = String(value ?? "").trim().toUpperCase();
+  const numeric = Number(raw);
+  if (numeric === 1 || ["OK", "GOOD", "PASS", "PASSED"].includes(raw)) return "OK";
+  if (numeric === 3 || raw.includes("WARM")) return "WARM_UP_SHOT";
+  if (numeric === 5 || raw.includes("OFF") || raw.includes("OFFSET")) return "NG_SHOT";
+  if (["NG", "NOK", "FAIL", "FAILED", "REJECTED"].includes(raw)) return "NG_SHOT";
+  return raw || null;
+}
+
+function pickObject(...values) {
+  return values.find((value) => value && typeof value === "object" && !Array.isArray(value)) || {};
+}
+
+function cleanLeakTest(reading, readings) {
+  const list = Array.isArray(readings) ? readings.filter(Boolean) : (reading ? [reading] : []);
+  if (!list.length) return null;
+  return list.map((item) => ({
+    machine: cleanValue(item.Machine || item.machineName || item.matchedMachineName),
+    result: cleanStatus(item.Result || item.result),
+    bodyLeakValue: cleanValue(item.Body_Leak_Value),
+    gall1: cleanValue(item.Gall_1),
+    gall2: cleanValue(item.Gall_2),
+    cycleTime: cleanValue(item.Cycle_Time),
+    cycleEndAt: cleanValue(item.Cycle_End_Time || item.cycleEndTime || item.updatedAt || item.createdAt),
+    runningMode: cleanValue(item.Running_Mode),
+  }));
+}
+
+function formatCleanReportResponse(payload = {}) {
+  const metrics = payload.metrics || {};
+  const records = (Array.isArray(payload.rows) ? payload.rows : []).map((row, index) => {
+    const plc = pickObject(row.plcReading, row.plc_reading, row.plcReadings, row.plcCycleReadings, row.plc_cycle_readings);
+    const shotStatusRaw = plc.shot_status ?? row.shot_status ?? row.shotStatus;
+    return {
+      serialNo: cleanValue(row.srNo, index + 1),
+      part: {
+        id: cleanValue(row.partId || row.displayPartId || row.traceabilityPartId || row.part_id),
+        customerQr: cleanValue(row.customerQrCode || row.customerCode || row.customer_qr),
+        name: cleanValue(row.partName),
+        die: cleanValue(row.dieName),
+        label: cleanValue(row.partDieLabel || plc.part_name),
+        status: cleanStatus(row.partStatus || row.status),
+      },
+      production: {
+        firstScanAt: cleanValue(row.firstScanCreatedAt || row.createdAtRaw || row.createdAt),
+        firstScanShift: cleanValue(row.firstScanShiftCode || row.shiftCode),
+        latestActivityAt: cleanValue(row.latestAnchorCreatedAt || row.updatedAt || row.createdAtRaw || row.createdAt),
+        line: cleanValue(row.lineName || row.anchorLineName),
+      },
+      station: {
+        operation: cleanValue(row.operationNo || row.stationNo),
+        name: cleanValue(row.machineName),
+        result: cleanStatus(row.industrialResult || row.statusLabel || row.result),
+        cycleStartAt: cleanValue(row.cycleStartTime),
+        cycleEndAt: cleanValue(row.cycleEndTime),
+        cycleTime: cleanValue(row.cycleTime),
+      },
+      shot: {
+        number: cleanValue(row.shotNumber ?? row.shot_number ?? plc.shot_number),
+        status: cleanShotStatus(shotStatusRaw),
+        recordedAt: cleanValue(plc.recorded_at || plc.recordedAt),
+        machine: cleanValue(plc.machine_name),
+        partDie: cleanValue(plc.part_name),
+        date: cleanValue(plc.shot_date),
+        time: cleanValue(plc.shot_time),
+        parameters: {
+          cycleTime: cleanValue(plc.cycle_time),
+          dieCloseCoreInTime: cleanValue(plc.die_close_core_in_time),
+          pouringTime: cleanValue(plc.pouring_time),
+          shotForwardTime: cleanValue(plc.shot_fwd_time),
+          curingTime: cleanValue(plc.curing_time),
+          dieOpenCoreOutTime: cleanValue(plc.die_open_core_out_time),
+          ejectorTime: cleanValue(plc.ejector_time),
+          extractTime: cleanValue(plc.extract_time),
+          sprayTime: cleanValue(plc.spray_time),
+          v1Speed: cleanValue(plc.v1_speed),
+          v2Speed: cleanValue(plc.v2_speed),
+          v3Speed: cleanValue(plc.v3_speed),
+          v4Speed: cleanValue(plc.v4_speed),
+          metalPressure: cleanValue(plc.metal_pressure),
+          furnaceMetalTemp: cleanValue(plc.furnace_metal_temp),
+          coolingWaterMoving: cleanValue(plc.cooling_water_mov),
+          coolingWaterStationary: cleanValue(plc.cooling_water_sta),
+          accelPoint: cleanValue(plc.accel_point),
+          deaccelPoint: cleanValue(plc.deaccel_point),
+          intensificationTime: cleanValue(plc.intensification_time),
+          biscuitThickness: cleanValue(plc.biscuit_thickness),
+          jetCoolingPressure: cleanValue(plc.jet_cooling_pressure),
+          clampTonnage: cleanValue(plc.clamp_tonnage),
+          vacuumPressure: cleanValue(plc.vacuum_pressure),
+          stroke: cleanValue(plc.stroke),
+        },
+      },
+      leakTest: cleanLeakTest(row.leakTestReading, row.leakTestReadings),
+      rejection: {
+        category: cleanValue(row.rejectionCategory || row.category),
+        view: cleanValue(row.rejectionView),
+        zone: cleanValue(row.rejectionZone),
+        subZone: cleanValue(row.rejectionSubZone),
+        reason: cleanValue(row.rejectionReason || row.reason),
+        remark: cleanValue(row.rejectionRemark),
+      },
+    };
+  });
+
+  return {
+    records,
+    summary: {
+      totalProduction: Number(metrics.totalProduction || metrics.traceabilityProduction || 0),
+      passed: Number(metrics.totalOK || 0),
+      failed: Number(metrics.totalNG || 0),
+      inProgress: Number(metrics.inProgress || 0),
+      passRate: Number(metrics.passRate || 0),
+      shotSummary: {
+        totalShots: Number(metrics.plcShotSummary?.totalProduction || 0),
+        okShots: Number(metrics.plcShotSummary?.okShot || 0),
+        warmUpShots: Number(metrics.plcShotSummary?.warmUpShot || 0),
+        ngShots: Number(metrics.plcShotSummary?.offShot || 0),
+        source: cleanValue(metrics.plcShotSummarySource, "UNKNOWN"),
+      },
+    },
+    pagination: payload.pagination || {},
+    reportMode: payload.reportMode || null,
+    availableShifts: payload.availableShifts || [],
+    warning: payload.warning || undefined,
+  };
+}
+
 const DEFAULT_REPORT_CONFIG = {
   companyName: "BMW Group",
   plantName: "Gen-6 Bawal Plant",
@@ -286,8 +449,8 @@ exports.getReportData = async (req, res) => {
     const responseMetrics = await applyUncappedTraceabilityMetrics(metrics, filters);
     responseMetrics.plcShotSummary = responseMetrics.plcShotSummary || {};
     responseMetrics.plcShotSummarySource = responseMetrics.plcShotSummarySource || "REPORT_ROWS";
-    
-    res.json({
+
+    const payload = {
       rows: paged.rows,
       metrics: responseMetrics,
       pagination: paged.pagination,
@@ -298,9 +461,10 @@ exports.getReportData = async (req, res) => {
         shiftName: shift.shift_name,
         shiftCode: shift.shift_code,
         startTime: shift.start_time,
-        endTime: shift.end_time,
-      })),
-    });
+          endTime: shift.end_time,
+        })),
+    };
+    res.json(wantsCleanReportResponse(req.query || {}) ? formatCleanReportResponse(payload) : payload);
   } catch (error) {
     const db = summarizeDbError(error);
     console.error(`[ReportController] getReportData failed code=${db.code} msg=${db.message}`);
@@ -316,7 +480,7 @@ exports.getReportData = async (req, res) => {
       const { rows, shifts, plcColumnSet, metrics } = await getLiveReportBundle(filters, fallbackOptions);
       const paged = paginateReportRowsByPart(rows, pagination);
       const responseMetrics = await applyUncappedTraceabilityMetrics(metrics, filters);
-      return res.json({
+      const fallbackPayload = {
         rows: paged.rows,
         metrics: {
           ...responseMetrics,
@@ -332,9 +496,10 @@ exports.getReportData = async (req, res) => {
           shiftName: shift.shift_name,
           shiftCode: shift.shift_code,
           startTime: shift.start_time,
-          endTime: shift.end_time,
-        })),
-      });
+            endTime: shift.end_time,
+          })),
+      };
+      return res.json(wantsCleanReportResponse(req.query || {}) ? formatCleanReportResponse(fallbackPayload) : fallbackPayload);
     } catch (fallbackError) {
       const fallbackDb = summarizeDbError(fallbackError);
       console.error(`[ReportController] getReportData fallback failed code=${fallbackDb.code} msg=${fallbackDb.message}`);

@@ -791,11 +791,8 @@ async function getLeaktestSequenceStateForPart(partId, sequence) {
     order: [["updatedAt", "DESC"]],
     raw: true,
   });
-  const customerQr = String(mapping?.customer_qr || "").trim();
-  if (!customerQr) {
-    return null;
-  }
   const effectivePartId = String(mapping?.old_part_id || normalizedPartId).trim();
+  const customerQr = String(mapping?.customer_qr || normalizedPartId).trim();
 
   const machines = await Machine.findAll({
     where: {
@@ -814,6 +811,8 @@ async function getLeaktestSequenceStateForPart(partId, sequence) {
     customerQrByPartId: {
       [effectivePartId.toUpperCase()]: customerQr,
       [effectivePartId]: customerQr,
+      [normalizedPartId.toUpperCase()]: customerQr,
+      [normalizedPartId]: customerQr,
     },
     machines,
   });

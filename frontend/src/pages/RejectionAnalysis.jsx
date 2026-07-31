@@ -73,6 +73,44 @@ const C = {
 };
 
 const CHART_COLORS = ["#ef4444", "#f97316", "#fab95b", "#547792", "#14b8a6", "#8b5cf6", "#d4a017", "#1a3263"];
+const SHOT_DETAIL_COLUMNS = [
+  ["Machine Name", "machine_name"],
+  ["Part Name", "part_name"],
+  ["Shot Date", "shot_date"],
+  ["Shot Time", "shot_time"],
+  ["Cycle Time", "cycle_time"],
+  ["Die Close Core In Time", "die_close_core_in_time"],
+  ["Pouring Time", "pouring_time"],
+  ["Shot Fwd Time", "shot_fwd_time"],
+  ["Curing Time", "curing_time"],
+  ["Die Open Core Out Time", "die_open_core_out_time"],
+  ["Ejector Time", "ejector_time"],
+  ["Extract Time", "extract_time"],
+  ["Spray Time", "spray_time"],
+  ["V1 Speed", "v1_speed"],
+  ["V2 Speed", "v2_speed"],
+  ["V3 Speed", "v3_speed"],
+  ["V4 Speed", "v4_speed"],
+  ["Metal Pressure", "metal_pressure"],
+  ["Furnace Metal Temp", "furnace_metal_temp"],
+  ["Cooling Water Mov", "cooling_water_mov"],
+  ["Cooling Water Sta", "cooling_water_sta"],
+  ["Accel Point", "accel_point"],
+  ["Deaccel Point", "deaccel_point"],
+  ["Intensification Time", "intensification_time"],
+  ["Biscuit Thickness", "biscuit_thickness"],
+  ["Jet Cooling Pressure", "jet_cooling_pressure"],
+  ["Clamp Tonnage", "clamp_tonnage"],
+  ["Vacuum Pressure", "vacuum_pressure"],
+  ["Stroke", "stroke"],
+];
+
+const formatChartPercent = (value) => {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric)) return "0";
+  const percent = numeric > 1 ? numeric : numeric * 100;
+  return percent % 1 === 0 ? String(percent.toFixed(0)) : String(percent.toFixed(1));
+};
 
 // ── Animation Keyframes ──────────────────────────────────────────────────
 const DS = `
@@ -620,6 +658,35 @@ function shortLabel(value = "", max = 18) {
   return text.length > max ? `${text.slice(0, max - 1)}...` : text;
 }
 
+function formatShotStatus(value = "") {
+  const raw = String(value ?? "").trim();
+  const token = raw.toUpperCase();
+  const code = Number(raw);
+  if (code === 1 || ["OK", "GOOD", "PASS", "PASSED"].includes(token)) return "OK";
+  if (code === 3 || token.includes("WARM")) return "WARM UP SHOT";
+  if (code === 5 || token.includes("OFF") || token.includes("OFFSET")) return "NG SHOT";
+  if (["NG", "FAIL", "FAILED"].includes(token)) return "NG";
+  return raw || "-";
+}
+
+function getShotField(row = {}, key = "") {
+  const shot = row.shotDetails || row.shot_details || {};
+  const value = shot[key] ?? row[key];
+  return value === undefined || value === null || value === "" ? "-" : value;
+}
+
+function formatShotDetailsSummary(row = {}) {
+  const shot = row.shotDetails || {};
+  const items = [
+    ["Machine", shot.machine_name],
+    ["Part", shot.part_name],
+    ["Cycle", shot.cycle_time],
+    ["Pressure", shot.metal_pressure],
+    ["Temp", shot.furnace_metal_temp],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== "");
+  return items.length ? items.map(([label, value]) => `${label}: ${value}`).join(" | ") : "-";
+}
+
 function getSeverityLevel(count, max) {
   const ratio = count / max;
   if (ratio > 0.8) return { level: "Critical", color: C.danger, icon: "🚨", bg: `${C.danger}30` };
@@ -1097,6 +1164,8 @@ export default function RejectionAnalysis() {
   injectStyles();
   
   const [rows, setRows] = useState([]);
+  const [productionTotal, setProductionTotal] = useState(0);
+  const [rejectionTotal, setRejectionTotal] = useState(0);
   const [machines, setMachines] = useState([]);
   const [availableShifts, setAvailableShifts] = useState([]);
   const [configuredParts, setConfiguredParts] = useState([]);
@@ -1142,7 +1211,10 @@ export default function RejectionAnalysis() {
     setLoading(true);
     try {
       const analysis = await dashboardApi.rejectionAnalysis(query, { timeout: 45000, suppressGlobalError: true });
-      setRows((Array.isArray(analysis?.rows) ? analysis.rows : []).filter((row) => !isSystemRecoveryReason(row.reason)));
+      const nextRows = (Array.isArray(analysis?.rows) ? analysis.rows : []).filter((row) => !isSystemRecoveryReason(row.reason));
+      setRows(nextRows);
+      setProductionTotal(Number(analysis?.productionTotal || 0));
+      setRejectionTotal(Number(analysis?.total ?? nextRows.length));
       setConfiguredParts(analysis?.configuredParts || []);
       setFilters((current) => {
         const firstConfiguredPart = analysis?.configuredParts?.[0] || "";
@@ -1228,11 +1300,13 @@ export default function RejectionAnalysis() {
       acc[type.label] = (acc[type.label] || 0) + 1;
       return acc;
     }, {});
-    return [
+    const rows = [
       { name: "CR - Casting", value: grouped["CR - Casting Rejection"] || 0, color: C.danger, icon: "🔥" },
       { name: "CRAM - Cram", value: grouped["CRAM - Cram Rejection"] || 0, color: C.amber, icon: "📐" },
       { name: "MR - Machining", value: grouped["MR - Machining Rejection"] || 0, color: C.steel, icon: "⚙️" },
     ];
+    const total = Math.max(1, rows.reduce((sum, row) => sum + Number(row.value || 0), 0));
+    return rows.map((row) => ({ ...row, percent: Number(((Number(row.value || 0) / total) * 100).toFixed(1)) }));
   }, [analysisRows]);
 
   const topReasons = useMemo(() => {
@@ -1488,20 +1562,23 @@ export default function RejectionAnalysis() {
 
   // ── KPIs ────────────────────────────────────────────────────────────
   const kpis = useMemo(() => {
-    const total = analysisRows.length;
+    const total = Number(rejectionTotal || analysisRows.length);
     const uniqueParts = new Set(analysisRows.map((row) => row.partId).filter(Boolean)).size;
     const topReason = topReasons[0];
     const topZone = zoneWise[0];
     const severity = getSeverityLevel(total, Math.max(1, total * 1.2));
+    const rejectRate = productionTotal > 0 ? Number(((total / productionTotal) * 100).toFixed(1)) : 0;
     
     return {
       total,
+      productionTotal,
+      rejectRate,
       uniqueParts,
       topReason,
       topZone,
       severity,
     };
-  }, [analysisRows, topReasons, zoneWise]);
+  }, [analysisRows, productionTotal, rejectionTotal, topReasons, zoneWise]);
 
   // ── Handlers ──────────────────────────────────────────────────────
   const handleDateRangeApply = (start, end) => {
@@ -1596,6 +1673,9 @@ export default function RejectionAnalysis() {
       "Sub Zone",
       "Reason",
       "Remark",
+      "Shot Number",
+      ...SHOT_DETAIL_COLUMNS.map(([label]) => label),
+      "Shot Status",
     ];
 
     const data = analysisRows.map((row, index) => {
@@ -1613,6 +1693,9 @@ export default function RejectionAnalysis() {
         details.subZone || "",
         details.reason || "",
         row.remark || "",
+        row.shotNumber || "",
+        ...SHOT_DETAIL_COLUMNS.map(([, key]) => getShotField(row, key)),
+        formatShotStatus(row.shotStatus),
       ];
     });
 
@@ -1647,7 +1730,7 @@ export default function RejectionAnalysis() {
 
     ws.getCell("A1").value = "Rejection Analysis";
     ws.getCell("A2").value = `Generated At: ${generatedAt}`;
-    ws.getCell("A3").value = `Total Rejection Records: ${analysisRows.length}`;
+    ws.getCell("A3").value = `Total Production: ${productionTotal || 0} | Total Rejection Records: ${rejectionTotal || analysisRows.length}`;
     ws.getCell("A4").value = filterSummary;
 
     ws.getCell("A1").font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
@@ -1700,13 +1783,16 @@ export default function RejectionAnalysis() {
       { width: 16 },
       { width: 28 },
       { width: 30 },
+      { width: 16 },
+      ...SHOT_DETAIL_COLUMNS.map(() => ({ width: 18 })),
+      { width: 16 },
     ];
     ws.autoFilter = { from: "A6", to: { row: Math.max(6, ws.rowCount), column: headers.length } };
 
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     const buffer = await wb.xlsx.writeBuffer();
     saveAs(new Blob([buffer]), `rejection-analysis-${stamp}.xlsx`);
-  }, [analysisRows, filters]);
+  }, [analysisRows, filters, productionTotal, rejectionTotal]);
 
   // ── Render ──────────────────────────────────────────────────────────
   const activeFilters = Object.entries(filters).filter(([key, value]) => {
@@ -1950,19 +2036,26 @@ export default function RejectionAnalysis() {
 
       {/* ── KPI Cards ── */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 14 }}>
+        <Kpi
+          label="Total Production"
+          value={kpis.productionTotal}
+          icon={Activity}
+          color={C.navy}
+          sub={`${kpis.rejectRate}% rejected`}
+        />
         <Kpi 
           label="Total Rejects" 
           value={kpis.total} 
           icon={XCircle} 
           color={C.danger} 
-          sub={`${kpis.severity.level} severity`}
+          sub={`${kpis.total} of ${Math.max(0, kpis.productionTotal)} production`}
         />
         <Kpi 
           label="Affected Parts" 
           value={kpis.uniqueParts} 
           icon={Target} 
           color={C.steel}
-          sub={`${Math.round((kpis.uniqueParts / Math.max(1, kpis.total)) * 100)}% reject rate`}
+          sub={`${Math.round((kpis.uniqueParts / Math.max(1, kpis.total)) * 100)}% unique rejects`}
         />
         <Kpi 
           label="Top Reason" 
@@ -2002,12 +2095,12 @@ export default function RejectionAnalysis() {
                   cy="50%" 
                   outerRadius={90}
                   innerRadius={50}
-                  label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                  label={({ name, percent, payload }) => `${name} ${formatChartPercent(payload?.percent ?? percent)}%`}
                   labelLine={true}
                 >
                   {pieData.map((entry) => <Cell key={entry.name} fill={entry.color} />)}
                 </Pie>
-                <Tooltip />
+                <Tooltip formatter={(value, name, props) => [`${value} (${formatChartPercent(props?.payload?.percent)}%)`, name]} />
               </PieChart>
             )}
           </SafeChart>
@@ -2016,7 +2109,7 @@ export default function RejectionAnalysis() {
               <div key={row.name} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, color: C.text }}>
                 <span style={{ width: 10, height: 10, borderRadius: 3, background: row.color }} />
                 <span>{row.icon} {row.name.replace(/ - .*/, "")}</span>
-                <strong style={{ color: row.color }}>{row.value}</strong>
+                <strong style={{ color: row.color }}>{row.value} ({row.percent}%)</strong>
               </div>
             ))}
           </div>
@@ -2743,21 +2836,27 @@ export default function RejectionAnalysis() {
           </div>
         </div>
         <div className="rej-slim-scrollbar" style={{ overflow: "auto", maxHeight: 520 }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1180 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 5200 }}>
             <thead>
               <tr style={{ background: C.navy }}>
-                {["🕐 Time", "🔹 Part ID", "🔲 Customer QR", "🏭 Quality Gate", "📏 Line",
-                  "📂 Category", "👁️ View", "📍 Zone", "Sub Zone", "❓ Reason", "📝 Remark"].map((h) => (
+                {["Time", "Part ID", "Customer QR", "Quality Gate", "Line",
+                  "Category", "View", "Zone", "Sub Zone", "Reason", "Remark"].map((h) => (
                   <th key={h} style={th}>{h}</th>
                 ))}
+                <th style={th}>Shot No</th>
+                {SHOT_DETAIL_COLUMNS.map(([label]) => (
+                  <th key={"shot-" + label} style={th}>{label}</th>
+                ))}
+                <th style={th}>Shot Status</th>
               </tr>
             </thead>
             <tbody>
               {analysisRows.map((row) => {
                 const type = normalizeRejectionType(row);
                 const details = resolveRejectionDetails(row);
+                const rowKey = getRejectionRowKey(row);
                 return (
-                  <tr key={getRejectionRowKey(row)} style={{ transition: "background 0.1s ease" }}>
+                  <tr key={rowKey} style={{ transition: "background 0.1s ease" }}>
                     <td style={td}>{row.createdAt ? new Date(row.createdAt).toLocaleString() : "-"}</td>
                     <td style={tdMono}>{row.partId || "-"}</td>
                     <td style={tdMono}>{row.customerQrCode || "-"}</td>
@@ -2770,7 +2869,7 @@ export default function RejectionAnalysis() {
                         gap: 4,
                         padding: "2px 8px",
                         borderRadius: 4,
-                        background: `${type.color}20`,
+                        background: type.color + "20",
                         color: type.color,
                         fontWeight: 700,
                         fontSize: 10,
@@ -2786,12 +2885,12 @@ export default function RejectionAnalysis() {
                         gap: 4,
                         padding: "2px 8px",
                         borderRadius: 4,
-                        background: details.zone ? `${C.gold}20` : 'transparent',
+                        background: details.zone ? C.gold + "20" : "transparent",
                         color: details.zone ? C.gold : C.muted,
                         fontWeight: details.zone ? 700 : 400,
                         fontSize: 10,
                       }}>
-                        {details.zone ? `📍 ${details.zone}` : "-"}
+                        {details.zone || "-"}
                       </span>
                     </td>
                     <td style={td}>{details.subZone || "-"}</td>
@@ -2799,13 +2898,18 @@ export default function RejectionAnalysis() {
                       {details.reason || "-"}
                     </td>
                     <td style={td}>{row.remark || "-"}</td>
+                    <td style={tdMono}>{row.shotNumber || "-"}</td>
+                    {SHOT_DETAIL_COLUMNS.map(([, key]) => (
+                      <td key={rowKey + "-" + key} style={td}>{getShotField(row, key)}</td>
+                    ))}
+                    <td style={td}>{formatShotStatus(row.shotStatus)}</td>
                   </tr>
                 );
               })}
               {!analysisRows.length && (
                 <tr>
-                  <td colSpan={11} style={{ ...td, textAlign: "center", padding: 40 }}>
-                    <Empty text={loading ? "⏳ Loading rejection data..." : "📭 No rejections found for selected filters."} />
+                  <td colSpan={13 + SHOT_DETAIL_COLUMNS.length} style={{ ...td, textAlign: "center", padding: 40 }}>
+                    <Empty text={loading ? "Loading rejection data..." : "No rejections found for selected filters."} />
                   </td>
                 </tr>
               )}

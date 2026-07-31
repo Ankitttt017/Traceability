@@ -74,17 +74,17 @@ const MODULE_REDIRECT_ORDER = [
   { moduleKey: "packing", path: APP_ROUTES.packing },
   { moduleKey: "packing_management", path: APP_ROUTES.packingManagement },
   { moduleKey: "reports", path: APP_ROUTES.reports },
-  { moduleKey: "reports", path: APP_ROUTES.rejectionAnalysis },
+  { moduleKey: "rejection_analysis", path: APP_ROUTES.rejectionAnalysis },
   { moduleKey: "traceability", path: APP_ROUTES.traceability },
   { moduleKey: "io_monitor", path: APP_ROUTES.ioMonitor },
   { moduleKey: "part_journey", path: APP_ROUTES.partJourney },
   { moduleKey: "part_process_flow", path: APP_ROUTES.partProcessFlow },
   { moduleKey: "process_flow", path: APP_ROUTES.processFlow },
   { moduleKey: "master_settings", path: APP_ROUTES.masterSettings },
-  { moduleKey: "master_settings", path: APP_ROUTES.plants },
-  { moduleKey: "master_settings", path: APP_ROUTES.lines },
-  { moduleKey: "master_settings", path: APP_ROUTES.parts },
-  { moduleKey: "master_settings", path: APP_ROUTES.rejectionConfiguration },
+  { moduleKey: "plants", path: APP_ROUTES.plants },
+  { moduleKey: "lines", path: APP_ROUTES.lines },
+  { moduleKey: "parts", path: APP_ROUTES.parts },
+  { moduleKey: "rejection_config", path: APP_ROUTES.rejectionConfiguration },
   { moduleKey: "station_control", path: APP_ROUTES.stationControls },
   { moduleKey: "report_config", path: APP_ROUTES.masterReports },
   { moduleKey: "machines", path: APP_ROUTES.machines },
@@ -206,30 +206,6 @@ function App() {
               }
             />
             <Route
-              path={APP_ROUTES.plants.slice(1)}
-              element={
-                <ModuleRoute moduleKey="master_settings">
-                  <Plants />
-                </ModuleRoute>
-              }
-            />
-            <Route
-              path={APP_ROUTES.lines.slice(1)}
-              element={
-                <ModuleRoute moduleKey="master_settings">
-                  <Lines />
-                </ModuleRoute>
-              }
-            />
-            <Route
-              path={APP_ROUTES.parts.slice(1)}
-              element={
-                <ModuleRoute moduleKey="master_settings">
-                  <Parts />
-                </ModuleRoute>
-              }
-            />
-            <Route
               path={APP_ROUTES.masterSettings.slice(1)}
               element={
                 <ModuleRoute moduleKey="master_settings">
@@ -238,9 +214,33 @@ function App() {
               }
             />
             <Route
+              path={APP_ROUTES.plants.slice(1)}
+              element={
+                <ModuleRoute moduleKey="plants">
+                  <Plants />
+                </ModuleRoute>
+              }
+            />
+            <Route
+              path={APP_ROUTES.lines.slice(1)}
+              element={
+                <ModuleRoute moduleKey="lines">
+                  <Lines />
+                </ModuleRoute>
+              }
+            />
+            <Route
+              path={APP_ROUTES.parts.slice(1)}
+              element={
+                <ModuleRoute moduleKey="parts">
+                  <Parts />
+                </ModuleRoute>
+              }
+            />
+            <Route
               path={APP_ROUTES.rejectionConfiguration.slice(1)}
               element={
-                <ModuleRoute moduleKey="master_settings">
+                <ModuleRoute moduleKey="rejection_config">
                   <RejectionConfiguration />
                 </ModuleRoute>
               }
@@ -275,7 +275,7 @@ function App() {
             <Route
               path={APP_ROUTES.rejectionAnalysis.slice(1)}
               element={
-                <ModuleRoute moduleKey="reports">
+                <ModuleRoute moduleKey="rejection_analysis">
                   <RejectionAnalysis />
                 </ModuleRoute>
               }

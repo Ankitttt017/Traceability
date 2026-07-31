@@ -13,6 +13,7 @@ router.get(
     { moduleKey: "operator_view", mode: "view" },
     { moduleKey: "part_journey", mode: "view" },
     { moduleKey: "traceability", mode: "view" },
+    { moduleKey: "dashboard", mode: "view" },
   ]),
   stationSettingsController.getSettings
 );

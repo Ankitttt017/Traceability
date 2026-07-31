@@ -99,7 +99,7 @@ const ReportSummaryCards = ({ metrics = {}, loading = false, shotSummaryLoading 
       subtitle: "shots",
     },
     {
-      label: "Off Shots",
+      label: "NG Shots",
       value: plc.offShot ?? 0,
       icon: CircleSlash,
       colorClass: "red",
