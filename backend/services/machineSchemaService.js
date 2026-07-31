@@ -411,98 +411,38 @@ async function ensureRoleAccessSchema() {
   const [tableRows] = await sequelize.query("SELECT OBJECT_ID(N'dbo.RoleAccessSettings', N'U') AS table_id;");
   if (!tableRows?.[0]?.table_id) return;
 
-  await sequelize.query(`
-    IF NOT EXISTS (
-      SELECT 1
-      FROM sys.columns
-      WHERE object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
-        AND name = N'other_access'
-    )
-    BEGIN
-      ALTER TABLE [dbo].[RoleAccessSettings] ADD [other_access] NVARCHAR(20) NULL;
-    END
-  `);
+  const columns = [
+    ["super_admin_access", "COALESCE([admin_access], 'VIEW_CONTROL')"],
+    ["company_admin_access", "COALESCE([admin_access], 'VIEW_EDIT')"],
+    ["plant_admin_access", "COALESCE([admin_access], 'VIEW_EDIT')"],
+    ["production_manager_access", "'VIEW'"],
+    ["quality_manager_access", "'VIEW'"],
+    ["maintenance_access", "'VIEW'"],
+    ["auditor_access", "'VIEW'"],
+    ["other_access", "'HIDDEN'"],
+    ["viewer_access", "COALESCE([other_access], 'VIEW')"],
+  ];
 
-  await sequelize.query(`
-    UPDATE [dbo].[RoleAccessSettings]
-    SET [other_access] = 'HIDDEN'
-    WHERE [other_access] IS NULL
-       OR LTRIM(RTRIM([other_access])) = '';
-  `);
+  for (const [name, seedExpression] of columns) {
+    await sequelize.query(`
+      IF NOT EXISTS (
+        SELECT 1
+        FROM sys.columns
+        WHERE object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
+          AND name = N'${name}'
+      )
+      BEGIN
+        ALTER TABLE [dbo].[RoleAccessSettings] ADD ${quoteIdentifier(name)} NVARCHAR(20) NULL;
+      END
+    `);
 
-  await sequelize.query(`
-    DECLARE @constraintName sysname;
-    DECLARE @sql nvarchar(max);
-
-    DECLARE other_access_constraints CURSOR LOCAL FAST_FORWARD FOR
-      SELECT cc.name
-      FROM sys.check_constraints cc
-      INNER JOIN sys.sql_expression_dependencies dep
-        ON dep.referencing_id = cc.object_id
-      INNER JOIN sys.columns col
-        ON col.object_id = cc.parent_object_id
-        AND col.column_id = dep.referenced_minor_id
-      WHERE cc.parent_object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
-        AND col.name = N'other_access';
-
-    OPEN other_access_constraints;
-    FETCH NEXT FROM other_access_constraints INTO @constraintName;
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-      SET @sql = N'ALTER TABLE [dbo].[RoleAccessSettings] DROP CONSTRAINT ' + QUOTENAME(@constraintName);
-      EXEC sp_executesql @sql;
-      FETCH NEXT FROM other_access_constraints INTO @constraintName;
-    END;
-    CLOSE other_access_constraints;
-    DEALLOCATE other_access_constraints;
-
-    SELECT @constraintName = dc.name
-    FROM sys.default_constraints dc
-    INNER JOIN sys.columns col
-      ON col.object_id = dc.parent_object_id
-      AND col.column_id = dc.parent_column_id
-    WHERE dc.parent_object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
-      AND col.name = N'other_access';
-
-    IF @constraintName IS NOT NULL
-    BEGIN
-      SET @sql = N'ALTER TABLE [dbo].[RoleAccessSettings] DROP CONSTRAINT ' + QUOTENAME(@constraintName);
-      EXEC sp_executesql @sql;
-    END;
-  `);
-
-  await sequelize.query(`
-    ALTER TABLE [dbo].[RoleAccessSettings]
-    ALTER COLUMN [other_access] NVARCHAR(20) NOT NULL;
-  `);
-
-  await sequelize.query(`
-    IF NOT EXISTS (
-      SELECT 1
-      FROM sys.default_constraints
-      WHERE parent_object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
-        AND name = N'DF_RoleAccessSettings_other_access'
-    )
-    BEGIN
-      ALTER TABLE [dbo].[RoleAccessSettings]
-      ADD CONSTRAINT [DF_RoleAccessSettings_other_access]
-      DEFAULT 'HIDDEN' FOR [other_access];
-    END
-  `);
-
-  await sequelize.query(`
-    IF NOT EXISTS (
-      SELECT 1
-      FROM sys.check_constraints
-      WHERE parent_object_id = OBJECT_ID(N'dbo.RoleAccessSettings')
-        AND name = N'CK_RoleAccessSettings_other_access_allowed'
-    )
-    BEGIN
-      ALTER TABLE [dbo].[RoleAccessSettings]
-      ADD CONSTRAINT [CK_RoleAccessSettings_other_access_allowed]
-      CHECK ([other_access] IN ('HIDDEN', 'VIEW', 'VIEW_EDIT', 'VIEW_CONTROL'));
-    END
-  `);
+    await sequelize.query(`
+      UPDATE [dbo].[RoleAccessSettings]
+      SET ${quoteIdentifier(name)} = ${seedExpression}
+      WHERE ${quoteIdentifier(name)} IS NULL
+         OR LTRIM(RTRIM(${quoteIdentifier(name)})) = '';
+    `);
+  }
 }
 
 async function ensureUserRoleSchema() {
@@ -512,57 +452,30 @@ async function ensureUserRoleSchema() {
   const [tableRows] = await sequelize.query("SELECT OBJECT_ID(N'dbo.Users', N'U') AS table_id;");
   if (!tableRows?.[0]?.table_id) return;
 
-  await sequelize.query(`
-    UPDATE [dbo].[Users]
-    SET [role] = 'Operator'
-    WHERE [role] IS NULL
-       OR LTRIM(RTRIM([role])) = ''
-       OR [role] NOT IN ('Admin', 'Engineer', 'Supervisor', 'Operator', 'Other');
-  `);
+  const columns = [
+    ["full_name", "NVARCHAR(160) NULL"],
+    ["access_role", "NVARCHAR(80) NULL"],
+    ["plant_id", "INT NULL"],
+    ["employee_code", "NVARCHAR(80) NULL"],
+    ["email", "NVARCHAR(160) NULL"],
+    ["phone_number", "NVARCHAR(40) NULL"],
+    ["profile_image_url", "NVARCHAR(1000) NULL"],
+    ["page_access_overrides", "NVARCHAR(MAX) NULL"],
+  ];
 
-  const [constraints] = await sequelize.query(`
-    SELECT [name], [definition]
-    FROM sys.check_constraints
-    WHERE parent_object_id = OBJECT_ID(N'dbo.Users');
-  `);
-
-  for (const constraint of constraints || []) {
-    const definition = String(constraint.definition || "");
-    if (!/\brole\b/i.test(definition) && !/\[role\]/i.test(definition)) {
-      continue;
-    }
+  for (const [name, definition] of columns) {
     await sequelize.query(`
-      ALTER TABLE [dbo].[Users]
-      DROP CONSTRAINT ${quoteIdentifier(constraint.name)};
+      IF NOT EXISTS (
+        SELECT 1
+        FROM sys.columns
+        WHERE object_id = OBJECT_ID(N'dbo.Users')
+          AND name = N'${name}'
+      )
+      BEGIN
+        ALTER TABLE [dbo].[Users] ADD ${quoteIdentifier(name)} ${definition};
+      END
     `);
   }
-
-  await sequelize.query(`
-    IF NOT EXISTS (
-      SELECT 1
-      FROM sys.default_constraints
-      WHERE parent_object_id = OBJECT_ID(N'dbo.Users')
-        AND name = N'DF_Users_role'
-    )
-    BEGIN
-      ALTER TABLE [dbo].[Users]
-      ADD CONSTRAINT [DF_Users_role] DEFAULT 'Operator' FOR [role];
-    END
-  `);
-
-  await sequelize.query(`
-    IF NOT EXISTS (
-      SELECT 1
-      FROM sys.check_constraints
-      WHERE parent_object_id = OBJECT_ID(N'dbo.Users')
-        AND name = N'CK_Users_role_allowed_values'
-    )
-    BEGIN
-      ALTER TABLE [dbo].[Users]
-      ADD CONSTRAINT [CK_Users_role_allowed_values]
-      CHECK ([role] IN ('Admin', 'Engineer', 'Supervisor', 'Operator', 'Other'));
-    END
-  `);
 }
 
 async function ensureRejectionSchema() {

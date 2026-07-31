@@ -275,6 +275,43 @@ const formatPlcColumnLabel = (key) => {
     .join(" ");
   return formatted.replace(/^Plc\s+/i, "");
 };
+const normalizeShotSummaryBucket = (value) => {
+  const raw = String(value ?? "").trim().toUpperCase();
+  const numeric = Number(raw);
+  if (numeric === 1 || ["OK", "GOOD", "PASS", "PASSED"].includes(raw)) return "ok";
+  if (numeric === 3 || raw.includes("WARM")) return "warmUp";
+  if (numeric === 5 || raw.includes("OFF") || raw.includes("OFFSET")) return "off";
+  return "other";
+};
+const derivePlcShotSummaryFromRows = (rows = []) => {
+  const summary = { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
+  const seen = new Set();
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const plc = {
+      ...(row?.plcReading || {}),
+      ...(row?.plc_reading || {}),
+      ...(row?.plcReadings || {}),
+      ...(row?.plcCycleReadings || {}),
+      ...(row?.plc_cycle_readings || {}),
+    };
+    const shotNumber = String(plc.shot_number ?? row.shot_number ?? row.shotNumber ?? "").trim();
+    const shotStatus = plc.shot_status ?? row.shot_status ?? row.shotStatus;
+    if (!shotNumber && (shotStatus === undefined || shotStatus === null || shotStatus === "")) return;
+    const key = [
+      shotNumber || row.reportGroupKey || row.partId || row.part_id || "",
+      plc.recorded_at || plc.recordedAt || plc.shot_date || row.createdAtRaw || row.createdAt || "",
+      shotStatus ?? "",
+    ].map((value) => String(value || "").trim()).join("|");
+    if (seen.has(key)) return;
+    seen.add(key);
+    const bucket = normalizeShotSummaryBucket(shotStatus);
+    if (bucket === "ok") summary.okShot += 1;
+    else if (bucket === "warmUp") summary.warmUpShot += 1;
+    else if (bucket === "off") summary.offShot += 1;
+  });
+  summary.totalProduction = summary.okShot + summary.warmUpShot + summary.offShot;
+  return summary;
+};
 const extractShotFromPartId = (partId) => {
   const s = String(partId || "").trim();
   if (!s) return "";
@@ -1104,10 +1141,19 @@ const ReportsPage = () => {
     try {
       const response = await reportApi.getData(requestPayload, { signal: controller.signal, suppressGlobalError: true });
       setLoadProgress(100);
+      const rowShotSummary = derivePlcShotSummaryFromRows(response.rows || []);
       const pageData = {
         reportMode: response.reportMode || "",
         rows: response.rows || [], 
-        metrics: response.metrics || {},
+        metrics: {
+          ...(response.metrics || {}),
+          plcShotSummary: Number(response.metrics?.plcShotSummary?.totalProduction || 0) > 0
+            ? response.metrics.plcShotSummary
+            : rowShotSummary,
+          plcShotSummarySource: Number(response.metrics?.plcShotSummary?.totalProduction || 0) > 0
+            ? (response.metrics?.plcShotSummarySource || "PLC_SUMMARY")
+            : "REPORT_ROWS",
+        },
         availableShifts: response.availableShifts || [],
         plcColumns: response.plcColumns || [],
         pagination: response.pagination || { page: reportPage.page, pageSize: reportPage.pageSize, totalRows: response.rows?.length || 0, totalPages: 1 },
@@ -1120,9 +1166,10 @@ const ReportsPage = () => {
       reportApi.getShotSummary(summaryFilters, { suppressGlobalError: true })
         .then((summary) => {
           if (shotSummarySeqRef.current !== summarySeq) return;
+          const serverShotSummary = summary?.plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
           const nextShotSummary = {
-            plcShotSummary: summary?.plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 },
-            plcShotSummarySource: summary?.plcShotSummarySource || "PLC_SUMMARY",
+            plcShotSummary: Number(serverShotSummary.totalProduction || 0) > 0 ? serverShotSummary : rowShotSummary,
+            plcShotSummarySource: Number(serverShotSummary.totalProduction || 0) > 0 ? (summary?.plcShotSummarySource || "PLC_SUMMARY") : "REPORT_ROWS",
           };
           setData((prev) => {
             return {
@@ -1137,6 +1184,14 @@ const ReportsPage = () => {
         .catch((summaryError) => {
           if (shotSummarySeqRef.current !== summarySeq) return;
           console.warn("Report shot summary failed", summaryError);
+          setData((prev) => ({
+            ...prev,
+            metrics: {
+              ...(prev.metrics || {}),
+              plcShotSummary: rowShotSummary,
+              plcShotSummarySource: "REPORT_ROWS_FALLBACK",
+            },
+          }));
         })
         .finally(() => {
           if (shotSummarySeqRef.current === summarySeq) setShotSummaryLoading(false);
@@ -1436,9 +1491,7 @@ const ReportsPage = () => {
         }
         if (stationKey) {
           const normalizedStationResult = normResult(
-            stationOp === LEAK_TEST_OPERATION
-              ? ""
-              : String(row.industrialResult || row.statusLabel || row.result || "-").toUpperCase(),
+            String(row.industrialResult || row.statusLabel || row.result || "-").toUpperCase(),
             row.reason || row.interlock_reason,
             row
           );
@@ -1505,6 +1558,8 @@ const ReportsPage = () => {
         const effectiveRequiredOperations = hasLeakData
           ? requiredOperations
           : requiredOperations.filter((operation) => operation !== LEAK_TEST_OPERATION);
+        const allVals = Object.values(operationResults).map((value) => normResult(value)).filter(Boolean);
+        if (allVals.some((v) => v === "NG")) return "NG";
         const vals = effectiveRequiredOperations.map((operation) => normResult(operationResults[operation])).filter(Boolean);
         if (vals.some((v) => v === "NG")) return "NG";
         if (finalInspectionOkAt) return "PASSED";
@@ -1515,7 +1570,8 @@ const ReportsPage = () => {
         if (finalStatus === "PASSED") return "PASSED";
         return "IN_PROGRESS";
       };
-      const overallStatus = customerQrPending && !mappedCustomerCode ? "IN_PROGRESS" : resolveOverallStatus();
+      const resolvedOverallStatus = resolveOverallStatus();
+      const overallStatus = customerQrPending && !mappedCustomerCode && resolvedOverallStatus !== "NG" ? "IN_PROGRESS" : resolvedOverallStatus;
       const finalResultRaw = (() => {
         if (overallStatus === "NG") {
           return entries.reduce((picked, row) => {

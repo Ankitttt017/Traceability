@@ -156,6 +156,18 @@ function stripMetricStatusFilters(filters = {}) {
 
 async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
   const nextMetrics = { ...(metrics || {}) };
+  const hasEnrichedPartScope = Boolean(
+    filters.partName ||
+    filters.part_name ||
+    filters.dieName ||
+    filters.die_name ||
+    filters.dieCastingMachine ||
+    filters.die_casting_machine ||
+    filters.partType
+  );
+  if (hasEnrichedPartScope) {
+    return nextMetrics;
+  }
   const [summaryMetrics, totalProduction] = await Promise.all([
     fetchProductionSummaryMetrics(filters).catch((error) => {
       console.warn(`[ReportExport] traceability SQL summary skipped: ${error.message}`);
@@ -271,9 +283,15 @@ function deriveReportGroupStatus(entries = [], requiredOperations = [], range = 
     }
   }
 
+  const fallbackNgAt = firstNgAt || getReportRowResultTimestamp(latestRow);
   const effectiveRequiredOperations = hasLeakData
     ? requiredOperations
     : requiredOperations.filter((operation) => operation !== LEAKTEST_OPERATION);
+  const allStationValues = Object.values(operationResults).map((value) => normalizeReportRowResult(value)).filter(Boolean);
+  if (allStationValues.some((value) => value === "NG")) {
+    const finalResultAt = fallbackNgAt;
+    return isReportTimeWithinRange(finalResultAt, range) ? "NG" : "IN_PROGRESS";
+  }
   const values = effectiveRequiredOperations.map((operation) => normalizeReportRowResult(operationResults[operation])).filter(Boolean);
   const finalStatus = normalizeReportFinalPartStatus(latestRow.partStatus || latestRow.part_status || latestRow.status);
   let overallStatus = "IN_PROGRESS";
@@ -286,7 +304,7 @@ function deriveReportGroupStatus(entries = [], requiredOperations = [], range = 
 
   const terminalOperation = effectiveRequiredOperations[effectiveRequiredOperations.length - 1];
   const finalResultAt = overallStatus === "NG"
-    ? firstNgAt
+    ? fallbackNgAt
     : overallStatus === "PASSED"
       ? (finalInspectionOkAt || operationResultTimes[terminalOperation] || getReportRowResultTimestamp(latestRow))
       : null;
@@ -648,6 +666,13 @@ function splitRejectionZone(value) {
 function normalizePartToken(value) {
   return String(value || "").trim().toUpperCase();
 }
+function normalizeMachineScopeToken(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/O(?=\d)/g, "0")
+    .replace(/[^A-Z0-9]/g, "");
+}
 function splitPlcPartDie(value) {
   const raw = normalizePartToken(value);
   if (!raw) return { partName: "", dieName: "", label: "" };
@@ -927,13 +952,32 @@ function normalizeShotStatusBucket(value) {
   return "other";
 }
 
+function buildShotStatusBucketSql(statusExpr) {
+  return `
+    CASE
+      WHEN TRY_CONVERT(INT, ${statusExpr}) = 1
+        OR UPPER(LTRIM(RTRIM(CAST(${statusExpr} AS NVARCHAR(255))))) IN ('OK', 'GOOD', 'PASS', 'PASSED')
+        THEN 'ok'
+      WHEN TRY_CONVERT(INT, ${statusExpr}) = 3
+        OR UPPER(LTRIM(RTRIM(CAST(${statusExpr} AS NVARCHAR(255))))) LIKE '%WARM%'
+        THEN 'warmUp'
+      WHEN TRY_CONVERT(INT, ${statusExpr}) = 5
+        OR UPPER(LTRIM(RTRIM(CAST(${statusExpr} AS NVARCHAR(255))))) IN ('NG', 'NOK', 'FAIL', 'FAILED', 'REJECTED')
+        OR UPPER(LTRIM(RTRIM(CAST(${statusExpr} AS NVARCHAR(255))))) LIKE '%OFF%'
+        OR UPPER(LTRIM(RTRIM(CAST(${statusExpr} AS NVARCHAR(255))))) LIKE '%OFFSET%'
+        THEN 'off'
+      ELSE NULL
+    END
+  `;
+}
+
 function normalizeOptionalToken(value) {
   const token = String(value || "").trim();
   const upper = token.toUpperCase();
   return ["", "ALL", "ANY", "ALL_SHIFTS", "ALL SHIFT", "ALL SHIFTS"].includes(upper) ? "" : token;
 }
 
-async function applyPlcShiftWhere(whereParts, replacements, shiftCode) {
+async function applyPlcShiftWhere(whereParts, replacements, shiftCode, recordedColumn = "recorded_at") {
   const target = normalizeOptionalToken(shiftCode).toUpperCase();
   if (!target) return;
   const targetAlias = normalizeShiftAlias(target);
@@ -947,8 +991,9 @@ async function applyPlcShiftWhere(whereParts, replacements, shiftCode) {
   const start = toShiftSeconds(shift.start_time);
   const end = toShiftSeconds(shift.end_time);
   if (start === null || end === null) return;
-  const localSecondExpr = "(DATEPART(HOUR, recorded_at) * 3600 + DATEPART(MINUTE, recorded_at) * 60 + DATEPART(SECOND, recorded_at))";
-  const istSecondExpr = `(DATEPART(HOUR, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at)) * 3600 + DATEPART(MINUTE, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at)) * 60 + DATEPART(SECOND, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, recorded_at)))`;
+  const timestampExpr = `[${recordedColumn}]`;
+  const localSecondExpr = `(DATEPART(HOUR, ${timestampExpr}) * 3600 + DATEPART(MINUTE, ${timestampExpr}) * 60 + DATEPART(SECOND, ${timestampExpr}))`;
+  const istSecondExpr = `(DATEPART(HOUR, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, ${timestampExpr})) * 3600 + DATEPART(MINUTE, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, ${timestampExpr})) * 60 + DATEPART(SECOND, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, ${timestampExpr})))`;
   if (start === end) return;
   replacements.shiftStartSeconds = start;
   replacements.shiftEndSeconds = end;
@@ -1006,9 +1051,18 @@ async function applyOperationLogShiftWhere(whereParts, replacements, shiftCode) 
 }
 
 async function fetchPlcShotSummary(filters = {}) {
+  const availableColumns = await getPlcReadingColumns();
+  const hasColumn = (name) => availableColumns.has(String(name || "").toLowerCase());
+  const recordedColumn = hasColumn("recorded_at") ? "recorded_at" : (hasColumn("createdAt") ? "createdAt" : "");
+  const shotStatusColumn = pickFirstAvailableColumn(availableColumns, ["shot_status", "status", "result", "shot_result"]);
+  const shotNumberColumn = pickFirstAvailableColumn(availableColumns, ["shot_number", "shot_no", "shot"]);
+  if (!recordedColumn || !shotStatusColumn) {
+    return { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
+  }
+
   const { safeFrom, safeTo } = normalizeReportDateRange(filters);
   const whereParts = [
-    `(recorded_at >= :dateFrom AND recorded_at <= :dateTo)`
+    `([${recordedColumn}] >= :dateFrom AND [${recordedColumn}] <= :dateTo)`
   ];
   const replacements = {
     dateFrom: safeFrom,
@@ -1019,6 +1073,7 @@ async function fetchPlcShotSummary(filters = {}) {
   const partName = normalizePartToken(filters.partName || filters.part_name);
   const dieName = normalizePartToken(filters.dieName || filters.die_name);
   const dieCastingMachine = String(filters.dieCastingMachine || filters.die_casting_machine || "").trim().toUpperCase();
+  const dieCastingMachineToken = normalizeMachineScopeToken(dieCastingMachine);
 
   const assignmentWhere = { is_active: true };
   if (filters.plantId) assignmentWhere.plant_id = filters.plantId;
@@ -1040,7 +1095,7 @@ async function fetchPlcShotSummary(filters = {}) {
     const rowMachine = String(row.die_casting_machine || "").trim().toUpperCase();
     if (partName && rowPart !== partName) return false;
     if (dieName && rowDie !== dieName) return false;
-    if (dieCastingMachine && rowMachine !== dieCastingMachine) return false;
+    if (dieCastingMachineToken && normalizeMachineScopeToken(rowMachine) !== dieCastingMachineToken) return false;
     return true;
   });
 
@@ -1082,61 +1137,86 @@ async function fetchPlcShotSummary(filters = {}) {
       if (rowPart) {
         const key = `assignmentPart${index}`;
         replacements[key] = rowDie ? `${rowPart}-${rowDie}%` : `${rowPart}%`;
-        parts.push(`UPPER(LTRIM(RTRIM(CAST(part_name AS NVARCHAR(255))))) LIKE :${key}`);
+        if (hasColumn("part_name")) {
+          parts.push(`UPPER(LTRIM(RTRIM(CAST(part_name AS NVARCHAR(255))))) LIKE :${key}`);
+        }
       }
+      const machineOrIpParts = [];
       if (rowMachine) {
         const key = `assignmentMachine${index}`;
         replacements[key] = rowMachine;
-        parts.push(`UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))) = :${key}`);
+        if (hasColumn("machine_name")) {
+          machineOrIpParts.push(`UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))) = :${key}`);
+        }
       }
       if (rowIp) {
         const key = `assignmentIp${index}`;
         replacements[key] = rowIp;
-        parts.push(`LTRIM(RTRIM(CAST(plc_ip AS NVARCHAR(255)))) = :${key}`);
+        if (hasColumn("plc_ip")) {
+          machineOrIpParts.push(`LTRIM(RTRIM(CAST(plc_ip AS NVARCHAR(255)))) = :${key}`);
+        }
       }
+      if (machineOrIpParts.length) parts.push(`(${machineOrIpParts.join(" OR ")})`);
       if (parts.length) clauses.push(`(${parts.join(" AND ")})`);
     });
     if (clauses.length) whereParts.push(`(${clauses.join(" OR ")})`);
   } else if (uniqueMachineNames.length) {
-    const placeholders = uniqueMachineNames.map((_, index) => `:machineName${index}`).join(", ");
-    whereParts.push(`UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))) IN (${placeholders})`);
-    uniqueMachineNames.forEach((name, index) => {
-      replacements[`machineName${index}`] = name;
-    });
+    if (hasColumn("machine_name")) {
+      const placeholders = uniqueMachineNames.map((_, index) => `:machineName${index}`).join(", ");
+      const compactPlaceholders = uniqueMachineNames.map((_, index) => `:machineNameCompact${index}`).join(", ");
+      const compactMachineExpr = "REPLACE(REPLACE(REPLACE(UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))), ' ', ''), '-', ''), '_', '')";
+      whereParts.push(`(
+        UPPER(LTRIM(RTRIM(CAST(machine_name AS NVARCHAR(255))))) IN (${placeholders})
+        OR ${compactMachineExpr} IN (${compactPlaceholders})
+      )`);
+      uniqueMachineNames.forEach((name, index) => {
+        replacements[`machineName${index}`] = name;
+        replacements[`machineNameCompact${index}`] = normalizeMachineScopeToken(name);
+      });
+    }
   }
 
   const searchToken = String(filters.barcode || filters.customerCode || "").trim();
   if (searchToken) {
-    whereParts.push(`(
-      LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) LIKE :searchToken
-      OR LTRIM(RTRIM(CAST(part_name AS NVARCHAR(255)))) LIKE :searchToken
-    )`);
+    const searchParts = [];
+    if (shotNumberColumn) searchParts.push(`LTRIM(RTRIM(CAST([${shotNumberColumn}] AS NVARCHAR(255)))) LIKE :searchToken`);
+    if (hasColumn("part_name")) searchParts.push(`LTRIM(RTRIM(CAST(part_name AS NVARCHAR(255)))) LIKE :searchToken`);
+    if (searchParts.length) whereParts.push(`(${searchParts.join(" OR ")})`);
     replacements.searchToken = `%${searchToken}%`;
   }
 
-  if (partName) {
+  if (partName && hasColumn("part_name")) {
     whereParts.push(`UPPER(LTRIM(RTRIM(CAST(part_name AS NVARCHAR(255))))) LIKE :partNameLike`);
     replacements.partNameLike = `${partName}%`;
   }
-  if (dieName) {
+  if (dieName && hasColumn("part_name")) {
     whereParts.push(`UPPER(LTRIM(RTRIM(CAST(part_name AS NVARCHAR(255))))) LIKE :dieNameLike`);
     replacements.dieNameLike = partName ? `${partName}-${dieName}%` : `%-${dieName}%`;
   }
-  await applyPlcShiftWhere(whereParts, replacements, filters.shiftCode || filters.shift_code);
+  await applyPlcShiftWhere(whereParts, replacements, filters.shiftCode || filters.shift_code, recordedColumn);
 
   try {
+    const shotBucketSql = buildShotStatusBucketSql(`[${shotStatusColumn}]`);
     const [rows] = await sequelize.query(
       `
         WITH DistinctShots AS (
-          SELECT shot_status,
-                 ROW_NUMBER() OVER(PARTITION BY machine_name, plc_ip, shot_number ORDER BY recorded_at DESC) as rn
+          SELECT [${shotStatusColumn}] AS shot_status,
+                 ${shotBucketSql} AS shot_bucket,
+                 ROW_NUMBER() OVER(PARTITION BY ${
+                   [
+                     hasColumn("machine_name") ? "machine_name" : null,
+                     hasColumn("plc_ip") ? "plc_ip" : null,
+                     shotNumberColumn ? `[${shotNumberColumn}]` : null,
+                   ].filter(Boolean).join(", ") || `[${shotStatusColumn}]`
+                 } ORDER BY [${recordedColumn}] DESC) as rn
           FROM ${PLC_READING_TABLE}
           WHERE ${whereParts.join(" AND ")}
+            AND ${shotBucketSql} IS NOT NULL
         )
-        SELECT shot_status, COUNT(*) AS count
+        SELECT shot_bucket, COUNT(*) AS count
         FROM DistinctShots
         WHERE rn = 1
-        GROUP BY shot_status
+        GROUP BY shot_bucket
       `,
       { replacements }
     );
@@ -1144,12 +1224,12 @@ async function fetchPlcShotSummary(filters = {}) {
     const summary = { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
     for (const row of rows || []) {
       const count = Number(row.count || 0) || 0;
-      summary.totalProduction += count;
-      const bucket = normalizeShotStatusBucket(row.shot_status);
+      const bucket = String(row.shot_bucket || "").trim();
       if (bucket === "ok") summary.okShot += count;
       else if (bucket === "warmUp") summary.warmUpShot += count;
       else if (bucket === "off") summary.offShot += count;
     }
+    summary.totalProduction = summary.okShot + summary.warmUpShot + summary.offShot;
     return summary;
   } catch (error) {
     console.warn(`[REPORT] PLC shot summary unavailable: ${error.message}`);
@@ -1380,6 +1460,7 @@ async function runIndustrialExport(res, { filters, reportConfig, type = "full", 
 async function buildProductionCountScope(filters = {}, options = {}) {
   const includeDateRange = options.includeDateRange !== false;
   const includeStatusFilter = options.includeStatusFilter !== false;
+  const includeShiftFilter = options.includeShiftFilter !== false;
   const { safeFrom, safeTo } = normalizeReportDateRange(filters);
   const whereParts = [
     "NULLIF(LTRIM(RTRIM(CAST(ol.part_id AS NVARCHAR(255)))), '') IS NOT NULL",
@@ -1466,7 +1547,9 @@ async function buildProductionCountScope(filters = {}, options = {}) {
     }
   }
 
-  await applyOperationLogShiftWhere(whereParts, replacements, filters.shiftCode || filters.shift_code);
+  if (includeShiftFilter) {
+    await applyOperationLogShiftWhere(whereParts, replacements, filters.shiftCode || filters.shift_code);
+  }
 
   return { whereParts, joins, replacements };
 }
@@ -1514,7 +1597,38 @@ async function fetchProductionFirstScanPartCount(filters = {}) {
   const { whereParts, joins, replacements } = await buildProductionCountScope(filters, {
     includeDateRange: false,
     includeStatusFilter: false,
+    includeShiftFilter: false,
   });
+  const firstScanWhereParts = [
+    "firstScanAt >= :dateFrom",
+    "firstScanAt <= :dateTo",
+  ];
+  const shiftToken = normalizeOptionalToken(filters.shiftCode || filters.shift_code);
+  if (shiftToken) {
+    const shifts = await getActiveShiftDefinitions();
+    const target = shiftToken.toUpperCase();
+    const targetAlias = normalizeShiftAlias(target);
+    const shift = shifts.find((row) => {
+      const code = String(row.shift_code || row.shiftCode || "").trim().toUpperCase();
+      const name = String(row.shift_name || row.shiftName || "").trim().toUpperCase();
+      return code === target || name === target || normalizeShiftAlias(code) === targetAlias || normalizeShiftAlias(name) === targetAlias;
+    });
+    const start = shift ? toShiftSeconds(shift.start_time) : null;
+    const end = shift ? toShiftSeconds(shift.end_time) : null;
+    if (start !== null && end !== null && start !== end) {
+      replacements.firstScanShiftStartSeconds = start;
+      replacements.firstScanShiftEndSeconds = end;
+      const localSecondExpr = "(DATEPART(HOUR, firstScanAt) * 3600 + DATEPART(MINUTE, firstScanAt) * 60 + DATEPART(SECOND, firstScanAt))";
+      const istSecondExpr = `(DATEPART(HOUR, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, firstScanAt)) * 3600 + DATEPART(MINUTE, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, firstScanAt)) * 60 + DATEPART(SECOND, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, firstScanAt)))`;
+      const directShiftClause = start < end
+        ? `(${localSecondExpr} >= :firstScanShiftStartSeconds AND ${localSecondExpr} <= :firstScanShiftEndSeconds)`
+        : `(${localSecondExpr} >= :firstScanShiftStartSeconds OR ${localSecondExpr} <= :firstScanShiftEndSeconds)`;
+      const istShiftClause = start < end
+        ? `(${istSecondExpr} >= :firstScanShiftStartSeconds AND ${istSecondExpr} <= :firstScanShiftEndSeconds)`
+        : `(${istSecondExpr} >= :firstScanShiftStartSeconds OR ${istSecondExpr} <= :firstScanShiftEndSeconds)`;
+      firstScanWhereParts.push(`(${directShiftClause} OR ${istShiftClause})`);
+    }
+  }
   const [rows] = await sequelize.query(
     `
       WITH PartFirstScans AS (
@@ -1526,8 +1640,7 @@ async function fetchProductionFirstScanPartCount(filters = {}) {
       )
       SELECT COUNT(*) AS totalRows
       FROM PartFirstScans
-      WHERE firstScanAt >= :dateFrom
-        AND firstScanAt <= :dateTo
+      WHERE ${firstScanWhereParts.join("\n        AND ")}
     `,
     { replacements }
   );

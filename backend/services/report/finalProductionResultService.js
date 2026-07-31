@@ -303,11 +303,13 @@ function deriveGroupSummary(rows = []) {
   const operations = Object.keys(stationResults).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
   const values = operations.map((operation) => stationResults[operation]).filter(Boolean);
   const finalStatus = (() => {
+    if (Object.values(stationResults).includes("NG")) return "NG";
     if (values.includes("NG")) return "NG";
     if (finalInspectionOkAt) return "PASSED";
     if (values.includes("IN_PROGRESS")) return "IN_PROGRESS";
     const partStatus = normalizeFinalPartStatus(latestRow.partStatus || latestRow.part_status || latestRow.status);
     if (partStatus === "NG") return "NG";
+    if (operations.length > 1 && values.length >= operations.length && values.every((value) => value === "OK")) return "PASSED";
     if (partStatus === "PASSED") return "PASSED";
     return "IN_PROGRESS";
   })();

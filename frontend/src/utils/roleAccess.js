@@ -7,13 +7,28 @@ export const ACCESS_LEVEL_OPTIONS = [
   { value: "VIEW_CONTROL", label: "View/Control" },
 ];
 
-export const ROLE_KEYS = ["admin", "engineer", "supervisor", "operator", "other"];
+export const USER_ROLE_OPTIONS = [
+  { value: "Super Admin", key: "super_admin", label: "Super Admin" },
+  { value: "Company Admin", key: "company_admin", label: "Company Admin" },
+  { value: "Plant Admin", key: "plant_admin", label: "Plant Admin" },
+  { value: "Production Manager", key: "production_manager", label: "Production Manager" },
+  { value: "Quality Manager", key: "quality_manager", label: "Quality Manager" },
+  { value: "Maintenance", key: "maintenance", label: "Maintenance" },
+  { value: "Engineer", key: "engineer", label: "Engineer" },
+  { value: "Supervisor", key: "supervisor", label: "Supervisor" },
+  { value: "Operator", key: "operator", label: "Operator" },
+  { value: "Auditor", key: "auditor", label: "Auditor" },
+  { value: "Viewer", key: "viewer", label: "Viewer" },
+];
+
+export const ROLE_KEYS = USER_ROLE_OPTIONS.map((role) => role.key);
 
 export const MODULE_ACCESS_META = [
   { key: "dashboard", label: "Dashboard" },
+  { key: "traceability", label: "Traceability" },
   { key: "production", label: "Production" },
   { key: "reports", label: "Reports" },
-  { key: "traceability", label: "Traceability" },
+  { key: "rejection_analysis", label: "Rejection Analysis" },
   { key: "io_monitor", label: "I/O Monitor" },
   { key: "part_journey", label: "Part Journey" },
   { key: "part_process_flow", label: "Part Process Flow" },
@@ -22,7 +37,11 @@ export const MODULE_ACCESS_META = [
   { key: "control_plan", label: "Control Plan" },
   { key: "packing", label: "Packing" },
   { key: "packing_management", label: "Packing Management" },
-  { key: "master_settings", label: "Master Settings" },
+  { key: "master_settings", label: "Role Access" },
+  { key: "plants", label: "Plant Manager" },
+  { key: "lines", label: "Line Manager" },
+  { key: "parts", label: "Part Manager" },
+  { key: "rejection_config", label: "Rejection Configuration" },
   { key: "station_control", label: "Station Control" },
   { key: "report_config", label: "Report Configuration" },
   { key: "machines", label: "Machines" },
@@ -35,41 +54,63 @@ export const MODULE_ACCESS_META = [
   { key: "faq", label: "FAQ" },
 ];
 
-const DEFAULT_FALLBACK = { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" };
+const DEFAULT_FALLBACK = {
+  super_admin: "VIEW_CONTROL",
+  company_admin: "VIEW_EDIT",
+  plant_admin: "VIEW_EDIT",
+  production_manager: "VIEW",
+  quality_manager: "VIEW",
+  maintenance: "VIEW",
+  engineer: "VIEW",
+  supervisor: "VIEW",
+  operator: "HIDDEN",
+  auditor: "VIEW",
+  viewer: "VIEW",
+};
 const VALID_ACCESS = new Set(ACCESS_LEVEL_OPTIONS.map((entry) => entry.value));
 const EDIT_ACCESS = new Set(["VIEW_EDIT", "VIEW_CONTROL"]);
 const CONTROL_ACCESS = new Set(["VIEW_CONTROL"]);
 
 export const DEFAULT_ROLE_ACCESS_SETTINGS = {
-  dashboard: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  production: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  reports: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  traceability: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  io_monitor: { admin: "VIEW_CONTROL", engineer: "VIEW_CONTROL", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  part_journey: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  part_process_flow: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  process_flow: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  operator_view: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  control_plan: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  packing: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  packing_management: { admin: "VIEW_EDIT", engineer: "VIEW_EDIT", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  master_settings: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  station_control: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  report_config: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  machines: { admin: "VIEW_EDIT", engineer: "VIEW_EDIT", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  plc_config: { admin: "VIEW_EDIT", engineer: "VIEW_EDIT", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  scanners: { admin: "VIEW_EDIT", engineer: "VIEW_EDIT", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  scanner_monitor: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  shifts: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  qr_rules: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  users: { admin: "VIEW_EDIT", engineer: "HIDDEN", supervisor: "HIDDEN", operator: "HIDDEN", other: "HIDDEN" },
-  faq: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
+  dashboard: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  traceability: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  production: { ...DEFAULT_FALLBACK, production_manager: "VIEW_EDIT" },
+  reports: { ...DEFAULT_FALLBACK, auditor: "VIEW", viewer: "VIEW" },
+  rejection_analysis: { ...DEFAULT_FALLBACK, quality_manager: "VIEW_EDIT", auditor: "VIEW", viewer: "VIEW" },
+  io_monitor: { ...DEFAULT_FALLBACK, engineer: "VIEW_CONTROL", maintenance: "VIEW_CONTROL", operator: "VIEW" },
+  part_journey: { ...DEFAULT_FALLBACK },
+  part_process_flow: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  process_flow: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  operator_view: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  control_plan: { ...DEFAULT_FALLBACK, operator: "VIEW", quality_manager: "VIEW_EDIT" },
+  packing: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  packing_management: { ...DEFAULT_FALLBACK, production_manager: "VIEW_EDIT" },
+  master_settings: { ...DEFAULT_FALLBACK, engineer: "HIDDEN", supervisor: "HIDDEN", operator: "HIDDEN", maintenance: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  plants: { ...DEFAULT_FALLBACK, engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  lines: { ...DEFAULT_FALLBACK, engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  parts: { ...DEFAULT_FALLBACK, engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  rejection_config: { ...DEFAULT_FALLBACK, quality_manager: "VIEW_EDIT", engineer: "VIEW", operator: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  station_control: { ...DEFAULT_FALLBACK, engineer: "VIEW_EDIT", maintenance: "VIEW_EDIT", operator: "HIDDEN" },
+  report_config: { ...DEFAULT_FALLBACK, quality_manager: "VIEW_EDIT", operator: "HIDDEN" },
+  machines: { ...DEFAULT_FALLBACK, engineer: "VIEW_EDIT", maintenance: "VIEW_EDIT", operator: "HIDDEN" },
+  plc_config: { ...DEFAULT_FALLBACK, engineer: "VIEW_EDIT", maintenance: "VIEW_EDIT", operator: "HIDDEN" },
+  scanners: { ...DEFAULT_FALLBACK, engineer: "VIEW_EDIT", operator: "HIDDEN" },
+  scanner_monitor: { ...DEFAULT_FALLBACK, operator: "HIDDEN" },
+  shifts: { ...DEFAULT_FALLBACK, production_manager: "VIEW_EDIT", operator: "HIDDEN" },
+  qr_rules: { ...DEFAULT_FALLBACK, engineer: "VIEW_EDIT", operator: "HIDDEN" },
+  users: { ...DEFAULT_FALLBACK, engineer: "HIDDEN", supervisor: "HIDDEN", operator: "HIDDEN", maintenance: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  faq: { ...DEFAULT_FALLBACK, operator: "VIEW" },
 };
 
 function normalizeRole(value) {
-  return String(value || "")
+  const normalized = String(value || "")
     .trim()
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (normalized === "admin") return "super_admin";
+  if (normalized === "other") return "viewer";
+  return normalized;
 }
 
 function normalizeAccess(value, fallback = "HIDDEN") {
@@ -85,16 +126,42 @@ function normalizeModuleKey(value) {
     .toLowerCase();
 }
 
+function getStoredUser() {
+  if (typeof window === "undefined") return null;
+  try {
+    return JSON.parse(localStorage.getItem("user") || "null");
+  } catch {
+    return null;
+  }
+}
+
+export function normalizePageAccessOverrides(rawOverrides = {}) {
+  if (!rawOverrides || typeof rawOverrides !== "object" || Array.isArray(rawOverrides)) {
+    return {};
+  }
+  return Object.entries(rawOverrides).reduce((acc, [moduleKey, accessLevel]) => {
+    const normalizedModule = normalizeModuleKey(moduleKey);
+    const normalizedAccess = normalizeAccess(accessLevel, "");
+    if (normalizedModule && VALID_ACCESS.has(normalizedAccess)) {
+      acc[normalizedModule] = normalizedAccess;
+    }
+    return acc;
+  }, {});
+}
+
 export function normalizeRoleAccessSettings(rawSettings = {}) {
   const normalized = {};
 
   for (const [moduleKey, defaults] of Object.entries(DEFAULT_ROLE_ACCESS_SETTINGS)) {
     const source = rawSettings?.[moduleKey] || {};
     normalized[moduleKey] = Object.fromEntries(
-      ROLE_KEYS.map((roleKey) => [
-        roleKey,
-        normalizeAccess(source[roleKey], defaults[roleKey] || DEFAULT_FALLBACK[roleKey]),
-      ])
+      ROLE_KEYS.map((roleKey) => {
+        const legacyValue = roleKey === "super_admin" ? source.admin : roleKey === "viewer" ? source.other : undefined;
+        return [
+          roleKey,
+          normalizeAccess(source[roleKey] ?? legacyValue, defaults[roleKey] || DEFAULT_FALLBACK[roleKey]),
+        ];
+      })
     );
   }
 
@@ -104,10 +171,13 @@ export function normalizeRoleAccessSettings(rawSettings = {}) {
       continue;
     }
     normalized[moduleKey] = Object.fromEntries(
-      ROLE_KEYS.map((roleKey) => [
-        roleKey,
-        normalizeAccess(rawValue[roleKey], DEFAULT_FALLBACK[roleKey]),
-      ])
+      ROLE_KEYS.map((roleKey) => {
+        const legacyValue = roleKey === "super_admin" ? rawValue.admin : roleKey === "viewer" ? rawValue.other : undefined;
+        return [
+          roleKey,
+          normalizeAccess(rawValue[roleKey] ?? legacyValue, DEFAULT_FALLBACK[roleKey]),
+        ];
+      })
     );
   }
 
@@ -144,16 +214,27 @@ export function getRoleAccessLevel(role, moduleKey, settings = getRoleAccessSett
   return normalizeAccess(moduleSettings?.[normalizedRole], DEFAULT_FALLBACK[normalizedRole] || "HIDDEN");
 }
 
-export function canAccessModule(role, moduleKey, settings = getRoleAccessSettings()) {
-  return getRoleAccessLevel(role, moduleKey, settings) !== "HIDDEN";
+export function getEffectiveAccessLevel(roleOrUser, moduleKey, settings = getRoleAccessSettings()) {
+  const normalizedModule = normalizeModuleKey(moduleKey);
+  const user = typeof roleOrUser === "object" && roleOrUser !== null ? roleOrUser : getStoredUser();
+  const overrides = normalizePageAccessOverrides(user?.pageAccessOverrides);
+  if (Object.prototype.hasOwnProperty.call(overrides, normalizedModule)) {
+    return normalizeAccess(overrides[normalizedModule], "HIDDEN");
+  }
+  const role = typeof roleOrUser === "object" && roleOrUser !== null ? roleOrUser.role : roleOrUser;
+  return getRoleAccessLevel(role, normalizedModule, settings);
 }
 
-export function canEditModule(role, moduleKey, settings = getRoleAccessSettings()) {
-  return EDIT_ACCESS.has(getRoleAccessLevel(role, moduleKey, settings));
+export function canAccessModule(roleOrUser, moduleKey, settings = getRoleAccessSettings()) {
+  return getEffectiveAccessLevel(roleOrUser, moduleKey, settings) !== "HIDDEN";
 }
 
-export function canControlModule(role, moduleKey, settings = getRoleAccessSettings()) {
-  return CONTROL_ACCESS.has(getRoleAccessLevel(role, moduleKey, settings));
+export function canEditModule(roleOrUser, moduleKey, settings = getRoleAccessSettings()) {
+  return EDIT_ACCESS.has(getEffectiveAccessLevel(roleOrUser, moduleKey, settings));
+}
+
+export function canControlModule(roleOrUser, moduleKey, settings = getRoleAccessSettings()) {
+  return CONTROL_ACCESS.has(getEffectiveAccessLevel(roleOrUser, moduleKey, settings));
 }
 
 export function formatAccessLevel(value) {

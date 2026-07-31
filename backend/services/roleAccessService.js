@@ -1,39 +1,63 @@
 const RoleAccessSetting = require("../models/RoleAccessSetting");
 
 const ACCESS_LEVELS = new Set(["HIDDEN", "VIEW", "VIEW_EDIT", "VIEW_CONTROL"]);
-const ROLE_KEYS = ["admin", "engineer", "supervisor", "operator", "other"];
+const ROLE_KEYS = [
+  "super_admin",
+  "company_admin",
+  "plant_admin",
+  "production_manager",
+  "quality_manager",
+  "maintenance",
+  "engineer",
+  "supervisor",
+  "operator",
+  "auditor",
+  "viewer",
+];
+
 const DEFAULT_FALLBACK = {
-  admin: "VIEW_EDIT",
+  super_admin: "VIEW_CONTROL",
+  company_admin: "VIEW_EDIT",
+  plant_admin: "VIEW_EDIT",
+  production_manager: "VIEW",
+  quality_manager: "VIEW",
+  maintenance: "VIEW",
   engineer: "VIEW",
   supervisor: "VIEW",
   operator: "HIDDEN",
-  other: "HIDDEN",
+  auditor: "VIEW",
+  viewer: "VIEW",
 };
 
 const DEFAULT_ROLE_ACCESS_SETTINGS = {
-  dashboard: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  production: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  reports: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  traceability: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  io_monitor: { admin: "VIEW_CONTROL", engineer: "VIEW_CONTROL", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  part_journey: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  part_process_flow: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  process_flow: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  operator_view: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  control_plan: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  packing: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
-  packing_management: { admin: "VIEW_EDIT", engineer: "VIEW_EDIT", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  master_settings: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  station_control: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  report_config: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  machines: { admin: "VIEW_EDIT", engineer: "VIEW_EDIT", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  plc_config: { admin: "VIEW_EDIT", engineer: "VIEW_EDIT", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  scanners: { admin: "VIEW_EDIT", engineer: "VIEW_EDIT", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  scanner_monitor: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  shifts: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  qr_rules: { admin: "VIEW_EDIT", engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", other: "HIDDEN" },
-  users: { admin: "VIEW_EDIT", engineer: "HIDDEN", supervisor: "HIDDEN", operator: "HIDDEN", other: "HIDDEN" },
-  faq: { admin: "VIEW", engineer: "VIEW", supervisor: "VIEW", operator: "VIEW", other: "HIDDEN" },
+  dashboard: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  traceability: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  production: { ...DEFAULT_FALLBACK, production_manager: "VIEW_EDIT" },
+  reports: { ...DEFAULT_FALLBACK, auditor: "VIEW", viewer: "VIEW" },
+  rejection_analysis: { ...DEFAULT_FALLBACK, quality_manager: "VIEW_EDIT", auditor: "VIEW", viewer: "VIEW" },
+  io_monitor: { ...DEFAULT_FALLBACK, engineer: "VIEW_CONTROL", maintenance: "VIEW_CONTROL", operator: "VIEW" },
+  part_journey: { ...DEFAULT_FALLBACK },
+  part_process_flow: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  process_flow: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  operator_view: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  control_plan: { ...DEFAULT_FALLBACK, operator: "VIEW", quality_manager: "VIEW_EDIT" },
+  packing: { ...DEFAULT_FALLBACK, operator: "VIEW" },
+  packing_management: { ...DEFAULT_FALLBACK, production_manager: "VIEW_EDIT" },
+  master_settings: { ...DEFAULT_FALLBACK, engineer: "HIDDEN", supervisor: "HIDDEN", operator: "HIDDEN", maintenance: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  plants: { ...DEFAULT_FALLBACK, engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  lines: { ...DEFAULT_FALLBACK, engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  parts: { ...DEFAULT_FALLBACK, engineer: "VIEW", supervisor: "VIEW", operator: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  rejection_config: { ...DEFAULT_FALLBACK, quality_manager: "VIEW_EDIT", engineer: "VIEW", operator: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  station_control: { ...DEFAULT_FALLBACK, engineer: "VIEW_EDIT", maintenance: "VIEW_EDIT", operator: "HIDDEN" },
+  report_config: { ...DEFAULT_FALLBACK, quality_manager: "VIEW_EDIT", operator: "HIDDEN" },
+  machines: { ...DEFAULT_FALLBACK, engineer: "VIEW_EDIT", maintenance: "VIEW_EDIT", operator: "HIDDEN" },
+  plc_config: { ...DEFAULT_FALLBACK, engineer: "VIEW_EDIT", maintenance: "VIEW_EDIT", operator: "HIDDEN" },
+  scanners: { ...DEFAULT_FALLBACK, engineer: "VIEW_EDIT", operator: "HIDDEN" },
+  scanner_monitor: { ...DEFAULT_FALLBACK, operator: "HIDDEN" },
+  shifts: { ...DEFAULT_FALLBACK, production_manager: "VIEW_EDIT", operator: "HIDDEN" },
+  qr_rules: { ...DEFAULT_FALLBACK, engineer: "VIEW_EDIT", operator: "HIDDEN" },
+  users: { ...DEFAULT_FALLBACK, engineer: "HIDDEN", supervisor: "HIDDEN", operator: "HIDDEN", maintenance: "HIDDEN", auditor: "HIDDEN", viewer: "HIDDEN" },
+  faq: { ...DEFAULT_FALLBACK, operator: "VIEW" },
 };
 
 const CACHE_TTL_MS = Math.max(Number(process.env.ROLE_ACCESS_CACHE_TTL_MS || 5000), 0);
@@ -46,7 +70,18 @@ function normalizeModuleKey(value) {
 }
 
 function normalizeUserRole(value) {
-  return String(value || "").trim().toLowerCase();
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (normalized === "admin") return "super_admin";
+  if (normalized === "other") return "viewer";
+  return normalized;
+}
+
+function roleColumn(roleKey) {
+  return `${roleKey}_access`;
 }
 
 function normalizeAccessLevel(value, fallback = "HIDDEN") {
@@ -62,10 +97,13 @@ function cloneDefaultSettings() {
 
 function buildRoleMap(source = {}, fallback = DEFAULT_FALLBACK) {
   return Object.fromEntries(
-    ROLE_KEYS.map((roleKey) => [
-      roleKey,
-      normalizeAccessLevel(source?.[roleKey], fallback?.[roleKey] || DEFAULT_FALLBACK[roleKey]),
-    ])
+    ROLE_KEYS.map((roleKey) => {
+      const legacyValue = roleKey === "super_admin" ? source.admin : roleKey === "viewer" ? source.other : undefined;
+      return [
+        roleKey,
+        normalizeAccessLevel(source?.[roleKey] ?? legacyValue, fallback?.[roleKey] || DEFAULT_FALLBACK[roleKey]),
+      ];
+    })
   );
 }
 
@@ -91,18 +129,23 @@ function rowsToMap(rows = []) {
     if (!moduleKey) {
       continue;
     }
-    merged[moduleKey] = buildRoleMap(
-      {
-        admin: row.admin_access,
-        engineer: row.engineer_access,
-        supervisor: row.supervisor_access,
-        operator: row.operator_access,
-        other: row.other_access,
-      },
-      merged[moduleKey] || DEFAULT_FALLBACK
+    const rowAccess = Object.fromEntries(
+      ROLE_KEYS.map((roleKey) => [roleKey, row[roleColumn(roleKey)]])
     );
+    rowAccess.admin = row.admin_access;
+    rowAccess.other = row.other_access;
+    merged[moduleKey] = buildRoleMap(rowAccess, merged[moduleKey] || DEFAULT_FALLBACK);
   }
   return merged;
+}
+
+function roleMapToRow(moduleKey, roleMap = {}) {
+  return {
+    module_key: moduleKey,
+    ...Object.fromEntries(ROLE_KEYS.map((roleKey) => [roleColumn(roleKey), roleMap[roleKey]])),
+    admin_access: roleMap.super_admin,
+    other_access: roleMap.viewer,
+  };
 }
 
 async function ensureDefaultModules() {
@@ -118,30 +161,13 @@ async function ensureDefaultModules() {
   }
 
   await Promise.all(
-    missing.map((moduleKey) => {
-      const defaults = DEFAULT_ROLE_ACCESS_SETTINGS[moduleKey];
-      return RoleAccessSetting.create({
-        module_key: moduleKey,
-        admin_access: defaults.admin,
-        engineer_access: defaults.engineer,
-        supervisor_access: defaults.supervisor,
-        operator_access: defaults.operator,
-        other_access: defaults.other,
-      });
-    })
+    missing.map((moduleKey) => RoleAccessSetting.create(roleMapToRow(moduleKey, DEFAULT_ROLE_ACCESS_SETTINGS[moduleKey])))
   );
 }
 
 function setRoleAccessSettingsCache(settings) {
   cachedSettings = rowsToMap(
-    Object.entries(settings || {}).map(([moduleKey, roleMap]) => ({
-      module_key: moduleKey,
-      admin_access: roleMap?.admin,
-      engineer_access: roleMap?.engineer,
-      supervisor_access: roleMap?.supervisor,
-      operator_access: roleMap?.operator,
-      other_access: roleMap?.other,
-    }))
+    Object.entries(settings || {}).map(([moduleKey, roleMap]) => roleMapToRow(moduleKey, roleMap))
   );
   cacheUpdatedAt = Date.now();
 }
@@ -190,6 +216,7 @@ function canRoleAccess(role, moduleKey, mode = "view", settings = DEFAULT_ROLE_A
 }
 
 module.exports = {
+  ROLE_KEYS,
   DEFAULT_ROLE_ACCESS_SETTINGS,
   normalizeModuleKey,
   normalizeSettingsInput,
@@ -199,4 +226,5 @@ module.exports = {
   canRoleAccess,
   setRoleAccessSettingsCache,
   invalidateRoleAccessCache,
+  roleMapToRow,
 };

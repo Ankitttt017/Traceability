@@ -11,6 +11,7 @@ const QrFormatRule = require("../models/QrFormatRule");
 const PartCodeMapping = require("../models/PartCodeMapping");
 const MachineRuntimeState = require("../models/MachineRuntimeState");
 const RejectionView = require("../models/RejectionView");
+const FinalProductionResult = require("../models/FinalProductionResult");
 const { saveScan } = require("../services/scanService");
 const { captureLeakReadingsForScan } = require("../services/leakTestCaptureService");
 const LeakTestReading = require("../models/LeakTestReading");
@@ -42,6 +43,10 @@ const { emitRealtime } = require("../services/realtimeService");
 const { tryAcquireMachineLock, clearMachineLock } = require("../services/machineLockService");
 const { finalizeCycleAfterPlc } = require("../services/cycleFinalizationService");
 const { autoPackReadyPart } = require("../services/packingService");
+const {
+  fetchProductionFirstScanPartCount,
+  fetchProductionSummaryMetrics,
+} = require("../services/report/reportExportService");
 const { TIMELINE_EVENTS, recordTimelineEvent } = require("../services/operationTimelineService");
 const {
   getStationFeatureConfig,
@@ -7963,6 +7968,175 @@ exports.getRejectionAnalysis = async (req, res) => {
       if (key && !acc[key]) acc[key] = String(row.customer_qr || "").trim();
       return acc;
     }, {});
+    const finalNgWhere = {
+      final_status: "NG",
+      final_result_at: { [Op.between]: [from, to] },
+    };
+    if (partId) {
+      finalNgWhere[Op.or] = [
+        { report_group_key: { [Op.like]: `%${partId}%` } },
+        { traceability_part_id: { [Op.like]: `%${partId}%` } },
+        { part_serial_no: { [Op.like]: `%${partId}%` } },
+        { customer_qr_code: { [Op.like]: `%${partId}%` } },
+      ];
+    }
+    if (categoryFilter) finalNgWhere.rejection_category = categoryFilter;
+    if (viewFilter) finalNgWhere.rejection_view = viewFilter;
+    if (zoneFilter) finalNgWhere.rejection_zone = zoneFilter;
+    if (reasonFilter) finalNgWhere.rejection_reason = reasonFilter;
+    if (plantId) finalNgWhere.plant_id = plantId;
+    if (lineId) finalNgWhere.line_id = lineId;
+    if (lineName) finalNgWhere.line_name = lineName;
+    if (machineId) finalNgWhere.anchor_machine_id = machineId;
+
+    const finalRows = await FinalProductionResult.findAll({
+          where: partIds.length
+            ? {
+                [Op.or]: [
+                  { report_group_key: { [Op.in]: partIds } },
+                  { traceability_part_id: { [Op.in]: partIds } },
+                  { part_serial_no: { [Op.in]: partIds } },
+                  { customer_qr_code: { [Op.in]: partIds } },
+                ],
+              }
+            : finalNgWhere,
+          attributes: [
+            "report_group_key", "traceability_part_id", "part_serial_no", "customer_qr_code",
+            "shot_number", "shot_details_json", "plc_shot_json", "final_result_at", "first_scan_at",
+            "anchor_machine_id", "anchor_machine_name", "line_name", "plant_id", "line_id",
+            "ng_station", "rejection_category", "rejection_view", "rejection_zone", "rejection_sub_zone",
+            "rejection_reason", "ng_reason", "final_status",
+          ],
+          order: [["last_activity_at", "DESC"], ["updatedAt", "DESC"]],
+          raw: true,
+        }).catch(() => []);
+    const parseJsonObject = (value) => {
+      if (!value) return {};
+      try {
+        const parsed = typeof value === "string" ? JSON.parse(value) : value;
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      } catch (_error) {
+        return {};
+      }
+    };
+    const normalizeShotTokenForLookup = (value) => {
+      const raw = String(value ?? "").trim();
+      if (!raw || raw.toUpperCase() === "NULL") return "";
+      const digits = raw.replace(/\D/g, "");
+      if (!digits) return raw.toUpperCase();
+      const noLead = digits.replace(/^0+/, "");
+      return (noLead || "0").toUpperCase();
+    };
+    const extractShotCandidatesForLookup = (value) => {
+      const raw = String(value || "").trim().toUpperCase();
+      if (!raw) return [];
+      const candidates = new Set();
+      const compactMatch = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+      if (compactMatch?.groups?.shot) candidates.add(normalizeShotTokenForLookup(compactMatch.groups.shot));
+      const trailing = raw.match(/(\d{1,8})$/);
+      if (trailing?.[1]) candidates.add(normalizeShotTokenForLookup(trailing[1]));
+      return [...candidates].filter(Boolean);
+    };
+    const shotLookupValues = new Set();
+    rows.forEach((row) => {
+      const plain = typeof row.get === "function" ? row.get({ plain: true }) : row;
+      const directShot = normalizeShotTokenForLookup(plain.shot_number || plain.shotNumber || "");
+      if (directShot) shotLookupValues.add(directShot);
+      extractShotCandidatesForLookup(plain.part_id).forEach((value) => shotLookupValues.add(value));
+    });
+    finalRows.forEach((row) => {
+      const directShot = normalizeShotTokenForLookup(row.shot_number || "");
+      if (directShot) shotLookupValues.add(directShot);
+      [row.report_group_key, row.traceability_part_id, row.part_serial_no, row.customer_qr_code]
+        .forEach((value) => extractShotCandidatesForLookup(value).forEach((shot) => shotLookupValues.add(shot)));
+    });
+    const plcByShot = new Map();
+    if (shotLookupValues.size) {
+      try {
+        const sequelize = require("../config/db");
+        const shotValues = [...shotLookupValues].slice(0, 1000);
+        const textPlaceholders = shotValues.map((_, index) => `:shotText${index}`).join(", ");
+        const numericValues = shotValues.filter((value) => /^\d+$/.test(value)).slice(0, 1000);
+        const numericPlaceholders = numericValues.map((_, index) => `:shotNumber${index}`).join(", ");
+        const replacements = {};
+        shotValues.forEach((value, index) => {
+          replacements[`shotText${index}`] = value;
+        });
+        numericValues.forEach((value, index) => {
+          replacements[`shotNumber${index}`] = Number(value);
+        });
+        const numericClause = numericValues.length
+          ? `OR TRY_CONVERT(BIGINT, shot_number) IN (${numericPlaceholders})`
+          : "";
+        const [plcRows] = await sequelize.query(
+          `
+            SELECT *
+            FROM PlcCycleReadings
+            WHERE LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) IN (${textPlaceholders})
+              ${numericClause}
+            ORDER BY recorded_at DESC
+          `,
+          { replacements }
+        );
+        for (const row of plcRows || []) {
+          const key = normalizeShotTokenForLookup(row.shot_number || "");
+          if (key && !plcByShot.has(key)) plcByShot.set(key, row);
+        }
+      } catch (error) {
+        console.warn(`[REJECTION] PLC shot detail lookup unavailable: ${error.message}`);
+      }
+    }
+    const resolvePlcShotDetails = (...values) => {
+      for (const value of values) {
+        const direct = normalizeShotTokenForLookup(value);
+        if (direct && plcByShot.has(direct)) return plcByShot.get(direct);
+        for (const candidate of extractShotCandidatesForLookup(value)) {
+          if (plcByShot.has(candidate)) return plcByShot.get(candidate);
+        }
+      }
+      return {};
+    };
+    const finalByPart = finalRows.reduce((acc, row) => {
+      const keys = [row.report_group_key, row.traceability_part_id, row.part_serial_no, row.customer_qr_code]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      const plcShot = resolvePlcShotDetails(row.shot_number, row.report_group_key, row.traceability_part_id, row.part_serial_no, row.customer_qr_code);
+      const shotDetails = {
+        ...plcShot,
+        ...parseJsonObject(row.plc_shot_json),
+        ...parseJsonObject(row.shot_details_json),
+      };
+      const entry = {
+        shotNumber: String(row.shot_number || shotDetails.shot_number || "").trim(),
+        shotStatus: shotDetails.shot_status ?? shotDetails.status ?? "",
+        shotDetails,
+      };
+      keys.forEach((key) => {
+        if (key && !acc[key]) acc[key] = entry;
+      });
+      return acc;
+    }, {});
+
+    const reportMetricFilters = {
+      dateFrom: from,
+      dateTo: to,
+      machineId: machineId || undefined,
+      plantId: plantId || undefined,
+      lineId: lineId || undefined,
+      lineName: lineName || undefined,
+      shiftCode: shiftCodeFilter || undefined,
+      barcode: partId || undefined,
+    };
+    const [productionTotal, reportSummaryMetrics] = await Promise.all([
+      fetchProductionFirstScanPartCount(reportMetricFilters).catch((error) => {
+        console.warn(`[REJECTION] first-scan production total unavailable: ${error.message}`);
+        return 0;
+      }),
+      fetchProductionSummaryMetrics(reportMetricFilters).catch((error) => {
+        console.warn(`[REJECTION] summary metrics unavailable: ${error.message}`);
+        return null;
+      }),
+    ]);
 
     const configuredPartRows = await RejectionView.findAll({
       attributes: ["part_name"],
@@ -7970,7 +8144,7 @@ exports.getRejectionAnalysis = async (req, res) => {
       raw: true,
     }).catch(() => []);
 
-    const analysisRows = rows.map((row) => {
+    const operationAnalysisRows = rows.map((row) => {
       const plain = row.get({ plain: true });
       const machine = plain.Machine || {};
       const shift = resolveShift(plain.createdAt, shifts);
@@ -7979,6 +8153,12 @@ exports.getRejectionAnalysis = async (req, res) => {
       const cleanReason = SYSTEM_RECOVERY_REASONS.includes(fallbackReason.toUpperCase())
         ? ""
         : fallbackReason;
+      const directPlcShot = resolvePlcShotDetails(plain.shot_number, plain.part_id, mappingByPart[String(plain.part_id || "").trim()]);
+      const finalShot = finalByPart[String(plain.part_id || "").trim()] || {};
+      const mergedShotDetails = {
+        ...directPlcShot,
+        ...(finalShot.shotDetails || {}),
+      };
       return {
         id: plain.id,
         partId: plain.part_id || "",
@@ -7999,9 +8179,96 @@ exports.getRejectionAnalysis = async (req, res) => {
         remark: plain.rejection_remark || "",
         resultSource: plain.result_source || "",
         shiftCode: shift?.shift_code || "UNASSIGNED",
+        shotNumber: finalShot.shotNumber || directPlcShot.shot_number || plain.shot_number || "",
+        shotStatus: finalShot.shotStatus || directPlcShot.shot_status || "",
+        shotDetails: mergedShotDetails,
         createdAt: plain.createdAt,
       };
     }).filter((row) => !shiftCodeFilter || normalizeShiftAlias(row.shiftCode) === normalizeShiftAlias(shiftCodeFilter));
+    const operationKeys = new Set(operationAnalysisRows.flatMap((row) => [
+      row.partId,
+      row.customerQrCode,
+    ]).map((value) => String(value || "").trim()).filter(Boolean));
+    const supplementalFinalRows = await FinalProductionResult.findAll({
+      where: finalNgWhere,
+      order: [["final_result_at", "DESC"], ["last_activity_at", "DESC"]],
+      limit: Math.min(Math.max(Number(req.query.limit || 5000), 1), 20000),
+      raw: true,
+    }).catch(() => []);
+    const finalAnalysisRows = supplementalFinalRows
+      .filter((row) => ![row.part_serial_no, row.traceability_part_id, row.report_group_key, row.customer_qr_code]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .some((key) => operationKeys.has(key)))
+      .map((row) => {
+        const plcShot = resolvePlcShotDetails(row.shot_number, row.report_group_key, row.traceability_part_id, row.part_serial_no, row.customer_qr_code);
+        const shotDetails = {
+          ...plcShot,
+          ...parseJsonObject(row.plc_shot_json),
+          ...parseJsonObject(row.shot_details_json),
+        };
+        const createdAt = row.final_result_at || row.last_activity_at || row.first_scan_at;
+        const shift = resolveShift(createdAt, shifts);
+        return {
+          id: `final:${row.report_group_key}`,
+          partId: row.part_serial_no || row.traceability_part_id || row.report_group_key || "",
+          customerQrCode: row.customer_qr_code || null,
+          machineId: row.anchor_machine_id || null,
+          machineName: row.anchor_machine_name || null,
+          lineName: row.line_name || null,
+          plantId: row.plant_id || null,
+          lineId: row.line_id || null,
+          stationNo: normalizeStation(row.ng_station || ""),
+          result: "NG",
+          plcStatus: "FINAL_NG",
+          category: row.rejection_category || "",
+          view: row.rejection_view || "",
+          zone: row.rejection_zone || "",
+          subZone: row.rejection_sub_zone || "",
+          reason: row.rejection_reason || row.ng_reason || "NG",
+          rejectionReasonOnly: row.rejection_reason || "",
+          remark: "",
+          resultSource: "FINAL_PRODUCTION_RESULT",
+          shiftCode: shift?.shift_code || "UNASSIGNED",
+          shotNumber: row.shot_number || shotDetails.shot_number || "",
+          shotStatus: shotDetails.shot_status ?? shotDetails.status ?? "",
+          shotDetails,
+          createdAt,
+        };
+      })
+      .filter((row) => !shiftCodeFilter || normalizeShiftAlias(row.shiftCode) === normalizeShiftAlias(shiftCodeFilter));
+    const mergeRejectionRows = (existing, incoming) => {
+      if (!existing) return incoming;
+      const incomingFinal = String(incoming.resultSource || "").toUpperCase() === "FINAL_PRODUCTION_RESULT";
+      const base = incomingFinal ? { ...existing, ...incoming } : { ...incoming, ...existing };
+      return {
+        ...base,
+        category: base.category || existing.category || incoming.category || "",
+        view: base.view || existing.view || incoming.view || "",
+        zone: base.zone || existing.zone || incoming.zone || "",
+        subZone: base.subZone || existing.subZone || incoming.subZone || "",
+        reason: base.reason || existing.reason || incoming.reason || "NG",
+        rejectionReasonOnly: base.rejectionReasonOnly || existing.rejectionReasonOnly || incoming.rejectionReasonOnly || "",
+        remark: base.remark || existing.remark || incoming.remark || "",
+        shotNumber: base.shotNumber || existing.shotNumber || incoming.shotNumber || "",
+        shotStatus: base.shotStatus || existing.shotStatus || incoming.shotStatus || "",
+        shotDetails: {
+          ...(existing.shotDetails || {}),
+          ...(incoming.shotDetails || {}),
+        },
+      };
+    };
+    const rowsByPart = new Map();
+    [...operationAnalysisRows, ...finalAnalysisRows].forEach((row) => {
+      const key = String(row.customerQrCode || row.partId || row.id || "").trim();
+      if (!key) return;
+      rowsByPart.set(key, mergeRejectionRows(rowsByPart.get(key), row));
+    });
+    const analysisRows = [...rowsByPart.values()].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    const hasRejectionDetailFilters = Boolean(categoryFilter || viewFilter || zoneFilter || reasonFilter);
+    const alignedRejectionTotal = hasRejectionDetailFilters
+      ? analysisRows.length
+      : Number(reportSummaryMetrics?.totalNG ?? analysisRows.length);
 
     res.json({
       filters: {
@@ -8015,7 +8282,10 @@ exports.getRejectionAnalysis = async (req, res) => {
         shiftCode: shiftCodeFilter || null,
       },
       rows: analysisRows,
-      total: analysisRows.length,
+      total: alignedRejectionTotal,
+      rowCount: analysisRows.length,
+      reportTotalNG: Number(reportSummaryMetrics?.totalNG ?? analysisRows.length),
+      productionTotal,
       configuredParts: configuredPartRows.map((row) => String(row.part_name || "").trim()).filter(Boolean),
       availableShifts: shifts.map((shift) => ({
         shiftCode: shift.shift_code,

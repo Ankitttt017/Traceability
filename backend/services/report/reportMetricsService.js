@@ -218,6 +218,8 @@ function calculateProductionMetrics(rows, range = {}) {
       const effectiveRequiredOperations = hasLeakData
         ? requiredOperations
         : requiredOperations.filter((operation) => operation !== LEAK_TEST_OPERATION);
+      const allStationValues = Object.values(operationResults).map((value) => normalizeResult(value)).filter(Boolean);
+      if (allStationValues.some((value) => value === "NG")) return "NG";
       const values = effectiveRequiredOperations.map((operation) => normalizeResult(operationResults[operation])).filter(Boolean);
       if (values.some((value) => value === "NG")) return "NG";
       if (finalInspectionOkAt) return "PASSED";

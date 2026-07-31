@@ -636,6 +636,9 @@ async function generateIndustrialExcel(res, {
       row.componentName ||
       row.partDieLabel ||
       "-";
+    const finalResultDisplay = (overall === "PASSED" || overall === "NG") && row.finalResultAt
+      ? formatIndustrialTimestamp(row.finalResultAt)
+      : "-";
     const values = [
       i + 1,
       shotNumber,
@@ -644,7 +647,7 @@ async function generateIndustrialExcel(res, {
       exportPartName,
       row.dieCastingMachineName || row.plcReading?.machine_name || "-",
       row.cycleStart,
-      row.finalResultAt ? formatIndustrialTimestamp(row.finalResultAt) : "-",
+      finalResultDisplay,
       ...stationResults,
       overall,
       row.rejectionCategory || "-",

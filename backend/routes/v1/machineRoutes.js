@@ -5,22 +5,38 @@ const { requireAnyModuleAccess, requireModuleAccess } = require("../../middlewar
 
 const router = express.Router();
 
+const machineReadAccess = [
+  { moduleKey: "machines", mode: "view" },
+  { moduleKey: "operator_view", mode: "view" },
+  { moduleKey: "reports", mode: "view" },
+  { moduleKey: "production", mode: "view" },
+  { moduleKey: "rejection_analysis", mode: "view" },
+  { moduleKey: "dashboard", mode: "view" },
+  { moduleKey: "part_journey", mode: "view" },
+  { moduleKey: "part_process_flow", mode: "view" },
+  { moduleKey: "process_flow", mode: "view" },
+  { moduleKey: "traceability", mode: "view" },
+  { moduleKey: "control_plan", mode: "view" },
+  { moduleKey: "io_monitor", mode: "view" },
+  { moduleKey: "station_control", mode: "view" },
+  { moduleKey: "scanners", mode: "view" },
+  { moduleKey: "scanner_monitor", mode: "view" },
+  { moduleKey: "packing", mode: "view" },
+  { moduleKey: "packing_management", mode: "view" },
+  { moduleKey: "rejection_config", mode: "view" },
+  { moduleKey: "report_config", mode: "view" },
+];
+
 router.get(
   "/",
   verifyToken,
-  requireAnyModuleAccess([
-    { moduleKey: "machines", mode: "view" },
-    { moduleKey: "operator_view", mode: "view" },
-  ]),
+  requireAnyModuleAccess(machineReadAccess),
   machineController.getMachines
 );
 router.get(
   "/:id",
   verifyToken,
-  requireAnyModuleAccess([
-    { moduleKey: "machines", mode: "view" },
-    { moduleKey: "operator_view", mode: "view" },
-  ]),
+  requireAnyModuleAccess(machineReadAccess),
   machineController.getMachineById
 );
 router.post("/test-plc", verifyToken, requireModuleAccess("io_monitor", "control"), machineController.testPlc);

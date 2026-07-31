@@ -6,6 +6,8 @@ const { Op } = require("sequelize");
 const { emitRealtime } = require("./realtimeService");
 const { getFinalPackingStations } = require("./stationFeatureService");
 const { getPackingManagementSettings, reserveNextAutoBox } = require("./packingManagementService");
+const FinalProductionResult = require("../models/FinalProductionResult");
+const { materializePartFromCurrentReport } = require("./report/finalProductionResultService");
 
 const DEFAULT_PACKING_CAPACITY = Math.max(Number(process.env.DEFAULT_PACKING_CAPACITY || 65), 1);
 const MIN_PACKING_CAPACITY = 1;
@@ -77,6 +79,45 @@ async function resolvePackingPartId(scannedCode) {
     partId: String(mapping.old_part_id || "").trim(),
     customerQrCode: raw,
   };
+}
+
+function normalizeFinalReportStatus(value) {
+  const status = String(value || "").trim().toUpperCase();
+  if (["OK", "PASSED", "PASS", "COMPLETED", "COMPLETED_OK", "ENDED_OK"].includes(status)) return "PASSED";
+  if (["NG", "FAILED", "FAIL", "REJECTED", "INTERLOCKED", "COMPLETED_NG", "ENDED_NG"].includes(status)) return "NG";
+  return "IN_PROGRESS";
+}
+
+async function getLatestFinalProductionResult(partId, customerQrCode = null) {
+  const candidates = [...new Set([partId, customerQrCode].map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!candidates.length) return null;
+  return FinalProductionResult.findOne({
+    where: {
+      [Op.or]: [
+        { report_group_key: { [Op.in]: candidates } },
+        { traceability_part_id: { [Op.in]: candidates } },
+        { part_serial_no: { [Op.in]: candidates } },
+        { customer_qr_code: { [Op.in]: candidates } },
+      ],
+    },
+    order: [["last_activity_at", "DESC"], ["updatedAt", "DESC"]],
+    raw: true,
+  });
+}
+
+async function assertFinalReportPassedForPacking(partId, customerQrCode = null) {
+  let finalResult = await getLatestFinalProductionResult(partId, customerQrCode);
+  if (!finalResult) {
+    await materializePartFromCurrentReport(partId).catch((error) => {
+      console.warn(`[PACKING] final report materialization skipped for ${partId}: ${error.message}`);
+    });
+    finalResult = await getLatestFinalProductionResult(partId, customerQrCode);
+  }
+
+  const finalStatus = normalizeFinalReportStatus(finalResult?.final_status);
+  if (finalStatus !== "PASSED") {
+    throw new Error(`Only overall PASSED parts can be packed. Current final status: ${finalStatus}`);
+  }
 }
 
 async function getOpenSessionByBox(boxNumber) {
@@ -172,6 +213,7 @@ async function packPart({ boxNumber, partId, capacity }) {
   if (!isCompletedPart) {
     throw new Error("Only COMPLETED/PASSED parts can be packed");
   }
+  await assertFinalReportPassedForPacking(normalizedPartId, resolvedScan.customerQrCode);
 
   const finalPackingStations = await getFinalPackingStations();
   if (finalPackingStations.length > 0) {
