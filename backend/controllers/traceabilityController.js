@@ -3290,7 +3290,12 @@ exports.getPartJourney = async (req, res) => {
       const waitingForCustomerQr = Boolean(
         stationMeta?.requiresCustomerQr &&
         !hasGlobalCustomerQr &&
-        !customerMappingByStation[stationNo]?.customerQrCode
+        !customerMappingByStation[stationNo]?.customerQrCode &&
+        (
+          stationNo === currentStation ||
+          stationNo === expectedNextStation ||
+          attempts.some((attempt) => String(attempt.plcStatus || "").trim().toUpperCase() === "WAITING_CUSTOMER_QR")
+        )
       );
 
       if (leakTestReadings.length > 0) {

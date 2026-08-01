@@ -48,6 +48,13 @@ const ShotStatusChip = ({ value }) => {
 };
 
 const isStatusLike = (key) => key === "overallStatus" || key.startsWith("station_");
+const STICKY_COLUMNS = {
+  plc_shot_number: { left: 0, width: 92 },
+  shot_datetime: { left: 92, width: 150 },
+  barcode: { left: 242, width: 170 },
+  customerCode: { left: 412, width: 230 },
+};
+const STICKY_LAST_KEY = "customerCode";
 
 const ReportTable = ({
   rows = [],
@@ -114,6 +121,25 @@ const ReportTable = ({
     const amount = Math.max(320, Math.floor(node.clientWidth * 0.75));
     node.scrollBy({ left: direction * amount, behavior: "smooth" });
   };
+  const getStickyStyle = (key, { header = false, rowIndex = 0 } = {}) => {
+    const meta = STICKY_COLUMNS[key];
+    if (!meta) return undefined;
+    return {
+      position: "sticky",
+      left: meta.left,
+      minWidth: meta.width,
+      width: meta.width,
+      maxWidth: meta.width,
+      zIndex: header ? 35 : 15,
+      background: header
+        ? "rgb(24, 54, 113)"
+        : rowIndex % 2 === 0
+          ? "rgb(var(--pk-bg-card))"
+          : "rgb(var(--pk-bg-card))",
+      boxShadow: key === STICKY_LAST_KEY ? "8px 0 14px -12px rgba(15,23,42,0.45)" : undefined,
+    };
+  };
+  const stickyClass = (key) => STICKY_COLUMNS[key] ? "sticky-report-cell" : "";
 
   if (loading) {
     return <PageSkeleton rows={7} columns={6} progress={progress} title="Report" />;
@@ -158,10 +184,14 @@ const ReportTable = ({
         
         <div ref={tableScrollRef} className="overflow-auto max-h-[70vh] scroll-smooth" style={{ scrollbarWidth: "thin" }}>
           <table className="w-max min-w-full border-collapse text-[12px]">
-            <thead className="sticky top-0 z-10">
+            <thead className="sticky top-0 z-40">
               <tr className="border-b border-[rgba(var(--pk-bdr),0.15)] backdrop-blur" style={{ background: "linear-gradient(135deg, rgb(16,37,77), rgb(26,58,124), rgb(45,94,167))" }}>
                 {columns.map((column) => (
-                  <th key={column.key} className="px-4 py-3.5 text-[10px] font-black text-white uppercase tracking-wider whitespace-nowrap text-center">
+                  <th
+                    key={column.key}
+                    className={`px-2.5 py-2.5 text-[10px] font-black text-white uppercase tracking-wider whitespace-nowrap text-center ${stickyClass(column.key)}`}
+                    style={getStickyStyle(column.key, { header: true })}
+                  >
                     {column.label}
                   </th>
                 ))}
@@ -175,19 +205,21 @@ const ReportTable = ({
                     const value = row[column.key];
                     const isEmptyValue = value === null || value === undefined || value === "";
                     const text = isEmptyValue ? (column.blankIfEmpty ? "" : "-") : String(value);
+                    const cellStickyStyle = getStickyStyle(column.key, { rowIndex: idx });
+                    const cellStickyClass = stickyClass(column.key);
                     
                     if (column.renderLeakOperation) {
                       const machineName = String(value?.machineName || "").trim();
                       const status = String(value?.status || "").trim().toUpperCase() || "-";
                       if (!machineName || status === "-") {
                         return (
-                          <td key={column.key} className="px-4 py-3 text-center whitespace-nowrap">
+                          <td key={column.key} className={`px-2.5 py-2 text-center whitespace-nowrap ${cellStickyClass}`} style={cellStickyStyle}>
                             <DashCell />
                           </td>
                         );
                       }
                       return (
-                        <td key={column.key} className="px-4 py-3 text-center whitespace-nowrap">
+                        <td key={column.key} className={`px-2.5 py-2 text-center whitespace-nowrap ${cellStickyClass}`} style={cellStickyStyle}>
                           <div className="inline-flex items-center gap-2">
                             <span className="text-[11px] font-semibold text-[rgb(var(--pk-txt-pri))]">{machineName}</span>
                             <StatusChip status={status} />
@@ -199,7 +231,7 @@ const ReportTable = ({
                     if (column.renderAsText) {
                       if (text === "-") {
                         return (
-                          <td key={column.key} className="px-4 py-3 text-center whitespace-nowrap">
+                          <td key={column.key} className={`px-2.5 py-2 text-center whitespace-nowrap ${cellStickyClass}`} style={cellStickyStyle}>
                             <DashCell />
                           </td>
                         );
@@ -207,7 +239,8 @@ const ReportTable = ({
                       return (
                         <td
                           key={column.key}
-                          className="px-4 py-3 text-[11px] text-[rgb(var(--pk-txt-pri))] text-center font-medium whitespace-nowrap"
+                          className={`px-2.5 py-2 text-[11px] text-[rgb(var(--pk-txt-pri))] text-center font-medium whitespace-nowrap ${cellStickyClass}`}
+                          style={cellStickyStyle}
                         >
                           {text}
                         </td>
@@ -216,7 +249,7 @@ const ReportTable = ({
                     
                     if (isStatusLike(column.key)) {
                       return (
-                        <td key={column.key} className="px-4 py-3 text-center whitespace-nowrap">
+                        <td key={column.key} className={`px-2.5 py-2 text-center whitespace-nowrap ${cellStickyClass}`} style={cellStickyStyle}>
                           <StatusChip status={text} />
                         </td>
                       );
@@ -224,7 +257,7 @@ const ReportTable = ({
                     
                     if (column.key === "plc_shot_status") {
                       return (
-                        <td key={column.key} className="px-4 py-3 text-center whitespace-nowrap">
+                        <td key={column.key} className={`px-2.5 py-2 text-center whitespace-nowrap ${cellStickyClass}`} style={cellStickyStyle}>
                           <ShotStatusChip value={text} />
                         </td>
                       );
@@ -233,7 +266,7 @@ const ReportTable = ({
                     if (column.key === "ngReason") {
                       const reasonText = value === null || value === undefined ? "" : String(value);
                       return (
-                        <td key={column.key} className="px-4 py-3 text-[11px] text-[rgb(239,68,68)]/80 min-w-[220px] max-w-[420px] text-left whitespace-normal break-words leading-relaxed" title={reasonText || undefined}>
+                        <td key={column.key} className={`px-2.5 py-2 text-[11px] text-[rgb(239,68,68)]/80 min-w-[220px] max-w-[420px] text-left whitespace-normal break-words leading-relaxed ${cellStickyClass}`} style={cellStickyStyle} title={reasonText || undefined}>
                           {reasonText || "-"}
                         </td>
                       );
@@ -243,7 +276,8 @@ const ReportTable = ({
                       return (
                         <td
                           key={column.key}
-                          className="px-4 py-3 text-[11px] text-[rgb(var(--pk-txt-pri))] text-center font-medium min-w-[120px] max-w-[220px] whitespace-normal break-words leading-relaxed"
+                          className={`px-2.5 py-2 text-[11px] text-[rgb(var(--pk-txt-pri))] text-center font-medium min-w-[110px] max-w-[200px] whitespace-normal break-words leading-relaxed ${cellStickyClass}`}
+                          style={cellStickyStyle}
                           title={text !== "-" ? text : undefined}
                         >
                           {text}
@@ -253,7 +287,7 @@ const ReportTable = ({
                     
                     if (column.key.startsWith("leak_") && text === "-") {
                       return (
-                        <td key={column.key} className="px-4 py-3 text-center whitespace-nowrap">
+                        <td key={column.key} className={`px-2.5 py-2 text-center whitespace-nowrap ${cellStickyClass}`} style={cellStickyStyle}>
                           <DashCell />
                         </td>
                       );
@@ -262,7 +296,8 @@ const ReportTable = ({
                     return (
                       <td
                         key={column.key}
-                        className={`px-4 py-3 text-[11px] text-[rgb(var(--pk-txt-pri))] text-center font-medium ${column.key.startsWith("plc_") ? "max-w-[220px] truncate" : "whitespace-nowrap"}`}
+                        className={`px-2.5 py-2 text-[11px] text-[rgb(var(--pk-txt-pri))] text-center font-medium ${column.key.startsWith("plc_") ? "max-w-[200px] truncate" : "whitespace-nowrap"} ${cellStickyClass}`}
+                        style={cellStickyStyle}
                         title={column.key.startsWith("plc_") ? text : undefined}
                       >
                         {text}

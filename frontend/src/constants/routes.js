@@ -9,7 +9,6 @@ export const APP_ROUTES = {
   rejectionConfiguration: "/rejection-configuration",
   stationControls: "/station-controls",
   masterReports: "/master-reports",
-  traceability: "/traceability",
   machines: "/machines",
   plcConfig: "/plc-configuration",
   ioMonitor: "/io-monitor",

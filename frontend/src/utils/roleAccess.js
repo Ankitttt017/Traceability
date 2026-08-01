@@ -25,7 +25,6 @@ export const ROLE_KEYS = USER_ROLE_OPTIONS.map((role) => role.key);
 
 export const MODULE_ACCESS_META = [
   { key: "dashboard", label: "Dashboard" },
-  { key: "traceability", label: "Traceability" },
   { key: "production", label: "Production" },
   { key: "reports", label: "Reports" },
   { key: "rejection_analysis", label: "Rejection Analysis" },
@@ -73,7 +72,6 @@ const CONTROL_ACCESS = new Set(["VIEW_CONTROL"]);
 
 export const DEFAULT_ROLE_ACCESS_SETTINGS = {
   dashboard: { ...DEFAULT_FALLBACK, operator: "VIEW" },
-  traceability: { ...DEFAULT_FALLBACK, operator: "VIEW" },
   production: { ...DEFAULT_FALLBACK, production_manager: "VIEW_EDIT" },
   reports: { ...DEFAULT_FALLBACK, auditor: "VIEW", viewer: "VIEW" },
   rejection_analysis: { ...DEFAULT_FALLBACK, quality_manager: "VIEW_EDIT", auditor: "VIEW", viewer: "VIEW" },

@@ -175,7 +175,9 @@ function normalizeLeakResult(value) {
   if (!token) return "";
   if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(token)) return "NG";
   if (["OK", "PASS", "PASSED", "GOOD"].includes(token)) return "OK";
-  return "OK";
+  if (token === "19279") return "OK";
+  if (/^\d+$/.test(token) && Number(token) > 0) return "NG";
+  return "";
 }
 function getLeakTestStatus(reading) {
   const result = normalizeLeakResult(reading?.Result || reading?.result);
@@ -246,13 +248,17 @@ function getExcelGroupKey(row = {}, fallback = "") {
 }
 
 function getDisplayPartSerial(row = {}, fallback = "-") {
+  const isCustomerQrOnly = Boolean(row.isCustomerQrOnly || row.is_customer_qr_only);
+  if (isCustomerQrOnly) {
+    return String(row.displayPartId || row.display_part_id || "").trim() || "-";
+  }
   return String(
     row.displayPartId ||
     row.display_part_id ||
-    row.traceabilityPartId ||
-    row.traceability_part_id ||
     row.partId ||
     row.part_id ||
+    row.traceabilityPartId ||
+    row.traceability_part_id ||
     fallback ||
     "-"
   ).trim() || "-";
@@ -345,33 +351,6 @@ async function generateIndustrialExcel(res, {
     set("A", r[0], true); set("B", r[1], false); set("D", r[2], true); set("E", r[3], false);
     const emptyC = worksheet.getCell(`C${rowNum}`);
     emptyC.border = { top:{style:"thin",color:{argb:BORDER}}, bottom:{style:"thin",color:{argb:BORDER}}, left:{style:"thin",color:{argb:BORDER}}, right:{style:"thin",color:{argb:BORDER}} };
-  });
-
-  const summaryStart = 10;
-  worksheet.mergeCells(`A${summaryStart}:K${summaryStart}`);
-  const sumHeader = worksheet.getCell(`A${summaryStart}`);
-  sumHeader.value = "PRODUCTION SUMMARY";
-  sumHeader.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF3F4F6" } };
-  sumHeader.font = { bold: true, size: 10, color: { argb: NAVY } };
-  sumHeader.alignment = { horizontal: "left", indent: 1 };
-  sumHeader.border = { bottom: { style: "medium", color: { argb: NAVY } } };
-
-  const summaryCards = [
-    { label: "Total Production", value: metrics.totalProduction || 0, color: NAVY },
-    { label: "Total OK", value: metrics.totalOK || 0, color: "FF059669" },
-    { label: "Total NG", value: metrics.totalNG || 0, color: RED },
-    { label: "Validation Rejects", value: metrics.validationRejects || 0, color: "FFD97706" },
-    { label: "Pass Rate", value: `${metrics.passRate || 0}%`, color: TEAL },
-  ];
-
-  summaryCards.forEach((card, i) => {
-    const col = i * 2 + 1;
-    worksheet.getCell(summaryStart + 1, col).value = card.label;
-    worksheet.getCell(summaryStart + 1, col).font = { bold: true, size: 8, color: { argb: GRAY } };
-    worksheet.getCell(summaryStart + 1, col).alignment = { horizontal: "center" };
-    worksheet.getCell(summaryStart + 2, col).value = card.value;
-    worksheet.getCell(summaryStart + 2, col).font = { bold: true, size: 14, color: { argb: card.color } };
-    worksheet.getCell(summaryStart + 2, col).alignment = { horizontal: "center" };
   });
 
   const stationMap = new Map();
@@ -539,7 +518,7 @@ async function generateIndustrialExcel(res, {
     });
   }
 
-  const tableHeaderRow = 14;
+  const tableHeaderRow = 10;
   const baseColumns = [
     { header: "SR NO", width: 8 },
     { header: "Shot Number", width: 14 },

@@ -72,14 +72,6 @@ const Header = ({ onMenuClick }) => {
         icon: "🖥️",
       },
       {
-        name: t("pages.traceability", "Traceability"),
-        path: APP_ROUTES.traceability,
-        moduleKey: "traceability",
-        description: "Track part lifecycle and scans",
-        keywords: ["part", "scan", "history"],
-        icon: "🔍",
-      },
-      {
         name: t("pages.ioMonitor", "I/O Monitor"),
         path: APP_ROUTES.ioMonitor,
         moduleKey: "io_monitor",

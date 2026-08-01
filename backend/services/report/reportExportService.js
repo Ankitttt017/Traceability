@@ -154,6 +154,37 @@ function stripMetricStatusFilters(filters = {}) {
   return rest;
 }
 
+function scopeMetricsToStatusFilter(metrics = {}, filters = {}) {
+  const tokens = getStatusFilterTokens(filters.status, filters.resultType, filters.statusFilter);
+  if (!tokens.length) return metrics;
+  const next = { ...(metrics || {}) };
+  const wantsOk = tokens.some((token) => ["OK", "PASSED", "PASS"].includes(token));
+  const wantsNg = tokens.some((token) => ["NG", "FAILED", "FAIL"].includes(token));
+  const wantsProgress = tokens.some((token) => ["PENDING", "IN_PROGRESS", "IN PROGRESS", "ACTIVE"].includes(token));
+  if (wantsOk && !wantsNg && !wantsProgress) {
+    next.traceabilityProduction = Number(next.totalOK || 0);
+    next.totalProduction = next.traceabilityProduction;
+    next.totalNG = 0;
+    next.inProgress = 0;
+    next.validationRejects = 0;
+  } else if (wantsNg && !wantsOk && !wantsProgress) {
+    next.traceabilityProduction = Number(next.totalNG || 0);
+    next.totalProduction = next.traceabilityProduction;
+    next.totalOK = 0;
+    next.inProgress = 0;
+    next.validationRejects = next.traceabilityProduction;
+  } else if (wantsProgress && !wantsOk && !wantsNg) {
+    next.traceabilityProduction = Number(next.inProgress || 0);
+    next.totalProduction = next.traceabilityProduction;
+    next.totalOK = 0;
+    next.totalNG = 0;
+    next.validationRejects = 0;
+  }
+  const productionBase = Number(next.totalOK || 0) + Number(next.totalNG || 0);
+  next.passRate = productionBase > 0 ? Number(((Number(next.totalOK || 0) / productionBase) * 100).toFixed(2)) : 0;
+  return next;
+}
+
 async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
   const nextMetrics = { ...(metrics || {}) };
   const hasEnrichedPartScope = Boolean(
@@ -166,14 +197,15 @@ async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
     filters.partType
   );
   if (hasEnrichedPartScope) {
-    return nextMetrics;
+    return scopeMetricsToStatusFilter(nextMetrics, filters);
   }
+  const productionFilters = stripMetricStatusFilters(filters);
   const [summaryMetrics, totalProduction] = await Promise.all([
-    fetchProductionSummaryMetrics(filters).catch((error) => {
+    fetchProductionSummaryMetrics(productionFilters).catch((error) => {
       console.warn(`[ReportExport] traceability SQL summary skipped: ${error.message}`);
       return null;
     }),
-    fetchProductionFirstScanPartCount(stripMetricStatusFilters(filters)).catch((error) => {
+    fetchProductionFirstScanPartCount(productionFilters).catch((error) => {
       console.warn(`[ReportExport] first-scan production total skipped: ${error.message}`);
       return null;
     }),
@@ -192,7 +224,7 @@ async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
     nextMetrics.traceabilityProduction = normalizedTotal;
     nextMetrics.totalProduction = normalizedTotal;
   }
-  return nextMetrics;
+  return scopeMetricsToStatusFilter(nextMetrics, filters);
 }
 
 function toReportTime(value) {

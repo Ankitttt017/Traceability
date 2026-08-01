@@ -31,7 +31,9 @@ function normalizeLeaktestResult(value) {
   if (!token) return null;
   if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(token)) return "NG";
   if (["OK", "PASS", "PASSED", "GOOD"].includes(token)) return "OK";
-  return "OK";
+  if (token === "19279") return "OK";
+  if (/^\d+$/.test(token) && Number(token) > 0) return "NG";
+  return null;
 }
 
 function normalizeMachineName(value) {

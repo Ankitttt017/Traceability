@@ -12,7 +12,9 @@ const {
   LEAKTEST_OPERATION,
   buildLeaktestIndex,
   getLeaktestReadingForPartStation,
+  getAllLeaktestReadingsForPart,
   getLeaktestStageState,
+  getLeaktestStageStateFromReadings,
 } = require("./leaktestLookupService");
 const sequelize = require("../config/db");
 const { Op } = require("sequelize");
@@ -816,14 +818,16 @@ async function getLeaktestSequenceStateForPart(partId, sequence) {
     },
     machines,
   });
-  const reading = getLeaktestReadingForPartStation(index.byPartAndStation, effectivePartId, LEAKTEST_OPERATION);
-  if (!reading) {
+  const readings = getAllLeaktestReadingsForPart(index.byPartAndIp, effectivePartId, LEAKTEST_OPERATION);
+  const reading = readings[readings.length - 1] || getLeaktestReadingForPartStation(index.byPartAndStation, effectivePartId, LEAKTEST_OPERATION);
+  if (!readings.length && !reading) {
     return null;
   }
 
   return {
-    state: getLeaktestStageState(reading),
+    state: readings.length ? getLeaktestStageStateFromReadings(readings) : getLeaktestStageState(reading),
     reading,
+    readings,
     customerQr,
   };
 }

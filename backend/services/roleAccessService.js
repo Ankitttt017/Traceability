@@ -31,7 +31,6 @@ const DEFAULT_FALLBACK = {
 
 const DEFAULT_ROLE_ACCESS_SETTINGS = {
   dashboard: { ...DEFAULT_FALLBACK, operator: "VIEW" },
-  traceability: { ...DEFAULT_FALLBACK, operator: "VIEW" },
   production: { ...DEFAULT_FALLBACK, production_manager: "VIEW_EDIT" },
   reports: { ...DEFAULT_FALLBACK, auditor: "VIEW", viewer: "VIEW" },
   rejection_analysis: { ...DEFAULT_FALLBACK, quality_manager: "VIEW_EDIT", auditor: "VIEW", viewer: "VIEW" },
