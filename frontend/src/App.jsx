@@ -5,7 +5,6 @@ import { LanguageProvider } from "./context/LanguageContext";
 import MainLayout from "./layouts/MainLayout";
 import LoginPage from "./pages/LoginPage";
 import Dashboard from "./pages/Dashboard";
-import Traceability from "./pages/Traceability";
 import Machine from "./pages/Machine";
 import UsersPage from "./pages/Users";
 import ComponentJourney from "./pages/ComponentJourney";
@@ -27,6 +26,7 @@ import ReportConfiguration from "./pages/ReportConfiguration";
 import ReportsPage from "./pages/Reports/ReportsPage";
 import RejectionAnalysis from "./pages/RejectionAnalysis";
 import RejectionConfiguration from "./pages/RejectionConfiguration";
+import NetworkOutageOverlay from "./components/NetworkOutageOverlay";
 import Plants from "./pages/Plants";
 import Lines from "./pages/Lines";
 import Parts from "./pages/Parts";
@@ -75,7 +75,6 @@ const MODULE_REDIRECT_ORDER = [
   { moduleKey: "packing_management", path: APP_ROUTES.packingManagement },
   { moduleKey: "reports", path: APP_ROUTES.reports },
   { moduleKey: "rejection_analysis", path: APP_ROUTES.rejectionAnalysis },
-  { moduleKey: "traceability", path: APP_ROUTES.traceability },
   { moduleKey: "io_monitor", path: APP_ROUTES.ioMonitor },
   { moduleKey: "part_journey", path: APP_ROUTES.partJourney },
   { moduleKey: "part_process_flow", path: APP_ROUTES.partProcessFlow },
@@ -161,6 +160,7 @@ function App() {
             },
           }}
         />
+        <NetworkOutageOverlay />
         <Routes>
           <Route
             path={APP_ROUTES.login}
@@ -277,14 +277,6 @@ function App() {
               element={
                 <ModuleRoute moduleKey="rejection_analysis">
                   <RejectionAnalysis />
-                </ModuleRoute>
-              }
-            />
-            <Route
-              path={APP_ROUTES.traceability.slice(1)}
-              element={
-                <ModuleRoute moduleKey="traceability">
-                  <Traceability />
                 </ModuleRoute>
               }
             />

@@ -36,6 +36,13 @@ const apiClient = axios.create({
   timeout: 15000,
 });
 
+function emitConnectivityStatus(status, detail = {}) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("traceability:connectivity", {
+    detail: { status, ...detail },
+  }));
+}
+
 apiClient.interceptors.request.use((config) => {
   const token = localStorage.getItem("token");
 
@@ -57,7 +64,10 @@ function isAuthEndpoint(url = "") {
 }
 
 apiClient.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    emitConnectivityStatus("online");
+    return response;
+  },
 
   (error) => {
     const status = Number(error?.response?.status || 0);
@@ -75,6 +85,30 @@ apiClient.interceptors.response.use(
           apiError.includes("NO TOKEN")));
 
     const isAuthEndpointReq = isAuthEndpoint(requestUrl);
+    const globalRawMessage = String(
+      error?.response?.data?.error ||
+      error?.response?.data?.message ||
+      error?.message ||
+      ""
+    );
+    const globalNormalized = globalRawMessage.toLowerCase();
+    const globalIsTimeout =
+      error?.code === "ECONNABORTED" ||
+      globalNormalized.includes("timeout") ||
+      globalNormalized.includes("15000ms");
+    const globalIsNetworkDown =
+      error?.message === "Network Error" ||
+      error?.code === "ERR_NETWORK" ||
+      globalNormalized.includes("failed to fetch");
+
+    if (status !== 401 && status !== 403 && (globalIsTimeout || globalIsNetworkDown)) {
+      emitConnectivityStatus("offline", {
+        reason: globalIsTimeout ? "timeout" : "network",
+        message: globalIsTimeout
+          ? "Server timeout. Check API/DB connection."
+          : "Unable to reach server. Please check network or backend service status.",
+      });
+    }
 
     if (authFailure && !isAuthEndpointReq && typeof window !== "undefined") {
       clearAuthSession();
@@ -106,6 +140,7 @@ apiClient.interceptors.response.use(
         normalized.includes("15000ms");
       const isNetworkDown =
         error?.message === "Network Error" ||
+        error?.code === "ERR_NETWORK" ||
         normalized.includes("failed to fetch");
 
       let errorMessage = rawMessage || "An unexpected error occurred.";

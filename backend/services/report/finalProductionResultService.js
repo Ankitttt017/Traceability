@@ -250,6 +250,21 @@ function normalizeFinalPartStatus(value) {
   return "IN_PROGRESS";
 }
 
+function normalizeLeakResult(value) {
+  const status = normalizeUpper(value);
+  if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(status)) return "NG";
+  if (["OK", "PASS", "PASSED", "GOOD"].includes(status)) return "OK";
+  return "";
+}
+
+function getLeakReadingStatus(reading = {}) {
+  return normalizeLeakResult(reading.Result || reading.result || reading.Status || reading.status);
+}
+
+function getLeakReadingTime(reading = {}) {
+  return reading.Cycle_End_Time || reading.cycleEndTime || reading.updatedAt || reading.createdAt || null;
+}
+
 function deriveGroupSummary(rows = []) {
   const stationResults = {};
   const operationResultTimes = {};
@@ -259,6 +274,7 @@ function deriveGroupSummary(rows = []) {
   let latestAt = 0;
   let firstNgAt = null;
   let ngRow = null;
+  let ngStation = null;
   let finalInspectionOkAt = null;
 
   for (const row of rows) {
@@ -283,6 +299,7 @@ function deriveGroupSummary(rows = []) {
       if (resultAt && (!firstNgAt || toTime(resultAt) < toTime(firstNgAt))) {
         firstNgAt = resultAt;
         ngRow = row;
+        ngStation = operation || null;
       }
     }
 
@@ -298,6 +315,23 @@ function deriveGroupSummary(rows = []) {
       latestAt = rowAt;
       latestRow = row;
     }
+  }
+
+  const leakReadings = rows.flatMap((row) => Array.isArray(row.leakTestReadings) ? row.leakTestReadings : (row.leakTestReading ? [row.leakTestReading] : []));
+  const leakStatuses = leakReadings.map(getLeakReadingStatus).filter(Boolean);
+  if (leakStatuses.some((status) => status === "NG")) {
+    stationResults.OP150 = pickStationResult(stationResults.OP150, "NG");
+    const leakNgReading = leakReadings.find((reading) => getLeakReadingStatus(reading) === "NG") || {};
+    const leakNgAt = getLeakReadingTime(leakNgReading);
+    if (leakNgAt && (!firstNgAt || toTime(leakNgAt) < toTime(firstNgAt))) {
+      firstNgAt = leakNgAt;
+      ngRow = rows.find((row) => row.leakTestReading === leakNgReading || row.leakTestReadings?.includes?.(leakNgReading)) || ngRow;
+      ngStation = "OP150";
+    } else if (!ngStation) {
+      ngStation = "OP150";
+    }
+  } else if (leakStatuses.length && leakStatuses.every((status) => status === "OK")) {
+    stationResults.OP150 = pickStationResult(stationResults.OP150, "OK");
   }
 
   const operations = Object.keys(stationResults).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
@@ -330,7 +364,6 @@ function deriveGroupSummary(rows = []) {
     return Math.max(latest, rowLatest);
   }, 0);
   const plcReading = rows.map((row) => row.plcReading || row.plc_reading).find((value) => value && Object.keys(value).length);
-  const leakReadings = rows.flatMap((row) => Array.isArray(row.leakTestReadings) ? row.leakTestReadings : (row.leakTestReading ? [row.leakTestReading] : []));
   const rejectionRow = rows.find((row) => row.rejectionReason || row.rejection_reason || row.rejectionCategory || row.rejection_category || row.reason) || ngRow || {};
 
   return {
@@ -345,6 +378,7 @@ function deriveGroupSummary(rows = []) {
     leakReadings,
     rejectionRow,
     ngRow,
+    ngStation,
   };
 }
 
@@ -454,7 +488,7 @@ async function buildMaterializedRecord(groupKey, rows = []) {
     die_casting_machine_name: normalizeText(plc.machine_name || latestRow.dieCastingMachine || latestRow.die_casting_machine) || null,
     part_name: normalizeText(latestRow.partName || latestRow.part_name || firstRow.partName || firstRow.part_name || plc.part_name) || null,
     die_name: normalizeText(latestRow.dieName || latestRow.die_name || firstRow.dieName || firstRow.die_name) || null,
-    ng_station: normalizeText(getStationOperation(summary.ngRow || {})) || null,
+    ng_station: normalizeText(summary.ngStation || getStationOperation(summary.ngRow || {})) || null,
     ng_reason: normalizeText(rejectionJson.reason || rejectionJson.text) || null,
     rejection_category: normalizeText(rejectionJson.category) || null,
     rejection_view: normalizeText(rejectionJson.view) || null,

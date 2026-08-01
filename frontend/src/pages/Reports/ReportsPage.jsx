@@ -1413,13 +1413,10 @@ const ReportsPage = () => {
     const discoveredPlcColumns = Array.isArray(data.plcColumns) ? data.plcColumns : DEFAULT_PLC_CYCLE_COLUMNS;
     const plcKeys = discoveredPlcColumns
       .filter((key) => DEFAULT_PLC_CYCLE_COLUMNS.includes(key))
-      .filter((key) => !["machine_name", "part_name", "shot_number", "shot_date", "shot_time"].includes(key));
+      .filter((key) => !["machine_name", "part_name", "shot_number", "shot_date", "shot_time", "shot_datetime"].includes(key));
     const plcColumns = (() => {
       const used = new Map();
-      const baseColumns = [
-        { key: "shot_datetime", label: "Shot Date & Time" },
-        ...plcKeys.map((key) => ({ key, label: withUnit(formatPlcColumnLabel(key), PLC_COLUMN_UNITS[key]) }))
-      ];
+      const baseColumns = plcKeys.map((key) => ({ key, label: withUnit(formatPlcColumnLabel(key), PLC_COLUMN_UNITS[key]) }));
       return baseColumns.map(({ key, label: initialLabel }) => {
         const base = initialLabel;
         const count = used.get(base) || 0;
@@ -1438,6 +1435,7 @@ const ReportsPage = () => {
     const dynamicColumns = [
       { key: "srNo", label: "#" },
       { key: "plc_shot_number", label: "Shot #" },
+      { key: "shot_datetime", label: "Shot Date & Time" },
       { key: "barcode", label: "Part Serial", blankIfEmpty: true },
       { key: "customerCode", label: "Customer QR" },
       { key: "createdAt", label: "First Scan" },
@@ -1642,6 +1640,9 @@ const ReportsPage = () => {
             idx
         ),
         plc_shot_number: displayPartId ? (plcData.shot_number || displayShotNumber || "-") : "-",
+        shot_datetime: plcData.shot_datetime
+          ? new Date(plcData.shot_datetime).toLocaleString("en-IN")
+          : [plcData.shot_date || first.shot_date, plcData.shot_time || first.shot_time].filter(Boolean).join(" ") || "-",
         barcode: displayPartId,
         plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
@@ -1695,7 +1696,7 @@ const ReportsPage = () => {
         }
         shaped[`cycle_${s.key}`] = stationCycleTimes[s.key] || "-";
       });
-      if (String(shaped.overallStatus || "").toUpperCase() === "IN_PROGRESS") {
+      if (String(shaped.overallStatus || "").toUpperCase() === "IN_PROGRESS" && customerQrPending) {
         const laserMarkingPendingStation = stationPairs.find((s) => {
           if (s.sharedLeakOperation) return false;
           const op = String(s.op || s.key || "").trim().toUpperCase();

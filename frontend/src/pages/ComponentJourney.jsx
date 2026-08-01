@@ -630,6 +630,8 @@ function normalizeLeakResult(value) {
   if (!token) return "";
   if (["NG","NOK","NOT_OK","NOT OK","FAIL","FAILED","REJECT","REJECTED"].includes(token)) return "NG";
   if (["OK","PASS","PASSED","GOOD"].includes(token)) return "OK";
+  if (token === "19279") return "OK";
+  if (/^\d+$/.test(token) && Number(token) > 0) return "NG";
   return "";
 }
 function getLeakStationState(station={}) {

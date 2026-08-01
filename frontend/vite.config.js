@@ -13,7 +13,7 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['App-logo.ico'],
+      includeAssets: ['analysis.png', 'No-Internet.avif'],
       workbox: {
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024
       },
@@ -27,9 +27,9 @@ export default defineConfig({
         start_url: '/operator-view',
         scope: '/',
         icons: [
-          { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
-          { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
-          { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable any' }
+          { src: '/analysis.png', sizes: '192x192', type: 'image/png' },
+          { src: '/analysis.png', sizes: '512x512', type: 'image/png' },
+          { src: '/analysis.png', sizes: '512x512', type: 'image/png', purpose: 'maskable any' }
         ]
       }
     }),

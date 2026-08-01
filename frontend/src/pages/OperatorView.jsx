@@ -847,7 +847,10 @@ const OperatorView = () => {
     });
   }, [scannerEntries, primaryScannerEntry]);
   const plcHealthKnown = typeof plcHealth?.healthy === "boolean";
-  const plcConnected = plcHealthKnown ? Boolean(plcHealth?.healthy) : null;
+  const selectedPlcIp = String(plcHealth?.plcIp || selectedMachine?.plcIp || liveState?.machine?.plcIp || "").trim();
+  const selectedPlcPort = Number(plcHealth?.plcPort || selectedMachine?.plcPort || liveState?.machine?.plcPort || 0);
+  const plcConfigured = String(plcHealth?.status || "").trim().toUpperCase() !== "NOT_CONFIGURED" && Boolean(selectedPlcIp && selectedPlcPort);
+  const plcConnected = !plcConfigured ? null : plcHealthKnown ? Boolean(plcHealth?.healthy) : null;
   const scannerConfigured = scannerEntries.length > 0 ? scannerEntries.some((entry) => entry.configured) : String(scannerHealth?.status || "").toUpperCase() !== "NOT_CONFIGURED";
   const scannerConnected = scannerEntries.length > 0 ? scannerEntries.some((entry) => entry.connected) : Boolean(scannerHealth?.connected);
   const scannerMode = String(primaryScannerEntry?.scanner?.scannerMode || scannerInfo?.scannerMode || scannerInfo?.mode || "").trim().toUpperCase();
@@ -2090,21 +2093,21 @@ const OperatorView = () => {
                   <div style={{
                     display: "flex", alignItems: "center", justifyContent: "space-between",
                     padding: "8px 10px", borderRadius: 9,
-                    background: plcConnected === null ? C.idle(0.07) : plcConnected ? C.ok(0.07) : C.ng(0.07),
-                    border: `1px solid ${plcConnected === null ? C.bdr() : plcConnected ? C.ok(0.22) : C.ng(0.22)}`,
+                    background: !plcConfigured || plcConnected === null ? C.idle(0.07) : plcConnected ? C.ok(0.07) : C.ng(0.07),
+                    border: `1px solid ${!plcConfigured || plcConnected === null ? C.bdr() : plcConnected ? C.ok(0.22) : C.ng(0.22)}`,
                   }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                       <ConnDot connected={Boolean(plcConnected)} />
                       <div style={{ minWidth: 0 }}>
                         <p style={{ fontSize: isCompact ? 11 : 12, fontWeight: 700, color: C.txt("pri") }}>{t("operatorView.plcController", "PLC Controller")}</p>
                           <p style={{ fontSize: 9, color: C.txt("muted"), fontFamily: "'DM Mono',monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {plcHealth?.plcIp || selectedMachine?.plcIp || liveState?.machine?.plcIp || "—"}
+                          {selectedPlcIp || "Not Set"}
                         </p>
                       </div>
                     </div>
                     <Badge
-                      variant={plcConnected === null ? "idle" : plcConnected ? "ok" : "ng"}
-                      label={plcConnected === null ? t("operatorView.checking", "Checking") : plcConnected ? t("operatorView.online", "Online") : t("operatorView.offline", "Offline")}
+                      variant={!plcConfigured || plcConnected === null ? "idle" : plcConnected ? "ok" : "ng"}
+                      label={!plcConfigured ? t("operatorView.notSet", "Not Set") : plcConnected === null ? t("operatorView.checking", "Checking") : plcConnected ? t("operatorView.online", "Online") : t("operatorView.offline", "Offline")}
                       pulse={Boolean(plcConnected)}
                       size={isCompact ? "sm" : "sm"}
                     />
