@@ -12,6 +12,7 @@ const PartCodeMapping = require("../models/PartCodeMapping");
 const MachineRuntimeState = require("../models/MachineRuntimeState");
 const RejectionView = require("../models/RejectionView");
 const FinalProductionResult = require("../models/FinalProductionResult");
+const LinePartAssignment = require("../models/LinePartAssignment");
 const { saveScan } = require("../services/scanService");
 const { captureLeakReadingsForScan } = require("../services/leakTestCaptureService");
 const LeakTestReading = require("../models/LeakTestReading");
@@ -7894,6 +7895,10 @@ exports.getRejectionAnalysis = async (req, res) => {
     const lineId = Number(req.query.lineId || 0);
     const lineName = String(req.query.lineName || "").trim();
     const partId = String(req.query.partId || "").trim();
+    const partNameFilter = String(req.query.partName || req.query.part_name || "").trim().toUpperCase();
+    const partTypeFilter = String(req.query.partType || req.query.part_type || "").trim().toUpperCase();
+    const dieNameFilter = String(req.query.dieName || req.query.die_name || "").trim().toUpperCase();
+    const dieCastingMachineFilter = String(req.query.dieCastingMachine || req.query.die_casting_machine || "").trim().toUpperCase();
     const shiftCodeFilter = String(req.query.shiftCode || "").trim().toUpperCase();
     const categoryFilter = String(req.query.category || "").trim();
     const viewFilter = String(req.query.view || "").trim();
@@ -7906,6 +7911,48 @@ exports.getRejectionAnalysis = async (req, res) => {
     if (lineId) machineWhere.line_id = lineId;
     if (lineName) machineWhere.line_name = lineName;
 
+    const normalizePartDieTokenForReport = (value) => String(value || "").trim().toUpperCase();
+    const normalizeMachineTokenForReport = (value) => normalizePartDieTokenForReport(value).replace(/[\s_-]+/g, "");
+    const splitPlcPartDieForReport = (value) => {
+      const raw = normalizePartDieTokenForReport(value);
+      if (!raw) return { partName: "", dieName: "" };
+      const [partName, ...dieParts] = raw.split("-");
+      return { partName: partName || "", dieName: dieParts.join("-") || "" };
+    };
+
+    const assignmentWhere = { is_active: true };
+    if (plantId) assignmentWhere.plant_id = plantId;
+    if (lineId) assignmentWhere.line_id = lineId;
+    let assignmentRows = [];
+    try {
+      assignmentRows = await LinePartAssignment.findAll({
+        where: assignmentWhere,
+        attributes: ["part_name", "die_name", "die_casting_machine", "ip_address"],
+        order: [["part_name", "ASC"], ["die_name", "ASC"]],
+        raw: true,
+      });
+    } catch (error) {
+      console.warn(`[REJECTION] part/die assignment scope unavailable: ${error.message}`);
+    }
+    const assignmentFilterOptions = {
+      parts: [...new Set(assignmentRows.map((row) => String(row.part_name || "").trim()).filter(Boolean))],
+      dies: [...new Set(assignmentRows.map((row) => String(row.die_name || "").trim()).filter(Boolean))],
+      dieCastingMachines: [...new Set(assignmentRows.map((row) => String(row.die_casting_machine || "").trim()).filter(Boolean))],
+      assignments: assignmentRows.map((row) => ({
+        partName: String(row.part_name || "").trim(),
+        dieName: String(row.die_name || "").trim(),
+        dieCastingMachine: String(row.die_casting_machine || "").trim(),
+      })),
+    };
+    const scopedAssignmentRows = assignmentRows.filter((row) => {
+      const rowPart = normalizePartDieTokenForReport(row.part_name);
+      const rowDie = normalizePartDieTokenForReport(row.die_name);
+      const rowMachine = normalizeMachineTokenForReport(row.die_casting_machine);
+      if (partNameFilter && rowPart !== partNameFilter) return false;
+      if (dieNameFilter && rowDie !== dieNameFilter) return false;
+      if (dieCastingMachineFilter && rowMachine !== normalizeMachineTokenForReport(dieCastingMachineFilter)) return false;
+      return true;
+    });
     const where = {
       createdAt: { [Op.between]: [from, to] },
       [Op.and]: [
@@ -7989,6 +8036,9 @@ exports.getRejectionAnalysis = async (req, res) => {
     if (viewFilter) finalNgWhere.rejection_view = viewFilter;
     if (zoneFilter) finalNgWhere.rejection_zone = zoneFilter;
     if (reasonFilter) finalNgWhere.rejection_reason = reasonFilter;
+    if (partNameFilter) finalNgWhere.part_name = partNameFilter;
+    if (dieNameFilter) finalNgWhere.die_name = dieNameFilter;
+    if (dieCastingMachineFilter) finalNgWhere.die_casting_machine_name = dieCastingMachineFilter;
     if (plantId) finalNgWhere.plant_id = plantId;
     if (lineId) finalNgWhere.line_id = lineId;
     if (lineName) finalNgWhere.line_name = lineName;
@@ -8009,6 +8059,7 @@ exports.getRejectionAnalysis = async (req, res) => {
             "report_group_key", "traceability_part_id", "part_serial_no", "customer_qr_code",
             "shot_number", "shot_details_json", "plc_shot_json", "final_result_at", "first_scan_at",
             "anchor_machine_id", "anchor_machine_name", "line_name", "plant_id", "line_id",
+            "part_name", "die_name", "die_casting_machine_name",
             "ng_station", "rejection_category", "rejection_view", "rejection_zone", "rejection_sub_zone",
             "rejection_reason", "ng_reason", "final_status",
           ],
@@ -8023,6 +8074,23 @@ exports.getRejectionAnalysis = async (req, res) => {
       } catch (_error) {
         return {};
       }
+    };
+    const looksLikeCustomerQrForReport = (value) => /^R\d/i.test(String(value || "").trim());
+    const safeInternalPartIdForReport = (value, customerQr = "") => {
+      const raw = String(value || "").trim();
+      const mappedCustomerQr = String(customerQr || "").trim();
+      if (!raw || raw === "-") return "";
+      if (looksLikeCustomerQrForReport(raw)) return "";
+      if (mappedCustomerQr && raw.toUpperCase() === mappedCustomerQr.toUpperCase()) return "";
+      return raw;
+    };
+    const getFinalDisplayPartIdForReport = (row = {}) => {
+      const customerQr = String(row.customer_qr_code || "").trim();
+      return (
+        safeInternalPartIdForReport(row.part_serial_no, customerQr) ||
+        safeInternalPartIdForReport(row.traceability_part_id, customerQr) ||
+        safeInternalPartIdForReport(row.report_group_key, customerQr)
+      );
     };
     const normalizeShotTokenForLookup = (value) => {
       const raw = String(value ?? "").trim();
@@ -8042,17 +8110,50 @@ exports.getRejectionAnalysis = async (req, res) => {
       if (trailing?.[1]) candidates.add(normalizeShotTokenForLookup(trailing[1]));
       return [...candidates].filter(Boolean);
     };
+    const plcRowMatchesAssignmentScope = (plcRow = {}) => {
+      const scopeRows = scopedAssignmentRows.length ? scopedAssignmentRows : assignmentRows;
+      if (!scopeRows.length) return true;
+      const plcMachine = normalizeMachineTokenForReport(plcRow.machine_name);
+      const plcIp = String(plcRow.plc_ip || plcRow.ip_address || "").trim();
+      const plcPartDie = splitPlcPartDieForReport(plcRow.part_name || "");
+      return scopeRows.some((assignment) => {
+        const assignmentMachine = normalizeMachineTokenForReport(assignment.die_casting_machine);
+        const assignmentIp = String(assignment.ip_address || "").trim();
+        const assignmentPart = normalizePartDieTokenForReport(assignment.part_name);
+        const assignmentDie = normalizePartDieTokenForReport(assignment.die_name);
+        const machineOk = assignmentIp
+          ? plcIp && plcIp === assignmentIp
+          : assignmentMachine && plcMachine === assignmentMachine;
+        if (!machineOk) return false;
+        if (assignmentPart && plcPartDie.partName && plcPartDie.partName !== assignmentPart) return false;
+        if (assignmentDie && plcPartDie.dieName && plcPartDie.dieName !== assignmentDie) return false;
+        return true;
+      });
+    };
+    const pickScopedPlcRow = (rows = []) => {
+      if (!Array.isArray(rows) || !rows.length) return null;
+      return rows.find(plcRowMatchesAssignmentScope) || null;
+    };
+    const scopedShotDetailsForDisplay = (details = {}) => {
+      if (!details || typeof details !== "object" || !Object.keys(details).length) return {};
+      return plcRowMatchesAssignmentScope(details) ? details : {};
+    };
     const shotLookupValues = new Set();
     rows.forEach((row) => {
       const plain = typeof row.get === "function" ? row.get({ plain: true }) : row;
+      const partKey = String(plain.part_id || "").trim();
+      const displayPartId = safeInternalPartIdForReport(partKey, mappingByPart[partKey]);
+      if (!displayPartId) return;
       const directShot = normalizeShotTokenForLookup(plain.shot_number || plain.shotNumber || "");
       if (directShot) shotLookupValues.add(directShot);
-      extractShotCandidatesForLookup(plain.part_id).forEach((value) => shotLookupValues.add(value));
+      extractShotCandidatesForLookup(displayPartId).forEach((value) => shotLookupValues.add(value));
     });
     finalRows.forEach((row) => {
+      const displayPartId = getFinalDisplayPartIdForReport(row);
+      if (!displayPartId) return;
       const directShot = normalizeShotTokenForLookup(row.shot_number || "");
       if (directShot) shotLookupValues.add(directShot);
-      [row.report_group_key, row.traceability_part_id, row.part_serial_no, row.customer_qr_code]
+      [displayPartId]
         .forEach((value) => extractShotCandidatesForLookup(value).forEach((shot) => shotLookupValues.add(shot)));
     });
     const plcByShot = new Map();
@@ -8085,7 +8186,10 @@ exports.getRejectionAnalysis = async (req, res) => {
         );
         for (const row of plcRows || []) {
           const key = normalizeShotTokenForLookup(row.shot_number || "");
-          if (key && !plcByShot.has(key)) plcByShot.set(key, row);
+          if (!key) continue;
+          const bucket = plcByShot.get(key) || [];
+          bucket.push(row);
+          plcByShot.set(key, bucket);
         }
       } catch (error) {
         console.warn(`[REJECTION] PLC shot detail lookup unavailable: ${error.message}`);
@@ -8094,9 +8198,15 @@ exports.getRejectionAnalysis = async (req, res) => {
     const resolvePlcShotDetails = (...values) => {
       for (const value of values) {
         const direct = normalizeShotTokenForLookup(value);
-        if (direct && plcByShot.has(direct)) return plcByShot.get(direct);
+        if (direct && plcByShot.has(direct)) {
+          const scoped = pickScopedPlcRow(plcByShot.get(direct));
+          if (scoped) return scoped;
+        }
         for (const candidate of extractShotCandidatesForLookup(value)) {
-          if (plcByShot.has(candidate)) return plcByShot.get(candidate);
+          if (plcByShot.has(candidate)) {
+            const scoped = pickScopedPlcRow(plcByShot.get(candidate));
+            if (scoped) return scoped;
+          }
         }
       }
       return {};
@@ -8105,16 +8215,24 @@ exports.getRejectionAnalysis = async (req, res) => {
       const keys = [row.report_group_key, row.traceability_part_id, row.part_serial_no, row.customer_qr_code]
         .map((value) => String(value || "").trim())
         .filter(Boolean);
-      const plcShot = resolvePlcShotDetails(row.shot_number, row.report_group_key, row.traceability_part_id, row.part_serial_no, row.customer_qr_code);
-      const shotDetails = {
-        ...plcShot,
-        ...parseJsonObject(row.plc_shot_json),
-        ...parseJsonObject(row.shot_details_json),
-      };
+      const displayPartId = getFinalDisplayPartIdForReport(row);
+      const plcShot = displayPartId ? resolvePlcShotDetails(row.shot_number, displayPartId) : {};
+      const shotDetails = displayPartId
+        ? {
+            ...plcShot,
+            ...parseJsonObject(row.plc_shot_json),
+            ...parseJsonObject(row.shot_details_json),
+          }
+        : {};
+      const scopedShotDetails = scopedShotDetailsForDisplay(shotDetails);
+      const plcPartDie = splitPlcPartDieForReport(scopedShotDetails.part_name || "");
       const entry = {
-        shotNumber: String(row.shot_number || shotDetails.shot_number || "").trim(),
-        shotStatus: shotDetails.shot_status ?? shotDetails.status ?? "",
-        shotDetails,
+        shotNumber: displayPartId ? String(row.shot_number || scopedShotDetails.shot_number || "").trim() : "",
+        shotStatus: displayPartId ? (scopedShotDetails.shot_status ?? scopedShotDetails.status ?? "") : "",
+        shotDetails: scopedShotDetails,
+        partName: normalizePartDieTokenForReport(row.part_name || plcPartDie.partName),
+        dieName: normalizePartDieTokenForReport(row.die_name || plcPartDie.dieName),
+        dieCastingMachine: normalizePartDieTokenForReport(row.die_casting_machine_name || scopedShotDetails.machine_name),
       };
       keys.forEach((key) => {
         if (key && !acc[key]) acc[key] = entry;
@@ -8131,6 +8249,10 @@ exports.getRejectionAnalysis = async (req, res) => {
       lineName: lineName || undefined,
       shiftCode: shiftCodeFilter || undefined,
       barcode: partId || undefined,
+      partName: partNameFilter || undefined,
+      partType: partTypeFilter || undefined,
+      dieName: dieNameFilter || undefined,
+      dieCastingMachine: dieCastingMachineFilter || undefined,
     };
     const [productionTotal, reportSummaryMetrics] = await Promise.all([
       fetchProductionFirstScanPartCount(reportMetricFilters).catch((error) => {
@@ -8142,6 +8264,53 @@ exports.getRejectionAnalysis = async (req, res) => {
         return null;
       }),
     ]);
+    let alignedProductionTotal = Number(productionTotal || 0);
+    if (machineId || plantId || lineId || lineName || partId || shiftCodeFilter || partNameFilter || partTypeFilter || dieNameFilter || dieCastingMachineFilter) {
+      const scopedProductionWhere = {
+        first_scan_at: { [Op.between]: [from, to] },
+      };
+      if (plantId) scopedProductionWhere.plant_id = plantId;
+      if (lineId) scopedProductionWhere.line_id = lineId;
+      if (lineName) scopedProductionWhere.line_name = lineName;
+      if (machineId) scopedProductionWhere.anchor_machine_id = machineId;
+      if (partNameFilter) scopedProductionWhere.part_name = partNameFilter;
+      if (dieNameFilter) scopedProductionWhere.die_name = dieNameFilter;
+      if (dieCastingMachineFilter) scopedProductionWhere.die_casting_machine_name = dieCastingMachineFilter;
+      if (shiftCodeFilter) scopedProductionWhere.shift_code = shiftCodeFilter;
+      if (partId) {
+        scopedProductionWhere[Op.and] = [
+          ...(scopedProductionWhere[Op.and] || []),
+          {
+            [Op.or]: [
+              { report_group_key: { [Op.like]: `%${partId}%` } },
+              { traceability_part_id: { [Op.like]: `%${partId}%` } },
+              { part_serial_no: { [Op.like]: `%${partId}%` } },
+              { customer_qr_code: { [Op.like]: `%${partId}%` } },
+            ],
+          },
+        ];
+      }
+      if (partTypeFilter && ["OTHER", "CUSTOMER_QR_ONLY", "CUSTOMER_QR", "QR_ONLY"].includes(partTypeFilter)) {
+        scopedProductionWhere[Op.and] = [
+          ...(scopedProductionWhere[Op.and] || []),
+          {
+            [Op.or]: [
+              { part_serial_no: null },
+              { part_serial_no: "" },
+              { part_serial_no: { [Op.eq]: col("customer_qr_code") } },
+            ],
+          },
+        ];
+      }
+      alignedProductionTotal = await FinalProductionResult.count({
+        where: scopedProductionWhere,
+        distinct: true,
+        col: "report_group_key",
+      }).catch((error) => {
+        console.warn(`[REJECTION] scoped production total unavailable: ${error.message}`);
+        return alignedProductionTotal;
+      });
+    }
 
     const configuredPartRows = await RejectionView.findAll({
       attributes: ["part_name"],
@@ -8152,28 +8321,38 @@ exports.getRejectionAnalysis = async (req, res) => {
     const operationAnalysisRows = rows.map((row) => {
       const plain = row.get({ plain: true });
       const machine = plain.Machine || {};
+      const rawPartId = String(plain.part_id || "").trim();
+      const mappedCustomerQr = mappingByPart[rawPartId] || null;
+      const displayPartId = safeInternalPartIdForReport(rawPartId, mappedCustomerQr);
       const shift = resolveShift(plain.createdAt, shifts);
       const rejectionReason = String(plain.rejection_reason || "").trim();
       const fallbackReason = String(plain.interlock_reason || "").trim();
       const cleanReason = SYSTEM_RECOVERY_REASONS.includes(fallbackReason.toUpperCase())
         ? ""
         : fallbackReason;
-      const directPlcShot = resolvePlcShotDetails(plain.shot_number, plain.part_id, mappingByPart[String(plain.part_id || "").trim()]);
-      const finalShot = finalByPart[String(plain.part_id || "").trim()] || {};
-      const mergedShotDetails = {
-        ...directPlcShot,
-        ...(finalShot.shotDetails || {}),
-      };
+      const directPlcShot = displayPartId ? resolvePlcShotDetails(plain.shot_number, displayPartId) : {};
+      const finalShot = finalByPart[displayPartId] || finalByPart[rawPartId] || {};
+      const mergedShotDetails = displayPartId
+        ? {
+            ...directPlcShot,
+            ...(finalShot.shotDetails || {}),
+          }
+        : {};
+      const scopedShotDetails = scopedShotDetailsForDisplay(mergedShotDetails);
+      const plcPartDie = splitPlcPartDieForReport(scopedShotDetails.part_name || "");
       return {
         id: plain.id,
-        partId: plain.part_id || "",
-        customerQrCode: mappingByPart[String(plain.part_id || "").trim()] || null,
+        partId: displayPartId,
+        customerQrCode: mappedCustomerQr,
         machineId: plain.machine_id || null,
         machineName: machine.machine_name || null,
         lineName: machine.line_name || null,
         plantId: machine.plant_id || null,
         lineId: machine.line_id || null,
         stationNo: normalizeStation(plain.station_no || plain.operation_no || machine.operation_no || ""),
+        partName: finalShot.partName || plcPartDie.partName || "",
+        dieName: finalShot.dieName || plcPartDie.dieName || "",
+        dieCastingMachine: finalShot.dieCastingMachine || normalizePartDieTokenForReport(scopedShotDetails.machine_name) || "",
         result: "NG",
         plcStatus: plain.plc_status || "",
         category: plain.rejection_category || "",
@@ -8184,9 +8363,9 @@ exports.getRejectionAnalysis = async (req, res) => {
         remark: plain.rejection_remark || "",
         resultSource: plain.result_source || "",
         shiftCode: shift?.shift_code || "UNASSIGNED",
-        shotNumber: finalShot.shotNumber || directPlcShot.shot_number || plain.shot_number || "",
-        shotStatus: finalShot.shotStatus || directPlcShot.shot_status || "",
-        shotDetails: mergedShotDetails,
+        shotNumber: displayPartId ? (finalShot.shotNumber || scopedShotDetails.shot_number || plain.shot_number || "") : "",
+        shotStatus: displayPartId ? (finalShot.shotStatus || scopedShotDetails.shot_status || "") : "",
+        shotDetails: scopedShotDetails,
         createdAt: plain.createdAt,
       };
     }).filter((row) => !shiftCodeFilter || normalizeShiftAlias(row.shiftCode) === normalizeShiftAlias(shiftCodeFilter));
@@ -8206,17 +8385,22 @@ exports.getRejectionAnalysis = async (req, res) => {
         .filter(Boolean)
         .some((key) => operationKeys.has(key)))
       .map((row) => {
-        const plcShot = resolvePlcShotDetails(row.shot_number, row.report_group_key, row.traceability_part_id, row.part_serial_no, row.customer_qr_code);
-        const shotDetails = {
-          ...plcShot,
-          ...parseJsonObject(row.plc_shot_json),
-          ...parseJsonObject(row.shot_details_json),
-        };
+        const displayPartId = getFinalDisplayPartIdForReport(row);
+        const plcShot = displayPartId ? resolvePlcShotDetails(row.shot_number, displayPartId) : {};
+        const shotDetails = displayPartId
+          ? {
+              ...plcShot,
+              ...parseJsonObject(row.plc_shot_json),
+              ...parseJsonObject(row.shot_details_json),
+            }
+          : {};
+        const scopedShotDetails = scopedShotDetailsForDisplay(shotDetails);
         const createdAt = row.final_result_at || row.last_activity_at || row.first_scan_at;
         const shift = resolveShift(createdAt, shifts);
+        const plcPartDie = splitPlcPartDieForReport(scopedShotDetails.part_name || "");
         return {
           id: `final:${row.report_group_key}`,
-          partId: row.part_serial_no || row.traceability_part_id || row.report_group_key || "",
+          partId: displayPartId,
           customerQrCode: row.customer_qr_code || null,
           machineId: row.anchor_machine_id || null,
           machineName: row.anchor_machine_name || null,
@@ -8224,6 +8408,9 @@ exports.getRejectionAnalysis = async (req, res) => {
           plantId: row.plant_id || null,
           lineId: row.line_id || null,
           stationNo: normalizeStation(row.ng_station || ""),
+          partName: normalizePartDieTokenForReport(row.part_name || plcPartDie.partName),
+          dieName: normalizePartDieTokenForReport(row.die_name || plcPartDie.dieName),
+          dieCastingMachine: normalizePartDieTokenForReport(row.die_casting_machine_name || scopedShotDetails.machine_name),
           result: "NG",
           plcStatus: "FINAL_NG",
           category: row.rejection_category || "",
@@ -8235,9 +8422,9 @@ exports.getRejectionAnalysis = async (req, res) => {
           remark: "",
           resultSource: "FINAL_PRODUCTION_RESULT",
           shiftCode: shift?.shift_code || "UNASSIGNED",
-          shotNumber: row.shot_number || shotDetails.shot_number || "",
-          shotStatus: shotDetails.shot_status ?? shotDetails.status ?? "",
-          shotDetails,
+          shotNumber: displayPartId ? (row.shot_number || scopedShotDetails.shot_number || "") : "",
+          shotStatus: displayPartId ? (scopedShotDetails.shot_status ?? scopedShotDetails.status ?? "") : "",
+          shotDetails: scopedShotDetails,
           createdAt,
         };
       })
@@ -8269,8 +8456,22 @@ exports.getRejectionAnalysis = async (req, res) => {
       if (!key) return;
       rowsByPart.set(key, mergeRejectionRows(rowsByPart.get(key), row));
     });
-    const analysisRows = [...rowsByPart.values()].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-    const hasRejectionDetailFilters = Boolean(categoryFilter || viewFilter || zoneFilter || reasonFilter);
+    const matchesPartDieMachineFilters = (row = {}) => {
+      const hasSafePartId = Boolean(String(row.partId || "").trim());
+      if (["OTHER", "CUSTOMER_QR_ONLY", "CUSTOMER_QR", "QR_ONLY"].includes(partTypeFilter) && hasSafePartId) return false;
+      if (["PART_ID", "PARTID", "INTERNAL", "INTERNAL_PART"].includes(partTypeFilter) && !hasSafePartId) return false;
+      const rowPart = normalizePartDieTokenForReport(row.partName);
+      const rowDie = normalizePartDieTokenForReport(row.dieName);
+      const rowMachine = normalizeMachineTokenForReport(row.dieCastingMachine);
+      if (partNameFilter && rowPart !== partNameFilter) return false;
+      if (dieNameFilter && rowDie !== dieNameFilter) return false;
+      if (dieCastingMachineFilter && rowMachine !== normalizeMachineTokenForReport(dieCastingMachineFilter)) return false;
+      return true;
+    };
+    const analysisRows = [...rowsByPart.values()]
+      .filter(matchesPartDieMachineFilters)
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    const hasRejectionDetailFilters = Boolean(categoryFilter || viewFilter || zoneFilter || reasonFilter || partNameFilter || partTypeFilter || dieNameFilter || dieCastingMachineFilter);
     const alignedRejectionTotal = hasRejectionDetailFilters
       ? analysisRows.length
       : Number(reportSummaryMetrics?.totalNG ?? analysisRows.length);
@@ -8284,13 +8485,18 @@ exports.getRejectionAnalysis = async (req, res) => {
         lineId: lineId || null,
         lineName: lineName || null,
         partId: partId || null,
+        partName: partNameFilter || null,
+        partType: partTypeFilter || null,
+        dieName: dieNameFilter || null,
+        dieCastingMachine: dieCastingMachineFilter || null,
         shiftCode: shiftCodeFilter || null,
       },
       rows: analysisRows,
       total: alignedRejectionTotal,
       rowCount: analysisRows.length,
       reportTotalNG: Number(reportSummaryMetrics?.totalNG ?? analysisRows.length),
-      productionTotal,
+      filterOptions: assignmentFilterOptions,
+      productionTotal: alignedProductionTotal,
       configuredParts: configuredPartRows.map((row) => String(row.part_name || "").trim()).filter(Boolean),
       availableShifts: shifts.map((shift) => ({
         shiftCode: shift.shift_code,

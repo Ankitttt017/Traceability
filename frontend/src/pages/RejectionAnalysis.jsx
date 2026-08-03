@@ -1189,6 +1189,54 @@ function getSafePartId(row = {}) {
   return candidate;
 }
 
+function normalizeShotNumber(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw === "-") return "";
+  if (!/^\d+$/.test(raw)) return "";
+  return String(Number(raw));
+}
+
+function extractShotNumberFromPartId(value = "") {
+  const partId = String(value || "").trim();
+  if (!partId || partId === "-" || looksLikeCustomerQr(partId)) return "";
+  const match = partId.match(/(\d{1,6})$/);
+  return match ? normalizeShotNumber(match[1]) : "";
+}
+
+function getSafeShotNumber(row = {}) {
+  const safePartId = getSafePartId(row);
+  if (safePartId === "-") return "-";
+
+  const shot = row.shotDetails || row.shot_details || {};
+  const plc = row.plcReading || row.plc_reading || {};
+  const hasTrustedShotSource =
+    row.shotDetails ||
+    row.shot_details ||
+    row.plcReading ||
+    row.plc_reading;
+  const trustedCandidates = [
+    plc.shot_number,
+    plc.shotNumber,
+    shot.shot_number,
+    shot.shotNumber,
+  ];
+
+  for (const candidate of trustedCandidates) {
+    const value = normalizeShotNumber(candidate);
+    if (value) return value;
+  }
+
+  if (hasTrustedShotSource) {
+    const direct = normalizeShotNumber(row.shotNumber ?? row.shot_number);
+    if (direct) return direct;
+  }
+
+  const extracted = extractShotNumberFromPartId(safePartId);
+  if (extracted) return extracted;
+
+  return "-";
+}
+
 function getShotField(row = {}, key = "") {
   const shot = row.shotDetails || row.shot_details || {};
   const value = shot[key] ?? row[key];
@@ -1266,6 +1314,10 @@ function buildInitialFilters() {
     datePreset: "today",
     machineId: "",
     lineName: "",
+    partName: "",
+    partType: "",
+    dieName: "",
+    dieCastingMachine: "",
     partId: "",
     shiftCode: "",
     category: "",
@@ -1727,6 +1779,7 @@ export default function RejectionAnalysis() {
   const [machines, setMachines] = useState([]);
   const [availableShifts, setAvailableShifts] = useState([]);
   const [configuredParts, setConfiguredParts] = useState([]);
+  const [assignmentOptions, setAssignmentOptions] = useState({ parts: [], dies: [], dieCastingMachines: [], assignments: [] });
   const [heatMapConfig, setHeatMapConfig] = useState(null);
   const [loading, setLoading] = useState(false);
   const [chartMode, setChartMode] = useState("bar");
@@ -1747,6 +1800,10 @@ export default function RejectionAnalysis() {
       dateTo: filters.dateTo || undefined,
       machineId: filters.machineId || undefined,
       lineName: filters.lineName || undefined,
+      partName: filters.partName || undefined,
+      partType: filters.partType || undefined,
+      dieName: filters.dieName || undefined,
+      dieCastingMachine: filters.dieCastingMachine || undefined,
       partId: filters.partId || undefined,
       shiftCode: filters.shiftCode || undefined,
       category: filters.category || undefined,
@@ -1759,6 +1816,10 @@ export default function RejectionAnalysis() {
     filters.dateTo,
     filters.machineId,
     filters.lineName,
+    filters.partName,
+    filters.partType,
+    filters.dieName,
+    filters.dieCastingMachine,
     filters.partId,
     filters.shiftCode,
     filters.category,
@@ -1777,6 +1838,12 @@ export default function RejectionAnalysis() {
       setProductionTotal(Number(analysis?.productionTotal || 0));
       setRejectionTotal(Number(analysis?.total ?? nextRows.length));
       setConfiguredParts(analysis?.configuredParts || []);
+      setAssignmentOptions({
+        parts: Array.isArray(analysis?.filterOptions?.parts) ? analysis.filterOptions.parts : [],
+        dies: Array.isArray(analysis?.filterOptions?.dies) ? analysis.filterOptions.dies : [],
+        dieCastingMachines: Array.isArray(analysis?.filterOptions?.dieCastingMachines) ? analysis.filterOptions.dieCastingMachines : [],
+        assignments: Array.isArray(analysis?.filterOptions?.assignments) ? analysis.filterOptions.assignments : [],
+      });
       setFilters((current) => {
         const firstConfiguredPart = analysis?.configuredParts?.[0] || "";
         if (current.configPart || !firstConfiguredPart) return current;
@@ -1830,6 +1897,48 @@ export default function RejectionAnalysis() {
     [machines]
   );
 
+  const normalizeFilterToken = (value) => String(value || "").trim().toUpperCase();
+
+  const availablePartNames = useMemo(() => {
+    const fromAssignments = assignmentOptions.assignments
+      .map((row) => String(row.partName || "").trim())
+      .filter(Boolean);
+    return Array.from(new Set(fromAssignments.length ? fromAssignments : assignmentOptions.parts)).sort();
+  }, [assignmentOptions]);
+
+  const availableDies = useMemo(() => {
+    const selectedPart = normalizeFilterToken(filters.partName);
+    const rows = assignmentOptions.assignments.filter((row) => (
+      !selectedPart || normalizeFilterToken(row.partName) === selectedPart
+    ));
+    const fromAssignments = rows.map((row) => String(row.dieName || "").trim()).filter(Boolean);
+    return Array.from(new Set(fromAssignments.length ? fromAssignments : assignmentOptions.dies)).sort();
+  }, [assignmentOptions, filters.partName]);
+
+  const availableDieCastingMachines = useMemo(() => {
+    const selectedPart = normalizeFilterToken(filters.partName);
+    const selectedDie = normalizeFilterToken(filters.dieName);
+    const rows = assignmentOptions.assignments.filter((row) => {
+      if (selectedPart && normalizeFilterToken(row.partName) !== selectedPart) return false;
+      if (selectedDie && normalizeFilterToken(row.dieName) !== selectedDie) return false;
+      return true;
+    });
+    const fromAssignments = rows.map((row) => String(row.dieCastingMachine || "").trim()).filter(Boolean);
+    return Array.from(new Set(fromAssignments.length ? fromAssignments : assignmentOptions.dieCastingMachines)).sort();
+  }, [assignmentOptions, filters.partName, filters.dieName]);
+
+  useEffect(() => {
+    if (filters.dieName && availableDies.length && !availableDies.some((die) => normalizeFilterToken(die) === normalizeFilterToken(filters.dieName))) {
+      setFilters((prev) => ({ ...prev, dieName: "", dieCastingMachine: "" }));
+    }
+  }, [availableDies, filters.dieName]);
+
+  useEffect(() => {
+    if (filters.dieCastingMachine && availableDieCastingMachines.length && !availableDieCastingMachines.some((machine) => normalizeFilterToken(machine) === normalizeFilterToken(filters.dieCastingMachine))) {
+      setFilters((prev) => ({ ...prev, dieCastingMachine: "" }));
+    }
+  }, [availableDieCastingMachines, filters.dieCastingMachine]);
+
   const analysisRows = useMemo(() => dedupeRejectionRows(rows), [rows]);
 
   const filterOptions = useMemo(() => {
@@ -1862,8 +1971,8 @@ export default function RejectionAnalysis() {
       let aVal = a[sortConfig.key] || '';
       let bVal = b[sortConfig.key] || '';
       if (sortConfig.key === 'shotNumber') {
-        aVal = Number(aVal) || 0;
-        bVal = Number(bVal) || 0;
+        aVal = Number(getSafeShotNumber(a)) || 0;
+        bVal = Number(getSafeShotNumber(b)) || 0;
       }
       if (sortConfig.key === 'shotDateTime') {
         aVal = getShotDateTime(a);
@@ -1885,7 +1994,7 @@ export default function RejectionAnalysis() {
         String(row.customerQrCode || '').toLowerCase().includes(searchLower) ||
         String(row.machineName || '').toLowerCase().includes(searchLower) ||
         String(getDisplayReason(row) || '').toLowerCase().includes(searchLower) ||
-        String(row.shotNumber || '').toLowerCase().includes(searchLower)
+        String(getSafeShotNumber(row)).toLowerCase().includes(searchLower)
       );
     });
   }, [sortedRows, searchTerm]);
@@ -2263,7 +2372,27 @@ export default function RejectionAnalysis() {
   };
 
   const removeFilter = (key) => {
-    setFilters((prev) => ({ ...prev, [key]: "" }));
+    setFilters((prev) => {
+      if (key === "lineName") return { ...prev, lineName: "", partName: "", partType: "", dieName: "", dieCastingMachine: "" };
+      if (key === "partName" || key === "partType") return { ...prev, partName: "", partType: "", dieName: "", dieCastingMachine: "" };
+      if (key === "dieName") return { ...prev, dieName: "", dieCastingMachine: "" };
+      return { ...prev, [key]: "" };
+    });
+  };
+
+  const filterLabels = {
+    machineId: "Quality Gate",
+    lineName: "Line",
+    partName: "Part",
+    partType: "Part",
+    dieName: "Die",
+    dieCastingMachine: "Die Casting Machine",
+    partId: "Part ID / QR",
+    shiftCode: "Shift",
+    category: "Category",
+    view: "View",
+    zone: "Zone",
+    reason: "Reason",
   };
 
   // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ Excel Export ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬
@@ -2294,9 +2423,10 @@ export default function RejectionAnalysis() {
 
     const data = analysisRows.map((row, index) => {
       const details = resolveRejectionDetails(row);
+      const shotNumber = getSafeShotNumber(row);
       return [
         index + 1,
-        row.shotNumber || "",
+        shotNumber === "-" ? "" : shotNumber,
         getShotDateTime(row),
         getSafePartId(row),
         row.customerQrCode || "",
@@ -2320,6 +2450,9 @@ export default function RejectionAnalysis() {
         : "Date: All",
       filters.machineId ? `Quality Gate: ${filters.machineId}` : "Quality Gate: All",
       filters.lineName ? `Line: ${filters.lineName}` : "Line: All",
+      filters.partName ? `Part: ${filters.partName}` : "Part: All",
+      filters.dieName ? `Die: ${filters.dieName}` : "Die: All",
+      filters.dieCastingMachine ? `Die Casting Machine: ${filters.dieCastingMachine}` : "Die Casting Machine: All",
       filters.partId ? `Part/QR: ${filters.partId}` : "Part/QR: All",
       filters.shiftCode ? `Shift: ${filters.shiftCode}` : "Shift: All",
       filters.category ? `Category: ${filters.category}` : "Category: All",
@@ -2522,21 +2655,56 @@ export default function RejectionAnalysis() {
         {/* Main Filters Grid */}
         <div className="rej-filters-grid">
           <select
+            value={filters.lineName}
+            onChange={(e) => setFilters((p) => ({ ...p, lineName: e.target.value, partName: "", partType: "", dieName: "", dieCastingMachine: "" }))}
+            className="rej-filter-select"
+          >
+            <option value="">All Lines</option>
+            {lineOptions.map((line) => <option key={line} value={line}>{line}</option>)}
+          </select>
+
+          <select
+            value={filters.partType === "OTHER" ? "__OTHER__" : filters.partName}
+            onChange={(e) => {
+              const value = e.target.value;
+              if (value === "__OTHER__") {
+                setFilters((p) => ({ ...p, partName: "", partType: "OTHER", dieName: "", dieCastingMachine: "" }));
+                return;
+              }
+              setFilters((p) => ({ ...p, partName: value, partType: "", dieName: "", dieCastingMachine: "" }));
+            }}
+            className="rej-filter-select"
+          >
+            <option value="">All Parts</option>
+            <option value="__OTHER__">Other Parts</option>
+            {availablePartNames.map((part) => <option key={part} value={part}>{part}</option>)}
+          </select>
+
+          <select
+            value={filters.dieName}
+            onChange={(e) => setFilters((p) => ({ ...p, dieName: e.target.value, dieCastingMachine: "" }))}
+            className="rej-filter-select"
+          >
+            <option value="">All Dies</option>
+            {availableDies.map((die) => <option key={die} value={die}>{die}</option>)}
+          </select>
+
+          <select
+            value={filters.dieCastingMachine}
+            onChange={(e) => setFilters((p) => ({ ...p, dieCastingMachine: e.target.value }))}
+            className="rej-filter-select"
+          >
+            <option value="">All Die Casting Machines</option>
+            {availableDieCastingMachines.map((machine) => <option key={machine} value={machine}>{machine}</option>)}
+          </select>
+
+          <select
             value={filters.machineId}
             onChange={(e) => setFilters((p) => ({ ...p, machineId: e.target.value }))}
             className="rej-filter-select"
           >
             <option value="">All Quality Gates</option>
             {machines.map((m) => <option key={m.id} value={m.id}>{m.machineName || m.machine_name}</option>)}
-          </select>
-
-          <select
-            value={filters.lineName}
-            onChange={(e) => setFilters((p) => ({ ...p, lineName: e.target.value }))}
-            className="rej-filter-select"
-          >
-            <option value="">All Lines</option>
-            {lineOptions.map((line) => <option key={line} value={line}>{line}</option>)}
           </select>
 
           <input
@@ -2598,7 +2766,7 @@ export default function RejectionAnalysis() {
               ...buildInitialFilters(),
               configPart: p.configPart,
               category: "", view: "", zone: "", reason: "",
-              machineId: "", lineName: "", partId: "", shiftCode: "",
+              machineId: "", lineName: "", partName: "", partType: "", dieName: "", dieCastingMachine: "", partId: "", shiftCode: "",
             }))}
             className="rej-btn-clear"
           >
@@ -2618,7 +2786,7 @@ export default function RejectionAnalysis() {
           }}>
             {activeFilters.map(([key, value]) => (
               <span key={key} className="rej-filter-chip">
-                <span style={{ opacity: 0.6, fontWeight: 600 }}>{key}:</span>
+                <span style={{ opacity: 0.6, fontWeight: 600 }}>{filterLabels[key] || key}:</span>
                 <span style={{ fontWeight: 600 }}>{String(value).slice(0, 30)}</span>
                 <span className="remove" onClick={() => removeFilter(key)}>x</span>
               </span>
@@ -3501,6 +3669,7 @@ export default function RejectionAnalysis() {
                 const details = resolveRejectionDetails(row);
                 const isExpanded = expandedRows.has(rowKey);
                 const status = formatShotStatus(row.shotStatus);
+                const shotNumber = getSafeShotNumber(row);
                 const rejectionSummary = [
                   ["Category", details.category],
                   ["View", details.view],
@@ -3523,7 +3692,7 @@ export default function RejectionAnalysis() {
                         </button>
                       </td>
                       <td style={{ fontWeight: 900, color: C.navy, fontSize: 12 }}>
-                        #{row.shotNumber || '-'}
+                        {shotNumber}
                       </td>
                       <td style={{ fontSize: 11, fontWeight: 700, color: C.steel }}>
                         {getShotDateTime(row)}
