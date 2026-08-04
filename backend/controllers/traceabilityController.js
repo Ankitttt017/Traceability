@@ -8265,14 +8265,14 @@ exports.getRejectionAnalysis = async (req, res) => {
       }),
     ]);
     let alignedProductionTotal = Number(productionTotal || 0);
-    if (machineId || plantId || lineId || lineName || partId || shiftCodeFilter || partNameFilter || partTypeFilter || dieNameFilter || dieCastingMachineFilter) {
+    const hasEnrichedPartProductionFilter = Boolean(partNameFilter || partTypeFilter || dieNameFilter || dieCastingMachineFilter);
+    if (hasEnrichedPartProductionFilter) {
       const scopedProductionWhere = {
         first_scan_at: { [Op.between]: [from, to] },
       };
       if (plantId) scopedProductionWhere.plant_id = plantId;
       if (lineId) scopedProductionWhere.line_id = lineId;
       if (lineName) scopedProductionWhere.line_name = lineName;
-      if (machineId) scopedProductionWhere.anchor_machine_id = machineId;
       if (partNameFilter) scopedProductionWhere.part_name = partNameFilter;
       if (dieNameFilter) scopedProductionWhere.die_name = dieNameFilter;
       if (dieCastingMachineFilter) scopedProductionWhere.die_casting_machine_name = dieCastingMachineFilter;
@@ -8471,10 +8471,21 @@ exports.getRejectionAnalysis = async (req, res) => {
     const analysisRows = [...rowsByPart.values()]
       .filter(matchesPartDieMachineFilters)
       .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-    const hasRejectionDetailFilters = Boolean(categoryFilter || viewFilter || zoneFilter || reasonFilter || partNameFilter || partTypeFilter || dieNameFilter || dieCastingMachineFilter);
+    const hasRejectionDetailFilters = Boolean(categoryFilter || viewFilter || zoneFilter || reasonFilter);
     const alignedRejectionTotal = hasRejectionDetailFilters
       ? analysisRows.length
       : Number(reportSummaryMetrics?.totalNG ?? analysisRows.length);
+    const alignedTraceabilityMetrics = {
+      traceabilityProduction: alignedProductionTotal,
+      totalProduction: alignedProductionTotal,
+      totalOK: Number(reportSummaryMetrics?.totalOK || 0),
+      totalNG: alignedRejectionTotal,
+      inProgress: Number(reportSummaryMetrics?.inProgress || 0),
+      validationRejects: alignedRejectionTotal,
+      passRate: (Number(reportSummaryMetrics?.totalOK || 0) + alignedRejectionTotal) > 0
+        ? Number(((Number(reportSummaryMetrics?.totalOK || 0) / (Number(reportSummaryMetrics?.totalOK || 0) + alignedRejectionTotal)) * 100).toFixed(2))
+        : 0,
+    };
 
     res.json({
       filters: {
@@ -8495,6 +8506,7 @@ exports.getRejectionAnalysis = async (req, res) => {
       total: alignedRejectionTotal,
       rowCount: analysisRows.length,
       reportTotalNG: Number(reportSummaryMetrics?.totalNG ?? analysisRows.length),
+      traceabilityMetrics: alignedTraceabilityMetrics,
       filterOptions: assignmentFilterOptions,
       productionTotal: alignedProductionTotal,
       configuredParts: configuredPartRows.map((row) => String(row.part_name || "").trim()).filter(Boolean),
