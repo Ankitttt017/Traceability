@@ -4,7 +4,8 @@ import { API_BASE_URL } from "../api/client";
 
 const SHOW_DELAY_MS = 700;
 const RETRY_SECONDS = 8;
-const OFFLINE_IMAGE = "/No-Internet.avif";
+const assetBaseUrl = (import.meta.env.BASE_URL || "/").replace(/\/?$/, "/");
+const OFFLINE_IMAGE = `${assetBaseUrl}No-Internet.avif`;
 
 function getInitialOfflineState() {
   if (typeof navigator === "undefined") return false;
@@ -24,6 +25,7 @@ export default function NetworkOutageOverlay() {
   const [visible, setVisible] = useState(getInitialOfflineState);
   const [reason, setReason] = useState(getInitialOfflineState() ? "browser" : "");
   const [retryIn, setRetryIn] = useState(RETRY_SECONDS);
+  const [imageFailed, setImageFailed] = useState(false);
 
   useEffect(() => {
     let delayRef = null;
@@ -31,6 +33,7 @@ export default function NetworkOutageOverlay() {
     const showOffline = (nextReason = "network") => {
       setReason(nextReason);
       setOffline(true);
+      setImageFailed(false);
       setRetryIn(RETRY_SECONDS);
       window.clearTimeout(delayRef);
       delayRef = window.setTimeout(() => setVisible(true), SHOW_DELAY_MS);
@@ -127,12 +130,21 @@ export default function NetworkOutageOverlay() {
               <AlertTriangle size={14} />
               Offline
             </div>
-            <img
-              src={OFFLINE_IMAGE}
-              alt="Network disconnected"
-              className="mt-8 h-auto max-h-[315px] w-full max-w-[360px] object-contain"
-              draggable="false"
-            />
+            {imageFailed ? (
+              <div className="mt-8 flex h-[260px] w-full max-w-[360px] flex-col items-center justify-center rounded-3xl border border-red-100 bg-red-50 text-red-600">
+                <WifiOff size={78} strokeWidth={1.8} />
+                <p className="mt-5 text-xl font-black text-slate-900">Network issue</p>
+                <p className="mt-2 text-center text-sm font-bold text-slate-600">Check LAN, Wi-Fi, router, or server.</p>
+              </div>
+            ) : (
+              <img
+                src={OFFLINE_IMAGE}
+                alt="Network disconnected"
+                className="mt-8 h-auto max-h-[315px] w-full max-w-[360px] object-contain"
+                draggable="false"
+                onError={() => setImageFailed(true)}
+              />
+            )}
           </div>
 
           <div className="flex flex-col justify-center gap-5 bg-slate-50 p-7 sm:p-9">

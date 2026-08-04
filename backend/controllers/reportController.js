@@ -96,6 +96,40 @@ function scopeMetricsToStatusFilter(metrics = {}, filters = {}) {
   return next;
 }
 
+function alignMetricsToVisibleStatusCount(metrics = {}, filters = {}, pagination = {}) {
+  const tokens = getStatusFilterTokens(filters.status, filters.resultType, filters.statusFilter);
+  if (!tokens.length) return metrics;
+  const wantsOk = tokens.some((token) => ["OK", "PASSED", "PASS"].includes(token));
+  const wantsNg = tokens.some((token) => ["NG", "FAILED", "FAIL"].includes(token));
+  const wantsProgress = tokens.some((token) => ["PENDING", "IN_PROGRESS", "IN PROGRESS", "ACTIVE"].includes(token));
+  const singleStatusScope = [wantsOk, wantsNg, wantsProgress].filter(Boolean).length === 1;
+  const visibleTotal = Number(pagination?.totalRows);
+  if (!singleStatusScope || !Number.isFinite(visibleTotal) || visibleTotal < 0) return metrics;
+
+  const next = { ...(metrics || {}) };
+  next.traceabilityProduction = visibleTotal;
+  next.totalProduction = visibleTotal;
+  if (wantsOk) {
+    next.totalOK = visibleTotal;
+    next.totalNG = 0;
+    next.inProgress = 0;
+    next.validationRejects = 0;
+  } else if (wantsNg) {
+    next.totalOK = 0;
+    next.totalNG = visibleTotal;
+    next.inProgress = 0;
+    next.validationRejects = visibleTotal;
+  } else if (wantsProgress) {
+    next.totalOK = 0;
+    next.totalNG = 0;
+    next.inProgress = visibleTotal;
+    next.validationRejects = 0;
+  }
+  const productionBase = Number(next.totalOK || 0) + Number(next.totalNG || 0);
+  next.passRate = productionBase > 0 ? Number(((Number(next.totalOK || 0) / productionBase) * 100).toFixed(2)) : 0;
+  return next;
+}
+
 async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
   const nextMetrics = { ...(metrics || {}) };
   const hasEnrichedPartScope = Boolean(
@@ -487,7 +521,11 @@ exports.getReportData = async (req, res) => {
     const pagination = getPagination(req.query || {});
     const { rows, shifts, plcColumnSet, metrics } = await getLiveReportBundle(filters, options);
     const paged = paginateReportRowsByPart(rows, pagination);
-    const responseMetrics = await applyUncappedTraceabilityMetrics(metrics, filters);
+    const responseMetrics = alignMetricsToVisibleStatusCount(
+      await applyUncappedTraceabilityMetrics(metrics, filters),
+      filters,
+      paged.pagination
+    );
     responseMetrics.plcShotSummary = responseMetrics.plcShotSummary || {};
     responseMetrics.plcShotSummarySource = responseMetrics.plcShotSummarySource || "REPORT_ROWS";
 
@@ -520,7 +558,11 @@ exports.getReportData = async (req, res) => {
       };
       const { rows, shifts, plcColumnSet, metrics } = await getLiveReportBundle(filters, fallbackOptions);
       const paged = paginateReportRowsByPart(rows, pagination);
-      const responseMetrics = await applyUncappedTraceabilityMetrics(metrics, filters);
+      const responseMetrics = alignMetricsToVisibleStatusCount(
+        await applyUncappedTraceabilityMetrics(metrics, filters),
+        filters,
+        paged.pagination
+      );
       const fallbackPayload = {
         rows: paged.rows,
         metrics: {

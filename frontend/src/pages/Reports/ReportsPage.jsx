@@ -131,10 +131,14 @@ const resolveRejectionDetails = (entries = []) => {
 const normalizeLeakResult = (value) => {
   const token = String(value || "").trim().toUpperCase();
   if (!token) return "";
+  if (token === "19279") return "OK";
   if (["NG", "NOK", "NOT_OK", "NOT OK", "FAIL", "FAILED", "REJECT", "REJECTED"].includes(token)) return "NG";
   if (["OK", "PASS", "PASSED", "GOOD"].includes(token)) return "OK";
+  if (/^\d+$/.test(token) && Number(token) > 0) return "NG";
   return "";
 };
+const getLeakResultToken = (reading = {}) =>
+  reading?.Result ?? reading?.result ?? reading?.Raw_Result ?? reading?.rawResult ?? "";
 const normalizeStationCellResult = (value) => {
   if (value && typeof value === "object") {
     return normResult(value.status || value.text || "");
@@ -149,11 +153,11 @@ const normalizeStationCellResult = (value) => {
 const getLeakTestStatus = (reading) => {
   const readings = Array.isArray(reading) ? reading.filter(Boolean) : (reading ? [reading] : []);
   if (!readings.length) return "";
-  const results = readings.map((r) => normalizeLeakResult(r?.Result || r?.result)).filter(Boolean);
+  const results = readings.map((r) => normalizeLeakResult(getLeakResultToken(r))).filter(Boolean);
   if (results.some((result) => result === "NG")) return "NG";
   if (results.length === readings.length && results.every((result) => result === "OK")) return "OK";
   const r = readings[readings.length - 1];
-  const result = normalizeLeakResult(r?.Result || r?.result);
+  const result = normalizeLeakResult(getLeakResultToken(r));
   if (result === "OK") return "OK";
   if (result === "NG") return "NG";
   return "IN_PROGRESS";
@@ -1081,6 +1085,7 @@ const ReportsPage = () => {
     dataRowsCountRef.current = Array.isArray(data.rows) ? data.rows.length : 0;
   }, [data.rows]);
   const [appliedFilters, setAppliedFilters] = useState(filters);
+  const [refreshTick, setRefreshTick] = useState(0);
   const [quickRange, setQuickRange] = useState("today");
   const [isFilterExpanded, setIsFilterExpanded] = useState(true);
 
@@ -1112,6 +1117,16 @@ const ReportsPage = () => {
     }));
   }, [getMesDayRange]);
 
+  const getFreshQuickRangeFilters = useCallback((baseFilters) => {
+    if (quickRange !== "today") return baseFilters;
+    const liveRange = getMesDayRange();
+    return {
+      ...baseFilters,
+      dateFrom: toDatetimeLocal(liveRange.start),
+      dateTo: toDatetimeLocal(liveRange.end),
+    };
+  }, [getMesDayRange, quickRange]);
+
   const fetchData = useCallback(async () => {
     reportAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1123,6 +1138,7 @@ const ReportsPage = () => {
       includePlcReadings: "1",
       includeLeaktest: "1",
       noCache: "1",
+      _ts: refreshTick || Date.now(),
       page: reportPage.page,
       pageSize: reportPage.pageSize,
     };
@@ -1161,7 +1177,7 @@ const ReportsPage = () => {
       setData(pageData);
       const summarySeq = shotSummarySeqRef.current + 1;
       shotSummarySeqRef.current = summarySeq;
-      const summaryFilters = { ...appliedFilters, fast: "1", noCache: "1" };
+      const summaryFilters = { ...appliedFilters, fast: "1", noCache: "1", _ts: refreshTick || Date.now() };
       setShotSummaryLoading(true);
       reportApi.getShotSummary(summaryFilters, { suppressGlobalError: true })
         .then((summary) => {
@@ -1214,17 +1230,24 @@ const ReportsPage = () => {
         reportAbortRef.current = null;
       }
     }
-  }, [appliedFilters, reportPage.page, reportPage.pageSize]);
+  }, [appliedFilters, refreshTick, reportPage.page, reportPage.pageSize]);
 
   const refreshReportData = useCallback(() => {
-    fetchData();
-  }, [fetchData]);
+    const nextFilters = getFreshQuickRangeFilters(filters);
+    setReportPage((prev) => ({ ...prev, page: 1 }));
+    setFilters(nextFilters);
+    setAppliedFilters(nextFilters);
+    setRefreshTick(Date.now());
+  }, [filters, getFreshQuickRangeFilters]);
 
   const applyReportFilters = useCallback(() => {
+    const nextFilters = getFreshQuickRangeFilters(filters);
     setReportPage((prev) => ({ ...prev, page: 1 }));
-    setAppliedFilters(filters);
+    setFilters(nextFilters);
+    setAppliedFilters(nextFilters);
+    setRefreshTick(Date.now());
     toast.success(t("reports.filtersApplied", "✅ Filters applied successfully"));
-  }, [filters, t]);
+  }, [filters, getFreshQuickRangeFilters, t]);
 
   useEffect(() => {
     const metadataConfig = { timeout: 45000, suppressGlobalError: true };
@@ -1987,6 +2010,7 @@ const ReportsPage = () => {
                 setFilters(nextFilters);
                 setAppliedFilters(nextFilters);
                 setReportPage((prev) => ({ ...prev, page: 1 }));
+                setRefreshTick(Date.now());
                 toast(t("reports.filtersCleared", "🧹 Filters cleared"));
               }}
               className="reports-btn-clear flex-1"
