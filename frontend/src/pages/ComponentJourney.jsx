@@ -569,6 +569,7 @@ function sanitizeCustomerQrValue(v) {
   if (!raw || raw === "-") return "";
   const invalid = new Set(["ERROR","ERR","FAILED","FAIL","NG","WAIT","WAITING","PENDING","IN_PROGRESS","RUNNING","PLC_COMM_ERROR","COMM_ERROR","TIMEOUT","NULL","UNDEFINED"]);
   if (invalid.has(raw.toUpperCase())) return "";
+  if (!/^R\d[A-Z0-9-]{10,}$/i.test(raw)) return "";
   return raw;
 }
 function extractQrDecision(payload={}) {

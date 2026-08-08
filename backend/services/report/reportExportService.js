@@ -636,6 +636,7 @@ function sanitizeCustomerQrValue(value) {
   const raw = collapseRepeatedQrValue(value);
   if (!raw || raw === "-") return "";
   if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
+  if (!/^R\d[A-Z0-9-]{10,}$/i.test(raw)) return "";
   return raw;
 }
 
@@ -1097,8 +1098,31 @@ async function fetchPlcShotSummary(filters = {}) {
   }
 
   const { safeFrom, safeTo } = normalizeReportDateRange(filters);
+  const hasShotDateParts = ["shot_year", "shot_month", "shot_day", "shot_hour", "shot_minute"].every(hasColumn);
+  const shotSecondExpr = hasColumn("shot_second") ? "TRY_CONVERT(INT, shot_second)" : "0";
+  const shotDateTimeExpr = hasShotDateParts
+    ? `TRY_CONVERT(DATETIME2, CONCAT(
+        CASE
+          WHEN TRY_CONVERT(INT, shot_year) IS NULL THEN NULL
+          WHEN TRY_CONVERT(INT, shot_year) < 100 THEN 2000 + TRY_CONVERT(INT, shot_year)
+          ELSE TRY_CONVERT(INT, shot_year)
+        END,
+        '-',
+        RIGHT('0' + CAST(TRY_CONVERT(INT, shot_month) AS VARCHAR(2)), 2),
+        '-',
+        RIGHT('0' + CAST(TRY_CONVERT(INT, shot_day) AS VARCHAR(2)), 2),
+        ' ',
+        RIGHT('0' + CAST(TRY_CONVERT(INT, shot_hour) AS VARCHAR(2)), 2),
+        ':',
+        RIGHT('0' + CAST(TRY_CONVERT(INT, shot_minute) AS VARCHAR(2)), 2),
+        ':',
+        RIGHT('0' + CAST(${shotSecondExpr} AS VARCHAR(2)), 2)
+      ))`
+    : null;
   const whereParts = [
-    `([${recordedColumn}] >= :dateFrom AND [${recordedColumn}] <= :dateTo)`
+    shotDateTimeExpr
+      ? `(${shotDateTimeExpr} >= :dateFrom AND ${shotDateTimeExpr} <= :dateTo)`
+      : `([${recordedColumn}] >= :dateFrom AND [${recordedColumn}] <= :dateTo)`
   ];
   const replacements = {
     dateFrom: safeFrom,
@@ -1719,17 +1743,24 @@ async function fetchProductionSummaryMetrics(filters = {}) {
       SELECT
         COUNT(*) AS totalProduction,
         SUM(CASE WHEN (
-          partFinalOK = 1
-          OR (partFinalNG = 0 AND hasNG = 0 AND :stationScoped = 1 AND okOpCount > 0)
-          OR (partFinalNG = 0 AND hasNG = 0 AND :stationScoped = 0 AND okOpCount >= :requiredOpsCount)
+          (:stationScoped = 1 AND hasNG = 0 AND okOpCount > 0)
+          OR (:stationScoped = 0 AND (
+            partFinalOK = 1
+            OR (partFinalNG = 0 AND hasNG = 0 AND okOpCount >= :requiredOpsCount)
+          ))
         ) THEN 1 ELSE 0 END) AS totalOK,
-        SUM(CASE WHEN partFinalNG = 1 OR (partFinalOK = 0 AND hasNG = 1) THEN 1 ELSE 0 END) AS totalNG,
+        SUM(CASE WHEN (
+          (:stationScoped = 1 AND hasNG = 1)
+          OR (:stationScoped = 0 AND (partFinalNG = 1 OR (partFinalOK = 0 AND hasNG = 1)))
+        ) THEN 1 ELSE 0 END) AS totalNG,
         SUM(CASE WHEN NOT (
-          partFinalOK = 1
-          OR partFinalNG = 1
-          OR hasNG = 1
-          OR (:stationScoped = 1 AND okOpCount > 0)
-          OR (:stationScoped = 0 AND okOpCount >= :requiredOpsCount)
+          (:stationScoped = 1 AND (hasNG = 1 OR okOpCount > 0))
+          OR (:stationScoped = 0 AND (
+            partFinalOK = 1
+            OR partFinalNG = 1
+            OR hasNG = 1
+            OR okOpCount >= :requiredOpsCount
+          ))
         ) THEN 1 ELSE 0 END) AS inProgress
       FROM FilteredPartStatus
     `,
@@ -1919,8 +1950,8 @@ async function fetchProductionData(filters = {}, options = {}) {
     const mappings = partIds.length ? await fetchPartCodeMappingsForIds(partIds) : [];
     const customerQrByPartId = mappings.reduce((acc, row) => {
       const key = normalizeKey(row.old_part_id);
-      const customerKey = normalizeKey(row.customer_qr);
-      const customerQr = String(row.customer_qr || "").trim();
+      const customerQr = sanitizeCustomerQrValue(row.customer_qr);
+      const customerKey = normalizeKey(customerQr);
       if (key && customerQr && !acc[key]) acc[key] = customerQr;
       if (customerKey && customerQr && !acc[customerKey]) acc[customerKey] = customerQr;
       return acc;
@@ -1984,7 +2015,7 @@ async function fetchProductionData(filters = {}, options = {}) {
   const anchorMappings = await fetchPartCodeMappingsForIds(anchorPartIds);
   const linkedAnchorPartIds = [...new Set([
     ...anchorPartIds,
-    ...anchorMappings.flatMap((row) => [row.old_part_id, row.customer_qr]),
+    ...anchorMappings.flatMap((row) => [row.old_part_id, sanitizeCustomerQrValue(row.customer_qr)]),
   ].map((value) => String(value || "").trim()).filter(Boolean))];
 
   const fullHistoryLogs = await fetchLogsForPartIds(linkedAnchorPartIds, runLogQuery);
@@ -2026,15 +2057,15 @@ async function fetchProductionData(filters = {}, options = {}) {
     String(partMap[normalizeKey(partId)]?.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT;
   const partCodeMap = partCodeMappings.reduce((acc, row) => {
     const key = normalizeKey(row.old_part_id);
-    const customerKey = normalizeKey(row.customer_qr);
-    const customerQr = String(row.customer_qr || "").trim();
+    const customerQr = sanitizeCustomerQrValue(row.customer_qr);
+    const customerKey = normalizeKey(customerQr);
     if (key && customerQr && !acc[key]) acc[key] = customerQr;
     if (customerKey && customerQr && !acc[customerKey]) acc[customerKey] = customerQr;
     return acc;
   }, {});
   const oldPartMap = partCodeMappings.reduce((acc, row) => {
     const oldPart = String(row.old_part_id || "").trim();
-    const customerQr = String(row.customer_qr || "").trim();
+    const customerQr = sanitizeCustomerQrValue(row.customer_qr);
     const oldKey = normalizeKey(oldPart);
     const customerKey = normalizeKey(customerQr);
     if (oldKey && oldPart && !acc[oldKey]) acc[oldKey] = oldPart;
@@ -2246,13 +2277,14 @@ async function fetchProductionData(filters = {}, options = {}) {
       : "";
     const shouldLookupPlcReading = includePlcReadings && Boolean(displayPartId) && (!customerQrOnlyPart || compactQrKey || shotCandidates.length);
     const plcReadingFromDbRaw = shouldLookupPlcReading
-      ? (
-        (compactQrKey && plcByCompactQr.get(compactQrKey)) ||
-        shotCandidates.map((shot) => plcByShot.get(normalizeShotToken(shot))).find(Boolean) ||
-        plcByUid.get(partLookupKey) ||
-        plcByPartId.get(partLookupKey) ||
-        null
-      )
+      ? (compactQrKey
+        ? (plcByCompactQr.get(compactQrKey) || null)
+        : (
+          shotCandidates.map((shot) => plcByShot.get(normalizeShotToken(shot))).find(Boolean) ||
+          plcByUid.get(partLookupKey) ||
+          plcByPartId.get(partLookupKey) ||
+          null
+        ))
       : null;
     const plcReadingFromDb = plcReadingFromDbRaw
       ? enrichPlcReadingDisplay(plcReadingFromDbRaw)

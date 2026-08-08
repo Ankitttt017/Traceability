@@ -704,46 +704,8 @@ function mergeMaterializedWhere(...parts) {
 }
 
 async function fetchMaterializedTraceabilityMetrics(filters = {}) {
-  if (filters.machineId || filters.operationNo || filters.station) {
-    const records = await fetchMaterializedRecords(filters, { limit: Number(filters.metricsLimit || 50000) });
-    return calculateMaterializedMetrics(records, filters);
-  }
-
-  const { from, to } = getMaterializedDateRange(filters);
-  const status = normalizeStatusFilter(filters.status || filters.resultType);
-  const baseWhere = appendMaterializedDimensionFilters({}, filters);
-  const range = (field) => ({ [field]: { [Op.gte]: from, [Op.lte]: to } });
-  const activityWhere = {
-    [Op.or]: [
-      range("first_scan_at"),
-      range("final_result_at"),
-      range("last_activity_at"),
-    ],
-  };
-  const countOrZero = async (where) => Number(await withDeadlockRetry(
-    "metric count",
-    () => FinalProductionResult.count({ where })
-  )) || 0;
-  const [totalProduction, passed, failed, inProgress] = await Promise.all([
-    countOrZero(mergeMaterializedWhere(baseWhere, range("first_scan_at"))),
-    status && status !== "PASSED" ? Promise.resolve(0) : countOrZero(mergeMaterializedWhere(baseWhere, getFinalStatusWhere("PASSED"), range("final_result_at"))),
-    status && status !== "NG" ? Promise.resolve(0) : countOrZero(mergeMaterializedWhere(baseWhere, getFinalStatusWhere("NG"), range("final_result_at"))),
-    status && status !== "IN_PROGRESS" ? Promise.resolve(0) : countOrZero(mergeMaterializedWhere(baseWhere, getFinalStatusWhere("IN_PROGRESS"), activityWhere)),
-  ]);
-  const productionBase = passed + failed;
-  return {
-    totalProduction,
-    traceabilityProduction: totalProduction,
-    completedProduction: productionBase,
-    totalOK: passed,
-    totalNG: failed,
-    inProgress,
-    validationRejects: failed,
-    passRate: productionBase > 0 ? Number(((passed / productionBase) * 100).toFixed(2)) : 0,
-    byMachine: {},
-    byShift: {},
-    byLine: {},
-  };
+  const records = await fetchMaterializedRecords(filters, { limit: Number(filters.metricsLimit || 50000) });
+  return calculateMaterializedMetrics(records, filters);
 }
 
 function getRecordRows(record = {}) {
@@ -908,12 +870,25 @@ function calculateScopedMaterializedMetrics(records = [], filters = {}) {
     let machineName = record.anchor_machine_name || "Unknown Machine";
     let shiftCode = record.shift_code || "Unknown Shift";
     let lineName = record.line_name || "Unknown Line";
+    let hasPlcCommError = false;
     for (const row of rowsInRange) {
       machineName = row.machineName || row.machine_name || machineName;
       shiftCode = getRowShiftCode(row) || shiftCode;
       lineName = row.lineName || row.line_name || lineName;
       const candidate = normalizeStationResult(row.industrialResult || row.statusLabel || row.result || row.plc_status, row.reason || row.interlock_reason, row);
       status = pickStationResult(status, candidate || "IN_PROGRESS");
+      const rowReason = String(row.reason || row.interlock_reason || "").trim().toUpperCase();
+      if (
+        rowReason.includes("PLC_COMM") ||
+        rowReason.includes("COMM_ERROR") ||
+        rowReason.includes("PLC_COMMUNICATION") ||
+        rowReason.includes("PLC_TIMEOUT") ||
+        rowReason.includes("TIMEOUT") ||
+        String(row.plc_status || "").toUpperCase() === "PLC_COMM_ERROR" ||
+        rowReason.includes("RESET_REQUIRED_AFTER_PLC_COMM_ERROR")
+      ) {
+        hasPlcCommError = true;
+      }
     }
 
     if (!metrics.byMachine[machineName]) metrics.byMachine[machineName] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
@@ -933,14 +908,16 @@ function calculateScopedMaterializedMetrics(records = [], filters = {}) {
       metrics.byLine[lineName].ok += 1;
     } else if (status === "NG") {
       metrics.completedProduction += 1;
-      metrics.totalNG += 1;
-      metrics.validationRejects += 1;
-      metrics.byMachine[machineName].ng += 1;
-      metrics.byShift[shiftCode].ng += 1;
-      metrics.byLine[lineName].ng += 1;
-      metrics.byMachine[machineName].rejects += 1;
-      metrics.byShift[shiftCode].rejects += 1;
-      metrics.byLine[lineName].rejects += 1;
+      if (!hasPlcCommError) {
+        metrics.totalNG += 1;
+        metrics.validationRejects += 1;
+        metrics.byMachine[machineName].ng += 1;
+        metrics.byShift[shiftCode].ng += 1;
+        metrics.byLine[lineName].ng += 1;
+        metrics.byMachine[machineName].rejects += 1;
+        metrics.byShift[shiftCode].rejects += 1;
+        metrics.byLine[lineName].rejects += 1;
+      }
     } else {
       metrics.inProgress += 1;
       metrics.byMachine[machineName].inProgress += 1;
@@ -1006,10 +983,23 @@ function calculateMaterializedMetrics(records = [], filters = {}) {
       metrics.byLine[lineName].ok += 1;
     } else if (finalStatus === "NG" && finalResultInRange) {
       metrics.completedProduction += 1;
-      metrics.totalNG += 1;
-      metrics.byMachine[machineName].ng += 1;
-      metrics.byShift[shiftCode].ng += 1;
-      metrics.byLine[lineName].ng += 1;
+      // exclude PLC communication/common errors from NG counts
+      const recordReason = String(record.rejection_reason || record.interlock_reason || record.reason || record.plc_status || "").toUpperCase();
+      const isPlcComm = (
+        recordReason.includes("PLC_COMM") ||
+        recordReason.includes("COMM_ERROR") ||
+        recordReason.includes("PLC_COMMUNICATION") ||
+        recordReason.includes("PLC_TIMEOUT") ||
+        recordReason.includes("TIMEOUT") ||
+        String(record.plc_status || "").toUpperCase() === "PLC_COMM_ERROR" ||
+        recordReason.includes("RESET_REQUIRED_AFTER_PLC_COMM_ERROR")
+      );
+      if (!isPlcComm) {
+        metrics.totalNG += 1;
+        metrics.byMachine[machineName].ng += 1;
+        metrics.byShift[shiftCode].ng += 1;
+        metrics.byLine[lineName].ng += 1;
+      }
     } else if (activityInRange && !completedInRange) {
       metrics.inProgress += 1;
       metrics.byMachine[machineName].inProgress += 1;

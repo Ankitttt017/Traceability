@@ -316,6 +316,10 @@ function normalizeRejectionType(reason = "") {
     .replace(/[_\-]+/g, " ")
     .replace(/\s+/g, " ");
   if (!r) return "MR - Machining Rejection";
+  
+  if (r.includes("LEAK") || r.includes("OP150")) {
+    return "LT - Leak Test Rejection";
+  }
 
   // MR: scan/traceability/data flow or generic manual reject paths.
   if (
@@ -419,6 +423,19 @@ function normalizeAnalysisToken(value = "") {
     .toUpperCase()
     .replace(/^ZONE[\s_-]*/, "")
     .replace(/\s+/g, " ");
+}
+
+function isPlcCommonError(value = "") {
+  const r = String(value || "").trim().toUpperCase();
+  if (!r) return false;
+  return (
+    r.includes("PLC_COMM") ||
+    r.includes("COMM_ERROR") ||
+    r.includes("PLC_COMMUNICATION") ||
+    r.includes("PLC_TIMEOUT") ||
+    r.includes("TIMEOUT") ||
+    r.includes("RESET_REQUIRED_AFTER_PLC_COMM_ERROR")
+  );
 }
 
 function shortChartLabel(value = "", maxLength = 18) {
@@ -1894,6 +1911,7 @@ const Dashboard = () => {
   const loadData = useCallback(async (showLoading = false) => {
     if (refreshInFlightRef.current) {
       refreshQueuedRef.current = true;
+      if (showLoading) setLoading(true);
       return;
     }
     refreshInFlightRef.current = true;
@@ -1930,13 +1948,11 @@ const Dashboard = () => {
           if (nextMetrics) {
             lastStableReportMetricsRef.current = nextMetrics;
             setReportMetrics(nextMetrics);
-            setLoading(false);
           }
         })
         .catch(() => {
           if (lastStableReportMetricsRef.current) {
             setReportMetrics(lastStableReportMetricsRef.current);
-            setLoading(false);
           }
         });
       const [
@@ -2372,18 +2388,27 @@ const Dashboard = () => {
       const passed = Number(reportMetrics.totalOK || 0);
       const failed = Number(reportMetrics.totalNG || 0);
       const inProgress = Number(reportMetrics.inProgress || 0);
+      const visibleNgCount = Array.isArray(report.partsList)
+        ? report.partsList.filter((row) => {
+            const status = String(row?.result || row?.status || row?.statusLabel || row?.industrialResult || "").toUpperCase();
+            const reason = String(row?.interlock_reason || row?.reason || "").trim();
+            if (isPlcCommonError(reason)) return false;
+            return status === "NG" || status === "FAILED";
+          }).length
+        : 0;
+      const resolvedFailed = failed > 0 ? failed : visibleNgCount;
       return {
         passed,
-        failed,
+        failed: resolvedFailed,
         blocked:
-          Number(reportMetrics.validationRejects || 0) > failed
-            ? Number(reportMetrics.validationRejects || 0) - failed
+          Number(reportMetrics.validationRejects || 0) > resolvedFailed
+            ? Number(reportMetrics.validationRejects || 0) - resolvedFailed
             : 0,
         inProgress,
         total: Number(
           reportMetrics.traceabilityProduction ??
             reportMetrics.totalProduction ??
-            passed + failed + inProgress,
+            passed + resolvedFailed + inProgress,
         ),
       };
     }
@@ -3050,7 +3075,7 @@ const Dashboard = () => {
 
   const rejectionTopReasons = useMemo(() => {
     const maxRejects = Number(
-      dashboardPartCounts.failed || reportMetrics?.totalNG || 0,
+      dashboardPartCounts.failed || reportTraceabilityCounts?.failed || reportMetrics?.totalNG || 0,
     );
     const grouped = filteredRejectionRows.reduce((acc, row) => {
       const reason = String(
@@ -3136,18 +3161,65 @@ const Dashboard = () => {
   }, [filters.dateFrom, filters.dateTo]);
 
   const productionTrendData = useMemo(() => {
-    if (!isMultiDayRange) return report.hourlyProduction || [];
-    const bucket = dashboardParts.reduce((acc, row) => {
+    const sourceRows = Array.isArray(dashboardParts) ? dashboardParts : [];
+    if (!sourceRows.length) {
+      return (Array.isArray(report.hourlyProduction) ? report.hourlyProduction : []).map(
+        (row) => ({
+          hour: row?.hour || row?.time || row?.slot || row?.bucket || "",
+          ok: Number(row?.ok || row?.pass || row?.passed || 0),
+          ng: Number(row?.ng || row?.fail || row?.failed || 0),
+          total: Number(
+            row?.total ||
+              Number(row?.ok || row?.pass || row?.passed || 0) +
+                Number(row?.ng || row?.fail || row?.failed || 0),
+          ),
+        }),
+      );
+    }
+
+    const bucketMap = new Map();
+    const ensureBucket = (key, label) => {
+      if (!bucketMap.has(key)) {
+        bucketMap.set(key, {
+          key,
+          date: label,
+          hour: label,
+          ok: 0,
+          ng: 0,
+          total: 0,
+        });
+      }
+      return bucketMap.get(key);
+    };
+
+    sourceRows.forEach((row) => {
       const ts = new Date(row.latestCreatedAt || row.createdAt || Date.now());
-      if (Number.isNaN(ts.getTime())) return acc;
-      const key = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}-${String(ts.getDate()).padStart(2, "0")}`;
-      if (!acc[key]) acc[key] = { date: key, ok: 0, ng: 0, total: 0 };
-      if (row.finalStatus === "PASSED") acc[key].ok += 1;
-      else if (row.finalStatus === "FAILED") acc[key].ng += 1;
-      acc[key].total += 1;
-      return acc;
-    }, {});
-    return Object.values(bucket).sort((a, b) =>
+      if (!Number.isFinite(ts.getTime())) return;
+
+      const key = isMultiDayRange
+        ? `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}-${String(ts.getDate()).padStart(2, "0")}`
+        : `${String(ts.getHours()).padStart(2, "0")}:00`;
+      const bucket = ensureBucket(key, key);
+      if (row.finalStatus === "PASSED") bucket.ok += 1;
+      else if (row.finalStatus === "FAILED") bucket.ng += 1;
+      bucket.total += 1;
+    });
+
+    if (!isMultiDayRange) {
+      return Array.from({ length: 24 }, (_, index) => {
+        const hour = `${String(index).padStart(2, "0")}:00`;
+        const existing = bucketMap.get(hour);
+        return {
+          hour,
+          date: hour,
+          ok: Number(existing?.ok || 0),
+          ng: Number(existing?.ng || 0),
+          total: Number(existing?.total || 0),
+        };
+      });
+    }
+
+    return Array.from(bucketMap.values()).sort((a, b) =>
       String(a.date).localeCompare(String(b.date)),
     );
   }, [dashboardParts, isMultiDayRange, report.hourlyProduction]);
@@ -3587,7 +3659,7 @@ const Dashboard = () => {
                     animation: loading ? "dbSpin 0.9s linear infinite" : "none",
                   }}
                 />{" "}
-                Apply Filters
+                {loading ? "Applying..." : "Apply Filters"}
               </button>
             </div>
           </div>
