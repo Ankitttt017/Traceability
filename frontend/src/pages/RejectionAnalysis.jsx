@@ -111,6 +111,38 @@ const SHOT_DETAIL_COLUMNS = [
   ["Stroke", "stroke"],
 ];
 
+const SHOT_SET_PARAM_COLUMNS = [
+  ["Die Close Core In Time", "die_close_core_in_time"],
+  ["Pouring Time", "pouring_time"],
+  ["Shot Fwd Time", "shot_fwd_time"],
+  ["Curing Time", "curing_time"],
+  ["Die Open Core Out Time", "die_open_core_out_time"],
+  ["Ejector Time", "ejector_time"],
+  ["Extract Time", "extract_time"],
+  ["Spray Time", "spray_time"],
+  ["V1 Speed", "v1_speed"],
+  ["V2 Speed", "v2_speed"],
+  ["V3 Speed", "v3_speed"],
+  ["V4 Speed", "v4_speed"],
+  ["Metal Pressure", "metal_pressure"],
+  ["Furnace Metal Temp", "furnace_metal_temp"],
+  ["Cooling Water Mov", "cooling_water_mov"],
+  ["Cooling Water Sta", "cooling_water_sta"],
+  ["Accel Point", "accel_point"],
+  ["Deaccel Point", "deaccel_point"],
+  ["Intensification Time", "intensification_time"],
+  ["Biscuit Thickness", "biscuit_thickness"],
+  ["Jet Cooling Pressure", "jet_cooling_pressure"],
+  ["Clamp Tonnage", "clamp_tonnage"],
+  ["Vacuum Pressure", "vacuum_pressure"],
+  ["Clamp Force %", "clamp_force_pct"],
+  ["Clamp Tonnage HE Low %", "clamp_tonnage_he_low_pct"],
+  ["Clamp Tonnage HE Low MN", "clamp_tonnage_he_low_mn"],
+  ["Clamp Tonnage OP Up %", "clamp_tonnage_op_up_pct"],
+  ["Clamp Tonnage OP Low %", "clamp_tonnage_op_low_pct"],
+  ["Clamp Tonnage HE Up %", "clamp_tonnage_he_up_pct"],
+];
+
 const formatChartPercent = (value) => {
   const numeric = Number(value || 0);
   if (!Number.isFinite(numeric)) return "0";
@@ -1265,6 +1297,59 @@ function getShotField(row = {}, key = "") {
   return value === undefined || value === null || value === "" ? "-" : value;
 }
 
+function toFiniteNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const numeric = Number(String(value).replace(/,/g, "").trim());
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function getShotParamLimit(row = {}, key = "", bound = "upper") {
+  return getShotField(row, `${key}_${bound}_limit`);
+}
+
+function getShotParamEvaluation(row = {}, key = "") {
+  const actualRaw = getShotField(row, key);
+  const lowerRaw = getShotParamLimit(row, key, "lower");
+  const upperRaw = getShotParamLimit(row, key, "upper");
+  const actual = toFiniteNumber(actualRaw);
+  const lower = toFiniteNumber(lowerRaw);
+  const upper = toFiniteNumber(upperRaw);
+  const hasActual = actual !== null;
+  const hasLimit = lower !== null || upper !== null;
+  const below = hasActual && lower !== null && actual < lower;
+  const above = hasActual && upper !== null && actual > upper;
+  const status = !hasActual ? "NO DATA" : !hasLimit ? "NO LIMIT" : (below || above) ? "OUT" : "OK";
+  const gap = below ? actual - lower : above ? actual - upper : 0;
+  return {
+    actualRaw,
+    lowerRaw,
+    upperRaw,
+    actual,
+    lower,
+    upper,
+    hasActual,
+    hasLimit,
+    status,
+    gap,
+  };
+}
+
+function getShotSetParamSummary(row = {}) {
+  const evaluated = SHOT_SET_PARAM_COLUMNS.map(([label, key]) => ({
+    label,
+    key,
+    ...getShotParamEvaluation(row, key),
+  }));
+  const checked = evaluated.filter((param) => param.hasActual && param.hasLimit);
+  const outOfSpec = checked.filter((param) => param.status === "OUT");
+  return {
+    evaluated,
+    checkedCount: checked.length,
+    outOfSpec,
+    outCount: outOfSpec.length,
+  };
+}
+
 function getShotDateTime(row = {}) {
   const shot = row.shotDetails || row.shot_details || {};
   const formatShotDateTimeValue = (value) => {
@@ -2231,6 +2316,35 @@ export default function RejectionAnalysis() {
       .slice(0, 10);
   }, [visibleChartRows]);
 
+  const setParamAnalysis = useMemo(() => {
+    const grouped = SHOT_SET_PARAM_COLUMNS.reduce((acc, [label, key]) => {
+      acc[key] = { label, key, checked: 0, out: 0, high: 0, low: 0 };
+      return acc;
+    }, {});
+    visibleChartRows.forEach((row) => {
+      SHOT_SET_PARAM_COLUMNS.forEach(([label, key]) => {
+        const evaluation = getShotParamEvaluation(row, key);
+        if (!evaluation.hasActual || !evaluation.hasLimit) return;
+        const target = grouped[key] || { label, key, checked: 0, out: 0, high: 0, low: 0 };
+        target.checked += 1;
+        if (evaluation.status === "OUT") {
+          target.out += 1;
+          if (evaluation.upper !== null && evaluation.actual > evaluation.upper) target.high += 1;
+          if (evaluation.lower !== null && evaluation.actual < evaluation.lower) target.low += 1;
+        }
+        grouped[key] = target;
+      });
+    });
+    return Object.values(grouped)
+      .map((row) => ({
+        ...row,
+        rate: row.checked ? Number(((row.out / row.checked) * 100).toFixed(1)) : 0,
+      }))
+      .filter((row) => row.checked > 0)
+      .sort((a, b) => b.out - a.out || b.rate - a.rate)
+      .slice(0, 8);
+  }, [visibleChartRows]);
+
   // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ Heat Map Data ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬
   const heatViews = Array.isArray(heatMapConfig?.views) ? heatMapConfig.views : [];
   const heatView = useMemo(() => {
@@ -2497,12 +2611,21 @@ export default function RejectionAnalysis() {
       "Reason",
       "Remark",
       ...SHOT_DETAIL_COLUMNS.map(([label]) => label),
+      "Set Params Checked",
+      "Set Params Out Of Limit",
+      ...SHOT_SET_PARAM_COLUMNS.flatMap(([label]) => [
+        `${label} Actual`,
+        `${label} LSL`,
+        `${label} USL`,
+        `${label} Status`,
+      ]),
       "Shot Status",
     ];
 
     const data = analysisRows.map((row, index) => {
       const details = resolveRejectionDetails(row);
       const shotNumber = getSafeShotNumber(row);
+      const setParamSummary = getShotSetParamSummary(row);
       return [
         index + 1,
         shotNumber === "-" ? "" : shotNumber,
@@ -2519,6 +2642,17 @@ export default function RejectionAnalysis() {
         details.reason || "",
         row.remark || "",
         ...SHOT_DETAIL_COLUMNS.map(([, key]) => getShotField(row, key)),
+        setParamSummary.checkedCount,
+        setParamSummary.outCount,
+        ...SHOT_SET_PARAM_COLUMNS.flatMap(([, key]) => {
+          const evaluation = getShotParamEvaluation(row, key);
+          return [
+            evaluation.actualRaw,
+            evaluation.lowerRaw,
+            evaluation.upperRaw,
+            evaluation.status,
+          ];
+        }),
         formatShotStatus(row.shotStatus),
       ];
     });
@@ -2612,6 +2746,14 @@ export default function RejectionAnalysis() {
       { width: 30 },
       { width: 16 },
       ...SHOT_DETAIL_COLUMNS.map(() => ({ width: 18 })),
+      { width: 18 },
+      { width: 20 },
+      ...SHOT_SET_PARAM_COLUMNS.flatMap(() => [
+        { width: 18 },
+        { width: 14 },
+        { width: 14 },
+        { width: 14 },
+      ]),
       { width: 16 },
     ];
     ws.autoFilter = { from: "A6", to: { row: Math.max(6, ws.rowCount), column: headers.length } };
@@ -2936,6 +3078,61 @@ export default function RejectionAnalysis() {
       </div>
 
       {/* ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ Charts Row 1 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ */}
+      <div className="rej-grid-2">
+        <Card style={{ padding: 18 }}>
+          <SectionHead
+            title="Recipe Limit Deviations"
+            subtitle="PLC actual values compared with saved set-parameter limits"
+            icon={Target}
+            accentColor={C.danger}
+          />
+          <SafeChart height={260}>
+            {({ width, height }) => (
+              <ComposedChart width={width} height={height} data={setParamAnalysis} margin={{ top: 8, right: 28, left: 0, bottom: 42 }}>
+                <CartesianGrid strokeDasharray="3 4" vertical={false} stroke={C.border} />
+                <XAxis dataKey="label" tick={{ fontSize: 8, fontWeight: 800 }} interval={0} angle={-20} textAnchor="end" height={58} />
+                <YAxis yAxisId="count" tick={{ fontSize: 9, fontWeight: 800 }} />
+                <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} tickFormatter={(value) => `${value}%`} tick={{ fontSize: 9, fontWeight: 800 }} />
+                <Tooltip
+                  formatter={(value, name) => name === "Deviation %" ? [`${value}%`, name] : [value, name]}
+                  labelFormatter={(_, payload) => payload?.[0]?.payload?.label || ""}
+                />
+                <Bar yAxisId="count" dataKey="out" name="Out of Limit" fill={C.danger} radius={[5, 5, 0, 0]} />
+                <Line yAxisId="rate" type="monotone" dataKey="rate" name="Deviation %" stroke={C.navy} strokeWidth={3} dot={{ r: 3, fill: C.card }} />
+              </ComposedChart>
+            )}
+          </SafeChart>
+          {!setParamAnalysis.length && <Empty text="No recipe limits found for matched PLC shots." />}
+        </Card>
+
+        <Card style={{ padding: 18 }}>
+          <SectionHead
+            title="Set Parameter Focus"
+            subtitle="Highest-impact recipe parameters in current filters"
+            icon={ClipboardCheck}
+            accentColor={C.amber}
+          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {setParamAnalysis.slice(0, 6).map((row, idx) => (
+              <div key={row.key} style={{ display: "grid", gridTemplateColumns: "28px 1fr auto", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 10, fontWeight: 900, color: C.muted }}>#{idx + 1}</span>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+                    <span style={{ fontSize: 12, fontWeight: 850, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.label}</span>
+                    <span style={{ fontSize: 11, fontWeight: 900, color: row.out ? C.danger : C.ok }}>{row.out}/{row.checked}</span>
+                  </div>
+                  <div style={{ height: 7, borderRadius: 99, background: C.slate, overflow: "hidden" }}>
+                    <div style={{ width: `${Math.min(100, row.rate)}%`, height: "100%", background: row.rate > 30 ? C.danger : row.rate > 10 ? C.amber : C.ok }} />
+                  </div>
+                </div>
+                <span style={{ fontSize: 11, fontWeight: 900, color: C.muted, textAlign: "right" }}>{row.rate}%</span>
+              </div>
+            ))}
+            {!setParamAnalysis.length && <Empty text="No set-parameter comparison available." />}
+          </div>
+        </Card>
+      </div>
+
       <div className="rej-grid-2">
         {/* ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ Pie Chart ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ */}
         <Card style={{ padding: 18 }}>
@@ -3753,6 +3950,7 @@ export default function RejectionAnalysis() {
                 const isExpanded = expandedRows.has(rowKey);
                 const status = formatShotStatus(row.shotStatus);
                 const shotNumber = getSafeShotNumber(row);
+                const setParamSummary = getShotSetParamSummary(row);
                 const rejectionSummary = [
                   ["Category", details.category],
                   ["View", details.view],
@@ -3850,6 +4048,14 @@ export default function RejectionAnalysis() {
                             <div className="rej-detail-grid">
                               <div className="rej-detail-section rej-detail-section-wide">
                                 <h4>Shot Parameters</h4>
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                                  <span className={`rej-badge ${setParamSummary.outCount ? "rej-badge-ng" : "rej-badge-ok"}`}>
+                                    Set Params: {setParamSummary.outCount ? `${setParamSummary.outCount} Out` : "OK"}
+                                  </span>
+                                  <span className="rej-badge rej-badge-mr">
+                                    Checked: {setParamSummary.checkedCount}
+                                  </span>
+                                </div>
                                 <div className="rej-param-grid">
                                   <div className="rej-param-item">
                                     <span className="rej-param-label">Shot Status</span>
@@ -3861,6 +4067,30 @@ export default function RejectionAnalysis() {
                                       <span className="rej-param-value">{getShotField(row, key)}</span>
                                     </div>
                                   ))}
+                                </div>
+                                <h4 style={{ marginTop: 14 }}>Set Params / Recipe Limits</h4>
+                                <div className="rej-param-grid">
+                                  {setParamSummary.evaluated.map((param) => {
+                                    const isOut = param.status === "OUT";
+                                    const isOk = param.status === "OK";
+                                    return (
+                                      <div key={`set-${param.key}`} className="rej-param-item" style={{
+                                        borderColor: isOut ? `${C.danger}55` : isOk ? `${C.ok}35` : undefined,
+                                        background: isOut ? `${C.danger}08` : isOk ? `${C.ok}08` : undefined,
+                                      }}>
+                                        <span className="rej-param-label">{param.label}</span>
+                                        <span className="rej-param-value" style={{ color: isOut ? C.danger : isOk ? C.ok : C.text }}>
+                                          {param.actualRaw}
+                                        </span>
+                                        <span style={{ fontSize: 10, fontWeight: 800, color: C.muted }}>
+                                          LSL {param.lowerRaw} / USL {param.upperRaw}
+                                        </span>
+                                        <span className={`rej-badge ${isOut ? "rej-badge-ng" : isOk ? "rej-badge-ok" : "rej-badge-mr"}`} style={{ alignSelf: "flex-start", marginTop: 4 }}>
+                                          {param.status}
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               </div>
                               <div className="rej-detail-section">

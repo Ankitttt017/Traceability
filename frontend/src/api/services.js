@@ -726,6 +726,15 @@ export const reportApi = {
     });
     return data;
   },
+  getSummaryMetrics: async (params, config = {}) => {
+    const cleanParams = normalizeReportFilters(params);
+    const { data } = await apiClient.get(ENDPOINTS.reports.summaryMetrics, {
+      params: cleanParams,
+      timeout: 60000,
+      ...config,
+    });
+    return data;
+  },
   exportFull: async (params, reportConfig, config = {}) => {
     const cleanParams = normalizeReportFilters(params);
     const { data } = await apiClient.post(ENDPOINTS.reports.exportFull, {

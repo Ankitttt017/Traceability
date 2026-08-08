@@ -387,7 +387,7 @@ const sanitizeCustomerQrValue = (value) => {
 function looksLikeCustomerQrValue(value) {
   return /^R\d[A-Z0-9-]{10,}$/i.test(String(value || "").trim());
 }
-const REPORT_PREVIEW_ROWS_LIMIT = 500;
+const REPORT_PREVIEW_ROWS_LIMIT = 100;
 
 // ── Professional Design System ────────────────────────────────────────────
 const DS = `
@@ -1121,7 +1121,8 @@ const ReportsPage = () => {
   }, [getMesDayRange]);
 
   const getFreshQuickRangeFilters = useCallback((baseFilters) => {
-    if (quickRange !== "today") return baseFilters;
+    const missingDateRange = !baseFilters?.dateFrom || !baseFilters?.dateTo;
+    if (quickRange !== "today" && !missingDateRange) return baseFilters;
     const liveRange = getMesDayRange();
     return {
       ...baseFilters,
@@ -1134,8 +1135,9 @@ const ReportsPage = () => {
     reportAbortRef.current?.abort();
     const controller = new AbortController();
     reportAbortRef.current = controller;
+    const liveAppliedFilters = getFreshQuickRangeFilters(appliedFilters);
     const requestPayload = {
-      ...appliedFilters,
+      ...liveAppliedFilters,
       fast: "1",
       includePlcSummary: "0",
       includePlcReadings: "1",
@@ -1144,6 +1146,12 @@ const ReportsPage = () => {
       _ts: refreshTick || Date.now(),
       page: reportPage.page,
       pageSize: reportPage.pageSize,
+    };
+    const metricsPayload = {
+      ...liveAppliedFilters,
+      fast: "1",
+      noCache: "1",
+      _ts: refreshTick || Date.now(),
     };
     const hasExistingRows = Number(dataRowsCountRef.current || 0) > 0;
     setLoading(!hasExistingRows);
@@ -1158,10 +1166,17 @@ const ReportsPage = () => {
       });
     }, 550);
     try {
-      const response = await reportApi.getData(requestPayload, { signal: controller.signal, suppressGlobalError: true });
+      const [response, summaryMetricsResponse] = await Promise.all([
+        reportApi.getData(requestPayload, { signal: controller.signal, suppressGlobalError: true }),
+        reportApi.getSummaryMetrics(metricsPayload, { signal: controller.signal, suppressGlobalError: true })
+          .catch((metricsError) => {
+            console.warn("Report summary metrics failed", metricsError);
+            return null;
+          }),
+      ]);
       setLoadProgress(100);
       const rowShotSummary = derivePlcShotSummaryFromRows(response.rows || []);
-      const hasQualityGateFilter = Boolean(String(appliedFilters.machineId || "").trim());
+      const hasQualityGateFilter = Boolean(String(liveAppliedFilters.machineId || "").trim());
       const getShotSummaryFilters = (source = {}) => {
         const {
           machineId,
@@ -1190,6 +1205,8 @@ const ReportsPage = () => {
         rows: response.rows || [], 
         metrics: {
           ...(response.metrics || {}),
+          ...(summaryMetricsResponse?.metrics || {}),
+          metricsSource: summaryMetricsResponse?.metricsSource || response.metrics?.metricsSource || response.metricsSource || "REPORT_ROWS",
           plcShotSummary: resolvedInitialShotSummary,
           plcShotSummarySource: hasQualityGateFilter
             ? (response.metrics?.plcShotSummarySource || "PLC_SUMMARY")
@@ -1202,7 +1219,7 @@ const ReportsPage = () => {
       setData(pageData);
       const summarySeq = shotSummarySeqRef.current + 1;
       shotSummarySeqRef.current = summarySeq;
-      const summaryFilters = { ...getShotSummaryFilters(appliedFilters), fast: "1", noCache: "1", _ts: refreshTick || Date.now() };
+      const summaryFilters = { ...getShotSummaryFilters(liveAppliedFilters), fast: "1", noCache: "1", _ts: refreshTick || Date.now() };
       setShotSummaryLoading(true);
       reportApi.getShotSummary(summaryFilters, { suppressGlobalError: true })
         .then((summary) => {
@@ -1259,7 +1276,7 @@ const ReportsPage = () => {
         reportAbortRef.current = null;
       }
     }
-  }, [appliedFilters, refreshTick, reportPage.page, reportPage.pageSize]);
+  }, [appliedFilters, getFreshQuickRangeFilters, refreshTick, reportPage.page, reportPage.pageSize]);
 
   const refreshReportData = useCallback(() => {
     const nextFilters = getFreshQuickRangeFilters(filters);
@@ -1406,12 +1423,13 @@ const ReportsPage = () => {
   };
 
   const handleDateRangeClear = () => {
+    const liveRange = getMesDayRange();
     setFilters((prev) => ({
       ...prev,
-      dateFrom: '',
-      dateTo: '',
+      dateFrom: toDatetimeLocal(liveRange.start),
+      dateTo: toDatetimeLocal(liveRange.end),
     }));
-    setQuickRange("");
+    setQuickRange("today");
   };
 
   const reportTable = useMemo(() => {
@@ -2133,7 +2151,7 @@ const ReportsPage = () => {
           setReportPage({ page: 1, pageSize });
         }}
         defaultPageSize={REPORT_PREVIEW_ROWS_LIMIT}
-        pageSizeOptions={[100, 250, 500, 1000]}
+        pageSizeOptions={[100, 250, 500]}
       />
     </div>
   );

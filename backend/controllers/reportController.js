@@ -172,6 +172,48 @@ async function applyUncappedTraceabilityMetrics(metrics = {}, filters = {}) {
   return scopeMetricsToStatusFilter(nextMetrics, filters);
 }
 
+async function fetchAccurateTraceabilityMetrics(filters = {}) {
+  const productionFilters = stripMetricStatusFilters(stripReportControlFilters(filters));
+  const statusScopedFilters = stripReportControlFilters(filters);
+  const nextMetrics = {};
+  const stationScoped = Boolean(
+    productionFilters.machineId ||
+    productionFilters.operationNo ||
+    productionFilters.stationNo ||
+    productionFilters.station
+  );
+  const [summaryMetrics, firstScanTotal] = await Promise.all([
+    fetchProductionSummaryMetrics(productionFilters),
+    stationScoped
+      ? Promise.resolve(null)
+      : fetchProductionFirstScanPartCount(productionFilters).catch((error) => {
+          console.warn(`[ReportController] first-scan production total skipped: ${error.message}`);
+          return null;
+        }),
+  ]);
+
+  if (summaryMetrics) {
+    nextMetrics.traceabilityProduction = Number(summaryMetrics.totalProduction || 0);
+    nextMetrics.totalProduction = Number(summaryMetrics.totalProduction || 0);
+    nextMetrics.totalOK = Number(summaryMetrics.totalOK || 0);
+    nextMetrics.totalNG = Number(summaryMetrics.totalNG || 0);
+    nextMetrics.inProgress = Number(summaryMetrics.inProgress || 0);
+    nextMetrics.validationRejects = Number(summaryMetrics.validationRejects || summaryMetrics.totalNG || 0);
+    nextMetrics.passRate = Number(summaryMetrics.passRate || 0);
+    nextMetrics.byMachine = summaryMetrics.byMachine || {};
+    nextMetrics.byShift = summaryMetrics.byShift || {};
+    nextMetrics.byLine = summaryMetrics.byLine || {};
+  }
+
+  const normalizedFirstScanTotal = Number(firstScanTotal);
+  if (!stationScoped && Number.isFinite(normalizedFirstScanTotal) && normalizedFirstScanTotal >= 0) {
+    nextMetrics.traceabilityProduction = normalizedFirstScanTotal;
+    nextMetrics.totalProduction = normalizedFirstScanTotal;
+  }
+
+  return scopeMetricsToStatusFilter(nextMetrics, statusScopedFilters);
+}
+
 function stripPaginationFilters(filters = {}) {
   const { page, pageSize, limit, offset, ...rest } = filters || {};
   void page; void pageSize; void limit; void offset;
@@ -234,14 +276,15 @@ function getReportOptions(query = {}) {
   const fast = !fastDisabled && !hasFocusedPartSearch;
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
   const pageSize = Math.min(Math.max(Number.parseInt(query.pageSize || query.limit, 10) || 50, 10), 10000);
-  const fastAnchorLimit = Math.min(Math.max((page + 1) * pageSize, pageSize, 500), 5000);
+  const fastPageSize = Math.min(pageSize, 100);
+  const fastAnchorLimit = Math.min(Math.max((page + 1) * fastPageSize, fastPageSize, 100), 300);
   return {
     fast,
     includePlcReadings: fast ? isTruthyToken(query.includePlcReadings) : !isFalseToken(query.includePlcReadings),
     includePlcSummary: !isFalseToken(query.includePlcSummary),
     includeLeaktest: fast ? isTruthyToken(query.includeLeaktest) : !isFalseToken(query.includeLeaktest),
     maxAnchorParts: fast ? fastAnchorLimit : null,
-    maxBaseLogs: fast ? Math.min(Math.max(fastAnchorLimit * 4, 2000), 20000) : null,
+    maxBaseLogs: fast ? Math.min(Math.max(fastAnchorLimit * 2, 800), 1500) : null,
   };
 }
 
@@ -537,11 +580,10 @@ exports.getReportData = async (req, res) => {
     const pagination = getPagination(req.query || {});
     const { rows, shifts, plcColumnSet, metrics } = await getLiveReportBundle(filters, options);
     const paged = paginateReportRowsByPart(rows, pagination);
-    const responseMetrics = alignMetricsToVisibleStatusCount(
-      await applyUncappedTraceabilityMetrics(metrics, filters),
-      filters,
-      paged.pagination
-    );
+    const scopedMetrics = options.fast
+      ? scopeMetricsToStatusFilter({ ...(metrics || {}) }, filters)
+      : await applyUncappedTraceabilityMetrics(metrics, filters);
+    const responseMetrics = alignMetricsToVisibleStatusCount(scopedMetrics, filters, paged.pagination);
     responseMetrics.plcShotSummary = responseMetrics.plcShotSummary || {};
     responseMetrics.plcShotSummarySource = responseMetrics.plcShotSummarySource || "REPORT_ROWS";
 
@@ -575,7 +617,7 @@ exports.getReportData = async (req, res) => {
       const { rows, shifts, plcColumnSet, metrics } = await getLiveReportBundle(filters, fallbackOptions);
       const paged = paginateReportRowsByPart(rows, pagination);
       const responseMetrics = alignMetricsToVisibleStatusCount(
-        await applyUncappedTraceabilityMetrics(metrics, filters),
+        scopeMetricsToStatusFilter({ ...(metrics || {}) }, filters),
         filters,
         paged.pagination
       );
@@ -617,6 +659,20 @@ exports.getPublicReportData = async (req, res) => {
     noCache: "1",
   };
   return exports.getReportData(req, res);
+};
+
+exports.getReportSummaryMetrics = async (req, res) => {
+  try {
+    const metrics = await fetchAccurateTraceabilityMetrics(req.query || {});
+    res.json({
+      metrics,
+      metricsSource: "SQL_SUMMARY",
+    });
+  } catch (error) {
+    const db = summarizeDbError(error);
+    console.error(`[ReportController] getReportSummaryMetrics failed code=${db.code} msg=${db.message}`);
+    res.status(500).json({ error: db.message });
+  }
 };
 
 exports.getReportShotSummary = async (req, res) => {

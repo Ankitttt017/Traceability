@@ -6,6 +6,7 @@ const { requireModuleAccess } = require("../../middleware/roleAccessMiddleware")
 const router = express.Router();
 
 router.get("/report/data", verifyToken, requireModuleAccess("reports", "view"), reportController.getReportData);
+router.get("/report/summary-metrics", verifyToken, requireModuleAccess("reports", "view"), reportController.getReportSummaryMetrics);
 router.get("/report/shot-summary", verifyToken, requireModuleAccess("reports", "view"), reportController.getReportShotSummary);
 router.post("/report/export-full", verifyToken, requireModuleAccess("reports", "view"), reportController.exportFullReportExcel);
 router.get("/report/export-full", verifyToken, requireModuleAccess("reports", "view"), reportController.exportFullReportExcel);

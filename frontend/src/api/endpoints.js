@@ -110,6 +110,7 @@ export const ENDPOINTS = {
   },
   reports: {
     data: "/reports/report/data",
+    summaryMetrics: "/reports/report/summary-metrics",
     shotSummary: "/reports/report/shot-summary",
     exportFull: "/reports/report/export-full",
     exportNG: "/reports/report/export-ng",
