@@ -1540,9 +1540,10 @@ async function buildProductionCountScope(filters = {}, options = {}) {
     whereParts.push("ol.machine_id = :machineId");
     replacements.machineId = filters.machineId;
   }
-  if (filters.operationNo) {
-    whereParts.push("ol.operation_no = :operationNo");
-    replacements.operationNo = String(filters.operationNo).trim().toUpperCase();
+  const operationScope = String(filters.operationNo || filters.stationNo || "").trim().toUpperCase();
+  if (operationScope) {
+    whereParts.push("(ol.operation_no = :operationNo OR ol.station_no = :operationNo)");
+    replacements.operationNo = operationScope;
   }
   if (filters.operatorId) {
     whereParts.push("ol.user_id = :operatorId");
@@ -1710,7 +1711,7 @@ async function fetchProductionFirstScanPartCount(filters = {}) {
 
 async function fetchProductionSummaryMetrics(filters = {}) {
   const { whereParts, joins, replacements } = await buildProductionCountScope(filters);
-  const stationScoped = Boolean(filters.machineId || filters.operationNo || filters.station);
+  const stationScoped = Boolean(filters.machineId || filters.operationNo || filters.stationNo || filters.station);
   replacements.stationScoped = stationScoped ? 1 : 0;
   replacements.requiredOpsCount = await resolveRequiredOperationCount(filters);
   const [rows] = await sequelize.query(
