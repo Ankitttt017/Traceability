@@ -208,40 +208,59 @@ async function checkPlcCycleReading(barcode) {
     if (code === 5) return "OFFSET_SHOT";
     return Number.isFinite(code) ? `UNKNOWN_${code}` : "UNKNOWN";
   };
+  const getCompactQrCandidates = (value) => {
+    const raw = String(value || "").trim();
+    const match =
+      raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i) ||
+      raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<shot>\d{1,6})$/i);
+    if (!match?.groups) return [];
+    const month = Number(match.groups.month);
+    const day = Number(match.groups.day);
+    const hour = Number(match.groups.hour);
+    const minute = Number(match.groups.minute);
+    const shot = Number(match.groups.shot);
+    if (![month, day, hour, minute, shot].every(Number.isFinite)) return [];
+    const candidates = [];
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      candidates.push({ month, day, hour, minute, shot, shotRaw: String(match.groups.shot || "").trim() });
+    }
+    if (day >= 1 && day <= 12 && month >= 1 && month <= 31 && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      const fallback = { month: day, day: month, hour, minute, shot, shotRaw: String(match.groups.shot || "").trim() };
+      if (!candidates.some((candidate) => candidate.month === fallback.month && candidate.day === fallback.day)) {
+        candidates.push(fallback);
+      }
+    }
+    return candidates;
+  };
 
   // Priority path for compact QR format:
-  // Compact format: DDMMHHMM + SHOT(1..6)
-  // Also support DPM-style compact code: DDMMHHMM + MACHINE_CODE(1) + SHOT(1..6),
-  // where machine code is ignored for PlcCycleReadings lookup.
-  const compactBarcode = String(barcode || "").trim();
-  const compactMatch =
-    compactBarcode.match(/^(\d{2})(\d{2})(\d{2})(\d{2})(\d{1,6})$/) ||
-    compactBarcode.match(/^(\d{2})(\d{2})(\d{2})(\d{2})([A-Z0-9]{1})(\d{1,6})$/i);
-  if (compactMatch) {
-    const day = Number(compactMatch[1]);
-    const month = Number(compactMatch[2]);
-    const hour = Number(compactMatch[3]);
-    const minute = Number(compactMatch[4]);
-    const shotGroupIndex = compactMatch.length >= 7 ? 6 : 5;
-    const shotNumber = String(parseInt(compactMatch[shotGroupIndex], 10));
+  // Current format: MMDDHHMM + MACHINE_CODE(1) + SHOT(1..6).
+  // Machine code is ignored for PlcCycleReadings lookup; older DDMMHHMM data is tried as fallback.
+  const compactCandidates = getCompactQrCandidates(barcode);
+  for (const compact of compactCandidates) {
+    const shotNumber = String(parseInt(compact.shot, 10));
     try {
       const [rows] = await sequelize.query(
         `
           SELECT TOP 1 * FROM PlcCycleReadings
-          WHERE TRY_CONVERT(INT, shot_day) = :day
-            AND TRY_CONVERT(INT, shot_month) = :month
+          WHERE TRY_CONVERT(INT, shot_month) = :month
+            AND TRY_CONVERT(INT, shot_day) = :day
             AND TRY_CONVERT(INT, shot_hour) = :hour
             AND TRY_CONVERT(INT, shot_minute) = :minute
-            AND shot_number = :shot
+            AND (
+              TRY_CONVERT(INT, shot_number) = :shot
+              OR LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) = :shotRaw
+            )
           ORDER BY recorded_at DESC
         `,
         {
           replacements: {
-            day,
-            month,
-            hour,
-            minute,
-            shot: parseInt(shotNumber, 10),
+            day: compact.day,
+            month: compact.month,
+            hour: compact.hour,
+            minute: compact.minute,
+            shot: compact.shot,
+            shotRaw: compact.shotRaw,
           },
         }
       );
@@ -263,6 +282,14 @@ async function checkPlcCycleReading(barcode) {
     } catch (error) {
       console.warn("[PLC_CYCLE_AUDIT] compact format query failed:", error.message);
     }
+  }
+  if (compactCandidates.length) {
+    const compact = compactCandidates[0];
+    return {
+      success: false,
+      reason: "PART_NOT_FOUND",
+      message: `Part not found - shot details unavailable in PlcCycleReadings for ${compact.month}/${compact.day} ${compact.hour}:${compact.minute}, shot ${compact.shot}.`,
+    };
   }
   const parsed = parseBarcodeToCycleReadingFields(barcode);
 

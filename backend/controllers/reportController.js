@@ -203,6 +203,22 @@ function stripReportControlFilters(filters = {}) {
   return rest;
 }
 
+function stripTraceabilityOnlyFilters(filters = {}) {
+  const {
+    machineId,
+    operationNo,
+    stationNo,
+    station,
+    status,
+    resultType,
+    statusFilter,
+    operatorId,
+    ...rest
+  } = filters || {};
+  void machineId; void operationNo; void stationNo; void station; void status; void resultType; void statusFilter; void operatorId;
+  return rest;
+}
+
 function isTruthyToken(value) {
   return ["1", "TRUE", "YES", "Y", "FAST"].includes(String(value || "").trim().toUpperCase());
 }
@@ -605,7 +621,7 @@ exports.getPublicReportData = async (req, res) => {
 
 exports.getReportShotSummary = async (req, res) => {
   try {
-    const filters = stripReportControlFilters(req.query || {});
+    const filters = stripTraceabilityOnlyFilters(stripReportControlFilters(req.query || {}));
     const plcShotSummary = await fetchPlcShotSummary(filters);
     res.json({
       plcShotSummary: plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 },

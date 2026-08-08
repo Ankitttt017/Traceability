@@ -141,6 +141,7 @@ function sanitizeCustomerQrValue(value) {
   const raw = collapseRepeatedQrValue(value);
   if (!raw || raw === "-") return "";
   if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
+  if (!/^R\d[A-Z0-9-]{10,}$/i.test(raw)) return "";
   return raw;
 }
 
@@ -3041,14 +3042,14 @@ exports.getPartJourney = async (req, res) => {
     });
     const traceabilityPartIds = uniqueStages([
       ...mappingSeedIds,
-      ...initialCustomerMappings.flatMap((row) => [row.old_part_id, row.customer_qr]),
+      ...initialCustomerMappings.flatMap((row) => [row.old_part_id, sanitizeCustomerQrValue(row.customer_qr)]),
     ]
       .map((value) => String(value || "").trim())
       .filter(Boolean));
     const canonicalTraceabilityPartId = String(
       initialCustomerMappings.find((row) => {
         const oldKey = String(row.old_part_id || "").trim().toUpperCase();
-        const customerKey = String(row.customer_qr || "").trim().toUpperCase();
+        const customerKey = sanitizeCustomerQrValue(row.customer_qr).toUpperCase();
         const requestedKey = String(requestedPartId || "").trim().toUpperCase();
         const resolvedKey = String(partId || "").trim().toUpperCase();
         return (
@@ -3379,7 +3380,7 @@ exports.getPartJourney = async (req, res) => {
     const mappedCustomerQrForPart = customerQrByPartId[String(partId || "").trim().toUpperCase()] || null;
     const mappedOldPartForPart = customerMappings.reduce((acc, row) => {
       const oldPart = String(row.old_part_id || "").trim();
-      const customerQr = String(row.customer_qr || "").trim();
+      const customerQr = sanitizeCustomerQrValue(row.customer_qr);
       if (!oldPart) return acc;
       const oldKey = oldPart.toUpperCase();
       const customerKey = customerQr.toUpperCase();
@@ -4137,9 +4138,18 @@ exports.processScan = async (req, res) => {
         });
       }
 
+      const mappedCustomerQrValue = sanitizeCustomerQrValue(scannedQrRaw);
+      if (!mappedCustomerQrValue) {
+        return res.status(400).json({
+          error: "Invalid Customer QR scan. Scan the actual Customer QR code.",
+          reason: "INVALID_CUSTOMER_QR_VALUE",
+          customerQrPending: true,
+        });
+      }
+
       const existingMapping = await PartCodeMapping.findOne({
         where: {
-          customer_qr: scannedQrRaw,
+          customer_qr: mappedCustomerQrValue,
           is_active: true,
         },
       });
@@ -4167,7 +4177,7 @@ exports.processScan = async (req, res) => {
           mapped: true,
           duplicate: true,
           partId: activePartId,
-          customerQrCode: scannedQrRaw,
+          customerQrCode: mappedCustomerQrValue,
           scannerRead,
           machine: {
             id: machine.id,
@@ -4179,15 +4189,6 @@ exports.processScan = async (req, res) => {
       if (existingMapping && String(existingMapping.old_part_id || "").trim() !== activePartId) {
         return res.status(409).json({
           error: "Customer QR already mapped to another part",
-        });
-      }
-
-      const mappedCustomerQrValue = sanitizeCustomerQrValue(scannedQrRaw);
-      if (!mappedCustomerQrValue) {
-        return res.status(400).json({
-          error: "Invalid Customer QR scan. Scan the actual Customer QR code.",
-          reason: "INVALID_CUSTOMER_QR_VALUE",
-          customerQrPending: true,
         });
       }
 
@@ -4623,19 +4624,22 @@ exports.verifyScanForOperator = async (req, res) => {
       (scanner) => String(scanner.scanner_role || "").trim().toUpperCase() === "CUSTOMER_QR"
     );
     const activePartIdForMachine = await resolveActivePartIdForMachine(machine, stationNo);
-    const existingCustomerMapping = await PartCodeMapping.findOne({
-      where: {
-        customer_qr: scannedQrRaw,
-        is_active: true,
-      },
-      order: [["updatedAt", "DESC"]],
-    });
+    const validScannedCustomerQr = sanitizeCustomerQrValue(scannedQrRaw);
+    const existingCustomerMapping = validScannedCustomerQr
+      ? await PartCodeMapping.findOne({
+          where: {
+            customer_qr: validScannedCustomerQr,
+            is_active: true,
+          },
+          order: [["updatedAt", "DESC"]],
+        })
+      : null;
     const isExistingMappedCustomerQr = Boolean(existingCustomerMapping);
     const isKnownPartId = Boolean(await Part.findOne({ where: { part_id: scannedQrRaw }, attributes: ["part_id"] }));
     const looksLikeCustomerQr =
       requiresCustomerQrForCompletion(machine) &&
       (hasCustomerQrScanner || isExistingMappedCustomerQr || Boolean(activePartIdForMachine)) &&
-      scannedQrRaw &&
+      validScannedCustomerQr &&
       scannedQrRaw !== activePartIdForMachine &&
       (!isKnownPartId || isExistingMappedCustomerQr);
 
@@ -6912,15 +6916,15 @@ exports.getDashboardReport = async (req, res) => {
     }
     const customerQrByPartId = dashboardPartCodeMappings.reduce((acc, row) => {
       const key = String(row.old_part_id || "").trim().toUpperCase();
-      const customerKey = String(row.customer_qr || "").trim().toUpperCase();
-      const customerValue = String(row.customer_qr || "").trim();
+      const customerValue = sanitizeCustomerQrValue(row.customer_qr);
+      const customerKey = customerValue.toUpperCase();
       if (key && customerValue && !acc[key]) acc[key] = customerValue;
       if (customerKey && customerValue && !acc[customerKey]) acc[customerKey] = customerValue;
       return acc;
     }, {});
     const mappedOldPartByPartId = dashboardPartCodeMappings.reduce((acc, row) => {
       const oldPart = String(row.old_part_id || "").trim();
-      const customerQr = String(row.customer_qr || "").trim();
+      const customerQr = sanitizeCustomerQrValue(row.customer_qr);
       const oldKey = oldPart.toUpperCase();
       const customerKey = customerQr.toUpperCase();
       if (oldKey && oldPart && !acc[oldKey]) acc[oldKey] = oldPart;
@@ -7446,24 +7450,20 @@ exports.getDashboardReport = async (req, res) => {
       const noLead = digits.replace(/^0+/, "");
       return (noLead || "0").toUpperCase();
     };
-    const parseCompactQrPartId = (value) => {
+    const getCompactQrCandidates = (value) => {
       const raw = String(value || "").trim();
       const match = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machine_code>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
-      if (!match?.groups) return null;
+      if (!match?.groups) return [];
       const month = Number(match.groups.month);
       const day = Number(match.groups.day);
       const hour = Number(match.groups.hour);
       const minute = Number(match.groups.minute);
       const shot = Number(match.groups.shot);
-      if (![day, month, hour, minute, shot].every(Number.isFinite)) return null;
-      return {
-        key: `${month}|${day}|${hour}|${minute}|${shot}`,
-        day,
-        month,
-        hour,
-        minute,
-        shot,
-      };
+      if (![day, month, hour, minute, shot].every(Number.isFinite)) return [];
+      return [{ key: `${month}|${day}|${hour}|${minute}|${shot}`, day, month, hour, minute, shot }];
+    };
+    const parseCompactQrPartId = (value) => {
+      return getCompactQrCandidates(value)[0] || null;
     };
     const extractYymmddhhmmss = (value) => {
       const s = String(value || "").toUpperCase();
@@ -7576,13 +7576,16 @@ exports.getDashboardReport = async (req, res) => {
       const fromPartIdTs = extractYymmddhhmmss(shotSourcePartId) || extractYymmddhhmmss(fullPartId);
       const fromPartIdShot = normalizeShotToken(extractShotSuffix(shotSourcePartId)) || normalizeShotToken(extractShotSuffix(fullPartId));
       const allPartDigitGroups = (shotSourcePartId.match(/\d+/g) || fullPartId.match(/\d+/g) || []).map((g) => normalizeShotToken(g)).filter(Boolean);
-      const plcReadingRaw = (compactQrKey && plcReadingByCompactQr.get(compactQrKey))
-        || (fullPartId && plcReadingByUid.get(fullPartId))
-        || (shotKey && plcReadingByShot.get(shotKey))
-        || (fromPartIdShot && plcReadingByShot.get(fromPartIdShot))
-        || (fromPartIdTs && plcReadingByShot.get(normalizeShotToken(fromPartIdTs)))
-        || allPartDigitGroups.map((g) => plcReadingByShot.get(g)).find(Boolean)
-        || null;
+      const plcReadingRaw = compactQrKey
+        ? (plcReadingByCompactQr.get(compactQrKey) || null)
+        : (
+          (fullPartId && plcReadingByUid.get(fullPartId))
+          || (shotKey && plcReadingByShot.get(shotKey))
+          || (fromPartIdShot && plcReadingByShot.get(fromPartIdShot))
+          || (fromPartIdTs && plcReadingByShot.get(normalizeShotToken(fromPartIdTs)))
+          || allPartDigitGroups.map((g) => plcReadingByShot.get(g)).find(Boolean)
+          || null
+        );
       const plcReading = enrichPlcReadingDisplay(plcReadingRaw);
 
       return {
@@ -8017,7 +8020,8 @@ exports.getRejectionAnalysis = async (req, res) => {
       : [];
     const mappingByPart = mappings.reduce((acc, row) => {
       const key = String(row.old_part_id || "").trim();
-      if (key && !acc[key]) acc[key] = String(row.customer_qr || "").trim();
+      const customerQr = sanitizeCustomerQrValue(row.customer_qr);
+      if (key && customerQr && !acc[key]) acc[key] = customerQr;
       return acc;
     }, {});
     const finalNgWhere = {
@@ -8110,6 +8114,27 @@ exports.getRejectionAnalysis = async (req, res) => {
       if (trailing?.[1]) candidates.add(normalizeShotTokenForLookup(trailing[1]));
       return [...candidates].filter(Boolean);
     };
+    const parseCompactQrForLookup = (value) => {
+      const raw = String(value || "").trim().toUpperCase();
+      if (!raw) return null;
+      const match = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+      if (!match?.groups) return null;
+      const month = Number(match.groups.month);
+      const day = Number(match.groups.day);
+      const hour = Number(match.groups.hour);
+      const minute = Number(match.groups.minute);
+      const shot = Number(match.groups.shot);
+      if (![month, day, hour, minute, shot].every(Number.isFinite)) return null;
+      return {
+        key: `${month}|${day}|${hour}|${minute}|${shot}`,
+        month,
+        day,
+        hour,
+        minute,
+        shot,
+        shotRaw: String(match.groups.shot || "").trim(),
+      };
+    };
     const plcRowMatchesAssignmentScope = (plcRow = {}) => {
       const scopeRows = scopedAssignmentRows.length ? scopedAssignmentRows : assignmentRows;
       if (!scopeRows.length) return true;
@@ -8138,12 +8163,35 @@ exports.getRejectionAnalysis = async (req, res) => {
       if (!details || typeof details !== "object" || !Object.keys(details).length) return {};
       return plcRowMatchesAssignmentScope(details) ? details : {};
     };
+    const enrichRejectionShotDetails = (details = {}) => {
+      if (!details || typeof details !== "object" || !Object.keys(details).length) return {};
+      const next = { ...details };
+      const y = normalizeReportYear(next.shot_year);
+      const m = Number(next.shot_month);
+      const d = Number(next.shot_day);
+      const hh = Number(next.shot_hour);
+      const mm = Number(next.shot_minute);
+      const ss = Number(next.shot_second ?? 0);
+      if (!next.shot_date && Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+        next.shot_date = `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      }
+      if (!next.shot_time && Number.isFinite(hh) && Number.isFinite(mm)) {
+        next.shot_time = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+      }
+      return next;
+    };
     const shotLookupValues = new Set();
+    const compactLookupMap = new Map();
+    const addCompactLookup = (value) => {
+      const compact = parseCompactQrForLookup(value);
+      if (compact && !compactLookupMap.has(compact.key)) compactLookupMap.set(compact.key, compact);
+    };
     rows.forEach((row) => {
       const plain = typeof row.get === "function" ? row.get({ plain: true }) : row;
       const partKey = String(plain.part_id || "").trim();
       const displayPartId = safeInternalPartIdForReport(partKey, mappingByPart[partKey]);
       if (!displayPartId) return;
+      addCompactLookup(displayPartId);
       const directShot = normalizeShotTokenForLookup(plain.shot_number || plain.shotNumber || "");
       if (directShot) shotLookupValues.add(directShot);
       extractShotCandidatesForLookup(displayPartId).forEach((value) => shotLookupValues.add(value));
@@ -8151,11 +8199,50 @@ exports.getRejectionAnalysis = async (req, res) => {
     finalRows.forEach((row) => {
       const displayPartId = getFinalDisplayPartIdForReport(row);
       if (!displayPartId) return;
+      addCompactLookup(displayPartId);
       const directShot = normalizeShotTokenForLookup(row.shot_number || "");
       if (directShot) shotLookupValues.add(directShot);
       [displayPartId]
         .forEach((value) => extractShotCandidatesForLookup(value).forEach((shot) => shotLookupValues.add(shot)));
     });
+    const plcByCompact = new Map();
+    if (compactLookupMap.size) {
+      try {
+        const sequelize = require("../config/db");
+        for (const compact of compactLookupMap.values()) {
+          const [plcRows] = await sequelize.query(
+            `
+              SELECT TOP 1 *
+              FROM PlcCycleReadings
+              WHERE TRY_CONVERT(INT, shot_month) = :month
+                AND TRY_CONVERT(INT, shot_day) = :day
+                AND TRY_CONVERT(INT, shot_hour) = :hour
+                AND TRY_CONVERT(INT, shot_minute) = :minute
+                AND (
+                  TRY_CONVERT(INT, shot_number) = :shot
+                  OR LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) = :shotRaw
+                )
+              ORDER BY recorded_at DESC
+            `,
+            {
+              replacements: {
+                month: compact.month,
+                day: compact.day,
+                hour: compact.hour,
+                minute: compact.minute,
+                shot: compact.shot,
+                shotRaw: compact.shotRaw,
+              },
+            }
+          );
+          if (plcRows && plcRows[0]) {
+            plcByCompact.set(compact.key, [plcRows[0]]);
+          }
+        }
+      } catch (error) {
+        console.warn(`[REJECTION] PLC compact shot detail lookup unavailable: ${error.message}`);
+      }
+    }
     const plcByShot = new Map();
     if (shotLookupValues.size) {
       try {
@@ -8196,6 +8283,14 @@ exports.getRejectionAnalysis = async (req, res) => {
       }
     }
     const resolvePlcShotDetails = (...values) => {
+      const compactCandidates = values.map(parseCompactQrForLookup).filter(Boolean);
+      for (const compact of compactCandidates) {
+        if (plcByCompact.has(compact.key)) {
+          const scoped = pickScopedPlcRow(plcByCompact.get(compact.key));
+          if (scoped) return scoped;
+        }
+      }
+      if (compactCandidates.length) return {};
       for (const value of values) {
         const direct = normalizeShotTokenForLookup(value);
         if (direct && plcByShot.has(direct)) {
@@ -8224,7 +8319,7 @@ exports.getRejectionAnalysis = async (req, res) => {
             ...parseJsonObject(row.shot_details_json),
           }
         : {};
-      const scopedShotDetails = scopedShotDetailsForDisplay(shotDetails);
+      const scopedShotDetails = enrichRejectionShotDetails(scopedShotDetailsForDisplay(shotDetails));
       const plcPartDie = splitPlcPartDieForReport(scopedShotDetails.part_name || "");
       const entry = {
         shotNumber: displayPartId ? String(row.shot_number || scopedShotDetails.shot_number || "").trim() : "",
@@ -8338,7 +8433,7 @@ exports.getRejectionAnalysis = async (req, res) => {
             ...(finalShot.shotDetails || {}),
           }
         : {};
-      const scopedShotDetails = scopedShotDetailsForDisplay(mergedShotDetails);
+      const scopedShotDetails = enrichRejectionShotDetails(scopedShotDetailsForDisplay(mergedShotDetails));
       const plcPartDie = splitPlcPartDieForReport(scopedShotDetails.part_name || "");
       return {
         id: plain.id,
@@ -8394,14 +8489,14 @@ exports.getRejectionAnalysis = async (req, res) => {
               ...parseJsonObject(row.shot_details_json),
             }
           : {};
-        const scopedShotDetails = scopedShotDetailsForDisplay(shotDetails);
+        const scopedShotDetails = enrichRejectionShotDetails(scopedShotDetailsForDisplay(shotDetails));
         const createdAt = row.final_result_at || row.last_activity_at || row.first_scan_at;
         const shift = resolveShift(createdAt, shifts);
         const plcPartDie = splitPlcPartDieForReport(scopedShotDetails.part_name || "");
         return {
           id: `final:${row.report_group_key}`,
           partId: displayPartId,
-          customerQrCode: row.customer_qr_code || null,
+          customerQrCode: sanitizeCustomerQrValue(row.customer_qr_code) || null,
           machineId: row.anchor_machine_id || null,
           machineName: row.anchor_machine_name || null,
           lineName: row.line_name || null,
@@ -8732,7 +8827,7 @@ async function getDashboardExportRows(filters) {
     : [];
   const customerQrByPartId = partCodeRows.reduce((acc, row) => {
     const partId = String(row.old_part_id || "").trim().toUpperCase();
-    const customerQr = String(row.customer_qr || "").trim();
+    const customerQr = sanitizeCustomerQrValue(row.customer_qr);
     const customerKey = customerQr.toUpperCase();
     if (partId && customerQr && !acc[partId]) acc[partId] = customerQr;
     if (customerKey && customerQr && !acc[customerKey]) acc[customerKey] = customerQr;
@@ -8740,7 +8835,7 @@ async function getDashboardExportRows(filters) {
   }, {});
   const oldPartByPartId = partCodeRows.reduce((acc, row) => {
     const oldPart = String(row.old_part_id || "").trim();
-    const customerQr = String(row.customer_qr || "").trim();
+    const customerQr = sanitizeCustomerQrValue(row.customer_qr);
     const oldKey = oldPart.toUpperCase();
     const customerKey = customerQr.toUpperCase();
     if (oldKey && oldPart && !acc[oldKey]) acc[oldKey] = oldPart;

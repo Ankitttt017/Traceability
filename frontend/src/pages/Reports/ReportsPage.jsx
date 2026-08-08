@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { reportApi, machineApi, organizationApi, shiftApi } from '../../api/services';
 import { toDatetimeLocal } from '../../utils/time';
 import { loadReportConfig } from '../../utils/reportConfig';
@@ -381,9 +381,12 @@ const sanitizeCustomerQrValue = (value) => {
   const raw = collapseRepeatedQrValue(value);
   if (!raw || raw === "-") return "";
   if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
+  if (!looksLikeCustomerQrValue(raw)) return "";
   return raw;
 };
-const looksLikeCustomerQrValue = (value) => /^R[A-Z0-9-]{12,}$/i.test(String(value || "").trim());
+function looksLikeCustomerQrValue(value) {
+  return /^R\d[A-Z0-9-]{10,}$/i.test(String(value || "").trim());
+}
 const REPORT_PREVIEW_ROWS_LIMIT = 500;
 
 // ── Professional Design System ────────────────────────────────────────────
@@ -1158,17 +1161,39 @@ const ReportsPage = () => {
       const response = await reportApi.getData(requestPayload, { signal: controller.signal, suppressGlobalError: true });
       setLoadProgress(100);
       const rowShotSummary = derivePlcShotSummaryFromRows(response.rows || []);
+      const hasQualityGateFilter = Boolean(String(appliedFilters.machineId || "").trim());
+      const getShotSummaryFilters = (source = {}) => {
+        const {
+          machineId,
+          operationNo,
+          station,
+          stationNo,
+          status,
+          resultType,
+          operatorId,
+          ...shotFilters
+        } = source || {};
+        void machineId; void operationNo; void station; void stationNo; void status; void resultType; void operatorId;
+        return shotFilters;
+      };
+      const responseShotSummary = response.metrics?.plcShotSummary || {};
+      const resolvedInitialShotSummary = hasQualityGateFilter
+        ? {
+            totalProduction: Number(responseShotSummary.totalProduction || 0),
+            okShot: Number(responseShotSummary.okShot || 0),
+            warmUpShot: Number(responseShotSummary.warmUpShot || 0),
+            offShot: Number(responseShotSummary.offShot || 0),
+          }
+        : (Number(responseShotSummary.totalProduction || 0) > 0 ? responseShotSummary : rowShotSummary);
       const pageData = {
         reportMode: response.reportMode || "",
         rows: response.rows || [], 
         metrics: {
           ...(response.metrics || {}),
-          plcShotSummary: Number(response.metrics?.plcShotSummary?.totalProduction || 0) > 0
-            ? response.metrics.plcShotSummary
-            : rowShotSummary,
-          plcShotSummarySource: Number(response.metrics?.plcShotSummary?.totalProduction || 0) > 0
+          plcShotSummary: resolvedInitialShotSummary,
+          plcShotSummarySource: hasQualityGateFilter
             ? (response.metrics?.plcShotSummarySource || "PLC_SUMMARY")
-            : "REPORT_ROWS",
+            : (Number(responseShotSummary.totalProduction || 0) > 0 ? (response.metrics?.plcShotSummarySource || "PLC_SUMMARY") : "REPORT_ROWS"),
         },
         availableShifts: response.availableShifts || [],
         plcColumns: response.plcColumns || [],
@@ -1177,15 +1202,19 @@ const ReportsPage = () => {
       setData(pageData);
       const summarySeq = shotSummarySeqRef.current + 1;
       shotSummarySeqRef.current = summarySeq;
-      const summaryFilters = { ...appliedFilters, fast: "1", noCache: "1", _ts: refreshTick || Date.now() };
+      const summaryFilters = { ...getShotSummaryFilters(appliedFilters), fast: "1", noCache: "1", _ts: refreshTick || Date.now() };
       setShotSummaryLoading(true);
       reportApi.getShotSummary(summaryFilters, { suppressGlobalError: true })
         .then((summary) => {
           if (shotSummarySeqRef.current !== summarySeq) return;
           const serverShotSummary = summary?.plcShotSummary || { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 };
           const nextShotSummary = {
-            plcShotSummary: Number(serverShotSummary.totalProduction || 0) > 0 ? serverShotSummary : rowShotSummary,
-            plcShotSummarySource: Number(serverShotSummary.totalProduction || 0) > 0 ? (summary?.plcShotSummarySource || "PLC_SUMMARY") : "REPORT_ROWS",
+            plcShotSummary: hasQualityGateFilter
+              ? serverShotSummary
+              : (Number(serverShotSummary.totalProduction || 0) > 0 ? serverShotSummary : rowShotSummary),
+            plcShotSummarySource: hasQualityGateFilter
+              ? (summary?.plcShotSummarySource || "PLC_SUMMARY")
+              : (Number(serverShotSummary.totalProduction || 0) > 0 ? (summary?.plcShotSummarySource || "PLC_SUMMARY") : "REPORT_ROWS"),
           };
           setData((prev) => {
             return {
@@ -1770,8 +1799,7 @@ const ReportsPage = () => {
 
   const reportSummaryMetrics = useMemo(() => {
     const metrics = data.metrics || {};
-    // Fix: only use server-provided metrics; never fall back to pagination.totalRows
-    // (that is the paginated page row count, not the actual "parts tracked" metric)
+    const visibleRows = Array.isArray(data.rows) ? data.rows : [];
     const traceabilityProduction = Number(
       metrics.traceabilityProduction ??
       metrics.totalProduction ??
@@ -1781,17 +1809,40 @@ const ReportsPage = () => {
     const totalNG = Number(metrics.totalNG || 0);
     const inProgress = Number(metrics.inProgress || 0);
     const productionBase = totalOK + totalNG;
+    const isPlcCommonError = (value = "") => {
+      const r = String(value || "").trim().toUpperCase();
+      if (!r) return false;
+      return (
+        r.includes("PLC_COMM") ||
+        r.includes("COMM_ERROR") ||
+        r.includes("PLC_COMMUNICATION") ||
+        r.includes("PLC_TIMEOUT") ||
+        r.includes("TIMEOUT") ||
+        r.includes("RESET_REQUIRED_AFTER_PLC_COMM_ERROR")
+      );
+    };
+
+    const visibleNgCount = visibleRows.filter((row) => {
+      const status = String(row?.status || row?.result || row?.finalStatus || "").toUpperCase();
+      const reason = String(row?.reason || row?.interlock_reason || "").trim();
+      if (isPlcCommonError(reason)) return false;
+      return status === "NG" || status === "FAILED";
+    }).length;
+    const hasQualityGateFilter = Boolean(String(appliedFilters.machineId || "").trim());
+    // Quality-gate scoped metrics must trust the backend station count. Visible rows can
+    // include the part's later/final NG history and would make Laser Marking look NG.
+    const resolvedTotalNG = hasQualityGateFilter ? totalNG : (totalNG > 0 ? totalNG : visibleNgCount);
     return {
       totalProduction: traceabilityProduction,
       traceabilityProduction,
       totalOK,
-      totalNG,
+      totalNG: resolvedTotalNG,
       inProgress,
-      validationRejects: Number(metrics.validationRejects ?? totalNG),
+      validationRejects: Number(metrics.validationRejects ?? resolvedTotalNG),
       passRate: productionBase > 0 ? Number(((totalOK / productionBase) * 100).toFixed(2)) : 0,
       plcShotSummary: metrics.plcShotSummary || {},
     };
-  }, [data.metrics]);
+  }, [data.metrics, data.rows, appliedFilters.machineId]);
   const scopedMachines = useMemo(
     () => (machines || []).filter((machine) => !filters.plantId || String(machine.plantId || "") === String(filters.plantId)),
     [machines, filters.plantId]

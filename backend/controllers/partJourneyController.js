@@ -20,9 +20,55 @@ const NON_QUALITY_AUDIT_REASONS = new Set([
 
 const CUSTOMER_QR_WAITING_MACHINE_TYPES = new Set(["LASER"]);
 const CUSTOMER_QR_WAITING_EXCLUDED_TOKENS = ["FINAL_INSPECTION", "FINAL INSPECTION", "FINAL STATION", "PDI", "PACKING", "PACKAGING", "DISPATCH"];
+const INVALID_CUSTOMER_QR_VALUES = new Set([
+  "ERROR",
+  "ERR",
+  "FAILED",
+  "FAIL",
+  "NG",
+  "WAIT",
+  "WAITING",
+  "PENDING",
+  "IN_PROGRESS",
+  "RUNNING",
+  "PLC_COMM_ERROR",
+  "COMM_ERROR",
+  "TIMEOUT",
+  "NULL",
+  "UNDEFINED",
+]);
 
 function toUpper(value) {
   return String(value || "").trim().toUpperCase();
+}
+
+function collapseRepeatedQrValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const customerQrSegments = raw.match(/R[^R]+/g);
+  if (
+    customerQrSegments &&
+    customerQrSegments.length > 1 &&
+    customerQrSegments.join("") === raw &&
+    customerQrSegments.every((segment) => segment === customerQrSegments[0])
+  ) {
+    return customerQrSegments[0];
+  }
+  if (raw.length < 16) return raw;
+  for (let size = Math.floor(raw.length / 2); size >= 8; size -= 1) {
+    if (raw.length % size !== 0) continue;
+    const token = raw.slice(0, size);
+    if (token && token.repeat(raw.length / size) === raw) return token;
+  }
+  return raw;
+}
+
+function sanitizeCustomerQrValue(value) {
+  const raw = collapseRepeatedQrValue(value);
+  if (!raw || raw === "-") return "";
+  if (INVALID_CUSTOMER_QR_VALUES.has(raw.toUpperCase())) return "";
+  if (!/^R\d[A-Z0-9-]{10,}$/i.test(raw)) return "";
+  return raw;
 }
 
 function looksLikePartialTraceabilityId(value) {
@@ -110,7 +156,7 @@ async function getPartJourney(req, res) {
     }
     const linkedPartIds = [
       partId,
-      ...initialMappings.flatMap((row) => [row.old_part_id, row.customer_qr]),
+      ...initialMappings.flatMap((row) => [row.old_part_id, sanitizeCustomerQrValue(row.customer_qr)]),
     ]
       .map((value) => String(value || "").trim())
       .filter(Boolean);
@@ -140,17 +186,17 @@ async function getPartJourney(req, res) {
       attributes: ["old_part_id", "station_no", "machine_id", "customer_qr"],
       raw: true,
     });
-    const mappedCustomerQr = String(customerMappings.find((row) => String(row.customer_qr || "").trim())?.customer_qr || "").trim();
+    const mappedCustomerQr = sanitizeCustomerQrValue(customerMappings.find((row) => sanitizeCustomerQrValue(row.customer_qr))?.customer_qr);
     const mappedPartId = String(customerMappings.find((row) => String(row.old_part_id || "").trim())?.old_part_id || "").trim();
     const mappedCustomerQrMachines = new Set(
       customerMappings
-        .filter((row) => String(row.customer_qr || "").trim())
+        .filter((row) => sanitizeCustomerQrValue(row.customer_qr))
         .map((row) => Number(row.machine_id || 0))
         .filter((id) => Number.isFinite(id) && id > 0)
     );
     const mappedCustomerQrStations = new Set(
       customerMappings
-        .filter((row) => String(row.customer_qr || "").trim())
+        .filter((row) => sanitizeCustomerQrValue(row.customer_qr))
         .map((row) => toUpper(row.station_no))
         .filter(Boolean)
     );

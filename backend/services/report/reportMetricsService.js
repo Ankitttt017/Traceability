@@ -153,6 +153,7 @@ function calculateProductionMetrics(rows, range = {}) {
     let latestRow = entries[0] || {};
     let latestTs = new Date(latestRow?.latestAnchorCreatedAt || latestRow?.createdAt || 0).getTime() || 0;
     let hasValidationReject = false;
+    let hasPlcCommError = false;
     let firstNgAt = null;
     let firstScanAt = null;
     let firstScanRow = entries[0] || {};
@@ -192,6 +193,19 @@ function calculateProductionMetrics(rows, range = {}) {
         if (resultTime && (!firstNgAt || toTime(resultTime) < toTime(firstNgAt))) {
           firstNgAt = resultTime;
         }
+      }
+      // Detect PLC communication / common PLC errors to allow exclusion from NG totals
+      const rowReason = String(row.reason || row.interlock_reason || "").trim().toUpperCase();
+      if (
+        rowReason.includes("PLC_COMM") ||
+        rowReason.includes("COMM_ERROR") ||
+        rowReason.includes("PLC_COMMUNICATION") ||
+        rowReason.includes("PLC_TIMEOUT") ||
+        rowReason.includes("TIMEOUT") ||
+        String(row.plc_status || "").toUpperCase() === "PLC_COMM_ERROR" ||
+        rowReason.includes("RESET_REQUIRED_AFTER_PLC_COMM_ERROR")
+      ) {
+        hasPlcCommError = true;
       }
       if (normalized === "OK" && isFinalInspectionOperation(row)) {
         const resultTime = getRowResultTimestamp(row);
@@ -255,6 +269,7 @@ function calculateProductionMetrics(rows, range = {}) {
       finalResultAt,
       finalResultInRange,
       hasValidationReject,
+      hasPlcCommError,
     };
   });
 
@@ -285,10 +300,12 @@ function calculateProductionMetrics(rows, range = {}) {
       metrics.byLine[lineName].ok += 1;
     } else if (part.overallStatus === "NG" && part.finalResultInRange) {
       metrics.completedProduction += 1;
-      metrics.totalNG += 1;
-      metrics.byMachine[machineName].ng += 1;
-      metrics.byShift[shiftCode].ng += 1;
-      metrics.byLine[lineName].ng += 1;
+      if (!part.hasPlcCommError) {
+        metrics.totalNG += 1;
+        metrics.byMachine[machineName].ng += 1;
+        metrics.byShift[shiftCode].ng += 1;
+        metrics.byLine[lineName].ng += 1;
+      }
     } else if (activeInRange && !completedInRange) {
       metrics.inProgress += 1;
       metrics.byMachine[machineName].inProgress += 1;
