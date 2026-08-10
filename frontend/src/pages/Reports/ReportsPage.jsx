@@ -1138,7 +1138,7 @@ const ReportsPage = () => {
     const liveAppliedFilters = getFreshQuickRangeFilters(appliedFilters);
     const requestPayload = {
       ...liveAppliedFilters,
-      fast: "1",
+      fast: "0",
       includePlcSummary: "0",
       includePlcReadings: "1",
       includeLeaktest: "1",
@@ -1434,6 +1434,8 @@ const ReportsPage = () => {
 
   const reportTable = useMemo(() => {
     const sourceRows = data.rows || [];
+    const scopedMachine = filters.machineId ? (machines || []).find(m => String(m.id || m.machineId || m.machine_id || "") === String(filters.machineId)) : null;
+    const scopedOperationKey = scopedMachine ? String(scopedMachine.operationNo || scopedMachine.operation_no || scopedMachine.stationNo || scopedMachine.station_no || "").trim().toUpperCase() : "";
     const machineStationPairs = (machines || [])
       .map((m) => {
         const machineName = String(m.machineName || m.machine_name || "").trim();
@@ -1623,6 +1625,12 @@ const ReportsPage = () => {
         .map((value) => String(value || "").trim())
         .find((value) => value && value !== "-") || "";
       const resolveOverallStatus = () => {
+        if (scopedOperationKey && operationResults[scopedOperationKey]) {
+          const scopedResult = normResult(operationResults[scopedOperationKey]);
+          if (scopedResult === "OK") return "PASSED";
+          if (scopedResult === "NG") return "NG";
+          return "IN_PROGRESS";
+        }
         const effectiveRequiredOperations = hasLeakData
           ? requiredOperations
           : requiredOperations.filter((operation) => operation !== LEAK_TEST_OPERATION);

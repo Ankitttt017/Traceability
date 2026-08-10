@@ -132,6 +132,31 @@ function calculateProductionMetrics(rows, range = {}) {
     byLine: {},
   };
 
+  const stationScoped = Boolean(
+    range.machineId ||
+    range.operationNo ||
+    range.stationNo ||
+    range.station
+  );
+
+  // Build a station-scope predicate so that when a machineId/operationNo filter is
+  // active we only evaluate rows that actually belong to the selected station.
+  // Without this guard, full-history rows from OTHER stations (e.g. Casting PDi NG)
+  // would contaminate the result for the selected Quality Gate (e.g. Laser Marking OK).
+  const scopedMachineId = range.machineId ? String(range.machineId).trim() : "";
+  const scopedOperationNo = String(range.operationNo || range.stationNo || range.station || "").trim().toUpperCase();
+  const isRowInScope = (row) => {
+    if (scopedMachineId) {
+      const rowMachineId = String(row.machine_id || row.machineId || "").trim();
+      if (rowMachineId && rowMachineId !== scopedMachineId) return false;
+    }
+    if (scopedOperationNo) {
+      const rowOp = String(row.operationNo || row.operation_no || row.stationNo || row.station_no || "").trim().toUpperCase();
+      if (rowOp && rowOp !== scopedOperationNo) return false;
+    }
+    return true;
+  };
+
   const groupedByPart = new Map();
   const requiredOperations = Array.from(
     new Set(
@@ -146,6 +171,112 @@ function calculateProductionMetrics(rows, range = {}) {
     if (!key) continue;
     if (!groupedByPart.has(key)) groupedByPart.set(key, []);
     groupedByPart.get(key).push(row);
+  }
+
+  if (stationScoped) {
+    groupedByPart.forEach((allEntries) => {
+      // Only consider rows that belong to the selected station/machine.
+      // Fall back to all entries if the scope filter would leave nothing
+      // (e.g. machineId is set but rows don't carry machine_id).
+      const scopedEntries = allEntries.filter(isRowInScope);
+      const entries = scopedEntries.length > 0 ? scopedEntries : allEntries;
+      let status = "";
+      let metricRow = entries[0] || {};
+      let metricTime = 0;
+      let hasActivityInRange = false;
+      let hasPlcCommError = false;
+
+      for (const row of entries) {
+        const { status: fallbackStatus } = resolveIndustrialResult(row);
+        const candidate = normalizeResult(
+          row.industrialResult ||
+          row.statusLabel ||
+          row.result ||
+          row.plc_status ||
+          fallbackStatus ||
+          "",
+          row.reason || row.interlock_reason,
+          row
+        );
+        status = pickPreferredOperationResult(status, candidate || "IN_PROGRESS");
+
+        const activityCandidates = [
+          getRowResultTimestamp(row),
+          row.latestAnchorCreatedAt,
+          row.createdAt,
+          row.updatedAt,
+          getRowFirstScanTimestamp(row),
+        ].filter(Boolean);
+        const activityTime = Math.max(0, ...activityCandidates.map(toTime));
+        if (activityTime >= metricTime) {
+          metricRow = row;
+          metricTime = activityTime;
+        }
+        if (activityCandidates.some((value) => isWithinRange(value, range))) {
+          hasActivityInRange = true;
+        }
+
+        const rowReason = String(row.reason || row.interlock_reason || "").trim().toUpperCase();
+        if (
+          rowReason.includes("PLC_COMM") ||
+          rowReason.includes("COMM_ERROR") ||
+          rowReason.includes("PLC_COMMUNICATION") ||
+          rowReason.includes("PLC_TIMEOUT") ||
+          rowReason.includes("TIMEOUT") ||
+          String(row.plc_status || "").toUpperCase() === "PLC_COMM_ERROR" ||
+          rowReason.includes("RESET_REQUIRED_AFTER_PLC_COMM_ERROR")
+        ) {
+          hasPlcCommError = true;
+        }
+      }
+
+      if (!hasActivityInRange) return;
+
+      const machineName = metricRow.anchorMachineName || metricRow.machineName || "Unknown Machine";
+      const shiftCode = metricRow.firstScanShiftCode || metricRow.shiftCode || metricRow.anchorShiftCode || "Unknown Shift";
+      const lineName = metricRow.anchorLineName || metricRow.lineName || "Unknown Line";
+
+      if (!metrics.byMachine[machineName]) metrics.byMachine[machineName] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
+      if (!metrics.byShift[shiftCode]) metrics.byShift[shiftCode] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
+      if (!metrics.byLine[lineName]) metrics.byLine[lineName] = { total: 0, ok: 0, ng: 0, inProgress: 0, rejects: 0 };
+
+      metrics.traceabilityProduction += 1;
+      metrics.byMachine[machineName].total += 1;
+      metrics.byShift[shiftCode].total += 1;
+      metrics.byLine[lineName].total += 1;
+
+      if (status === "OK") {
+        metrics.completedProduction += 1;
+        metrics.totalOK += 1;
+        metrics.byMachine[machineName].ok += 1;
+        metrics.byShift[shiftCode].ok += 1;
+        metrics.byLine[lineName].ok += 1;
+      } else if (status === "NG") {
+        metrics.completedProduction += 1;
+        if (!hasPlcCommError) {
+          metrics.totalNG += 1;
+          metrics.validationRejects += 1;
+          metrics.byMachine[machineName].ng += 1;
+          metrics.byShift[shiftCode].ng += 1;
+          metrics.byLine[lineName].ng += 1;
+          metrics.byMachine[machineName].rejects += 1;
+          metrics.byShift[shiftCode].rejects += 1;
+          metrics.byLine[lineName].rejects += 1;
+        }
+      } else {
+        metrics.inProgress += 1;
+        metrics.byMachine[machineName].inProgress += 1;
+        metrics.byShift[shiftCode].inProgress += 1;
+        metrics.byLine[lineName].inProgress += 1;
+      }
+    });
+
+    const productionBase = metrics.totalOK + metrics.totalNG;
+    metrics.totalProduction = metrics.traceabilityProduction;
+    metrics.passRate = productionBase > 0
+      ? Number(((metrics.totalOK / productionBase) * 100).toFixed(2))
+      : 0;
+    return metrics;
   }
 
   const groupedParts = Array.from(groupedByPart.values()).map((entries) => {
