@@ -45,9 +45,14 @@ const { tryAcquireMachineLock, clearMachineLock } = require("../services/machine
 const { finalizeCycleAfterPlc } = require("../services/cycleFinalizationService");
 const { autoPackReadyPart } = require("../services/packingService");
 const {
+  fetchProductionData,
   fetchProductionFirstScanPartCount,
   fetchProductionSummaryMetrics,
 } = require("../services/report/reportExportService");
+const { calculateProductionMetrics } = require("../services/report/reportMetricsService");
+const {
+  fetchMaterializedTraceabilityMetrics,
+} = require("../services/report/finalProductionResultService");
 const { TIMELINE_EVENTS, recordTimelineEvent } = require("../services/operationTimelineService");
 const {
   getStationFeatureConfig,
@@ -8349,7 +8354,19 @@ exports.getRejectionAnalysis = async (req, res) => {
       dieName: dieNameFilter || undefined,
       dieCastingMachine: dieCastingMachineFilter || undefined,
     };
-    const [productionTotal, reportSummaryMetrics] = await Promise.all([
+    const [liveMetricRows, materializedSummaryMetrics, productionTotal, sqlSummaryMetrics] = await Promise.all([
+      fetchProductionData(reportMetricFilters, {
+        includePlcReadings: false,
+        includeLeaktest: true,
+        includePlcSummary: false,
+      }).catch((error) => {
+        console.warn(`[REJECTION] live row metrics unavailable: ${error.message}`);
+        return null;
+      }),
+      fetchMaterializedTraceabilityMetrics(reportMetricFilters).catch((error) => {
+        console.warn(`[REJECTION] materialized summary metrics unavailable: ${error.message}`);
+        return null;
+      }),
       fetchProductionFirstScanPartCount(reportMetricFilters).catch((error) => {
         console.warn(`[REJECTION] first-scan production total unavailable: ${error.message}`);
         return 0;
@@ -8359,7 +8376,41 @@ exports.getRejectionAnalysis = async (req, res) => {
         return null;
       }),
     ]);
-    let alignedProductionTotal = Number(productionTotal || 0);
+    const liveSummaryMetrics = Array.isArray(liveMetricRows)
+      ? calculateProductionMetrics(liveMetricRows, reportMetricFilters)
+      : null;
+    const hasLiveSummary = Boolean(
+      liveSummaryMetrics &&
+      (
+        Number(liveSummaryMetrics.traceabilityProduction || 0) > 0 ||
+        Number(liveSummaryMetrics.totalProduction || 0) > 0 ||
+        Number(liveSummaryMetrics.totalOK || 0) > 0 ||
+        Number(liveSummaryMetrics.totalNG || 0) > 0 ||
+        Number(liveSummaryMetrics.inProgress || 0) > 0 ||
+        (Array.isArray(liveMetricRows) && liveMetricRows.length === 0)
+      )
+    );
+    const hasMaterializedSummary = Boolean(
+      materializedSummaryMetrics &&
+      (
+        Number(materializedSummaryMetrics.traceabilityProduction || 0) > 0 ||
+        Number(materializedSummaryMetrics.totalProduction || 0) > 0 ||
+        Number(materializedSummaryMetrics.totalOK || 0) > 0 ||
+        Number(materializedSummaryMetrics.totalNG || 0) > 0 ||
+        Number(materializedSummaryMetrics.inProgress || 0) > 0
+      )
+    );
+    const reportSummaryMetrics = hasLiveSummary
+      ? liveSummaryMetrics
+      : (hasMaterializedSummary ? materializedSummaryMetrics : (sqlSummaryMetrics || null));
+    const firstScanProductionTotal = Number(productionTotal);
+    let alignedProductionTotal = Number.isFinite(firstScanProductionTotal) && firstScanProductionTotal >= 0
+      ? firstScanProductionTotal
+      : Number(
+          reportSummaryMetrics?.traceabilityProduction ??
+          reportSummaryMetrics?.totalProduction ??
+          0
+        );
     const hasEnrichedPartProductionFilter = Boolean(partNameFilter || partTypeFilter || dieNameFilter || dieCastingMachineFilter);
     if (hasEnrichedPartProductionFilter) {
       const scopedProductionWhere = {
@@ -8570,15 +8621,16 @@ exports.getRejectionAnalysis = async (req, res) => {
     const alignedRejectionTotal = hasRejectionDetailFilters
       ? analysisRows.length
       : Number(reportSummaryMetrics?.totalNG ?? analysisRows.length);
+    const alignedTotalOK = Number(reportSummaryMetrics?.totalOK || 0);
     const alignedTraceabilityMetrics = {
       traceabilityProduction: alignedProductionTotal,
       totalProduction: alignedProductionTotal,
-      totalOK: Number(reportSummaryMetrics?.totalOK || 0),
+      totalOK: alignedTotalOK,
       totalNG: alignedRejectionTotal,
       inProgress: Number(reportSummaryMetrics?.inProgress || 0),
       validationRejects: alignedRejectionTotal,
-      passRate: (Number(reportSummaryMetrics?.totalOK || 0) + alignedRejectionTotal) > 0
-        ? Number(((Number(reportSummaryMetrics?.totalOK || 0) / (Number(reportSummaryMetrics?.totalOK || 0) + alignedRejectionTotal)) * 100).toFixed(2))
+      passRate: (alignedTotalOK + alignedRejectionTotal) > 0
+        ? Number(((alignedTotalOK / (alignedTotalOK + alignedRejectionTotal)) * 100).toFixed(2))
         : 0,
     };
 

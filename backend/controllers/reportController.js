@@ -12,6 +12,9 @@ const {
   getPlcReadingColumns,
   fetchPlcShotSummary,
 } = require("../services/report/reportExportService");
+const {
+  fetchMaterializedTraceabilityMetrics,
+} = require("../services/report/finalProductionResultService");
 const { calculateProductionMetrics } = require("../services/report/reportMetricsService");
 const Shift = require("../models/Shift");
 
@@ -176,33 +179,72 @@ async function fetchAccurateTraceabilityMetrics(filters = {}) {
   const productionFilters = stripMetricStatusFilters(stripReportControlFilters(filters));
   const statusScopedFilters = stripReportControlFilters(filters);
   const nextMetrics = {};
+  const liveRows = await fetchProductionData(productionFilters, {
+    includePlcReadings: false,
+    includeLeaktest: true,
+    includePlcSummary: false,
+  }).catch((error) => {
+    console.warn(`[ReportController] live row metrics skipped: ${error.message}`);
+    return null;
+  });
+  if (Array.isArray(liveRows)) {
+    const liveMetrics = calculateProductionMetrics(liveRows, productionFilters);
+    const hasLiveMetrics = (
+      Number(liveMetrics.traceabilityProduction || 0) > 0 ||
+      Number(liveMetrics.totalProduction || 0) > 0 ||
+      Number(liveMetrics.totalOK || 0) > 0 ||
+      Number(liveMetrics.totalNG || 0) > 0 ||
+      Number(liveMetrics.inProgress || 0) > 0
+    );
+    if (hasLiveMetrics || liveRows.length === 0) {
+      return scopeMetricsToStatusFilter(liveMetrics, statusScopedFilters);
+    }
+  }
+
   const stationScoped = Boolean(
     productionFilters.machineId ||
     productionFilters.operationNo ||
     productionFilters.stationNo ||
     productionFilters.station
   );
-  const [summaryMetrics, firstScanTotal] = await Promise.all([
-    fetchProductionSummaryMetrics(productionFilters),
-    stationScoped
-      ? Promise.resolve(null)
-      : fetchProductionFirstScanPartCount(productionFilters).catch((error) => {
-          console.warn(`[ReportController] first-scan production total skipped: ${error.message}`);
-          return null;
-        }),
+  const [materializedMetrics, summaryMetrics, firstScanTotal] = await Promise.all([
+    fetchMaterializedTraceabilityMetrics(productionFilters).catch((error) => {
+      console.warn(`[ReportController] materialized summary skipped: ${error.message}`);
+      return null;
+    }),
+    fetchProductionSummaryMetrics(productionFilters).catch((error) => {
+      console.warn(`[ReportController] traceability SQL summary skipped: ${error.message}`);
+      return null;
+    }),
+    fetchProductionFirstScanPartCount(productionFilters).catch((error) => {
+      console.warn(`[ReportController] first-scan production total skipped: ${error.message}`);
+      return null;
+    }),
   ]);
 
-  if (summaryMetrics) {
-    nextMetrics.traceabilityProduction = Number(summaryMetrics.totalProduction || 0);
-    nextMetrics.totalProduction = Number(summaryMetrics.totalProduction || 0);
-    nextMetrics.totalOK = Number(summaryMetrics.totalOK || 0);
-    nextMetrics.totalNG = Number(summaryMetrics.totalNG || 0);
-    nextMetrics.inProgress = Number(summaryMetrics.inProgress || 0);
-    nextMetrics.validationRejects = Number(summaryMetrics.validationRejects || summaryMetrics.totalNG || 0);
-    nextMetrics.passRate = Number(summaryMetrics.passRate || 0);
-    nextMetrics.byMachine = summaryMetrics.byMachine || {};
-    nextMetrics.byShift = summaryMetrics.byShift || {};
-    nextMetrics.byLine = summaryMetrics.byLine || {};
+  const hasMaterializedMetrics = Boolean(
+    materializedMetrics &&
+    (
+      Number(materializedMetrics.traceabilityProduction || 0) > 0 ||
+      Number(materializedMetrics.totalProduction || 0) > 0 ||
+      Number(materializedMetrics.totalOK || 0) > 0 ||
+      Number(materializedMetrics.totalNG || 0) > 0 ||
+      Number(materializedMetrics.inProgress || 0) > 0
+    )
+  );
+  const metricSource = hasMaterializedMetrics ? materializedMetrics : summaryMetrics;
+
+  if (metricSource) {
+    nextMetrics.traceabilityProduction = Number(metricSource.traceabilityProduction ?? metricSource.totalProduction ?? 0);
+    nextMetrics.totalProduction = Number(metricSource.totalProduction ?? metricSource.traceabilityProduction ?? 0);
+    nextMetrics.totalOK = Number(metricSource.totalOK || 0);
+    nextMetrics.totalNG = Number(metricSource.totalNG || 0);
+    nextMetrics.inProgress = Number(metricSource.inProgress || 0);
+    nextMetrics.validationRejects = Number(metricSource.validationRejects || metricSource.totalNG || 0);
+    nextMetrics.passRate = Number(metricSource.passRate || 0);
+    nextMetrics.byMachine = metricSource.byMachine || {};
+    nextMetrics.byShift = metricSource.byShift || {};
+    nextMetrics.byLine = metricSource.byLine || {};
   }
 
   const normalizedFirstScanTotal = Number(firstScanTotal);
@@ -580,9 +622,15 @@ exports.getReportData = async (req, res) => {
     const pagination = getPagination(req.query || {});
     const { rows, shifts, plcColumnSet, metrics } = await getLiveReportBundle(filters, options);
     const paged = paginateReportRowsByPart(rows, pagination);
-    const scopedMetrics = options.fast
-      ? scopeMetricsToStatusFilter({ ...(metrics || {}) }, filters)
-      : await applyUncappedTraceabilityMetrics(metrics, filters);
+    const accurateMetrics = await fetchAccurateTraceabilityMetrics(filters).catch((error) => {
+      console.warn(`[ReportController] accurate metrics skipped: ${error.message}`);
+      return null;
+    });
+    const scopedMetrics = accurateMetrics || (
+      options.fast
+        ? scopeMetricsToStatusFilter({ ...(metrics || {}) }, filters)
+        : await applyUncappedTraceabilityMetrics(metrics, filters)
+    );
     const responseMetrics = alignMetricsToVisibleStatusCount(scopedMetrics, filters, paged.pagination);
     responseMetrics.plcShotSummary = responseMetrics.plcShotSummary || {};
     responseMetrics.plcShotSummarySource = responseMetrics.plcShotSummarySource || "REPORT_ROWS";
@@ -666,7 +714,7 @@ exports.getReportSummaryMetrics = async (req, res) => {
     const metrics = await fetchAccurateTraceabilityMetrics(req.query || {});
     res.json({
       metrics,
-      metricsSource: "SQL_SUMMARY",
+      metricsSource: "TRACEABILITY_SUMMARY",
     });
   } catch (error) {
     const db = summarizeDbError(error);

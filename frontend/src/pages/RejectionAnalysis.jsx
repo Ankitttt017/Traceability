@@ -1187,9 +1187,6 @@ function dedupeRejectionRows(list = []) {
 function normalizeRejectionType(row = {}) {
   const raw = `${row.category || ""} ${getDisplayReason(row)}`;
   const r = normalizeToken(raw).replace(/[_-]+/g, " ");
-  if (r.includes("LEAK") || r.includes("OP150")) {
-    return { type: "LT", label: "LT - Leak Test Rejection", icon: "", color: C.blue };
-  }
   if (r.includes("CRAM") || r.includes("CHAMFER") || r.includes("DIMENSION") || r.includes("PROFILE")) {
     return { type: "CRAM", label: "CRAM - Cram Rejection", icon: "", color: C.amber };
   }
@@ -2158,7 +2155,6 @@ export default function RejectionAnalysis() {
       { name: "CR - Casting", value: grouped["CR - Casting Rejection"] || 0, color: C.danger, icon: "" },
       { name: "CRAM - Cram", value: grouped["CRAM - Cram Rejection"] || 0, color: C.amber, icon: "" },
       { name: "MR - Machining", value: grouped["MR - Machining Rejection"] || 0, color: C.steel, icon: "" },
-      { name: "LT - Leak Test", value: grouped["LT - Leak Test Rejection"] || 0, color: C.blue, icon: "" },
     ];
     const total = Math.max(1, rows.reduce((sum, row) => sum + Number(row.value || 0), 0));
     return rows.map((row) => ({ ...row, percent: Number(((Number(row.value || 0) / total) * 100).toFixed(1)) }));
@@ -3455,7 +3451,6 @@ export default function RejectionAnalysis() {
         </Card>
       </div>
 
-      {/* ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ Zone Heat Map ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ */}
       <Card style={{ padding: 18 }}>
         <SectionHead
           title="Zone Heat Map"
