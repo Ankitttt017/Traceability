@@ -51,6 +51,7 @@ import {
   AreaChart,
   Area,
   ComposedChart,
+  ResponsiveContainer,
 } from "recharts";
 import {
   dashboardApi,
@@ -321,7 +322,6 @@ function normalizeRejectionType(reason = "") {
     return "LT - Leak Test Rejection";
   }
 
-  // MR: scan/traceability/data flow or generic manual reject paths.
   if (
     r.includes("DUPLICATE") ||
     r.includes("FORMAT") ||
@@ -334,7 +334,6 @@ function normalizeRejectionType(reason = "") {
     return "MR - Machining Rejection";
   }
 
-  // CRAM: dimensional/geometry/chamfer/profile/surface-measurement style defects.
   if (
     r.includes("CRAM") ||
     r.includes("CHAMFER") ||
@@ -353,7 +352,6 @@ function normalizeRejectionType(reason = "") {
     return "CRAM - Cram Defects";
   }
 
-  // CR: casting/process-body defects.
   if (
     r.includes(" CAST") ||
     r.startsWith("CAST") ||
@@ -371,7 +369,6 @@ function normalizeRejectionType(reason = "") {
     return "CR - Casting Defects";
   }
 
-  // Keep plain "CR" token check at the end to avoid false positives in other words.
   if (/(^|\s)CR(\s|$)/.test(r)) return "CR - Casting Defects";
   return "MR - Machining Rejection";
 }
@@ -530,7 +527,7 @@ function resolveDashboardShiftCodeForDate(dateValue, shifts = []) {
       shift?.startTime || shift?.start_time,
     );
     const end = getDashboardShiftSeconds(shift?.endTime || shift?.end_time);
-    if (!code || start === null || end === null) continue;
+    if (!code || code === "UNASSIGNED" || start === null || end === null) continue;
     const inShift =
       start === end
         ? true
@@ -645,6 +642,31 @@ function getDashboardOperationPriority(value) {
   if (value === "NG") return 2;
   if (value === "IN_PROGRESS") return 1;
   return 0;
+}
+
+function isFinalInspectionOperation(rowOrOperation = {}) {
+  const operation =
+    typeof rowOrOperation === "string"
+      ? rowOrOperation
+      : rowOrOperation.operationNo ||
+        rowOrOperation.stationNo ||
+        rowOrOperation.operation_no ||
+        rowOrOperation.station_no ||
+        "";
+  const machineName =
+    typeof rowOrOperation === "string"
+      ? ""
+      : rowOrOperation.machineName ||
+        rowOrOperation.machine_name ||
+        rowOrOperation?.Machine?.machine_name ||
+        "";
+  const op = String(operation || "").trim().toUpperCase();
+  const machine = String(machineName || "").trim().toUpperCase();
+  return (
+    op === "OP160" ||
+    machine.includes("FINAL INSPECTION") ||
+    machine.includes("FINAL_INSPECTION")
+  );
 }
 
 const EMPTY_SUMMARY = {
@@ -1767,8 +1789,6 @@ const Dashboard = () => {
     };
   });
   const [isLiveProductionRange, setIsLiveProductionRange] = useState(true);
-  const [chartModeHourly, setChartModeHourly] = useState("bar");
-  const [chartModeShift, setChartModeShift] = useState("bar");
   const [chartModeRejectTrend, setChartModeRejectTrend] = useState("area");
   const [rejectionConfigParts, setRejectionConfigParts] = useState([]);
   const [heatMapPart, setHeatMapPart] = useState("");
@@ -1786,6 +1806,18 @@ const Dashboard = () => {
   const refreshTimerRef = useRef(null);
   const lastRefreshAtRef = useRef(0);
   const latestLoadDataRef = useRef(null);
+
+  // ---- Compute isMultiDayRange early ----
+  const isMultiDayRange = useMemo(() => {
+    if (filters.dateFrom && filters.dateTo) {
+      const fromMs = new Date(filters.dateFrom).getTime();
+      const toMs = new Date(filters.dateTo).getTime();
+      if (Number.isFinite(fromMs) && Number.isFinite(toMs)) {
+        return toMs - fromMs > 36 * 60 * 60 * 1000;
+      }
+    }
+    return false;
+  }, [filters.dateFrom, filters.dateTo]);
 
   useEffect(() => {
     if (activeTab !== "rejection") return;
@@ -2304,12 +2336,14 @@ const Dashboard = () => {
       const statuses = requiredOperations
         .map((operation) => operationResults.get(operation))
         .filter(Boolean);
+      const hasFinalInspectionOk = entry.stationTimeline.some(
+        (stage) =>
+          stage.normalizedStatus === "OK" &&
+          isFinalInspectionOperation(stage),
+      );
       const finalStatus = statuses.some((status) => status === "NG")
         ? "FAILED"
-        : requiredOperations.length > 0 &&
-            requiredOperations.every(
-              (operation) => operationResults.get(operation) === "OK",
-            )
+        : hasFinalInspectionOk
           ? "PASSED"
           : "IN_PROGRESS";
       const latestReason = String(entry.latestReason || "").trim();
@@ -2702,7 +2736,7 @@ const Dashboard = () => {
         }));
   }, [report.availableShifts, shiftManagerShifts, summary.availableShifts]);
 
-  // Shift bar data
+  // Shift bar data follows Shift Management and keeps configured shifts visible.
   const shiftData = useMemo(() => {
     const shiftLabelByCode = dashboardShifts.reduce((acc, shift) => {
       acc[normalizeDashboardShiftCode(shift.shiftCode || shift.shift_code)] =
@@ -2716,13 +2750,15 @@ const Dashboard = () => {
         normalizeDashboardShiftCode(shift.shiftCode || shift.shift_code),
       )
       .filter(Boolean);
-    const toShiftRows = (normalizedMap) =>
-      shiftOrder.map((code) => {
+
+    const toShiftRows = (normalizedMap) => {
+      return shiftOrder.map((code) => {
         const row = normalizedMap[code] || {};
         const ok = Number(row.ok || 0);
         const ng = Number(row.ng || 0);
         const inProgress = Number(row.inProgress || 0);
         const total = Number(row.total || 0);
+
         return {
           code,
           name: shiftLabelByCode[code] || getDashboardShiftLabel(code),
@@ -2735,10 +2771,11 @@ const Dashboard = () => {
           oa: Number(row.oa || 0),
         };
       });
-    const reconcileShiftRows = (rows) => {
-      return rows;
     };
 
+    const reconcileShiftRows = (rows) => rows;
+
+    // Try to get data from reportMetrics
     if (
       reportMetrics?.byShift &&
       typeof reportMetrics.byShift === "object" &&
@@ -2769,11 +2806,17 @@ const Dashboard = () => {
       return reconcileShiftRows(toShiftRows(normalizedMap));
     }
 
+    // Try from dashboardParts
     const shiftRowsFromParts = (dashboardParts || []).reduce((acc, part) => {
+      const shiftTime =
+        part?.finalStatus === "PASSED" || part?.finalStatus === "FAILED"
+          ? part?.latestCreatedAt || part?.createdAt
+          : part?.latestCreatedAt || part?.createdAt;
       const code = resolveDashboardShiftCodeForDate(
-        part?.createdAt || part?.latestCreatedAt,
+        shiftTime,
         dashboardShifts,
       );
+      if (code === "UNASSIGNED") return acc;
       if (!acc[code])
         acc[code] = { total: 0, ok: 0, ng: 0, inProgress: 0, target: 0 };
       acc[code].total += 1;
@@ -2785,6 +2828,7 @@ const Dashboard = () => {
     if (Object.keys(shiftRowsFromParts).length > 0)
       return reconcileShiftRows(toShiftRows(shiftRowsFromParts));
 
+    // Try from report.shiftProduction
     if (
       report.shiftProduction &&
       Object.keys(report.shiftProduction || {}).length > 0
@@ -2809,6 +2853,7 @@ const Dashboard = () => {
       return reconcileShiftRows(toShiftRows(normalizedMap));
     }
 
+    // Try from shiftWiseMetrics
     const shiftRowsFromMetrics = (report.shiftWiseMetrics || []).reduce(
       (acc, row) => {
         const code = normalizeDashboardShiftCode(
@@ -2828,6 +2873,7 @@ const Dashboard = () => {
     if (Object.keys(shiftRowsFromMetrics).length > 0)
       return reconcileShiftRows(toShiftRows(shiftRowsFromMetrics));
 
+    // Try from partsList
     const shiftRowsFromStationRows = (report.partsList || []).reduce(
       (acc, row) => {
         const scanTime =
@@ -2839,6 +2885,7 @@ const Dashboard = () => {
           scanTime,
           dashboardShifts,
         );
+        if (code === "UNASSIGNED") return acc;
         if (!acc[code])
           acc[code] = { total: 0, ok: 0, ng: 0, inProgress: 0, target: 0 };
         const normalizedStatus = normalizeDashboardStationResult(
@@ -2860,6 +2907,7 @@ const Dashboard = () => {
     if (Object.keys(shiftRowsFromStationRows).length > 0)
       return reconcileShiftRows(toShiftRows(shiftRowsFromStationRows));
 
+    // Try from hourlyProduction
     const shiftRowsFromHourly = (report.hourlyProduction || []).reduce(
       (acc, row) => {
         const hourValue = row?.hour || row?.time || row?.bucket;
@@ -2867,6 +2915,7 @@ const Dashboard = () => {
           hourValue,
           dashboardShifts,
         );
+        if (code === "UNASSIGNED") return acc;
         if (!acc[code])
           acc[code] = { total: 0, ok: 0, ng: 0, inProgress: 0, target: 0 };
         acc[code].total += Number(row?.total || 0);
@@ -2879,6 +2928,7 @@ const Dashboard = () => {
     );
     if (Object.keys(shiftRowsFromHourly).length > 0)
       return reconcileShiftRows(toShiftRows(shiftRowsFromHourly));
+    
     return reconcileShiftRows(toShiftRows({}));
   }, [
     dashboardParts,
@@ -3148,17 +3198,6 @@ const Dashboard = () => {
       String(a.slot).localeCompare(String(b.slot)),
     );
   }, [filteredRejectionRows]);
-
-  const isMultiDayRange = useMemo(() => {
-    if (filters.dateFrom && filters.dateTo) {
-      const fromMs = new Date(filters.dateFrom).getTime();
-      const toMs = new Date(filters.dateTo).getTime();
-      if (Number.isFinite(fromMs) && Number.isFinite(toMs)) {
-        return toMs - fromMs > 36 * 60 * 60 * 1000;
-      }
-    }
-    return false;
-  }, [filters.dateFrom, filters.dateTo]);
 
   const productionTrendData = useMemo(() => {
     const sourceRows = Array.isArray(dashboardParts) ? dashboardParts : [];
@@ -4078,10 +4117,6 @@ const Dashboard = () => {
                           gap: 8,
                         }}
                       >
-                        <ChartModeToggle
-                          mode={chartModeHourly}
-                          onChange={setChartModeHourly}
-                        />
                         <div
                           style={{
                             width: 6,
@@ -4113,187 +4148,65 @@ const Dashboard = () => {
                     }}
                   >
                     {({ width, height }) => (
-                      <>
-                        {chartModeHourly === "line" && (
-                          <LineChart
-                            width={width}
-                            height={height}
-                            data={productionTrendData}
-                            margin={{ top: 4, right: 8, bottom: 0, left: -10 }}
-                          >
-                            <CartesianGrid
-                              stroke={C.bdr(0.12)}
-                              strokeDasharray="3 4"
-                              vertical={false}
-                            />
-                            <XAxis
-                              dataKey={isMultiDayRange ? "date" : "hour"}
-                              tickFormatter={(h) =>
-                                isMultiDayRange
-                                  ? String(h).slice(5)
-                                  : `${String(h).padStart(2, "0")}:00`
-                              }
-                              tick={{
-                                fontSize: 11,
-                                fill: C.txt("sec"),
-                                fontFamily: "'DM Mono',monospace",
-                              }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <YAxis
-                              tick={{ fontSize: 11, fill: C.txt("sec") }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <Tooltip
-                              {...TooltipStyle}
-                              labelFormatter={(h) =>
-                                isMultiDayRange
-                                  ? String(h)
-                                  : `${String(h).padStart(2, "0")}:00`
-                              }
-                            />
-                            <Line
-                              type="monotone"
-                              dataKey="ok"
-                              stroke={C.ok()}
-                              strokeWidth={2.5}
-                              dot={false}
-                              activeDot={{ r: 4, fill: C.ok() }}
-                            />
-                            <Line
-                              type="monotone"
-                              dataKey="ng"
-                              stroke={C.ng()}
-                              strokeWidth={2}
-                              dot={false}
-                              strokeDasharray="4 3"
-                              activeDot={{ r: 4, fill: C.ng() }}
-                            />
-                            <Line
-                              type="monotone"
-                              dataKey="total"
-                              stroke={C.steel()}
-                              strokeWidth={1.5}
-                              dot={false}
-                              strokeDasharray="2 4"
-                              activeDot={{ r: 4, fill: C.steel() }}
-                            />
-                          </LineChart>
-                        )}
-                        {chartModeHourly === "bar" && (
-                          <BarChart
-                            width={width}
-                            height={height}
-                            data={productionTrendData}
-                            margin={{ top: 4, right: 8, bottom: 0, left: -10 }}
-                          >
-                            <CartesianGrid
-                              stroke={C.bdr(0.12)}
-                              strokeDasharray="3 4"
-                              vertical={false}
-                            />
-                            <XAxis
-                              dataKey={isMultiDayRange ? "date" : "hour"}
-                              tickFormatter={(h) =>
-                                isMultiDayRange
-                                  ? String(h).slice(5)
-                                  : `${String(h).padStart(2, "0")}:00`
-                              }
-                              tick={{
-                                fontSize: 11,
-                                fill: C.txt("sec"),
-                                fontFamily: "'DM Mono',monospace",
-                              }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <YAxis
-                              tick={{ fontSize: 11, fill: C.txt("sec") }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <Tooltip
-                              {...TooltipStyle}
-                              labelFormatter={(h) =>
-                                isMultiDayRange
-                                  ? String(h)
-                                  : `${String(h).padStart(2, "0")}:00`
-                              }
-                            />
-                            <Bar
-                              dataKey="ok"
-                              fill={C.ok()}
-                              radius={[4, 4, 0, 0]}
-                            />
-                            <Bar
-                              dataKey="ng"
-                              fill={C.ng()}
-                              radius={[4, 4, 0, 0]}
-                            />
-                            <Bar
-                              dataKey="total"
-                              fill={C.steel(0.6)}
-                              radius={[4, 4, 0, 0]}
-                            />
-                          </BarChart>
-                        )}
-                        {chartModeHourly === "area" && (
-                          <AreaChart
-                            width={width}
-                            height={height}
-                            data={productionTrendData}
-                            margin={{ top: 4, right: 8, bottom: 0, left: -10 }}
-                          >
-                            <CartesianGrid
-                              stroke={C.bdr(0.12)}
-                              strokeDasharray="3 4"
-                              vertical={false}
-                            />
-                            <XAxis
-                              dataKey={isMultiDayRange ? "date" : "hour"}
-                              tickFormatter={(h) =>
-                                isMultiDayRange
-                                  ? String(h).slice(5)
-                                  : `${String(h).padStart(2, "0")}:00`
-                              }
-                              tick={{
-                                fontSize: 11,
-                                fill: C.txt("sec"),
-                                fontFamily: "'DM Mono',monospace",
-                              }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <YAxis
-                              tick={{ fontSize: 11, fill: C.txt("sec") }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <Tooltip
-                              {...TooltipStyle}
-                              labelFormatter={(h) =>
-                                isMultiDayRange
-                                  ? String(h)
-                                  : `${String(h).padStart(2, "0")}:00`
-                              }
-                            />
-                            <Area
-                              type="monotone"
-                              dataKey="ok"
-                              stroke={C.ok()}
-                              fill={C.ok(0.25)}
-                            />
-                            <Area
-                              type="monotone"
-                              dataKey="ng"
-                              stroke={C.ng()}
-                              fill={C.ng(0.2)}
-                            />
-                          </AreaChart>
-                        )}
-                      </>
+                      <BarChart
+                        width={width}
+                        height={height}
+                        data={productionTrendData}
+                        margin={{ top: 10, right: 10, bottom: 0, left: -10 }}
+                      >
+                        <CartesianGrid
+                          stroke={C.bdr(0.12)}
+                          strokeDasharray="3 4"
+                          vertical={false}
+                        />
+                        <XAxis
+                          dataKey={isMultiDayRange ? "date" : "hour"}
+                          tickFormatter={(h) =>
+                            isMultiDayRange
+                              ? String(h).slice(5)
+                              : `${String(h).padStart(2, "0")}:00`
+                          }
+                          tick={{
+                            fontSize: 11,
+                            fill: C.txt("sec"),
+                            fontFamily: "'DM Mono',monospace",
+                          }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 11, fill: C.txt("sec") }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip
+                          {...TooltipStyle}
+                          labelFormatter={(h) =>
+                            isMultiDayRange
+                              ? String(h)
+                              : `${String(h).padStart(2, "0")}:00`
+                          }
+                          contentStyle={{
+                            ...TooltipStyle.contentStyle,
+                            padding: "12px 16px",
+                            borderRadius: 12,
+                          }}
+                        />
+                        <Bar
+                          dataKey="ok"
+                          name="Passed"
+                          fill={C.ok()}
+                          radius={[4, 4, 0, 0]}
+                          barSize={20}
+                        />
+                        <Bar
+                          dataKey="ng"
+                          name="NG"
+                          fill={C.ng()}
+                          radius={[4, 4, 0, 0]}
+                          barSize={20}
+                        />
+                      </BarChart>
                     )}
                   </SafeChart>
                   <div
@@ -4307,10 +4220,6 @@ const Dashboard = () => {
                     {[
                       { color: C.ok(), label: t("dashboard.pass", "Pass") },
                       { color: C.ng(), label: t("dashboard.fail", "Fail") },
-                      {
-                        color: C.steel(),
-                        label: t("dashboard.total", "Total"),
-                      },
                     ].map((l) => (
                       <div
                         key={l.label}
@@ -4344,53 +4253,68 @@ const Dashboard = () => {
               </div>
 
               <div
-                style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}
+                style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}
                 className="db-grid-2"
               >
                 <style>{`@media(max-width:800px){.db-grid-2{grid-template-columns:1fr!important}}`}</style>
 
-                {/* <div style={{background:C.bg("card"),border:`1px solid ${C.bdr()}`,
-              borderRadius:14,padding:20,boxShadow:SHADOW}}>
-              <SectionHead title={t("dashboard.productionByShift", "Production by Shift")} right={<ChartModeToggle mode={chartModeShift} onChange={setChartModeShift} />} />
-              <SafeChart height={200} style={{overflow:"visible",position:"relative",zIndex:2}}>
-                {({ width, height }) => (
-                  <>
-                  {chartModeShift === "bar" && (
-                    <BarChart width={width} height={height} data={shiftData} margin={{top:4,right:8,bottom:0,left:-10}}>
-                      <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
-                      <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                      <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                      <Tooltip {...TooltipStyle}/>
-                      <Bar dataKey="ok" name="Pass" stackId="shift" fill={C.ok()} radius={[4,4,0,0]} barSize={28}/>
-                      <Bar dataKey="ng" name="Fail" stackId="shift" fill={C.ng()} radius={[4,4,0,0]} barSize={28}/>
-                      <Bar dataKey="inProgress" name="In Progress" stackId="shift" fill={C.wip()} radius={[4,4,0,0]} barSize={28}/>
-                    </BarChart>
+                <div style={{
+                  background: C.bg("card"),
+                  border: `1px solid ${C.bdr()}`,
+                  borderRadius: 14,
+                  padding: 20,
+                  boxShadow: SHADOW
+                }}>
+                  <SectionHead title={t("dashboard.productionByShift", "Production by Shift")} />
+                  {shiftData.length > 0 ? (
+                    <SafeChart height={220} style={{ overflow: "visible", position: "relative", zIndex: 2 }}>
+                      {({ width, height }) => (
+                        <BarChart
+                          width={width}
+                          height={height}
+                          data={shiftData}
+                          margin={{ top: 10, right: 10, bottom: 0, left: -10 }}
+                        >
+                          <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false} />
+                          <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.txt("sec") }} axisLine={false} tickLine={false} />
+                          <YAxis tick={{ fontSize: 11, fill: C.txt("sec") }} axisLine={false} tickLine={false} />
+                          <Tooltip 
+                            {...TooltipStyle}
+                            contentStyle={{
+                              ...TooltipStyle.contentStyle,
+                              padding: "12px 16px",
+                              borderRadius: 12,
+                            }}
+                          />
+                          <Bar dataKey="ok" name="Passed" fill={C.ok()} radius={[4, 4, 0, 0]} barSize={28} />
+                          <Bar dataKey="ng" name="NG" fill={C.ng()} radius={[4, 4, 0, 0]} barSize={28} />
+                        </BarChart>
+                      )}
+                    </SafeChart>
+                  ) : (
+                    <p style={{ fontSize: 12, color: C.txt("muted"), textAlign: "center", padding: "20px 0" }}>
+                      No shift data available for this period.
+                    </p>
                   )}
-                  {chartModeShift === "line" && (
-                    <LineChart width={width} height={height} data={shiftData} margin={{top:4,right:8,bottom:0,left:-10}}>
-                      <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
-                      <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                      <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                      <Tooltip {...TooltipStyle}/>
-                      <Line type="monotone" dataKey="actual" name="Total" stroke={C.steel()} strokeWidth={2.4} />
-                      <Line type="monotone" dataKey="ok" name="Pass" stroke={C.ok()} strokeWidth={2.2} />
-                      <Line type="monotone" dataKey="ng" name="Fail" stroke={C.ng()} strokeWidth={2.2} />
-                    </LineChart>
-                  )}
-                  {chartModeShift === "area" && (
-                    <AreaChart width={width} height={height} data={shiftData} margin={{top:4,right:8,bottom:0,left:-10}}>
-                      <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false}/>
-                      <XAxis dataKey="name" tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                      <YAxis tick={{fontSize:11,fill:C.txt("sec")}} axisLine={false} tickLine={false}/>
-                      <Tooltip {...TooltipStyle}/>
-                      <Area type="monotone" dataKey="actual" name="Total" stroke={C.steel()} fill={C.steel(0.2)} />
-                      <Area type="monotone" dataKey="ok" name="Pass" stroke={C.ok()} fill={C.ok(0.22)} />
-                    </AreaChart>
-                  )}
-                  </>
-                )}
-              </SafeChart>
-            </div> */}
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 16,
+                      marginTop: 10,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    {[
+                      { color: C.ok(), label: t("dashboard.pass", "Pass") },
+                      { color: C.ng(), label: t("dashboard.fail", "Fail") },
+                    ].map((l) => (
+                      <div key={l.label} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <div style={{ width: 18, height: 2.5, borderRadius: 2, background: l.color }} />
+                        <span style={{ fontSize: 11, color: C.txt("muted"), fontWeight: 600 }}>{l.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
 
                 <div
                   style={{
@@ -4416,8 +4340,14 @@ const Dashboard = () => {
                           width={width}
                           height={height}
                           data={rejectionParetoData}
-                          margin={{ top: 8, right: 8, left: -10, bottom: 0 }}
+                          margin={{ top: 12, right: 12, left: -10, bottom: 20 }}
                         >
+                          <defs>
+                            <linearGradient id="paretoGrad" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor={C.ng()} stopOpacity={0.9} />
+                              <stop offset="95%" stopColor={C.ng()} stopOpacity={0.4} />
+                            </linearGradient>
+                          </defs>
                           <CartesianGrid
                             stroke={C.bdr(0.12)}
                             strokeDasharray="3 4"
@@ -4425,7 +4355,7 @@ const Dashboard = () => {
                           />
                           <XAxis
                             dataKey="reason"
-                            tickFormatter={(_, index) => `R${index + 1}`}
+                            tickFormatter={(reason) => String(reason).length > 8 ? String(reason).slice(0, 8) + '...' : reason}
                             tick={{
                               fontSize: 11,
                               fill: C.txt("sec"),
@@ -4444,31 +4374,41 @@ const Dashboard = () => {
                             yAxisId="right"
                             orientation="right"
                             domain={[0, 100]}
-                            tick={{ fontSize: 11, fill: C.txt("sec") }}
+                            tickFormatter={(v) => `${v}%`}
+                            tick={{ fontSize: 11, fill: C.txt("sec"), fontWeight: 600 }}
                             axisLine={false}
                             tickLine={false}
                           />
                           <Tooltip
                             {...TooltipStyle}
+                            contentStyle={{
+                              ...TooltipStyle.contentStyle,
+                              padding: "12px 16px",
+                              borderRadius: 12,
+                            }}
                             formatter={(value, name) => [
                               name === "cumulative" ? `${value}%` : value,
-                              name === "cumulative" ? "Cumulative" : "Rejects",
+                              name === "cumulative" ? "Cumulative Impact" : "Rejects Count",
                             ]}
+                            labelFormatter={(label) => `Reason: ${label}`}
                           />
                           <Bar
                             yAxisId="left"
                             dataKey="count"
-                            fill={C.ng()}
-                            radius={[4, 4, 0, 0]}
-                            barSize={28}
+                            name="count"
+                            fill="url(#paretoGrad)"
+                            radius={[6, 6, 0, 0]}
+                            barSize={32}
                           />
                           <Line
                             yAxisId="right"
                             type="monotone"
                             dataKey="cumulative"
+                            name="cumulative"
                             stroke={C.amber()}
-                            strokeWidth={2.5}
-                            dot={{ r: 3, fill: C.amber() }}
+                            strokeWidth={3}
+                            dot={{ r: 4, fill: C.amber(), stroke: "#fff", strokeWidth: 2 }}
+                            activeDot={{ r: 6, fill: C.amber(), stroke: "#fff", strokeWidth: 2 }}
                           />
                         </ComposedChart>
                       )}
@@ -5305,7 +5245,9 @@ const Dashboard = () => {
                                 name,
                               ]}
                             />
-                            <Legend />
+                            <Legend
+                              wrapperStyle={{ fontSize: 11 }}
+                            />
                             <Area
                               name="CR"
                               type="monotone"
@@ -5369,7 +5311,9 @@ const Dashboard = () => {
                                 name,
                               ]}
                             />
-                            <Legend />
+                            <Legend
+                              wrapperStyle={{ fontSize: 11 }}
+                            />
                             <Line
                               name="CR"
                               type="monotone"
@@ -5436,7 +5380,9 @@ const Dashboard = () => {
                                 name,
                               ]}
                             />
-                            <Legend />
+                            <Legend
+                              wrapperStyle={{ fontSize: 11 }}
+                            />
                             <Bar
                               name="CR"
                               dataKey="cr"
@@ -6035,8 +5981,14 @@ const Dashboard = () => {
                         width={width}
                         height={height}
                         data={rejectionParetoData}
-                        margin={{ top: 10, right: 8, left: -10, bottom: 45 }}
+                        margin={{ top: 12, right: 12, left: -10, bottom: 45 }}
                       >
+                        <defs>
+                          <linearGradient id="paretoGradTab" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={C.ng()} stopOpacity={0.9} />
+                            <stop offset="95%" stopColor={C.ng()} stopOpacity={0.4} />
+                          </linearGradient>
+                        </defs>
                         <CartesianGrid
                           stroke={C.bdr(0.12)}
                           strokeDasharray="3 4"
@@ -6049,7 +6001,7 @@ const Dashboard = () => {
                           angle={-20}
                           textAnchor="end"
                           height={58}
-                          tick={{ fontSize: 10, fill: C.txt("sec") }}
+                          tick={{ fontSize: 10, fill: C.txt("sec"), fontFamily: "'DM Mono',monospace" }}
                         />
                         <YAxis
                           yAxisId="count"
@@ -6062,25 +6014,40 @@ const Dashboard = () => {
                           orientation="right"
                           domain={[0, 100]}
                           tickFormatter={(value) => `${value}%`}
-                          tick={{ fontSize: 10, fill: C.txt("sec") }}
+                          tick={{ fontSize: 10, fill: C.txt("sec"), fontWeight: 600 }}
                           axisLine={false}
                           tickLine={false}
                         />
-                        <Tooltip {...TooltipStyle} />
+                        <Tooltip
+                          {...TooltipStyle}
+                          contentStyle={{
+                            ...TooltipStyle.contentStyle,
+                            padding: "12px 16px",
+                            borderRadius: 12,
+                          }}
+                          formatter={(value, name) => [
+                            name === "cumulative" ? `${value}%` : value,
+                            name === "cumulative" ? "Cumulative Impact" : "Rejects Count",
+                          ]}
+                          labelFormatter={(label) => `Reason: ${label}`}
+                        />
                         <Bar
                           yAxisId="count"
                           dataKey="count"
-                          fill={C.ng(0.82)}
-                          radius={[4, 4, 0, 0]}
+                          name="count"
+                          fill="url(#paretoGradTab)"
+                          radius={[6, 6, 0, 0]}
                           barSize={34}
                         />
                         <Line
                           yAxisId="pct"
                           type="monotone"
                           dataKey="cumulative"
-                          stroke={C.navy()}
+                          name="cumulative"
+                          stroke={C.amber()}
                           strokeWidth={3}
-                          dot={{ r: 3, fill: C.navy() }}
+                          dot={{ r: 4, fill: C.amber(), stroke: "#fff", strokeWidth: 2 }}
+                          activeDot={{ r: 6, fill: C.amber(), stroke: "#fff", strokeWidth: 2 }}
                         />
                       </ComposedChart>
                     )}

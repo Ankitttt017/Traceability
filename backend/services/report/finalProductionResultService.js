@@ -343,7 +343,6 @@ function deriveGroupSummary(rows = []) {
     if (values.includes("IN_PROGRESS")) return "IN_PROGRESS";
     const partStatus = normalizeFinalPartStatus(latestRow.partStatus || latestRow.part_status || latestRow.status);
     if (partStatus === "NG") return "NG";
-    if (operations.length > 1 && values.length >= operations.length && values.every((value) => value === "OK")) return "PASSED";
     if (partStatus === "PASSED") return "PASSED";
     return "IN_PROGRESS";
   })();

@@ -7709,6 +7709,10 @@ exports.getDashboardReport = async (req, res) => {
       traceabilityCounts.total += 1;
       const values = requiredTraceabilityOperations.map((operation) => group.operations.get(operation)).filter(Boolean);
       const latestPartStatus = String(group.latest?.status || "").trim().toUpperCase();
+      const hasFinalInspectionOk = requiredTraceabilityOperations.some((operation) => (
+        (operation === "OP160" || operation.includes("FINAL")) &&
+        group.operations.get(operation) === "OK"
+      ));
       const shiftCode = resolveShiftCodeForDate(group.latest?.createdAt || group.latestTs || from, shifts);
       if (!traceabilityShiftProduction[shiftCode]) {
         traceabilityShiftProduction[shiftCode] = { total: 0, ok: 0, ng: 0, inProgress: 0 };
@@ -7720,7 +7724,7 @@ exports.getDashboardReport = async (req, res) => {
       } else if (group.blocked) {
         traceabilityCounts.blocked += 1;
         traceabilityShiftProduction[shiftCode].inProgress += 1;
-      } else if (requiredTraceabilityOperations.length > 0 && values.length >= requiredTraceabilityOperations.length && values.every((value) => value === "OK")) {
+      } else if (hasFinalInspectionOk || ["PASSED", "COMPLETED"].includes(latestPartStatus)) {
         traceabilityCounts.passed += 1;
         traceabilityShiftProduction[shiftCode].ok += 1;
       } else {
