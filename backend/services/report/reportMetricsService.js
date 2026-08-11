@@ -371,9 +371,6 @@ function calculateProductionMetrics(rows, range = {}) {
       if (values.some((value) => value === "IN_PROGRESS")) return "IN_PROGRESS";
       const finalStatus = normalizeFinalPartStatus(latestRow.partStatus || latestRow.part_status || latestRow.status);
       if (finalStatus === "NG") return "NG";
-      if (effectiveRequiredOperations.length > 1 && values.length >= effectiveRequiredOperations.length && values.every((value) => value === "OK")) {
-        return "PASSED";
-      }
       if (finalStatus === "PASSED") return "PASSED";
       return "IN_PROGRESS";
     })();

@@ -600,8 +600,6 @@ async function generateIndustrialExcel(res, {
         ? "IN_PROGRESS"
         : finalPartStatus === "NG"
           ? "NG"
-          : requiredOperations.length > 1 && operationResults.length >= requiredOperations.length && operationResults.every((value) => value === "OK")
-            ? "PASSED"
           : finalPartStatus === "PASSED"
             ? "PASSED"
             : "IN_PROGRESS";

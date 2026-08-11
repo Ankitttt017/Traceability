@@ -1642,7 +1642,6 @@ const ReportsPage = () => {
         if (vals.some((v) => v === "IN_PROGRESS")) return "IN_PROGRESS";
         const finalStatus = normalizeFinalPartStatus(first.partStatus || first.part_status || first.status);
         if (finalStatus === "NG") return "NG";
-        if (effectiveRequiredOperations.length > 1 && vals.length >= effectiveRequiredOperations.length && vals.every((v) => v === "OK")) return "PASSED";
         if (finalStatus === "PASSED") return "PASSED";
         return "IN_PROGRESS";
       };

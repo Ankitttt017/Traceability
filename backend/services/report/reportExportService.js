@@ -331,7 +331,6 @@ function deriveReportGroupStatus(entries = [], requiredOperations = [], range = 
   else if (finalInspectionOkAt) overallStatus = "PASSED";
   else if (values.some((value) => value === "IN_PROGRESS")) overallStatus = "IN_PROGRESS";
   else if (finalStatus === "NG") overallStatus = "NG";
-  else if (effectiveRequiredOperations.length > 1 && values.length >= effectiveRequiredOperations.length && values.every((value) => value === "OK")) overallStatus = "PASSED";
   else if (finalStatus === "PASSED") overallStatus = "PASSED";
 
   const terminalOperation = effectiveRequiredOperations[effectiveRequiredOperations.length - 1];
@@ -1712,6 +1711,9 @@ async function fetchProductionFirstScanPartCount(filters = {}) {
 async function fetchProductionSummaryMetrics(filters = {}) {
   const { whereParts, joins, replacements } = await buildProductionCountScope(filters);
   const stationScoped = Boolean(filters.machineId || filters.operationNo || filters.stationNo || filters.station);
+  if (!joins.some((join) => /\bJOIN\s+Machines\s+m\b/i.test(join))) {
+    joins.push("LEFT JOIN Machines m ON m.id = ol.machine_id");
+  }
   replacements.stationScoped = stationScoped ? 1 : 0;
   replacements.requiredOpsCount = await resolveRequiredOperationCount(filters);
   const [rows] = await sequelize.query(
@@ -1719,8 +1721,22 @@ async function fetchProductionSummaryMetrics(filters = {}) {
       WITH FilteredPartStatus AS (
         SELECT
           ol.part_id,
-          MAX(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('OK', 'PASSED', 'COMPLETED') THEN 1 ELSE 0 END) AS partFinalOK,
+          MAX(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('PASSED', 'COMPLETED') THEN 1 ELSE 0 END) AS partFinalOK,
           MAX(CASE WHEN UPPER(LTRIM(RTRIM(COALESCE(p.status, '')))) IN ('NG', 'FAILED', 'REJECTED', 'INTERLOCKED') THEN 1 ELSE 0 END) AS partFinalNG,
+          MAX(CASE WHEN (
+            (
+              UPPER(LTRIM(RTRIM(COALESCE(ol.operation_no, ol.station_no, '')))) = 'OP160'
+              OR UPPER(LTRIM(RTRIM(COALESCE(m.machine_name, '')))) LIKE '%FINAL INSPECTION%'
+              OR UPPER(LTRIM(RTRIM(COALESCE(m.machine_name, '')))) LIKE '%FINAL_INSPECTION%'
+            )
+            AND (
+              ol.is_bypassed = 1
+              OR UPPER(LTRIM(RTRIM(COALESCE(ol.bypass_reason, '')))) IN ('MACHINE_BYPASS_AUTO_OK', 'STATION_BYPASS_AUTO_OK', 'STATION_OPERATION_DISABLED_AUTO_OK', 'MANUAL_BYPASS')
+              OR UPPER(LTRIM(RTRIM(COALESCE(ol.plc_status, '')))) IN ('ENDED_OK', 'COMPLETED_OK')
+              OR UPPER(LTRIM(RTRIM(COALESCE(ol.result, '')))) IN ('OK', 'PASS', 'PASSED')
+              OR UPPER(LTRIM(RTRIM(COALESCE(ol.operation_result, '')))) = 'PASSED'
+            )
+          ) THEN 1 ELSE 0 END) AS finalInspectionOK,
           MAX(CASE WHEN (
             UPPER(LTRIM(RTRIM(COALESCE(ol.plc_status, '')))) IN ('ENDED_NG', 'COMPLETED_NG', 'FAILED', 'INTERLOCKED')
             OR UPPER(LTRIM(RTRIM(COALESCE(ol.result, '')))) IN ('NG', 'FAIL', 'FAILED', 'BLOCK')
@@ -1746,8 +1762,8 @@ async function fetchProductionSummaryMetrics(filters = {}) {
         SUM(CASE WHEN (
           (:stationScoped = 1 AND hasNG = 0 AND okOpCount > 0)
           OR (:stationScoped = 0 AND (
-            partFinalOK = 1
-            OR (partFinalNG = 0 AND hasNG = 0 AND okOpCount >= :requiredOpsCount)
+            finalInspectionOK = 1
+            OR partFinalOK = 1
           ))
         ) THEN 1 ELSE 0 END) AS totalOK,
         SUM(CASE WHEN (
@@ -1760,7 +1776,7 @@ async function fetchProductionSummaryMetrics(filters = {}) {
             partFinalOK = 1
             OR partFinalNG = 1
             OR hasNG = 1
-            OR okOpCount >= :requiredOpsCount
+            OR finalInspectionOK = 1
           ))
         ) THEN 1 ELSE 0 END) AS inProgress
       FROM FilteredPartStatus
