@@ -387,7 +387,7 @@ const sanitizeCustomerQrValue = (value) => {
 function looksLikeCustomerQrValue(value) {
   return /^R\d[A-Z0-9-]{10,}$/i.test(String(value || "").trim());
 }
-const REPORT_PREVIEW_ROWS_LIMIT = 100;
+const REPORT_PREVIEW_ROWS_LIMIT = 1000;
 
 // ── Professional Design System ────────────────────────────────────────────
 const DS = `
@@ -1018,7 +1018,7 @@ const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select
   );
 };
 
-const ReportsPage = () => {
+const HistoricalReportsPage = () => {
   injectReportStyles();
   const { t } = useLanguage();
   const getMesDayRange = useCallback(() => {
@@ -1080,7 +1080,8 @@ const ReportsPage = () => {
       operatorId: '',
       resultType: '',
       modelCode: '',
-      operationNo: ''
+      operationNo: '',
+      quickRange: 'today'
     };
   });
 
@@ -1117,19 +1118,22 @@ const ReportsPage = () => {
       ...prev,
       dateFrom: toDatetimeLocal(from),
       dateTo: toDatetimeLocal(to),
+      quickRange: key
     }));
   }, [getMesDayRange]);
 
   const getFreshQuickRangeFilters = useCallback((baseFilters) => {
     const missingDateRange = !baseFilters?.dateFrom || !baseFilters?.dateTo;
-    if (quickRange !== "today" && !missingDateRange) return baseFilters;
+    const currentQuickRange = baseFilters?.quickRange || "today";
+    if (currentQuickRange !== "today" && !missingDateRange) return baseFilters;
     const liveRange = getMesDayRange();
     return {
       ...baseFilters,
       dateFrom: toDatetimeLocal(liveRange.start),
       dateTo: toDatetimeLocal(liveRange.end),
+      quickRange: "today"
     };
-  }, [getMesDayRange, quickRange]);
+  }, [getMesDayRange]);
 
   const fetchData = useCallback(async () => {
     reportAbortRef.current?.abort();
@@ -1166,14 +1170,8 @@ const ReportsPage = () => {
       });
     }, 550);
     try {
-      const [response, summaryMetricsResponse] = await Promise.all([
-        reportApi.getData(requestPayload, { signal: controller.signal, suppressGlobalError: true }),
-        reportApi.getSummaryMetrics(metricsPayload, { signal: controller.signal, suppressGlobalError: true })
-          .catch((metricsError) => {
-            console.warn("Report summary metrics failed", metricsError);
-            return null;
-          }),
-      ]);
+      const response = await reportApi.getHistoricalData(requestPayload, { signal: controller.signal, suppressGlobalError: true });
+      const summaryMetricsResponse = { metrics: response.metrics };
       setLoadProgress(100);
       const rowShotSummary = derivePlcShotSummaryFromRows(response.rows || []);
       const hasQualityGateFilter = Boolean(String(liveAppliedFilters.machineId || "").trim());
@@ -1310,11 +1308,8 @@ const ReportsPage = () => {
   }, []);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      fetchData();
-    }, 450);
+    fetchData();
     return () => {
-      window.clearTimeout(timer);
       reportAbortRef.current?.abort();
     };
   }, [fetchData]);
@@ -1355,10 +1350,8 @@ const ReportsPage = () => {
         },
       };
 
-      if (type === 'full')  blob = await reportApi.exportFull(exportFilters, reportConfig, downloadConfig);
-      else if (type === 'ng')    blob = await reportApi.exportNG(exportFilters, reportConfig, downloadConfig);
-      else if (type === 'parts') blob = await reportApi.exportParts(exportFilters, reportConfig, downloadConfig);
-      else if (type === 'audit') blob = await reportApi.exportAudit(exportFilters, reportConfig, downloadConfig);
+      exportFilters.type = type;
+      blob = await reportApi.exportHistorical(exportFilters, reportConfig, downloadConfig);
 
       if (!blob) throw new Error("Empty response from export engine");
       setExportProgress(100);
@@ -1401,6 +1394,23 @@ const ReportsPage = () => {
     }
   };
 
+  const handleSync = async () => {
+    try {
+      const payload = {
+        dateFrom: appliedFilters.dateFrom,
+        dateTo: appliedFilters.dateTo
+      };
+      
+      toast.promise(reportApi.syncHistoricalData(payload), {
+        loading: "Initiating Background Sync...",
+        success: "Master table sync started in background!",
+        error: "Failed to start sync"
+      });
+    } catch (e) {
+      console.error("Sync failed:", e);
+    }
+  };
+
   const handleDateRangeApply = (start, end) => {
     const normalizedStart = new Date(start);
     const normalizedEnd = new Date(end || start);
@@ -1418,6 +1428,7 @@ const ReportsPage = () => {
       ...prev,
       dateFrom: toDatetimeLocal(normalizedStart),
       dateTo: toDatetimeLocal(normalizedEnd),
+      quickRange: "custom"
     }));
     setQuickRange("custom");
   };
@@ -1482,7 +1493,7 @@ const ReportsPage = () => {
           .filter(Boolean)
       )
     );
-    const discoveredPlcColumns = Array.isArray(data.plcColumns) ? data.plcColumns : DEFAULT_PLC_CYCLE_COLUMNS;
+    const discoveredPlcColumns = Array.isArray(data.plcColumns) && data.plcColumns.length > 0 ? data.plcColumns : DEFAULT_PLC_CYCLE_COLUMNS;
     const plcKeys = discoveredPlcColumns
       .filter((key) => DEFAULT_PLC_CYCLE_COLUMNS.includes(key))
       .filter((key) => !["machine_name", "part_name", "shot_number", "shot_date", "shot_time", "shot_datetime"].includes(key));
@@ -1711,11 +1722,11 @@ const ReportsPage = () => {
             ((Number(data.pagination?.page || 1) - 1) * Number(data.pagination?.pageSize || sourceRows.length || 0)) -
             idx
         ),
-        plc_shot_number: displayPartId ? (plcData.shot_number || displayShotNumber || "-") : "-",
+        plc_shot_number: plcData.shot_number || displayShotNumber || "-",
         shot_datetime: plcData.shot_datetime
           ? new Date(plcData.shot_datetime).toLocaleString("en-IN")
           : [plcData.shot_date || first.shot_date, plcData.shot_time || first.shot_time].filter(Boolean).join(" ") || "-",
-        barcode: displayPartId,
+        barcode: displayPartId !== "" ? displayPartId : "",
         plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: firstScanAt ? new Date(firstScanAt).toLocaleString("en-IN") : "-",
         finalResultAt: displayFinalResultRaw ? new Date(displayFinalResultRaw).toLocaleString("en-IN") : "-",
@@ -1843,23 +1854,37 @@ const ReportsPage = () => {
     };
 
     const visibleNgCount = visibleRows.filter((row) => {
-      const status = String(row?.status || row?.result || row?.finalStatus || "").toUpperCase();
+      const status = String(row?.overallStatus || row?.status || row?.result || row?.finalStatus || "").toUpperCase();
       const reason = String(row?.reason || row?.interlock_reason || "").trim();
       if (isPlcCommonError(reason)) return false;
       return status === "NG" || status === "FAILED";
     }).length;
+    
+    const visibleOkCount = visibleRows.filter((row) => {
+      const status = String(row?.overallStatus || row?.status || row?.result || row?.finalStatus || "").toUpperCase();
+      return status === "PASSED" || status === "OK";
+    }).length;
+
+    const visibleInProgressCount = visibleRows.filter((row) => {
+      const status = String(row?.overallStatus || row?.status || row?.result || row?.finalStatus || "").toUpperCase();
+      return status === "IN_PROGRESS" || status === "PENDING";
+    }).length;
+
     const hasQualityGateFilter = Boolean(String(appliedFilters.machineId || "").trim());
-    // Quality-gate scoped metrics must trust the backend station count. Visible rows can
-    // include the part's later/final NG history and would make Laser Marking look NG.
-    const resolvedTotalNG = hasQualityGateFilter ? totalNG : (totalNG > 0 ? totalNG : visibleNgCount);
+    const resolvedTotalNG = typeof data.metrics?.totalNG !== "undefined" ? totalNG : visibleNgCount;
+    const resolvedTotalOK = typeof data.metrics?.totalOK !== "undefined" ? totalOK : visibleOkCount;
+    const resolvedInProgress = typeof data.metrics?.inProgress !== "undefined" ? inProgress : visibleInProgressCount;
+    const resolvedProductionBase = resolvedTotalOK + resolvedTotalNG;
+    const resolvedPassRate = resolvedProductionBase > 0 ? Number(((resolvedTotalOK / resolvedProductionBase) * 100).toFixed(2)) : 0;
+
     return {
       totalProduction: traceabilityProduction,
       traceabilityProduction,
-      totalOK,
+      totalOK: resolvedTotalOK,
       totalNG: resolvedTotalNG,
-      inProgress,
+      inProgress: resolvedInProgress,
       validationRejects: Number(metrics.validationRejects ?? resolvedTotalNG),
-      passRate: productionBase > 0 ? Number(((totalOK / productionBase) * 100).toFixed(2)) : 0,
+      passRate: resolvedPassRate,
       plcShotSummary: metrics.plcShotSummary || {},
     };
   }, [data.metrics, data.rows, appliedFilters.machineId]);
@@ -1926,7 +1951,7 @@ const ReportsPage = () => {
             </div>
             <div>
               <h1 className="text-xl font-extrabold text-[rgb(var(--pk-txt-pri))] tracking-tight flex items-center gap-2">
-                {t("reports.title", "📊 Traceability Report")}
+                {t("reports.title", "📊 Historical Reports")}
                
               </h1>
               <p className="text-sm text-[rgb(var(--pk-txt-sec))] mt-0.5 flex items-center gap-2">
@@ -1943,6 +1968,14 @@ const ReportsPage = () => {
             </div>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              disabled={loading || refreshing}
+              onClick={handleSync}
+              className="reports-btn-secondary !bg-[rgb(var(--pk-navy))] !text-white"
+            >
+              <Database size={13} />
+              <span className="hidden sm:inline">Sync Database</span>
+            </button>
             <button
               disabled={loading || refreshing}
               onClick={refreshReportData}
@@ -1986,78 +2019,6 @@ const ReportsPage = () => {
         </div>
 
         <div className={`grid gap-2.5 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 reports-filters-grid ${isFilterExpanded ? '' : 'max-h-48 overflow-hidden'}`}>
-          <select
-            value={filters.partType === "OTHER" ? "__OTHER__" : (filters.partName || "")}
-            onChange={(e) => {
-              const value = e.target.value;
-              if (value === "__OTHER__") {
-                setFilters((prev) => ({ ...prev, partName: "", partType: "OTHER", dieName: "", dieCastingMachine: "" }));
-                return;
-              }
-              setFilters((prev) => ({ ...prev, partName: normalizePartToken(value), partType: prev.partType === "OTHER" ? "" : prev.partType, dieName: "", dieCastingMachine: "" }));
-            }}
-            className="reports-filter-input"
-          >
-            <option value="">🔹 All Parts</option>
-            <option value="__OTHER__">📌 Other Parts</option>
-            {availablePartNames.map((partName) => <option key={partName} value={partName}>{partName}</option>)}
-          </select>
-          <select
-            value={filters.dieName || ""}
-            onChange={(e) => setFilters((prev) => ({ ...prev, dieName: normalizePartToken(e.target.value), dieCastingMachine: "" }))}
-            className="reports-filter-input"
-          >
-            <option value="">🔸 All Dies</option>
-            {availableDies.map((dieName) => <option key={dieName} value={dieName}>{dieName}</option>)}
-          </select>
-          <select
-            value={filters.dieCastingMachine || ""}
-            onChange={(e) => setFilters((prev) => ({ ...prev, dieCastingMachine: normalizePartToken(e.target.value) }))}
-            className="reports-filter-input"
-          >
-            <option value="">🏭 All Die Casting Machines</option>
-            {availableDieCastingMachines.map((machineName) => <option key={machineName} value={machineName}>{machineName}</option>)}
-          </select>
-          <select
-            value={filters.machineId}
-            onChange={(e) => setFilters((prev) => ({ ...prev, machineId: e.target.value }))}
-            className="reports-filter-input"
-          >
-            <option value="">⚙️ All Quality Gates</option>
-            {scopedMachines
-              .filter((m) => !filters.lineId || String(m.line_id || m.lineId || "") === String(filters.lineId))
-              .filter((m) => !filters.lineName || String(m.line_name || m.lineName || "").trim() === filters.lineName)
-              .map((m) => <option key={m.id} value={m.id}>{m.machine_name || m.machineName}</option>)}
-          </select>
-          <input
-            value={filters.barcode || ""}
-            onChange={(e) => setFilters((prev) => ({ ...prev, barcode: e.target.value }))}
-            placeholder="🔍 Customer QR / Part ID / Shot #"
-            className="reports-filter-input"
-          />
-          <select
-            value={filters.status || ""}
-            onChange={(e) => setFilters((prev) => ({ ...prev, status: e.target.value }))}
-            className="reports-filter-input"
-          >
-            <option value="">📊 All Status</option>
-            <option value="OK">✅ PASSED</option>
-            <option value="NG">❌ FAILED</option>
-            <option value="IN_PROGRESS">⏳ IN PROGRESS</option>
-          </select>
-          <select
-            value={filters.shiftCode || ""}
-            onChange={(e) => setFilters((prev) => ({ ...prev, shiftCode: e.target.value }))}
-            className="reports-filter-input"
-          >
-            <option value="">🕐 All Shifts</option>
-            {((data.availableShifts && data.availableShifts.length) ? data.availableShifts : availableShifts).map((shift) => (
-              <option key={shift.shiftCode || shift.shift_code} value={shift.shiftCode || shift.shift_code}>
-                {shift.shiftName || shift.shift_name || shift.shiftCode || shift.shift_code}
-              </option>
-            ))}
-          </select>
-          
           {/* Custom Date Range Picker */}
           <DateRangePicker
             startDate={filters.dateFrom}
@@ -2067,6 +2028,45 @@ const ReportsPage = () => {
             label="📅 Select Date Range"
           />
 
+          <select
+            className="h-9 w-full rounded-lg border border-[rgba(var(--pk-bdr),0.2)] bg-[rgb(var(--pk-bg-input))] px-3 text-xs font-semibold text-[rgb(var(--pk-txt-pri))] outline-none transition-all focus:border-[rgba(var(--pk-steel),0.5)] focus:ring-2 focus:ring-[rgba(var(--pk-steel),0.08)]"
+            value={filters.machineId || ""}
+            onChange={(e) => setFilters({ ...filters, machineId: e.target.value })}
+          >
+            <option value="">⚙️ All Quality Gates</option>
+            {machines.map((m) => (
+              <option key={m.id || m.machine_name} value={m.operation_no || m.machine_name}>
+                {m.machine_name || m.machineName}
+              </option>
+            ))}
+          </select>
+
+          <select
+            className="h-9 w-full rounded-lg border border-[rgba(var(--pk-bdr),0.2)] bg-[rgb(var(--pk-bg-input))] px-3 text-xs font-semibold text-[rgb(var(--pk-txt-pri))] outline-none transition-all focus:border-[rgba(var(--pk-steel),0.5)] focus:ring-2 focus:ring-[rgba(var(--pk-steel),0.08)]"
+            value={filters.status || ""}
+            onChange={(e) => setFilters({ ...filters, status: e.target.value })}
+          >
+            <option value="">📊 All Status</option>
+            {["OK", "NG", "WIP"].map((status) => (
+              <option key={status} value={status}>
+                {status === "OK" ? "✅ PASSED" : status === "NG" ? "❌ FAILED" : "⏳ WIP"}
+              </option>
+            ))}
+          </select>
+
+          <select
+            className="h-9 w-full rounded-lg border border-[rgba(var(--pk-bdr),0.2)] bg-[rgb(var(--pk-bg-input))] px-3 text-xs font-semibold text-[rgb(var(--pk-txt-pri))] outline-none transition-all focus:border-[rgba(var(--pk-steel),0.5)] focus:ring-2 focus:ring-[rgba(var(--pk-steel),0.08)]"
+            value={filters.shiftCode || ""}
+            onChange={(e) => setFilters({ ...filters, shiftCode: e.target.value })}
+          >
+            <option value="">🕐 All Shifts</option>
+            {(availableShifts || []).map((shift) => (
+              <option key={shift.shiftCode} value={shift.shiftCode}>
+                {shift.shiftName || shift.shiftCode}
+              </option>
+            ))}
+          </select>
+
           <div className="flex items-center gap-1.5 col-span-1 md:col-span-2 lg:col-span-1">
             <button
               onClick={() => {
@@ -2075,7 +2075,7 @@ const ReportsPage = () => {
                   dateFrom: toDatetimeLocal(todayRange.start),
                   dateTo: toDatetimeLocal(todayRange.end),
                   plantId: '', lineId: '', machineId: '', partName: '', dieName: '', dieCastingMachine: '', lineName: '', shiftCode: '', status: '', partType: '', station: '', barcode: '', customerCode: '',
-                  operatorId: '', resultType: '', modelCode: '', operationNo: ''
+                  operatorId: '', resultType: '', modelCode: '', operationNo: '', quickRange: 'today'
                 };
                 setQuickRange("today");
                 setFilters(nextFilters);
@@ -2147,16 +2147,17 @@ const ReportsPage = () => {
         columns={reportTable.columns}
         loading={loading}
         progress={loadProgress}
+        disablePagination={false}
         pagination={data.pagination}
         onPageChange={(page) => setReportPage((prev) => ({ ...prev, page }))}
         onPageSizeChange={(pageSize) => {
           setReportPage({ page: 1, pageSize });
         }}
-        defaultPageSize={REPORT_PREVIEW_ROWS_LIMIT}
-        pageSizeOptions={[100, 250, 500]}
+        defaultPageSize={10000}
+        pageSizeOptions={[500, 1000, 5000, 10000, 25000]}
       />
     </div>
   );
 };
 
-export default ReportsPage;
+export default HistoricalReportsPage;

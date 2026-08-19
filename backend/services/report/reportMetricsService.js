@@ -369,9 +369,13 @@ function calculateProductionMetrics(rows, range = {}) {
       if (values.some((value) => value === "NG")) return "NG";
       if (finalInspectionOkAt) return "PASSED";
       if (values.some((value) => value === "IN_PROGRESS")) return "IN_PROGRESS";
+      
       const finalStatus = normalizeFinalPartStatus(latestRow.partStatus || latestRow.part_status || latestRow.status);
       if (finalStatus === "NG") return "NG";
       if (finalStatus === "PASSED") return "PASSED";
+      
+      if (effectiveRequiredOperations.length > 0 && values.every(v => v === "OK")) return "PASSED";
+
       return "IN_PROGRESS";
     })();
     const effectiveRequiredOperations = hasLeakData
@@ -460,4 +464,5 @@ function calculateProductionMetrics(rows, range = {}) {
 
 module.exports = {
   calculateProductionMetrics,
+  normalizeResult,
 };

@@ -14,4 +14,10 @@ router.post("/report/export-ng", verifyToken, requireModuleAccess("reports", "vi
 router.post("/report/export-parts", verifyToken, requireModuleAccess("reports", "view"), reportController.exportPartsReportExcel);
 router.post("/report/export-audit", verifyToken, requireModuleAccess("reports", "view"), reportController.exportAuditReportExcel);
 
+const historicalReportController = require("../../controllers/historicalReportController");
+
+router.get("/report/historical", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.getHistoricalReportData);
+router.post("/report/historical/sync", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.syncHistoricalData);
+router.post("/report/historical/export", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.exportHistoricalReportExcel);
+
 module.exports = router;

@@ -32,6 +32,7 @@ import {
   ChevronUp,
   CircleDot,
   Menu,
+  Database,
 } from "lucide-react";
 
 import { APP_ROUTES } from "../constants/routes";
@@ -116,6 +117,12 @@ const Sidebar = ({ onClose }) => {
         name: t("pages.reports", "Reports"),
         path: APP_ROUTES.reports,
         icon: BarChart3,
+        moduleKey: "reports",
+      },
+      {
+        name: t("pages.historicalReports", "Historical Reports"),
+        path: APP_ROUTES.historicalReports,
+        icon: Database,
         moduleKey: "reports",
       },
       {

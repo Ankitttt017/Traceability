@@ -317,31 +317,29 @@ function getReportOptions(query = {}) {
   const fastDisabled = fullRequested || isFalseToken(query.fast || query.quick);
   const fast = !fastDisabled && !hasFocusedPartSearch;
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
-  const pageSize = Math.min(Math.max(Number.parseInt(query.pageSize || query.limit, 10) || 50, 10), 10000);
-  const fastPageSize = Math.min(pageSize, 100);
-  const fastAnchorLimit = Math.min(Math.max((page + 1) * fastPageSize, fastPageSize, 100), 300);
+  const pageSize = Math.max(Number.parseInt(query.pageSize || query.limit, 10) || 50, 10);
   return {
     fast,
+    page,
+    pageSize,
     includePlcReadings: fast ? isTruthyToken(query.includePlcReadings) : !isFalseToken(query.includePlcReadings),
     includePlcSummary: !isFalseToken(query.includePlcSummary),
     includeLeaktest: fast ? isTruthyToken(query.includeLeaktest) : !isFalseToken(query.includeLeaktest),
-    maxAnchorParts: fast ? fastAnchorLimit : null,
-    maxBaseLogs: fast ? Math.min(Math.max(fastAnchorLimit * 2, 800), 1500) : null,
+    maxAnchorParts: null,
+    maxBaseLogs: null,
   };
 }
 
 function getReportExportOptions(filters = {}) {
   const hasFocusedPartSearch = Boolean(String(filters.barcode || filters.customerCode || filters.partId || "").trim());
   const fast = isTruthyToken(filters.fast || filters.quick) && !hasFocusedPartSearch;
-  const rawLimit = Number.parseInt(filters.exportLimit || filters.maxAnchorParts || filters.pageSize || filters.limit, 10);
-  const exportAnchorLimit = Math.min(Math.max(rawLimit || 20000, 500), 50000);
   return {
     fast,
     includePlcReadings: !isFalseToken(filters.includePlcReadings),
     includePlcSummary: fast ? false : !isFalseToken(filters.includePlcSummary),
     includeLeaktest: !isFalseToken(filters.includeLeaktest),
-    maxAnchorParts: fast ? exportAnchorLimit : null,
-    maxBaseLogs: fast ? Math.min(Math.max(exportAnchorLimit * 6, 10000), 250000) : null,
+    maxAnchorParts: null,
+    maxBaseLogs: null,
   };
 }
 
@@ -414,26 +412,26 @@ function paginateReportRowsByPart(rows = [], pagination = {}) {
 
   groups.sort((a, b) => b.scannedAt - a.scannedAt);
 
-  const localTotalRows = groups.length;
-  const totalRows = localTotalRows;
-  const totalPages = Math.max(1, Math.ceil(totalRows / pagination.pageSize));
-  const page = Math.min(pagination.page, totalPages);
-  const offset = (page - 1) * pagination.pageSize;
+  const { page, pageSize } = pagination;
+  const hasMore = groups.length > pageSize;
   const pagedRows = groups
-    .slice(offset, offset + pagination.pageSize)
+    .slice(0, pageSize)
     .flatMap((group) => group.rows.map((row) => ({
       ...row,
       __reportPageGroupKey: group.key,
     })));
 
+  const totalPages = hasMore ? page + 1 : page;
+  const totalRows = (page * pageSize) + (hasMore ? 1 : 0);
+
   return {
     rows: pagedRows,
     pagination: {
       page,
-      pageSize: pagination.pageSize,
+      pageSize,
       totalRows,
       totalPages,
-      hasNextPage: page < totalPages,
+      hasNextPage: hasMore,
       hasPrevPage: page > 1,
     },
   };
@@ -653,47 +651,7 @@ exports.getReportData = async (req, res) => {
   } catch (error) {
     const db = summarizeDbError(error);
     console.error(`[ReportController] getReportData failed code=${db.code} msg=${db.message}`);
-    try {
-      const filters = stripReportControlFilters(req.query || {});
-      const pagination = getPagination(req.query || {});
-      const fallbackOptions = {
-        ...getReportOptions(req.query || {}),
-        includePlcReadings: false,
-        includeLeaktest: false,
-        includePlcSummary: false,
-      };
-      const { rows, shifts, plcColumnSet, metrics } = await getLiveReportBundle(filters, fallbackOptions);
-      const paged = paginateReportRowsByPart(rows, pagination);
-      const responseMetrics = alignMetricsToVisibleStatusCount(
-        scopeMetricsToStatusFilter({ ...(metrics || {}) }, filters),
-        filters,
-        paged.pagination
-      );
-      const fallbackPayload = {
-        rows: paged.rows,
-        metrics: {
-          ...responseMetrics,
-          plcShotSummary: { totalProduction: 0, okShot: 0, warmUpShot: 0, offShot: 0 },
-          plcShotSummarySource: "SKIPPED_FALLBACK",
-        },
-        pagination: paged.pagination,
-        plcColumns: [...plcColumnSet],
-        reportMode: "FALLBACK_FAST",
-        warning: "Report loaded in fast mode because detailed PLC/leak enrichment was unavailable for this range.",
-        availableShifts: shifts.map((shift) => ({
-          id: shift.id,
-          shiftName: shift.shift_name,
-          shiftCode: shift.shift_code,
-          startTime: shift.start_time,
-            endTime: shift.end_time,
-          })),
-      };
-      return res.json(wantsCleanReportResponse(req.query || {}) ? formatCleanReportResponse(fallbackPayload) : fallbackPayload);
-    } catch (fallbackError) {
-      const fallbackDb = summarizeDbError(fallbackError);
-      console.error(`[ReportController] getReportData fallback failed code=${fallbackDb.code} msg=${fallbackDb.message}`);
-      res.status(500).json({ error: fallbackDb.message });
-    }
+    res.status(500).json({ error: db.message });
   }
 };
 
@@ -811,4 +769,7 @@ exports.exportAuditReportExcel = async (req, res) => {
 
 exports._private = {
   derivePlcShotSummaryFromRows,
+  getLegacyReportBundle,
+  formatCleanReportResponse,
+  paginateReportRowsByPart,
 };

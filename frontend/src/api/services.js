@@ -717,6 +717,22 @@ export const reportApi = {
     });
     return data;
   },
+  getHistoricalData: async (params, config = {}) => {
+    const cleanParams = normalizeReportFilters(params);
+    const { data } = await apiClient.get(ENDPOINTS.reports.historicalData, {
+      params: cleanParams,
+      timeout: 180000,
+      ...config,
+    });
+    return data;
+  },
+  syncHistoricalData: async (payload, config = {}) => {
+    const { data } = await apiClient.post(ENDPOINTS.reports.syncHistoricalData, payload, {
+      timeout: 60000,
+      ...config,
+    });
+    return data;
+  },
   getShotSummary: async (params, config = {}) => {
     const cleanParams = normalizeReportFilters(params);
     const { data } = await apiClient.get(ENDPOINTS.reports.shotSummary, {
@@ -764,6 +780,19 @@ export const reportApi = {
     const { data } = await apiClient.post(ENDPOINTS.reports.exportParts, {
       filters: cleanParams,
       reportConfig: reportConfig || loadReportConfig(),
+    }, {
+      responseType: "blob",
+      timeout: 600000,
+      ...config,
+    });
+    return data;
+  },
+  exportHistorical: async (params, reportConfig, config = {}) => {
+    const cleanParams = normalizeReportFilters(params);
+    const { data } = await apiClient.post(ENDPOINTS.reports.exportHistorical, {
+      filters: cleanParams,
+      reportConfig: reportConfig || loadReportConfig(),
+      type: params.type || "full",
     }, {
       responseType: "blob",
       timeout: 600000,

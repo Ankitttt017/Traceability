@@ -58,21 +58,24 @@ async function refreshIndustrialCaches() {
     if (machinesResult.status === "fulfilled") {
       cache.machines = machinesResult.value || cache.machines || [];
       cache.lastMachineCacheRefresh = new Date().toISOString();
+      dbAvailable = true;
+      degradedMode = false;
     } else {
-      warnOnce(
-        "machine_cache_refresh_failed",
-        `[IndustrialCache] Machine cache refresh failed; using last snapshot. ${machinesResult.reason?.message || ""}`
-      );
+      // warnOnce(
+      //   "machine_cache_refresh_failed",
+      //   `[IndustrialCache] Machine cache refresh failed; using last snapshot. ${machinesResult.reason?.message || ""}`
+      // );
+      dbAvailable = false;
     }
-
+    
     if (scannersResult.status === "fulfilled") {
       cache.scanners = scannersResult.value || cache.scanners || [];
       cache.lastScannerCacheRefresh = new Date().toISOString();
     } else {
-      warnOnce(
-        "scanner_cache_refresh_failed",
-        `[IndustrialCache] Scanner cache refresh failed; using last snapshot. ${scannersResult.reason?.message || ""}`
-      );
+      // warnOnce(
+      //   "scanner_cache_refresh_failed",
+      //   `[IndustrialCache] Scanner cache refresh failed; using last snapshot. ${scannersResult.reason?.message || ""}`
+      // );
     }
 
     if (machinesResult.status === "fulfilled" && scannersResult.status === "fulfilled") {
