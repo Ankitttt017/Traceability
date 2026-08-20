@@ -189,10 +189,10 @@ async function checkBackendHealth() {
       },
     });
 
-    logInfo("WATCHDOG_BACKEND_HEARTBEAT", {
-      uptime: Math.round(uptime),
-      heapUsedMB: Math.round(memoryUsage.heapUsed / 1024 / 1024),
-    });
+    // logInfo("WATCHDOG_BACKEND_HEARTBEAT", {
+    //   uptime: Math.round(uptime),
+    //   heapUsedMB: Math.round(memoryUsage.heapUsed / 1024 / 1024),
+    // });
   } catch (error) {
     logError("WATCHDOG_BACKEND_CHECK_ERROR", {
       error: error.message,

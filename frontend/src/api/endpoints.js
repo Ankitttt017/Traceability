@@ -110,12 +110,15 @@ export const ENDPOINTS = {
   },
   reports: {
     data: "/reports/report/data",
+    historicalData: "/reports/report/historical",
+    syncHistoricalData: "/reports/report/historical/sync",
     summaryMetrics: "/reports/report/summary-metrics",
     shotSummary: "/reports/report/shot-summary",
     exportFull: "/reports/report/export-full",
     exportNG: "/reports/report/export-ng",
     exportParts: "/reports/report/export-parts",
     exportAudit: "/reports/report/export-audit",
+    exportHistorical: "/reports/report/historical/export",
   },
   alarms: {
     base: "/alarms",

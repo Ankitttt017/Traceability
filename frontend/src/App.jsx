@@ -24,6 +24,7 @@ import PlcConfiguration from "./pages/PlcConfiguration";
 import IoMonitor from "./pages/IoMonitor";
 import ReportConfiguration from "./pages/ReportConfiguration";
 import ReportsPage from "./pages/Reports/ReportsPage";
+import HistoricalReportsPage from "./pages/Reports/HistoricalReportsPage";
 import RejectionAnalysis from "./pages/RejectionAnalysis";
 import RejectionConfiguration from "./pages/RejectionConfiguration";
 import NetworkOutageOverlay from "./components/NetworkOutageOverlay";
@@ -269,6 +270,14 @@ function App() {
               element={
                 <ModuleRoute moduleKey="reports">
                   <ReportsPage />
+                </ModuleRoute>
+              }
+            />
+            <Route
+              path={APP_ROUTES.historicalReports.slice(1)}
+              element={
+                <ModuleRoute moduleKey="reports">
+                  <HistoricalReportsPage />
                 </ModuleRoute>
               }
             />

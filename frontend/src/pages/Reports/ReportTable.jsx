@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Activity, ChevronLeft, ChevronRight, Database } from "lucide-react";
 import PageSkeleton from "../../components/PageSkeleton";
 
@@ -90,6 +91,17 @@ const ReportTable = ({
   useEffect(() => {
     setPage(1);
   }, [rows]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: pagedRows.length,
+    getScrollElement: () => tableScrollRef.current,
+    estimateSize: () => 40,
+    overscan: 10,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
   
   const rangeStart = disablePagination ? (totalRows > 0 ? 1 : 0) : (totalRows > 0 ? ((currentPage - 1) * effectivePageSize) + 1 : 0);
   const rangeEnd = disablePagination ? pagedRows.length : (totalRows > 0 ? Math.min(totalRows, rangeStart + pagedRows.length - 1) : 0);
@@ -198,8 +210,18 @@ const ReportTable = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-[rgba(var(--pk-bdr),0.04)]">
-              {pagedRows.map((row, idx) => (
+              {paddingTop > 0 && (
+                <tr>
+                  <td style={{ height: paddingTop, padding: 0 }} colSpan={columns.length} />
+                </tr>
+              )}
+              {virtualItems.map((virtualRow) => {
+                const idx = virtualRow.index;
+                const row = pagedRows[idx];
+                return (
                 <tr key={`${row.traceabilityPartId || row.customerCode || row.barcode || "row"}-${idx}`} 
+                    data-index={virtualRow.index}
+                    ref={rowVirtualizer.measureElement}
                     className={`${idx % 2 === 0 ? "bg-transparent" : "bg-[rgba(var(--pk-bdr),0.02)]"} hover:bg-[rgba(var(--pk-steel),0.04)] transition-colors group`}>
                   {columns.map((column) => {
                     const value = row[column.key];
@@ -305,7 +327,13 @@ const ReportTable = ({
                     );
                   })}
                 </tr>
-              ))}
+                );
+              })}
+              {paddingBottom > 0 && (
+                <tr>
+                  <td style={{ height: paddingBottom, padding: 0 }} colSpan={columns.length} />
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

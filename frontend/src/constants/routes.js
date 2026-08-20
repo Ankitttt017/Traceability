@@ -27,5 +27,6 @@ export const APP_ROUTES = {
   faq: "/faq",
 
   reports: "/reports",
+  historicalReports: "/historical-reports",
   rejectionAnalysis: "/rejection-analysis",
 };

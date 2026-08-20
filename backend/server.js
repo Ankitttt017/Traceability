@@ -48,6 +48,7 @@ require("./models/ProductionLog");
 require("./models/QrFormatRule");
 require("./models/ReworkLog");
 require("./models/PackingSession");
+require("./models/ProductionReport");
 require("./models/PackingItem");
 require("./models/PackingManagementSetting");
 require("./models/StationFeatureSetting");
@@ -427,6 +428,7 @@ async function startServer() {
       console.log(`Server running on port ${PORT}`);
       startAlarmMonitor();
       scheduleStatusEmitter();
+      require("./services/report/historicalCronService").startHistoricalCron();
       io.emit("db:offline", { timestamp: new Date().toISOString(), reason: "DB_RECONNECTING" });
     });
     httpStarted = true;
@@ -482,6 +484,7 @@ async function startServer() {
       await runStartupDbTask("ensureDefaultShifts", () => ensureDefaultShifts());
       await refreshIndustrialCaches();
       io.emit("db:connected", { timestamp: new Date().toISOString() });
+      require("./cron/syncProductionReport").initCronJobs();
       scheduleDbReconnectLoop(STABLE_RECONNECT_MS);
     } else {
       scheduleDbReconnectLoop(DEGRADED_RECONNECT_MS);

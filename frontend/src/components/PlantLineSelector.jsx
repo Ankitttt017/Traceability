@@ -52,7 +52,7 @@ export default function PlantLineSelector({
       <label>
         {!hideLabels && <span className={labelClassName}>{plantLabel}</span>}
         <select
-          className={inputClassName}
+          className={typeof inputClassName === 'function' ? inputClassName(!!plantId) : inputClassName}
           value={plantId}
           onChange={(e) => emit({ plantId: e.target.value, lineId: "" })}
         >
@@ -65,7 +65,7 @@ export default function PlantLineSelector({
       <label>
         {!hideLabels && <span className={labelClassName}>{lineLabel}</span>}
         <select
-          className={inputClassName}
+          className={typeof inputClassName === 'function' ? inputClassName(!!lineId) : inputClassName}
           value={lineId}
           onChange={(e) => emit({ plantId, lineId: e.target.value })}
           disabled={(!includeAll && !plantId) || (requirePlantForLine && !plantId)}

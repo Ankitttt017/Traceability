@@ -135,7 +135,7 @@ async function checkSilentMachineAlarms() {
       const detail = { lastScanTime: prevLog?.createdAt || null, silentWindowMinutes: 10 };
       emitRealtime("alarm:silent", { machineId: machine.id, machineName: machine.machine_name, ...detail });
       await _persistAlarm({ type: "SILENT_MACHINE", machineId: machine.id, machineName: machine.machine_name, detail });
-      console.warn(`[AlarmService] SILENT_MACHINE alarm: machine=${machine.id} (${machine.machine_name})`);
+      // console.warn(`[AlarmService] SILENT_MACHINE alarm: machine=${machine.id} (${machine.machine_name})`);
     }
   } catch (err) {
     console.error("[AlarmService] checkSilentMachineAlarms error:", err.message);
