@@ -4,6 +4,7 @@ import { toDatetimeLocal } from '../../utils/time';
 import { loadReportConfig } from '../../utils/reportConfig';
 import ReportSummaryCards from './ReportSummaryCards';
 import ReportTable from './ReportTable';
+import PlantLineSelector from '../../components/PlantLineSelector';
 import { FileText, Download, RefreshCw, Filter, Calendar, Clock, ChevronDown, X, Zap, TrendingUp, AlertCircle, CheckCircle, Activity, BarChart3, Database, ChevronLeft, ChevronRight } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useLanguage } from '../../context/LanguageContext';
@@ -1081,6 +1082,7 @@ const HistoricalReportsPage = () => {
       resultType: '',
       modelCode: '',
       operationNo: '',
+      partCategory: '',
       quickRange: 'today'
     };
   });
@@ -1939,6 +1941,10 @@ const HistoricalReportsPage = () => {
     setFilters((prev) => ({ ...prev, dieCastingMachine: availableDieCastingMachines[0] }));
   }, [availableDieCastingMachines, filters.lineId, filters.dieCastingMachine]);
 
+  const getControlCls = useCallback((isActive) => {
+    return 'h-9 w-full rounded-lg border border-[rgba(var(--pk-bdr),0.2)] bg-[rgb(var(--pk-bg-input))] px-3 text-xs font-semibold text-[rgb(var(--pk-txt-pri))] outline-none transition-all focus:border-[rgba(var(--pk-steel),0.5)] focus:ring-2 focus:ring-[rgba(var(--pk-steel),0.08)]';
+  }, []);
+
   return (
     <div className="space-y-5 pb-16 reports-container">
       {/* ── Enhanced Page Header ── */}
@@ -2028,12 +2034,57 @@ const HistoricalReportsPage = () => {
             label="📅 Select Date Range"
           />
 
+          {/* 
+          <PlantLineSelector
+            value={filters}
+            onChange={(scope) => setFilters(prev => ({ ...prev, ...scope, machineId: "" }))}
+            includeAll
+            compact
+            hideLabels
+            className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:col-span-2"
+            inputClassName={getControlCls}
+          />
+
           <select
-            className="h-9 w-full rounded-lg border border-[rgba(var(--pk-bdr),0.2)] bg-[rgb(var(--pk-bg-input))] px-3 text-xs font-semibold text-[rgb(var(--pk-txt-pri))] outline-none transition-all focus:border-[rgba(var(--pk-steel),0.5)] focus:ring-2 focus:ring-[rgba(var(--pk-steel),0.08)]"
+            className={getControlCls(!!filters.partName)}
+            value={filters.partName || ""}
+            onChange={(e) => setFilters({ ...filters, partName: e.target.value, dieName: "", dieCastingMachine: "" })}
+          >
+            <option value="">⚙️ All Parts</option>
+            {availablePartNames.map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+
+          <select
+            className={getControlCls(!!filters.dieName)}
+            value={filters.dieName || ""}
+            onChange={(e) => setFilters({ ...filters, dieName: e.target.value, dieCastingMachine: "" })}
+            disabled={!availableDies.length && !filters.dieName}
+          >
+            <option value="">🎯 All Dies</option>
+            {availableDies.map((d) => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+          */}
+
+          <select
+            className={getControlCls(!!filters.partCategory)}
+            value={filters.partCategory || ""}
+            onChange={(e) => setFilters({ ...filters, partCategory: e.target.value })}
+          >
+            <option value="">🏷️ All Categories</option>
+            <option value="HPDC">⚙️ Casted Parts (With Shot Details)</option>
+            <option value="OTHER">📦 Other Parts (No Shot Details)</option>
+          </select>
+
+          <select
+            className={getControlCls(!!filters.machineId)}
             value={filters.machineId || ""}
             onChange={(e) => setFilters({ ...filters, machineId: e.target.value })}
           >
-            <option value="">⚙️ All Quality Gates</option>
+            <option value="">🏭 All Quality Gates</option>
             {machines.map((m) => (
               <option key={m.id || m.machine_name} value={m.operation_no || m.machine_name}>
                 {m.machine_name || m.machineName}
@@ -2042,7 +2093,7 @@ const HistoricalReportsPage = () => {
           </select>
 
           <select
-            className="h-9 w-full rounded-lg border border-[rgba(var(--pk-bdr),0.2)] bg-[rgb(var(--pk-bg-input))] px-3 text-xs font-semibold text-[rgb(var(--pk-txt-pri))] outline-none transition-all focus:border-[rgba(var(--pk-steel),0.5)] focus:ring-2 focus:ring-[rgba(var(--pk-steel),0.08)]"
+            className={getControlCls(!!filters.status)}
             value={filters.status || ""}
             onChange={(e) => setFilters({ ...filters, status: e.target.value })}
           >
@@ -2055,7 +2106,7 @@ const HistoricalReportsPage = () => {
           </select>
 
           <select
-            className="h-9 w-full rounded-lg border border-[rgba(var(--pk-bdr),0.2)] bg-[rgb(var(--pk-bg-input))] px-3 text-xs font-semibold text-[rgb(var(--pk-txt-pri))] outline-none transition-all focus:border-[rgba(var(--pk-steel),0.5)] focus:ring-2 focus:ring-[rgba(var(--pk-steel),0.08)]"
+            className={getControlCls(!!filters.shiftCode)}
             value={filters.shiftCode || ""}
             onChange={(e) => setFilters({ ...filters, shiftCode: e.target.value })}
           >
@@ -2075,7 +2126,7 @@ const HistoricalReportsPage = () => {
                   dateFrom: toDatetimeLocal(todayRange.start),
                   dateTo: toDatetimeLocal(todayRange.end),
                   plantId: '', lineId: '', machineId: '', partName: '', dieName: '', dieCastingMachine: '', lineName: '', shiftCode: '', status: '', partType: '', station: '', barcode: '', customerCode: '',
-                  operatorId: '', resultType: '', modelCode: '', operationNo: '', quickRange: 'today'
+                  operatorId: '', resultType: '', modelCode: '', operationNo: '', partCategory: '', quickRange: 'today'
                 };
                 setQuickRange("today");
                 setFilters(nextFilters);
@@ -2153,8 +2204,8 @@ const HistoricalReportsPage = () => {
         onPageSizeChange={(pageSize) => {
           setReportPage({ page: 1, pageSize });
         }}
-        defaultPageSize={10000}
-        pageSizeOptions={[500, 1000, 5000, 10000, 25000]}
+        defaultPageSize={5000}
+        pageSizeOptions={[100, 250, 500, 1000, 2000, 5000, 10000]}
       />
     </div>
   );

@@ -1,4 +1,5 @@
 const { Op } = require("sequelize");
+const sequelize = require("../config/db");
 const ProductionReport = require("../models/ProductionReport");
 
 exports.getHistoricalReportData = async (req, res) => {
@@ -10,10 +11,22 @@ exports.getHistoricalReportData = async (req, res) => {
     // Build fast filter
     const where = {};
     if (req.query.dateFrom && req.query.dateTo) {
-      where.first_scan_at = {
-        [Op.gte]: new Date(req.query.dateFrom),
-        [Op.lte]: new Date(req.query.dateTo),
-      };
+      const fromDateIso = new Date(req.query.dateFrom).toISOString();
+      const toDateIso = new Date(req.query.dateTo).toISOString();
+      // Use literal subquery to find parts that had any activity in the date range
+      where[Op.or] = [
+        {
+          part_id: {
+            [Op.in]: sequelize.literal(`(SELECT DISTINCT part_id FROM OperationLogs WHERE createdAt >= '${fromDateIso}' AND createdAt <= '${toDateIso}')`)
+          }
+        },
+        {
+          first_scan_at: {
+            [Op.gte]: new Date(req.query.dateFrom),
+            [Op.lte]: new Date(req.query.dateTo),
+          }
+        }
+      ];
     }
 
     if (req.query.barcode || req.query.customerCode || req.query.partId) {
@@ -24,22 +37,6 @@ exports.getHistoricalReportData = async (req, res) => {
        ];
     }
     
-    if (req.query.status) {
-       where.overall_status = req.query.status.toUpperCase();
-    }
-
-    if (req.query.shiftCode) {
-       where.shift_code = req.query.shiftCode;
-    }
-
-    if (req.query.partName) {
-       where.part_name = req.query.partName;
-    }
-
-    if (req.query.category) {
-       where.rejection_category = req.query.category;
-    }
-
     let stationScope = String(req.query.machineId || req.query.operationNo || req.query.stationNo || req.query.station || "").trim().toUpperCase();
     if (stationScope && !/^OP\d{3}$/i.test(stationScope)) {
       try {
@@ -53,6 +50,42 @@ exports.getHistoricalReportData = async (req, res) => {
           stationScope = String(resolvedMachine.operation_no).toUpperCase();
         }
       } catch (err) { void err; }
+    }
+
+    const isOpScope = /^OP\d{3}$/i.test(stationScope);
+    const statusCol = isOpScope ? stationScope.toLowerCase() + '_status' : 'overall_status';
+
+    if (req.query.status) {
+       let mappedStatus = req.query.status.toUpperCase();
+       if (!isOpScope) {
+         if (mappedStatus === 'OK') mappedStatus = 'PASSED';
+         if (mappedStatus === 'WIP') mappedStatus = 'IN_PROGRESS';
+       }
+       where[statusCol] = mappedStatus;
+    }
+
+    if (req.query.shiftCode) {
+       where.shift_code = req.query.shiftCode;
+    }
+
+    if (req.query.partName) {
+       where.part_name = req.query.partName;
+    }
+
+    if (req.query.partCategory) {
+       if (req.query.partCategory === 'HPDC') {
+          where.part_name = { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] };
+       } else if (req.query.partCategory === 'OTHER') {
+          where.part_name = { [Op.or]: [null, ''] };
+       }
+    }
+
+    if (req.query.dieName) {
+       where.part_id = { [Op.like]: `%-${req.query.dieName}-%` };
+    }
+
+    if (req.query.category) {
+       where.rejection_category = req.query.category;
     }
 
     if (stationScope) {
@@ -71,15 +104,15 @@ exports.getHistoricalReportData = async (req, res) => {
     });
 
     // 2. Fetch Lightning Fast Metrics
-    // If we are filtering by a specific Quality Gate (OP code), aggregate based on that specific station's status
-    const isOpScope = /^OP\d{3}$/i.test(stationScope);
-    const statusCol = isOpScope ? stationScope.toLowerCase() + '_status' : 'overall_status';
+    const fromDateStr = req.query.dateFrom ? new Date(req.query.dateFrom).toISOString() : '1970-01-01T00:00:00.000Z';
+    const toDateStr = req.query.dateTo ? new Date(req.query.dateTo).toISOString() : '2100-01-01T00:00:00.000Z';
 
     const metricsResult = await ProductionReport.findAll({
       where,
       attributes: [
         [ProductionReport.sequelize.col(statusCol), 'overall_status'],
-        [ProductionReport.sequelize.fn('COUNT', ProductionReport.sequelize.col('id')), 'count']
+        [ProductionReport.sequelize.fn('COUNT', ProductionReport.sequelize.col('id')), 'count'],
+        [ProductionReport.sequelize.literal(`SUM(CASE WHEN first_scan_at >= '${fromDateStr}' AND first_scan_at <= '${toDateStr}' THEN 1 ELSE 0 END)`), 'started_in_range_count']
       ],
       group: [statusCol],
       raw: true,
@@ -96,7 +129,10 @@ exports.getHistoricalReportData = async (req, res) => {
     metricsResult.forEach(row => {
       const status = row.overall_status;
       const cnt = Number(row.count) || 0;
-      totalProduction += cnt;
+      const startedCnt = Number(row.started_in_range_count) || 0;
+      
+      totalProduction += startedCnt;
+      
       if (status === 'OK' || status === 'PASSED') totalOK += cnt;
       else if (status === 'NG' || status === 'FAILED') totalNG += cnt;
       else inProgress += cnt;
@@ -134,8 +170,8 @@ exports.getHistoricalReportData = async (req, res) => {
 
         // If the sliced logs don't include the Leak Test station, don't show future leak test results
         const hasLeakTest = rawLogs.some(log => {
-          const op = String(log.operationNo || log.stationNo || log.operation_no || log.station_no || "").trim().toUpperCase();
-          return op === "OP150" || op === "LEAKTEST";
+          const op = String(log.operationNo || log.stationNo || log.operation_no || log.station_no || log.machine_id || log.machineId || "").trim().toUpperCase();
+          return op.includes("OP150") || op.includes("LEAK");
         });
         if (!hasLeakTest) {
           rawLogs.forEach(log => {

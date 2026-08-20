@@ -31,8 +31,8 @@ async function syncDateRange(dateFrom, dateTo) {
     });
 
     if (!rows || rows.length === 0) {
-      console.log(`[HistoricalSync] No rows found for range.`);
-      return;
+      // console.log(`[HistoricalSync] No rows found for range.`);
+      return { success: true, count: 0 };
     }
 
     // 2. Paginate to group them by part (fetch all at once for the sync chunk)
