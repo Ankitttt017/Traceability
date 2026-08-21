@@ -71,6 +71,13 @@ const ReportTable = ({
 }) => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(defaultPageSize);
+  const [prevRows, setPrevRows] = useState(rows);
+
+  if (rows !== prevRows) {
+    setPrevRows(rows);
+    setPage(1);
+  }
+
   const tableScrollRef = useRef(null);
   const serverPaged = !disablePagination && Boolean(pagination && typeof onPageChange === "function");
   const effectivePageSize = serverPaged ? Number(pagination.pageSize || 50) : pageSize;
@@ -88,9 +95,6 @@ const ReportTable = ({
     return rows.slice(start, start + pageSize);
   }, [rows, currentPage, pageSize, serverPaged, disablePagination]);
 
-  useEffect(() => {
-    setPage(1);
-  }, [rows]);
 
   const rowVirtualizer = useVirtualizer({
     count: pagedRows.length,

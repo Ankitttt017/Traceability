@@ -1,6 +1,7 @@
 const { Op } = require("sequelize");
 const sequelize = require("../config/db");
 const ProductionReport = require("../models/ProductionReport");
+const { _private: reportPrivate } = require("./reportController");
 
 exports.getHistoricalReportData = async (req, res) => {
   try {
@@ -148,6 +149,19 @@ exports.getHistoricalReportData = async (req, res) => {
     const formattedRows = rows.flatMap(row => {
       let rawLogs = row.raw_logs ? (typeof row.raw_logs === 'string' ? JSON.parse(row.raw_logs) : row.raw_logs) : [];
 
+      // Stamp every log entry with ProductionReport master metadata so the frontend
+      // can correctly resolve final status and final date without re-calculating.
+      const masterOverallStatus = row.overall_status || null;
+      const masterFinalScanAt = row.final_scan_at ? new Date(row.final_scan_at).toISOString() : null;
+      const masterFirstScanAt = row.first_scan_at ? new Date(row.first_scan_at).toISOString() : null;
+
+      rawLogs = rawLogs.map(log => ({
+        ...log,
+        __pr_overall_status: masterOverallStatus,
+        __pr_final_scan_at: masterFinalScanAt,
+        __pr_first_scan_at: masterFirstScanAt,
+      }));
+
       // Sort logs chronologically to ensure trimming works correctly
       rawLogs.sort((a, b) => {
         const tA = new Date(a.createdAt || a.plc_end_time || 0).getTime();
@@ -191,7 +205,7 @@ exports.getHistoricalReportData = async (req, res) => {
       return rawLogs;
     });
 
-    res.json({
+    const payload = {
       rows: formattedRows,
       metrics: {
         totalProduction,
@@ -214,7 +228,13 @@ exports.getHistoricalReportData = async (req, res) => {
       plcColumns: [...plcColumnSet],
       reportMode: "HISTORICAL_MASTER",
       warning: undefined,
-    });
+    };
+
+    if (reportPrivate?.wantsCleanReportResponse && reportPrivate.wantsCleanReportResponse(req.query || {})) {
+       res.json(reportPrivate.formatCleanReportResponse(payload));
+    } else {
+       res.json(payload);
+    }
   } catch (error) {
     console.error("[HistoricalReport] Error fetching historical report:", error);
     res.status(500).json({ error: error.message });

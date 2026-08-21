@@ -715,6 +715,9 @@ export const reportApi = {
       timeout: 180000,
       ...config,
     });
+    // For backward compatibility with generic dashboard components
+    if (data && data.records && !data.rows) data.rows = data.records;
+    if (data && data.summary && !data.metrics) data.metrics = data.summary;
     return data;
   },
   getHistoricalData: async (params, config = {}) => {
@@ -724,6 +727,9 @@ export const reportApi = {
       timeout: 180000,
       ...config,
     });
+    // For backward compatibility with generic dashboard components
+    if (data && data.records && !data.rows) data.rows = data.records;
+    if (data && data.summary && !data.metrics) data.metrics = data.summary;
     return data;
   },
   syncHistoricalData: async (payload, config = {}) => {

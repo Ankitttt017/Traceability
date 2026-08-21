@@ -445,7 +445,10 @@ function summarizeDbError(error) {
 
 function wantsCleanReportResponse(query = {}) {
   const format = String(query.format || "").trim().toUpperCase();
-  return isTruthyToken(query.clean || query.professional) || ["CLEAN", "PROFESSIONAL", "PUBLIC"].includes(format);
+  if (["RAW", "FLAT"].includes(format) || String(query.raw) === "1" || String(query.raw).toLowerCase() === "true") {
+    return false;
+  }
+  return true;
 }
 
 function cleanValue(value, fallback = null) {
@@ -480,7 +483,7 @@ function cleanLeakTest(reading, readings) {
   const list = Array.isArray(readings) ? readings.filter(Boolean) : (reading ? [reading] : []);
   if (!list.length) return null;
   return list.map((item) => ({
-    machine: cleanValue(item.Machine || item.machineName || item.matchedMachineName),
+    machine: cleanValue(item.matchedMachineName || item.Machine || item.machineName),
     result: cleanStatus(item.Result || item.result),
     bodyLeakValue: cleanValue(item.Body_Leak_Value),
     gall1: cleanValue(item.Gall_1),
@@ -488,6 +491,10 @@ function cleanLeakTest(reading, readings) {
     cycleTime: cleanValue(item.Cycle_Time),
     cycleEndAt: cleanValue(item.Cycle_End_Time || item.cycleEndTime || item.updatedAt || item.createdAt),
     runningMode: cleanValue(item.Running_Mode),
+    dry: cleanValue(item.Dry),
+    wey: cleanValue(item.Wey),
+    way: cleanValue(item.Way),
+    both: cleanValue(item.Both),
   }));
 }
 
@@ -528,45 +535,20 @@ function formatCleanReportResponse(payload = {}) {
         partDie: cleanValue(plc.part_name),
         date: cleanValue(plc.shot_date),
         time: cleanValue(plc.shot_time),
-        parameters: {
-          cycleTime: cleanValue(plc.cycle_time),
-          dieCloseCoreInTime: cleanValue(plc.die_close_core_in_time),
-          pouringTime: cleanValue(plc.pouring_time),
-          shotForwardTime: cleanValue(plc.shot_fwd_time),
-          curingTime: cleanValue(plc.curing_time),
-          dieOpenCoreOutTime: cleanValue(plc.die_open_core_out_time),
-          ejectorTime: cleanValue(plc.ejector_time),
-          extractTime: cleanValue(plc.extract_time),
-          sprayTime: cleanValue(plc.spray_time),
-          v1Speed: cleanValue(plc.v1_speed),
-          v2Speed: cleanValue(plc.v2_speed),
-          v3Speed: cleanValue(plc.v3_speed),
-          v4Speed: cleanValue(plc.v4_speed),
-          metalPressure: cleanValue(plc.metal_pressure),
-          furnaceMetalTemp: cleanValue(plc.furnace_metal_temp),
-          coolingWaterMoving: cleanValue(plc.cooling_water_mov),
-          coolingWaterStationary: cleanValue(plc.cooling_water_sta),
-          accelPoint: cleanValue(plc.accel_point),
-          deaccelPoint: cleanValue(plc.deaccel_point),
-          intensificationTime: cleanValue(plc.intensification_time),
-          biscuitThickness: cleanValue(plc.biscuit_thickness),
-          jetCoolingPressure: cleanValue(plc.jet_cooling_pressure),
-          clampForcePercent: cleanValue(plc.clamp_force_pct),
-          clampTonnage: cleanValue(plc.clamp_tonnage),
-          shotAccPressure: cleanValue(plc.shot_acc_pressure),
-          intensificationAccPressure: cleanValue(plc.intensification_acc_pressure),
-          vacuumPressure: cleanValue(plc.vacuum_pressure),
-          stroke: cleanValue(plc.stroke),
-        },
+        parameters: Object.fromEntries(
+          Object.entries(plc)
+            .filter(([k]) => !['shot_number', 'shot_status', 'recorded_at', 'recordedAt', 'machine_name', 'part_name', 'shot_date', 'shot_time'].includes(k))
+            .map(([k, v]) => [k, cleanValue(v)])
+        ),
       },
       leakTest: cleanLeakTest(row.leakTestReading, row.leakTestReadings),
       rejection: {
-        category: cleanValue(row.rejectionCategory || row.category),
-        view: cleanValue(row.rejectionView),
-        zone: cleanValue(row.rejectionZone),
-        subZone: cleanValue(row.rejectionSubZone),
-        reason: cleanValue(row.rejectionReason || row.reason),
-        remark: cleanValue(row.rejectionRemark),
+        category: cleanValue(row.rejectionCategory || row.rejection_category),
+        view: cleanValue(row.rejectionView || row.rejection_view),
+        zone: cleanValue(row.rejectionZone || row.rejection_zone),
+        subZone: cleanValue(row.rejectionSubZone || row.rejection_sub_zone),
+        reason: cleanValue(row.rejectionReason || row.rejection_reason || row.reason),
+        remark: cleanValue(row.rejectionRemark || row.rejection_remark),
       },
     };
   });
@@ -771,5 +753,6 @@ exports._private = {
   derivePlcShotSummaryFromRows,
   getLegacyReportBundle,
   formatCleanReportResponse,
+  wantsCleanReportResponse,
   paginateReportRowsByPart,
 };
