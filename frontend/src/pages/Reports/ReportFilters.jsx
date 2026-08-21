@@ -340,6 +340,7 @@ const ReportFilters = ({ filters, onFilterChange, onApply, onClear, machines = [
 
             <input
               type="text"
+              name="barcode"
               placeholder="🔍 Part Serial No."
               className={controlCls}
               value={filters.barcode || ""}
@@ -359,6 +360,7 @@ const ReportFilters = ({ filters, onFilterChange, onApply, onClear, machines = [
               inputClassName={controlCls}
             />
             <select
+              name="machineId"
               className={controlCls}
               value={filters.machineId}
               onChange={(e) => onFilterChange({ ...filters, machineId: e.target.value })}
@@ -375,6 +377,7 @@ const ReportFilters = ({ filters, onFilterChange, onApply, onClear, machines = [
                 ))}
             </select>
             <select
+              name="status"
               className={controlCls}
               value={filters.status || ""}
               onChange={(e) => onFilterChange({ ...filters, status: e.target.value })}
@@ -387,6 +390,7 @@ const ReportFilters = ({ filters, onFilterChange, onApply, onClear, machines = [
               ))}
             </select>
             <select
+              name="shiftCode"
               className={controlCls}
               value={filters.shiftCode || ""}
               onChange={(e) => onFilterChange({ ...filters, shiftCode: e.target.value })}

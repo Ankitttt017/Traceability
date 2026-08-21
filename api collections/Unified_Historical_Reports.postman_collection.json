@@ -79,7 +79,7 @@
           }
         ],
         "url": {
-          "raw": "{{BASE_URL}}/reports/report/historical?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&page=1&pageSize=1000&partCategory=HPDC",
+          "raw": "{{BASE_URL}}/reports/report/historical?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&page=1&pageSize=1000&partCategory=HPDC&clean=1",
           "host": [
             "{{BASE_URL}}"
           ],
@@ -109,6 +109,11 @@
               "key": "partCategory",
               "value": "HPDC",
               "description": "Filters only casted parts (with shot details)"
+            },
+            {
+              "key": "clean",
+              "value": "1",
+              "description": "Returns professional nested JSON format"
             }
           ]
         }
@@ -125,7 +130,7 @@
           }
         ],
         "url": {
-          "raw": "{{BASE_URL}}/reports/report/historical?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&page=1&pageSize=1000&partCategory=OTHER",
+          "raw": "{{BASE_URL}}/reports/report/historical?dateFrom={{DATE_FROM}}&dateTo={{DATE_TO}}&page=1&pageSize=1000&partCategory=OTHER&clean=1",
           "host": [
             "{{BASE_URL}}"
           ],
@@ -155,6 +160,11 @@
               "key": "partCategory",
               "value": "OTHER",
               "description": "Filters only manual/customer parts (no shot details)"
+            },
+            {
+              "key": "clean",
+              "value": "1",
+              "description": "Returns professional nested JSON format"
             }
           ]
         }

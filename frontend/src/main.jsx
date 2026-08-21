@@ -13,6 +13,15 @@ if (import.meta.env.PROD) {
     .catch(() => {});
 }
 
+// Suppress benign React 18 flushSync development warnings caused by @tanstack/react-virtual
+const originalError = console.error;
+console.error = (...args) => {
+  if (typeof args[0] === "string" && args[0].includes("flushSync was called from inside a lifecycle method")) {
+    return;
+  }
+  originalError(...args);
+};
+
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <ThemeProvider>

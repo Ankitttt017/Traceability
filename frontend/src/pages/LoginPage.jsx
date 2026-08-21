@@ -488,7 +488,7 @@ const LoginPage = () => {
                   <User size={15} color={focusF==="username"?C.steel():C.txt("m")}
                     style={{position:"absolute",left:14,top:"50%",
                       transform:"translateY(-50%)",transition:"color .15s"}}/>
-                  <input type="text" required
+                  <input type="text" required name="username" id="username"
                     value={form.username}
                     onChange={e=>setForm(p=>({...p,username:e.target.value}))}
                     placeholder={t("login.enterUsername", "Enter your username")}
@@ -512,7 +512,7 @@ const LoginPage = () => {
                   <Lock size={15} color={focusF==="password"?C.steel():C.txt("m")}
                     style={{position:"absolute",left:14,top:"50%",
                       transform:"translateY(-50%)",transition:"color .15s"}}/>
-                  <input type={showPw?"text":"password"} required
+                  <input type={showPw?"text":"password"} required name="password" id="password"
                     value={form.password}
                     onChange={e=>setForm(p=>({...p,password:e.target.value}))}
                     placeholder={t("login.enterPassword", "Enter your password")}

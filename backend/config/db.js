@@ -15,6 +15,7 @@ const dialectOptions = {
   encrypt: process.env.DB_ENCRYPT === "true",
   trustServerCertificate: process.env.DB_TRUST_SERVER_CERT !== "false",
   enableArithAbort: true,
+  packetSize: 32768,
 };
 const parsedRequestTimeout = Number(process.env.DB_REQUEST_TIMEOUT_MS);
 if (Number.isFinite(parsedRequestTimeout) && parsedRequestTimeout > 0) {
@@ -40,14 +41,14 @@ const sequelizeConfig = {
     options: dialectOptions,
   },
   pool: {
-    max: Number(process.env.DB_POOL_MAX || 20),
-    min: Number(process.env.DB_POOL_MIN || 2),
+    max: Number(process.env.DB_POOL_MAX || 100),
+    min: Number(process.env.DB_POOL_MIN || 5),
     acquire: Number(process.env.DB_POOL_ACQUIRE_MS || 60000),
-    idle: Number(process.env.DB_POOL_IDLE_MS || 10000),
-    evict: Number(process.env.DB_POOL_EVICT_MS || 10000),
+    idle: Number(process.env.DB_POOL_IDLE_MS || 60000),
+    evict: Number(process.env.DB_POOL_EVICT_MS || 60000),
   },
   retry: {
-    max: Number(process.env.DB_RETRY_MAX || 2),
+    max: Number(process.env.DB_RETRY_MAX || 5),
     match: [
       /ECONNRESET/i,
       /ESOCKET/i,
@@ -58,6 +59,8 @@ const sequelizeConfig = {
       /ConnectionError/i,
       /SequelizeConnectionError/i,
       /Requests can only be made in the LoggedIn state/i,
+      /Could not connect \(sequence\)/i,
+      /Connection lost/i,
     ],
   },
   logging: false,
