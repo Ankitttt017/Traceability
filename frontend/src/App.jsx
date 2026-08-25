@@ -23,7 +23,7 @@ import StationControls from "./pages/StationControls";
 import PlcConfiguration from "./pages/PlcConfiguration";
 import IoMonitor from "./pages/IoMonitor";
 import ReportConfiguration from "./pages/ReportConfiguration";
-import ReportsPage from "./pages/Reports/ReportsPage";
+// import ReportsPage from "./pages/Reports/ReportsPage";
 import HistoricalReportsPage from "./pages/Reports/HistoricalReportsPage";
 import RejectionAnalysis from "./pages/RejectionAnalysis";
 import RejectionConfiguration from "./pages/RejectionConfiguration";
@@ -265,14 +265,14 @@ function App() {
             />
 
             
-            <Route
+           {/* <Route
               path={APP_ROUTES.reports.slice(1)}
               element={
                 <ModuleRoute moduleKey="reports">
                   <ReportsPage />
                 </ModuleRoute>
               }
-            />
+            />*/}
             <Route
               path={APP_ROUTES.historicalReports.slice(1)}
               element={

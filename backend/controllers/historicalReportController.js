@@ -11,38 +11,13 @@ exports.getHistoricalReportData = async (req, res) => {
 
     // Build fast filter
     const where = {};
-    if (req.query.dateFrom && req.query.dateTo) {
-      const fromDateIso = new Date(req.query.dateFrom).toISOString();
-      const toDateIso = new Date(req.query.dateTo).toISOString();
-      // Use literal subquery to find parts that had any activity in the date range
-      where[Op.or] = [
-        {
-          part_id: {
-            [Op.in]: sequelize.literal(`(SELECT DISTINCT part_id FROM OperationLogs WHERE createdAt >= '${fromDateIso}' AND createdAt <= '${toDateIso}')`)
-          }
-        },
-        {
-          first_scan_at: {
-            [Op.gte]: new Date(req.query.dateFrom),
-            [Op.lte]: new Date(req.query.dateTo),
-          }
-        }
-      ];
-    }
+    const andConditions = [];
 
-    if (req.query.barcode || req.query.customerCode || req.query.partId) {
-       const term = req.query.barcode || req.query.customerCode || req.query.partId;
-       where[Op.or] = [
-         { part_id: { [Op.like]: `%${term}%` } },
-         { customer_qr: { [Op.like]: `%${term}%` } }
-       ];
-    }
-    
     let stationScope = String(req.query.machineId || req.query.operationNo || req.query.stationNo || req.query.station || "").trim().toUpperCase();
     if (stationScope && !/^OP\d{3}$/i.test(stationScope)) {
       try {
         const Machine = require("../models/Machine");
-        const resolvedMachine = await Machine.findOne({ 
+        const resolvedMachine = await Machine.findOne({
           where: { machine_name: req.query.machineId || req.query.operationNo || req.query.stationNo || req.query.station },
           attributes: ['operation_no'],
           raw: true
@@ -53,40 +28,97 @@ exports.getHistoricalReportData = async (req, res) => {
       } catch (err) { void err; }
     }
 
+    if (req.query.dateFrom && req.query.dateTo) {
+      const fromDateIso = new Date(req.query.dateFrom).toISOString();
+      const toDateIso = new Date(req.query.dateTo).toISOString();
+      
+      if (stationScope) {
+        let opLiteral = `SELECT DISTINCT part_id FROM OperationLogs WHERE createdAt >= '${fromDateIso}' AND createdAt <= '${toDateIso}'`;
+        if (/^\d+$/.test(stationScope)) {
+          opLiteral += ` AND machine_id = '${stationScope}'`;
+        } else {
+          opLiteral += ` AND (operation_no = '${stationScope}' OR station_no = '${stationScope}')`;
+        }
+        andConditions.push({
+          [Op.or]: [
+            { part_id: { [Op.in]: sequelize.literal(`(${opLiteral})`) } },
+            { customer_qr: { [Op.in]: sequelize.literal(`(${opLiteral})`) } }
+          ]
+        });
+      } else {
+        const reqStatus = (req.query.status || "").toUpperCase();
+        if (reqStatus === 'OK' || reqStatus === 'PASSED' || reqStatus === 'NG' || reqStatus === 'FAILED') {
+          andConditions.push({
+            final_scan_at: { [Op.gte]: fromDateIso, [Op.lte]: toDateIso }
+          });
+        } else if (reqStatus === 'WIP' || reqStatus === 'IN_PROGRESS') {
+          andConditions.push({
+            first_scan_at: { [Op.gte]: fromDateIso, [Op.lte]: toDateIso }
+          });
+        } else {
+          andConditions.push({
+            [Op.or]: [
+              { first_scan_at: { [Op.gte]: fromDateIso, [Op.lte]: toDateIso } },
+              { final_scan_at: { [Op.gte]: fromDateIso, [Op.lte]: toDateIso } }
+            ]
+          });
+        }
+      }
+    }
+
+    if (req.query.barcode || req.query.customerCode || req.query.partId) {
+      const term = req.query.barcode || req.query.customerCode || req.query.partId;
+      andConditions.push({
+        [Op.or]: [
+          { part_id: { [Op.like]: `%${term}%` } },
+          { customer_qr: { [Op.like]: `%${term}%` } },
+          { shot_number: { [Op.like]: `%${term}%` } }
+        ]
+      });
+    }
+
     const isOpScope = /^OP\d{3}$/i.test(stationScope);
     const statusCol = isOpScope ? stationScope.toLowerCase() + '_status' : 'overall_status';
 
     if (req.query.status) {
-       let mappedStatus = req.query.status.toUpperCase();
-       if (!isOpScope) {
-         if (mappedStatus === 'OK') mappedStatus = 'PASSED';
-         if (mappedStatus === 'WIP') mappedStatus = 'IN_PROGRESS';
-       }
-       where[statusCol] = mappedStatus;
+      let mappedStatus = req.query.status.toUpperCase();
+      if (!isOpScope) {
+        if (mappedStatus === 'OK' || mappedStatus === 'PASSED') {
+          where[statusCol] = { [Op.in]: ['OK', 'PASSED'] };
+        } else if (mappedStatus === 'NG' || mappedStatus === 'FAILED') {
+          where[statusCol] = { [Op.in]: ['NG', 'FAILED'] };
+        } else if (mappedStatus === 'WIP' || mappedStatus === 'IN_PROGRESS') {
+          where[statusCol] = { [Op.in]: ['WIP', 'IN_PROGRESS'] };
+        } else {
+          where[statusCol] = mappedStatus;
+        }
+      } else {
+        where[statusCol] = mappedStatus;
+      }
     }
 
     if (req.query.shiftCode) {
-       where.shift_code = req.query.shiftCode;
+      where.shift_code = req.query.shiftCode;
     }
 
     if (req.query.partName) {
-       where.part_name = req.query.partName;
+      where.part_name = req.query.partName;
     }
 
     if (req.query.partCategory) {
-       if (req.query.partCategory === 'HPDC') {
-          where.part_name = { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] };
-       } else if (req.query.partCategory === 'OTHER') {
-          where.part_name = { [Op.or]: [null, ''] };
-       }
+      if (req.query.partCategory === 'HPDC') {
+        where.part_name = { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] };
+      } else if (req.query.partCategory === 'OTHER') {
+        where.part_name = { [Op.or]: [null, ''] };
+      }
     }
 
     if (req.query.dieName) {
-       where.part_id = { [Op.like]: `%-${req.query.dieName}-%` };
+      where.part_id = { [Op.like]: `%-${req.query.dieName}-%` };
     }
 
     if (req.query.category) {
-       where.rejection_category = req.query.category;
+      where.rejection_category = req.query.category;
     }
 
     if (stationScope) {
@@ -95,6 +127,10 @@ exports.getHistoricalReportData = async (req, res) => {
       };
     }
     
+    if (andConditions.length > 0) {
+      where[Op.and] = andConditions;
+    }
+
     // 1. Fetch Paginated Rows
     const { count, rows } = await ProductionReport.findAndCountAll({
       where,
@@ -105,15 +141,11 @@ exports.getHistoricalReportData = async (req, res) => {
     });
 
     // 2. Fetch Lightning Fast Metrics
-    const fromDateStr = req.query.dateFrom ? new Date(req.query.dateFrom).toISOString() : '1970-01-01T00:00:00.000Z';
-    const toDateStr = req.query.dateTo ? new Date(req.query.dateTo).toISOString() : '2100-01-01T00:00:00.000Z';
-
     const metricsResult = await ProductionReport.findAll({
       where,
       attributes: [
         [ProductionReport.sequelize.col(statusCol), 'overall_status'],
-        [ProductionReport.sequelize.fn('COUNT', ProductionReport.sequelize.col('id')), 'count'],
-        [ProductionReport.sequelize.literal(`SUM(CASE WHEN first_scan_at >= '${fromDateStr}' AND first_scan_at <= '${toDateStr}' THEN 1 ELSE 0 END)`), 'started_in_range_count']
+        [ProductionReport.sequelize.fn('COUNT', ProductionReport.sequelize.col('id')), 'count']
       ],
       group: [statusCol],
       raw: true,
@@ -130,16 +162,21 @@ exports.getHistoricalReportData = async (req, res) => {
     metricsResult.forEach(row => {
       const status = row.overall_status;
       const cnt = Number(row.count) || 0;
-      const startedCnt = Number(row.started_in_range_count) || 0;
-      
-      totalProduction += startedCnt;
-      
+
+      // If a specific gate is selected, totalProduction is the sum of parts through that gate.
+      if (stationScope) totalProduction += cnt;
+
       if (status === 'OK' || status === 'PASSED') totalOK += cnt;
       else if (status === 'NG' || status === 'FAILED') totalNG += cnt;
       else inProgress += cnt;
     });
 
-    const passRate = totalProduction > 0 ? Number(((totalOK / totalProduction) * 100).toFixed(2)) : 0;
+    // Total Production = sum of all statuses from the same WHERE clause for consistency
+    if (!stationScope) {
+      totalProduction = totalOK + totalNG + inProgress;
+    }
+
+    const passRate = totalProduction > 0 ? Number(((totalOK / (totalOK + totalNG)) * 100).toFixed(2)) : 0;
 
     // 3. Format rows back exactly as the UI expects (array of OperationLog arrays)
     // The Master Table stored the raw OperationLog entries array in `raw_logs` for this part.
@@ -168,7 +205,7 @@ exports.getHistoricalReportData = async (req, res) => {
         const tB = new Date(b.createdAt || b.plc_end_time || 0).getTime();
         return tA - tB;
       });
-      
+
       // Trim data table: if a quality gate is selected, hide all stations that occurred AFTER it
       if (stationScope) {
         let targetIndex = rawLogs.length - 1;
@@ -182,12 +219,22 @@ exports.getHistoricalReportData = async (req, res) => {
         }
         rawLogs = rawLogs.slice(0, targetIndex + 1);
 
-        // If the sliced logs don't include the Leak Test station, don't show future leak test results
-        const hasLeakTest = rawLogs.some(log => {
+        // Preserve leak test data if:
+        // 1. The trimmed logs include an OP150 entry, OR
+        // 2. The selected gate is >= OP150 numerically (e.g. OP150, OP160), OR
+        // 3. Any remaining log already has leakTestReadings embedded
+        const scopeNum = parseInt(String(stationScope).replace(/\D/g, ''), 10) || 0;
+        const hasLeakOp = rawLogs.some(log => {
           const op = String(log.operationNo || log.stationNo || log.operation_no || log.station_no || log.machine_id || log.machineId || "").trim().toUpperCase();
           return op.includes("OP150") || op.includes("LEAK");
         });
-        if (!hasLeakTest) {
+        const hasLeakReadings = rawLogs.some(log => {
+          return (log.leakTestReadings && (Array.isArray(log.leakTestReadings) ? log.leakTestReadings.length > 0 : true)) ||
+                 (log.leakTestReading && typeof log.leakTestReading === 'object') ||
+                 (log.leak_data && typeof log.leak_data === 'object');
+        });
+        const shouldKeepLeak = hasLeakOp || hasLeakReadings || scopeNum >= 150;
+        if (!shouldKeepLeak) {
           rawLogs.forEach(log => {
             delete log.leakTestReadings;
             delete log.leakTestReading;
@@ -231,9 +278,9 @@ exports.getHistoricalReportData = async (req, res) => {
     };
 
     if (reportPrivate?.wantsCleanReportResponse && reportPrivate.wantsCleanReportResponse(req.query || {})) {
-       res.json(reportPrivate.formatCleanReportResponse(payload));
+      res.json(reportPrivate.formatCleanReportResponse(payload));
     } else {
-       res.json(payload);
+      res.json(payload);
     }
   } catch (error) {
     console.error("[HistoricalReport] Error fetching historical report:", error);
@@ -253,7 +300,7 @@ exports.syncHistoricalData = async (req, res) => {
       dateTo = new Date();
       dateFrom = new Date(dateTo.getTime() - 24 * 60 * 60 * 1000); // 24 hours back
     }
-    
+
     // Kick off sync asynchronously so we don't block the request if it takes a while
     syncDateRange(dateFrom, dateTo).catch(err => {
       console.error("[HistoricalReport] Manual sync error:", err);
@@ -278,31 +325,11 @@ exports.exportHistoricalReportExcel = async (req, res) => {
     const { calculateProductionMetrics } = require("../services/report/reportMetricsService");
     const { generateIndustrialExcel } = require("../services/report/excelTemplateEngine");
 
-    const where = {};
-    if (filters.dateFrom && filters.dateTo) {
-      where.first_scan_at = {
-        [Op.gte]: new Date(filters.dateFrom),
-        [Op.lte]: new Date(filters.dateTo),
-      };
-    }
-    if (filters.barcode || filters.customerCode || filters.partId) {
-       const term = filters.barcode || filters.customerCode || filters.partId;
-       where[Op.or] = [
-         { part_id: { [Op.like]: `%${term}%` } },
-         { customer_qr: { [Op.like]: `%${term}%` } }
-       ];
-    }
-    if (filters.status) {
-       where.overall_status = filters.status.toUpperCase();
-    }
-    if (filters.shiftCode) {
-       where.shift_code = filters.shiftCode;
-    }
     let stationScope = String(filters.machineId || filters.operationNo || filters.stationNo || filters.station || "").trim().toUpperCase();
     if (stationScope && !/^OP\d{3}$/i.test(stationScope)) {
       try {
         const Machine = require("../models/Machine");
-        const resolvedMachine = await Machine.findOne({ 
+        const resolvedMachine = await Machine.findOne({
           where: { machine_name: filters.machineId || filters.operationNo || filters.stationNo || filters.station },
           attributes: ['operation_no'],
           raw: true
@@ -313,59 +340,184 @@ exports.exportHistoricalReportExcel = async (req, res) => {
       } catch (err) { void err; }
     }
 
+    const where = {};
+    const andConditions = [];
+    if (filters.dateFrom && filters.dateTo) {
+      const fromDateIso = new Date(filters.dateFrom).toISOString();
+      const toDateIso = new Date(filters.dateTo).toISOString();
+
+      if (stationScope) {
+        let opLiteral = `SELECT DISTINCT part_id FROM OperationLogs WHERE createdAt >= '${fromDateIso}' AND createdAt <= '${toDateIso}'`;
+        if (/^\d+$/.test(stationScope)) {
+          opLiteral += ` AND machine_id = '${stationScope}'`;
+        } else {
+          opLiteral += ` AND (operation_no = '${stationScope}' OR station_no = '${stationScope}')`;
+        }
+        andConditions.push({
+          [Op.or]: [
+            { part_id: { [Op.in]: sequelize.literal(`(${opLiteral})`) } },
+            { customer_qr: { [Op.in]: sequelize.literal(`(${opLiteral})`) } }
+          ]
+        });
+      } else {
+        const reqStatus = (filters.status || "").toUpperCase();
+        if (reqStatus === 'OK' || reqStatus === 'PASSED' || reqStatus === 'NG' || reqStatus === 'FAILED') {
+          andConditions.push({
+            final_scan_at: { [Op.gte]: fromDateIso, [Op.lte]: toDateIso }
+          });
+        } else if (reqStatus === 'WIP' || reqStatus === 'IN_PROGRESS') {
+          andConditions.push({
+            first_scan_at: { [Op.gte]: fromDateIso, [Op.lte]: toDateIso }
+          });
+        } else {
+          andConditions.push({
+            [Op.or]: [
+              { first_scan_at: { [Op.gte]: fromDateIso, [Op.lte]: toDateIso } },
+              { final_scan_at: { [Op.gte]: fromDateIso, [Op.lte]: toDateIso } }
+            ]
+          });
+        }
+      }
+    }
+    if (filters.barcode || filters.customerCode || filters.partId) {
+      const term = filters.barcode || filters.customerCode || filters.partId;
+      andConditions.push({
+        [Op.or]: [
+          { part_id: { [Op.like]: `%${term}%` } },
+          { customer_qr: { [Op.like]: `%${term}%` } },
+          { shot_number: { [Op.like]: `%${term}%` } }
+        ]
+      });
+    }
+
+    // Map status exactly like the page query does
+    const isOpScope = /^OP\d{3}$/i.test(stationScope);
+    const statusCol = isOpScope ? stationScope.toLowerCase() + '_status' : 'overall_status';
+    if (filters.status) {
+      let mappedStatus = filters.status.toUpperCase();
+      if (!isOpScope) {
+        if (mappedStatus === 'OK' || mappedStatus === 'PASSED') {
+          where[statusCol] = { [Op.in]: ['OK', 'PASSED'] };
+        } else if (mappedStatus === 'NG' || mappedStatus === 'FAILED') {
+          where[statusCol] = { [Op.in]: ['NG', 'FAILED'] };
+        } else if (mappedStatus === 'WIP' || mappedStatus === 'IN_PROGRESS') {
+          where[statusCol] = { [Op.in]: ['WIP', 'IN_PROGRESS'] };
+        } else {
+          where[statusCol] = mappedStatus;
+        }
+      } else {
+        where[statusCol] = mappedStatus;
+      }
+    }
+    if (filters.shiftCode) {
+      where.shift_code = filters.shiftCode;
+    }
+    if (filters.partName) {
+      where.part_name = filters.partName;
+    }
+    if (filters.partCategory) {
+      if (filters.partCategory === 'HPDC') {
+        where.part_name = { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] };
+      } else if (filters.partCategory === 'OTHER') {
+        where.part_name = { [Op.or]: [null, ''] };
+      }
+    }
+    if (filters.dieName) {
+      where.part_id = { [Op.like]: `%-${filters.dieName}-%` };
+    }
+    if (filters.category) {
+      where.rejection_category = filters.category;
+    }
+
     if (stationScope) {
       where.station_keys = {
         [Op.like]: `%${stationScope}%`
       };
     }
 
-    const reports = await ProductionReport.findAll({
-      where,
-      order: [["first_scan_at", "DESC"]],
-      raw: true,
-    });
+    if (andConditions.length > 0) {
+      where[Op.and] = andConditions;
+    }
 
     const rows = [];
-    for (const report of reports) {
-      let rawLogs = report.raw_logs;
-      if (typeof rawLogs === 'string') {
-         try { rawLogs = JSON.parse(rawLogs); } catch(e) { rawLogs = []; }
+    const BATCH_SIZE = 500;
+    let offset = 0;
+
+    while (true) {
+      const reportsChunk = await ProductionReport.findAll({
+        where,
+        order: [["first_scan_at", "DESC"], ["id", "DESC"]],
+        raw: true,
+        limit: BATCH_SIZE,
+        offset: offset
+      });
+
+      if (!reportsChunk || reportsChunk.length === 0) {
+        break;
       }
-      if (Array.isArray(rawLogs)) {
-        // Sort logs chronologically to ensure trimming works correctly
-        rawLogs.sort((a, b) => {
-          const tA = new Date(a.createdAt || a.plc_end_time || 0).getTime();
-          const tB = new Date(b.createdAt || b.plc_end_time || 0).getTime();
-          return tA - tB;
-        });
-        
-        // Trim data table: if a quality gate is selected, hide all stations that occurred AFTER it
-        if (stationScope) {
-          let targetIndex = rawLogs.length - 1;
-          for (let i = rawLogs.length - 1; i >= 0; i--) {
-            const op = String(rawLogs[i].operationNo || rawLogs[i].stationNo || rawLogs[i].operation_no || rawLogs[i].station_no || "").trim().toUpperCase();
-            if (op === stationScope || String(rawLogs[i].machine_id).toUpperCase() === stationScope || String(rawLogs[i].machineId).toUpperCase() === stationScope) {
-              targetIndex = i;
-              break;
+
+      for (const report of reportsChunk) {
+        let rawLogs = report.raw_logs;
+        if (typeof rawLogs === 'string') {
+          try { rawLogs = JSON.parse(rawLogs); } catch (e) { rawLogs = []; }
+        }
+        if (Array.isArray(rawLogs)) {
+          // Sort logs chronologically to ensure trimming works correctly
+          rawLogs.sort((a, b) => {
+            const tA = new Date(a.createdAt || a.plc_end_time || 0).getTime();
+            const tB = new Date(b.createdAt || b.plc_end_time || 0).getTime();
+            return tA - tB;
+          });
+
+          // Trim data table: if a quality gate is selected, hide all stations that occurred AFTER it
+          if (stationScope) {
+            let targetIndex = rawLogs.length - 1;
+            for (let i = rawLogs.length - 1; i >= 0; i--) {
+              const op = String(rawLogs[i].operationNo || rawLogs[i].stationNo || rawLogs[i].operation_no || rawLogs[i].station_no || "").trim().toUpperCase();
+              if (op === stationScope || String(rawLogs[i].machine_id).toUpperCase() === stationScope || String(rawLogs[i].machineId).toUpperCase() === stationScope) {
+                targetIndex = i;
+                break;
+              }
+            }
+            rawLogs = rawLogs.slice(0, targetIndex + 1);
+
+            const scopeNum = parseInt(String(stationScope).replace(/\D/g, ''), 10) || 0;
+            const hasLeakOp = rawLogs.some(log => {
+              const op = String(log.operationNo || log.stationNo || log.operation_no || log.station_no || "").trim().toUpperCase();
+              return op === "OP150" || op === "LEAKTEST";
+            });
+            const hasLeakReadings = rawLogs.some(log => {
+              return (log.leakTestReadings && (Array.isArray(log.leakTestReadings) ? log.leakTestReadings.length > 0 : true)) ||
+                     (log.leakTestReading && typeof log.leakTestReading === 'object') ||
+                     (log.leak_data && typeof log.leak_data === 'object');
+            });
+            const shouldKeepLeak = hasLeakOp || hasLeakReadings || scopeNum >= 150;
+            if (!shouldKeepLeak) {
+              rawLogs.forEach(log => {
+                delete log.leakTestReadings;
+                delete log.leakTestReading;
+                delete log.leak_data;
+              });
             }
           }
-          rawLogs = rawLogs.slice(0, targetIndex + 1);
-          
-          const hasLeakTest = rawLogs.some(log => {
-            const op = String(log.operationNo || log.stationNo || log.operation_no || log.station_no || "").trim().toUpperCase();
-            return op === "OP150" || op === "LEAKTEST";
-          });
-          if (!hasLeakTest) {
-            rawLogs.forEach(log => {
-              delete log.leakTestReadings;
-              delete log.leakTestReading;
-              delete log.leak_data;
-            });
-          }
-        }
 
-        rows.push(...rawLogs);
+          // Stamp raw logs with master metadata for Excel engine
+          const masterOverallStatus = report.overall_status || null;
+          const masterFinalScanAt = report.final_scan_at ? new Date(report.final_scan_at).toISOString() : null;
+          const masterFirstScanAt = report.first_scan_at ? new Date(report.first_scan_at).toISOString() : null;
+          rawLogs.forEach(log => {
+            log.__pr_overall_status = masterOverallStatus;
+            log.__pr_final_scan_at = masterFinalScanAt;
+            log.__pr_first_scan_at = masterFirstScanAt;
+          });
+          rows.push(...rawLogs);
+        }
       }
+
+      offset += BATCH_SIZE;
+      
+      // Yield to the event loop to prevent blocking the Node.js thread during heavy processing
+      await new Promise(resolve => setTimeout(resolve, 0));
     }
 
     const stationPairs = await buildStationPairsFromRows(rows, filters);

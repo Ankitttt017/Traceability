@@ -341,7 +341,7 @@ const ReportFilters = ({ filters, onFilterChange, onApply, onClear, machines = [
             <input
               type="text"
               name="barcode"
-              placeholder="🔍 Part Serial No."
+              placeholder="🔍 Part ID / Shot No / Customer QR"
               className={controlCls}
               value={filters.barcode || ""}
               onChange={(e) => onFilterChange({ ...filters, barcode: e.target.value })}
