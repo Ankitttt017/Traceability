@@ -44,7 +44,7 @@ import {
   saveRoleAccessSettings,
 } from "../utils/roleAccess";
 import { useLanguage } from "../context/LanguageContext";
-import logo from "../assets/images/logo.jpg";
+// import logo from "../assets/images/logo.jpg";
 
 // Enhanced Logo Component
 const Logo = ({ collapsed }) => {
@@ -95,7 +95,7 @@ const Sidebar = ({ onClose }) => {
 
   useEffect(() => {
     if (onClose) onClose();
-  }, [location.pathname]);
+  }, [location.pathname, onClose]);
 
   const traceabilityNavigation = useMemo(
     () => [
@@ -113,14 +113,14 @@ const Sidebar = ({ onClose }) => {
         icon: UserCog,
         moduleKey: "operator_view",
       },
+      // {
+      //   name: t("pages.reports", "Reports"),
+      //   path: APP_ROUTES.reports,
+      //   icon: BarChart3,
+      //   moduleKey: "reports",
+      // }
       {
-        name: t("pages.reports", "Reports"),
-        path: APP_ROUTES.reports,
-        icon: BarChart3,
-        moduleKey: "reports",
-      },
-      {
-        name: t("pages.historicalReports", "Historical Reports"),
+        name: t("pages.historicalReports", "Reports"),
         path: APP_ROUTES.historicalReports,
         icon: Database,
         moduleKey: "reports",
@@ -272,7 +272,7 @@ const Sidebar = ({ onClose }) => {
         moduleKey: "process_flow",
       },
     ],
-    []
+    [t]
   );
 
   const visibleTraceNavigation = useMemo(

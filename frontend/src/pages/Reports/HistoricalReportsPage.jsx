@@ -235,12 +235,14 @@ const parseDateSafe = (dateStr) => {
   const spaceToTNative = new Date(spaceToT).getTime();
   if (!Number.isNaN(spaceToTNative)) return spaceToTNative;
 
-  const parts = String(dateStr).match(/(\d+)\/(\d+)\/(\d+),\s+(\d+):(\d+):(\d+)\s+(am|pm|AM|PM)/i);
+  const parts = String(dateStr).match(/(\d+)\/(\d+)\/(\d+)[,\s]+(\d+):(\d+):(\d+)\s*(am|pm|AM|PM)?/i);
   if (parts) {
     const [_, day, month, year, hours, minutes, seconds, ampm] = parts;
     let h = parseInt(hours, 10);
-    if (ampm.toLowerCase() === 'pm' && h < 12) h += 12;
-    if (ampm.toLowerCase() === 'am' && h === 12) h = 0;
+    if (ampm) {
+      if (ampm.toLowerCase() === 'pm' && h < 12) h += 12;
+      if (ampm.toLowerCase() === 'am' && h === 12) h = 0;
+    }
     return new Date(year, parseInt(month, 10) - 1, day, h, minutes, seconds).getTime();
   }
   return NaN;
@@ -1708,10 +1710,10 @@ const HistoricalReportsPage = () => {
         return customerQrPending && !mappedCustomerCode && resolvedOverallStatus !== 'NG' ? 'IN_PROGRESS' : resolvedOverallStatus;
       })();
       const finalResultRaw = (() => {
-        // Use the ProductionReport final_scan_at directly if available
-        if (first.__pr_final_scan_at) return first.__pr_final_scan_at;
+        // Compute the best timestamp from actual raw log entries
+        let computedTimestamp = null;
         if (overallStatus === "NG") {
-          return entries.reduce((picked, row) => {
+          computedTimestamp = entries.reduce((picked, row) => {
             const normalized = normResult(
               String(row.station?.result || row.industrialResult || row.statusLabel || row.result || "-").toUpperCase(),
               row.rejection?.reason || row.reason || row.interlock_reason,
@@ -1723,13 +1725,12 @@ const HistoricalReportsPage = () => {
             if (!picked) return resultTime;
             return parseDateSafe(resultTime) < parseDateSafe(picked) ? resultTime : picked;
           }, leakResultTime);
-        }
-        if (overallStatus === "PASSED") {
+        } else if (overallStatus === "PASSED") {
           const effectiveRequiredOperations = hasLeakData
             ? requiredOperations
             : requiredOperations.filter((operation) => operation !== LEAK_TEST_OPERATION);
           const terminalOperation = effectiveRequiredOperations[effectiveRequiredOperations.length - 1];
-          return finalInspectionOkAt || operationResultTimes[terminalOperation] || entries.reduce((latest, row) => {
+          computedTimestamp = finalInspectionOkAt || operationResultTimes[terminalOperation] || entries.reduce((latest, row) => {
             const normalized = normResult(
               String(row.industrialResult || row.statusLabel || row.result || "-").toUpperCase(),
               row.reason || row.interlock_reason,
@@ -1742,7 +1743,16 @@ const HistoricalReportsPage = () => {
             return parseDateSafe(resultTime) > parseDateSafe(latest) ? resultTime : latest;
           }, null);
         }
-        return null;
+
+        // In Historical Reports, the ProductionReport table is the ultimate source of truth,
+        // and using it directly ensures 100% parity with the Excel export.
+        const prTimestamp = first.__pr_final_scan_at;
+        if (prTimestamp && (overallStatus === "PASSED" || overallStatus === "NG")) {
+          return prTimestamp;
+        }
+
+        // Fall back to computed for IN_PROGRESS or missing master timestamps
+        return computedTimestamp || prTimestamp || null;
       })();
       const finalResultInAppliedRange = (() => {
         if (!finalResultRaw) return false;
@@ -2137,6 +2147,8 @@ const HistoricalReportsPage = () => {
           */}
 
           <select
+            id="filter-partCategory"
+            name="partCategory"
             className={getControlCls(!!filters.partCategory)}
             value={filters.partCategory || ""}
             onChange={(e) => setFilters({ ...filters, partCategory: e.target.value })}
@@ -2147,6 +2159,8 @@ const HistoricalReportsPage = () => {
           </select>
 
           <select
+            id="filter-machineId"
+            name="machineId"
             className={getControlCls(!!filters.machineId)}
             value={filters.machineId || ""}
             onChange={(e) => setFilters({ ...filters, machineId: e.target.value })}
@@ -2160,6 +2174,8 @@ const HistoricalReportsPage = () => {
           </select>
 
           <select
+            id="filter-status"
+            name="status"
             className={getControlCls(!!filters.status)}
             value={filters.status || ""}
             onChange={(e) => setFilters({ ...filters, status: e.target.value })}
@@ -2172,7 +2188,24 @@ const HistoricalReportsPage = () => {
             ))}
           </select>
 
+          <input
+            id="filter-barcode"
+            name="barcode"
+            type="text"
+            className={getControlCls(!!filters.barcode)}
+            placeholder="🔍 Part ID / Shot No / Customer QR"
+            value={filters.barcode || ""}
+            onChange={(e) => setFilters({ ...filters, barcode: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                applyReportFilters();
+              }
+            }}
+          />
+
           <select
+            id="filter-shiftCode"
+            name="shiftCode"
             className={getControlCls(!!filters.shiftCode)}
             value={filters.shiftCode || ""}
             onChange={(e) => setFilters({ ...filters, shiftCode: e.target.value })}

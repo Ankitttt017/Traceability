@@ -116,10 +116,29 @@ async function syncDateRange(dateFrom, dateTo) {
         overallStatus = "IN_PROGRESS";
       }
 
-      // `uniqueEntries` are ordered DESC by createdAt (newest first).
-      // So `first` (index 0) is the newest log, `last` (index length-1) is the oldest log.
-      let firstScan = last.createdAt || first.createdAt || null;
-      let finalScan = first.createdAt || last.createdAt || null;
+      // Compute true earliest (first_scan_at) and latest (final_scan_at) by
+      // scanning ALL entries across every timestamp field, not just the first/last.
+      let firstScan = null;
+      let finalScan = null;
+      for (const entry of uniqueEntries) {
+        const candidates = [
+          entry.createdAt, entry.created_at,
+          entry.firstScanCreatedAt, entry.first_scan_at,
+          entry.finalResultCreatedAt, entry.finalResultAt, entry.final_scan_at,
+          entry.cycleEndAt, entry.plc_end_at, entry.plcEndAt,
+          entry.production?.firstScanAt, entry.production?.latestActivityAt,
+          entry.updatedAt, entry.updated_at,
+        ].filter(c => c && c !== "-");
+
+        for (const c of candidates) {
+          const t = new Date(c).getTime();
+          if (Number.isNaN(t)) continue;
+          if (firstScan === null || t < firstScan) firstScan = t;
+          if (finalScan === null || t > finalScan) finalScan = t;
+        }
+      }
+      firstScan = firstScan !== null ? new Date(firstScan) : null;
+      finalScan = finalScan !== null ? new Date(finalScan) : null;
 
       // Map Stations
       const opStatuses = {
@@ -227,19 +246,68 @@ async function syncDateRange(dateFrom, dateTo) {
     if (validRecords.length > 0) {
       const partIds = validRecords.map(r => r.part_id);
       
-      // Process in batches of 500 to avoid MSSQL parameter limits
-      const BATCH_SIZE = 500;
-      for (let i = 0; i < partIds.length; i += BATCH_SIZE) {
-        const batchPartIds = partIds.slice(i, i + BATCH_SIZE);
-        const batchRecords = validRecords.slice(i, i + BATCH_SIZE);
+      // Process in batches of 50 to avoid connection pool exhaustion and table locks
+      const CHUNK_SIZE = 50;
+      for (let i = 0; i < validRecords.length; i += CHUNK_SIZE) {
+        const chunk = validRecords.slice(i, i + CHUNK_SIZE);
+        await Promise.all(chunk.map(async (record) => {
+          try {
+            const existing = await ProductionReport.findOne({ where: { part_id: record.part_id } });
+            if (existing) {
+              // 1. Merge opStatuses
+              const fieldsToMerge = ['op100_status', 'op110_status', 'op120_status', 'op130_status', 'op140_status', 'op150_status', 'op160_status'];
+              fieldsToMerge.forEach(field => {
+                if (!record[field] && existing[field]) {
+                  record[field] = existing[field];
+                }
+              });
 
-        await ProductionReport.destroy({ 
-          where: { part_id: { [Op.in]: batchPartIds } } 
-        });
+              // 2. Recalculate overallStatus
+              let hasNg = false;
+              let hasFinalOk = false;
+              fieldsToMerge.forEach(field => {
+                if (record[field] === 'NG') hasNg = true;
+                if (record[field] === 'OK' && (field === 'op160_status' || field === 'op150_status')) hasFinalOk = true;
+              });
+              if (hasNg) record.overall_status = 'NG';
+              else if (hasFinalOk) record.overall_status = 'PASSED';
+              else record.overall_status = 'IN_PROGRESS';
 
-        await ProductionReport.bulkCreate(batchRecords);
+              // 3. Maintain earliest first_scan_at
+              if (existing.first_scan_at && record.first_scan_at && record.first_scan_at > existing.first_scan_at) {
+                record.first_scan_at = existing.first_scan_at;
+              }
+
+              // 4. Merge station_keys
+              if (existing.station_keys) {
+                const existingKeys = existing.station_keys.split(',');
+                const newKeys = (record.station_keys || '').split(',');
+                record.station_keys = [...new Set([...existingKeys, ...newKeys])].filter(Boolean).join(',');
+              }
+
+              // 5. Merge raw_logs
+              try {
+                const existingLogs = JSON.parse(existing.raw_logs || '[]');
+                const newLogs = JSON.parse(record.raw_logs || '[]');
+                const mergedMap = new Map();
+                existingLogs.forEach(l => mergedMap.set(l.id || JSON.stringify(l), l));
+                newLogs.forEach(l => mergedMap.set(l.id || JSON.stringify(l), l));
+                const mergedArr = Array.from(mergedMap.values()).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+                record.raw_logs = JSON.stringify(mergedArr);
+              } catch (e) {
+                console.error("Failed to merge raw logs", e);
+              }
+
+              await existing.update(record);
+            } else {
+              await ProductionReport.create(record);
+            }
+          } catch (err) {
+             console.error(`[HistoricalSync] Error saving record for part_id ${record.part_id}:`, err.message);
+          }
+        }));
       }
-      // console.log(`[HistoricalSync] Upserted ${validRecords.length} records in batches.`);
+      // console.log(`[HistoricalSync] Upserted ${validRecords.length} records successfully.`);
     }
 
   } catch (error) {
