@@ -21,7 +21,7 @@ const VALIDATION_REJECT_REASONS = [
  */
 function formatIndustrialTimestamp(date) {
   if (!date) return "-";
-  return moment(date).format("DD-MMM-YYYY HH:mm:ss");
+  return moment(date).format("DD/MM/YYYY, hh:mm:ss A");
 }
 
 /**
