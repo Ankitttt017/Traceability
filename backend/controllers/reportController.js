@@ -504,6 +504,9 @@ function formatCleanReportResponse(payload = {}) {
     const plc = pickObject(row.plcReading, row.plc_reading, row.plcReadings, row.plcCycleReadings, row.plc_cycle_readings);
     const shotStatusRaw = plc.shot_status ?? row.shot_status ?? row.shotStatus;
     return {
+      __pr_overall_status: row.__pr_overall_status,
+      __pr_final_scan_at: row.__pr_final_scan_at,
+      __pr_first_scan_at: row.__pr_first_scan_at,
       serialNo: cleanValue(row.srNo, index + 1),
       part: {
         id: cleanValue(row.partId || row.displayPartId || row.traceabilityPartId || row.part_id),

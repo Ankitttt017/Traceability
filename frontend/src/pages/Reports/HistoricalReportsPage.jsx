@@ -1710,7 +1710,18 @@ const HistoricalReportsPage = () => {
         return customerQrPending && !mappedCustomerCode && resolvedOverallStatus !== 'NG' ? 'IN_PROGRESS' : resolvedOverallStatus;
       })();
       const finalResultRaw = (() => {
-        // Compute the best timestamp from actual raw log entries
+        if (overallStatus === "IN_PROGRESS" || overallStatus === "WIP") {
+          return null;
+        }
+
+        // PRIORITY 1: Trust the ProductionReport master table timestamp as absolute source of truth.
+        // This prevents leak test machines with incorrect clocks from showing future times.
+        const prTimestamp = first.__pr_final_scan_at;
+        if (prTimestamp && (overallStatus === "PASSED" || overallStatus === "NG")) {
+          return prTimestamp;
+        }
+
+        // PRIORITY 2: Compute from raw log entries for IN_PROGRESS or missing master timestamps
         let computedTimestamp = null;
         if (overallStatus === "NG") {
           computedTimestamp = entries.reduce((picked, row) => {
@@ -1744,16 +1755,10 @@ const HistoricalReportsPage = () => {
           }, null);
         }
 
-        // In Historical Reports, the ProductionReport table is the ultimate source of truth,
-        // and using it directly ensures 100% parity with the Excel export.
-        const prTimestamp = first.__pr_final_scan_at;
-        if (prTimestamp && (overallStatus === "PASSED" || overallStatus === "NG")) {
-          return prTimestamp;
-        }
-
         // Fall back to computed for IN_PROGRESS or missing master timestamps
         return computedTimestamp || prTimestamp || null;
       })();
+
       const finalResultInAppliedRange = (() => {
         if (!finalResultRaw) return false;
         const time = parseDateSafe(finalResultRaw);
