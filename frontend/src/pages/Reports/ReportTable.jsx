@@ -42,8 +42,8 @@ const ShotStatusChip = ({ value }) => {
   if (normalized.includes("WARM")) {
     return <span className={`${base} bg-[rgba(250,185,91,0.12)] text-[rgb(250,185,91)] border-[rgba(250,185,91,0.2)]`}>WARM UP</span>;
   }
-  if (normalized.includes("OFF") || normalized === "5") {
-    return <span className={`${base} bg-[rgba(239,68,68,0.1)] text-[rgb(239,68,68)] border-[rgba(239,68,68,0.2)]`}>OFF SHOT</span>;
+  if (normalized.includes("OFF") || normalized === "5" || normalized === "NG" || normalized === "FAILED") {
+    return <span className={`${base} bg-[rgba(239,68,68,0.1)] text-[rgb(239,68,68)] border-[rgba(239,68,68,0.2)]`}>NG</span>;
   }
   return <span className={`${base} bg-[rgba(148,163,184,0.08)] text-[rgb(148,163,184)] border-[rgba(148,163,184,0.15)]`}>{normalized || "-"}</span>;
 };

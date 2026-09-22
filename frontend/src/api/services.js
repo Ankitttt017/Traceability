@@ -500,6 +500,26 @@ export const dashboardApi = {
     const { data } = await apiClient.get(ENDPOINTS.dashboard.rejectionAnalysis, { ...config, params });
     return data;
   },
+  rejectionSummary: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.rejectionSummary, { ...config, params });
+    return data;
+  },
+  rejectionPareto: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.rejectionPareto, { ...config, params });
+    return data;
+  },
+  rejectionShiftScrap: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.rejectionShiftScrap, { ...config, params });
+    return data;
+  },
+  rejectionMlInsights: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.rejectionMlInsights, { ...config, params });
+    return data;
+  },
+  rejectionRows: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.rejectionRows, { ...config, params });
+    return data;
+  },
   exportReport: async (params) => {
     const { data } = await apiClient.post(ENDPOINTS.dashboard.exportFullReport, {
       filters: params || {},

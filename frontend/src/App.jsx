@@ -25,7 +25,7 @@ import IoMonitor from "./pages/IoMonitor";
 import ReportConfiguration from "./pages/ReportConfiguration";
 // import ReportsPage from "./pages/Reports/ReportsPage";
 import HistoricalReportsPage from "./pages/Reports/HistoricalReportsPage";
-import RejectionAnalysis from "./pages/RejectionAnalysis";
+import RejectionAnalysis from "./pages/Rejection/RejectionAnalysis";
 import RejectionConfiguration from "./pages/RejectionConfiguration";
 import NetworkOutageOverlay from "./components/NetworkOutageOverlay";
 import Plants from "./pages/Plants";

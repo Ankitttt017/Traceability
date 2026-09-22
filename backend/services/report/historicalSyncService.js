@@ -246,66 +246,98 @@ async function syncDateRange(dateFrom, dateTo) {
     if (validRecords.length > 0) {
       const partIds = validRecords.map(r => r.part_id);
       
-      // Process in batches of 50 to avoid connection pool exhaustion and table locks
-      const CHUNK_SIZE = 50;
+      // Process in batches of 100 with single batch lookup, bulkCreate for inserts, and sequential updates
+      const CHUNK_SIZE = 100;
       for (let i = 0; i < validRecords.length; i += CHUNK_SIZE) {
         const chunk = validRecords.slice(i, i + CHUNK_SIZE);
-        await Promise.all(chunk.map(async (record) => {
-          try {
-            const existing = await ProductionReport.findOne({ where: { part_id: record.part_id } });
-            if (existing) {
-              // 1. Merge opStatuses
-              const fieldsToMerge = ['op100_status', 'op110_status', 'op120_status', 'op130_status', 'op140_status', 'op150_status', 'op160_status'];
-              fieldsToMerge.forEach(field => {
-                if (!record[field] && existing[field]) {
-                  record[field] = existing[field];
-                }
-              });
+        const chunkPartIds = chunk.map(r => r.part_id);
 
-              // 2. Recalculate overallStatus
-              let hasNg = false;
-              let hasFinalOk = false;
-              fieldsToMerge.forEach(field => {
-                if (record[field] === 'NG') hasNg = true;
-                if (record[field] === 'OK' && (field === 'op160_status' || field === 'op150_status')) hasFinalOk = true;
-              });
-              if (hasNg) record.overall_status = 'NG';
-              else if (hasFinalOk) record.overall_status = 'PASSED';
-              else record.overall_status = 'IN_PROGRESS';
+        let existingList = [];
+        try {
+          existingList = await ProductionReport.findAll({
+            where: { part_id: { [Op.in]: chunkPartIds } },
+          });
+        } catch (findErr) {
+          console.error(`[HistoricalSync] Batch lookup error:`, findErr.message);
+          continue;
+        }
 
-              // 3. Maintain earliest first_scan_at
-              if (existing.first_scan_at && record.first_scan_at && record.first_scan_at > existing.first_scan_at) {
-                record.first_scan_at = existing.first_scan_at;
+        const existingMap = new Map();
+        existingList.forEach(r => existingMap.set(r.part_id, r));
+
+        const toCreate = [];
+        const toUpdate = [];
+
+        for (const record of chunk) {
+          const existing = existingMap.get(record.part_id);
+          if (existing) {
+            // 1. Merge opStatuses
+            const fieldsToMerge = ['op100_status', 'op110_status', 'op120_status', 'op130_status', 'op140_status', 'op150_status', 'op160_status'];
+            fieldsToMerge.forEach(field => {
+              if (!record[field] && existing[field]) {
+                record[field] = existing[field];
               }
+            });
 
-              // 4. Merge station_keys
-              if (existing.station_keys) {
-                const existingKeys = existing.station_keys.split(',');
-                const newKeys = (record.station_keys || '').split(',');
-                record.station_keys = [...new Set([...existingKeys, ...newKeys])].filter(Boolean).join(',');
-              }
+            // 2. Recalculate overallStatus
+            let hasNg = false;
+            let hasFinalOk = false;
+            fieldsToMerge.forEach(field => {
+              if (record[field] === 'NG') hasNg = true;
+              if (record[field] === 'OK' && (field === 'op160_status' || field === 'op150_status')) hasFinalOk = true;
+            });
+            if (hasNg) record.overall_status = 'NG';
+            else if (hasFinalOk) record.overall_status = 'PASSED';
+            else record.overall_status = 'IN_PROGRESS';
 
-              // 5. Merge raw_logs
-              try {
-                const existingLogs = JSON.parse(existing.raw_logs || '[]');
-                const newLogs = JSON.parse(record.raw_logs || '[]');
-                const mergedMap = new Map();
-                existingLogs.forEach(l => mergedMap.set(l.id || JSON.stringify(l), l));
-                newLogs.forEach(l => mergedMap.set(l.id || JSON.stringify(l), l));
-                const mergedArr = Array.from(mergedMap.values()).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-                record.raw_logs = JSON.stringify(mergedArr);
-              } catch (e) {
-                console.error("Failed to merge raw logs", e);
-              }
-
-              await existing.update(record);
-            } else {
-              await ProductionReport.create(record);
+            // 3. Maintain earliest first_scan_at
+            if (existing.first_scan_at && record.first_scan_at && record.first_scan_at > existing.first_scan_at) {
+              record.first_scan_at = existing.first_scan_at;
             }
-          } catch (err) {
-             console.error(`[HistoricalSync] Error saving record for part_id ${record.part_id}:`, err.message);
+
+            // 4. Merge station_keys
+            if (existing.station_keys) {
+              const existingKeys = existing.station_keys.split(',');
+              const newKeys = (record.station_keys || '').split(',');
+              record.station_keys = [...new Set([...existingKeys, ...newKeys])].filter(Boolean).join(',');
+            }
+
+            // 5. Merge raw_logs
+            try {
+              const existingLogs = JSON.parse(existing.raw_logs || '[]');
+              const newLogs = JSON.parse(record.raw_logs || '[]');
+              const mergedMap = new Map();
+              existingLogs.forEach(l => mergedMap.set(l.id || JSON.stringify(l), l));
+              newLogs.forEach(l => mergedMap.set(l.id || JSON.stringify(l), l));
+              const mergedArr = Array.from(mergedMap.values()).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+              record.raw_logs = JSON.stringify(mergedArr);
+            } catch (e) {
+              console.error("Failed to merge raw logs", e);
+            }
+
+            toUpdate.push({ existing, record });
+          } else {
+            toCreate.push(record);
           }
-        }));
+        }
+
+        // Bulk insert new records in one single query
+        if (toCreate.length > 0) {
+          try {
+            await ProductionReport.bulkCreate(toCreate, { validate: false });
+          } catch (createErr) {
+            console.error(`[HistoricalSync] Error bulk inserting ${toCreate.length} records:`, createErr.message);
+          }
+        }
+
+        // Update existing records sequentially to prevent SQL Server page lock escalation / timeouts
+        for (const item of toUpdate) {
+          try {
+            await item.existing.update(item.record);
+          } catch (updateErr) {
+            console.error(`[HistoricalSync] Error updating part_id ${item.record.part_id}:`, updateErr.message);
+          }
+        }
       }
       // console.log(`[HistoricalSync] Upserted ${validRecords.length} records successfully.`);
     }

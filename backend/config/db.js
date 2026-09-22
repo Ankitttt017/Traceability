@@ -61,6 +61,8 @@ const sequelizeConfig = {
       /Requests can only be made in the LoggedIn state/i,
       /Could not connect \(sequence\)/i,
       /Connection lost/i,
+      /ConnectionManager\.getConnection was called after the connection manager was closed/i,
+      /connection manager was closed/i,
     ],
   },
   logging: false,

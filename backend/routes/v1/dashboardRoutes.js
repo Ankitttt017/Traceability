@@ -11,6 +11,11 @@ router.get("/dashboard/summary", verifyToken, requireModuleAccess("dashboard", "
 router.get("/dashboard/trends", verifyToken, requireModuleAccess("dashboard", "view"), traceabilityController.getDashboardTrends);
 router.get("/dashboard/report", verifyToken, requireModuleAccess("dashboard", "view"), traceabilityController.getDashboardReport);
 router.get("/rejection-analysis", verifyToken, requireModuleAccess("rejection_analysis", "view"), traceabilityController.getRejectionAnalysis);
+router.get("/rejection-summary", verifyToken, requireModuleAccess("rejection_analysis", "view"), traceabilityController.getRejectionSummary);
+router.get("/rejection-pareto", verifyToken, requireModuleAccess("rejection_analysis", "view"), traceabilityController.getRejectionPareto);
+router.get("/rejection-shift-scrap", verifyToken, requireModuleAccess("rejection_analysis", "view"), traceabilityController.getRejectionShiftScrap);
+router.get("/rejection-ml-insights", verifyToken, requireModuleAccess("rejection_analysis", "view"), traceabilityController.getRejectionMlInsights);
+router.get("/rejection-rows", verifyToken, requireModuleAccess("rejection_analysis", "view"), traceabilityController.getRejectionRows);
 router.get("/dashboard/report/export", verifyToken, requireModuleAccess("reports", "view"), reportController.exportFullReportExcel);
 router.get("/dashboard/report/export-full", verifyToken, requireModuleAccess("reports", "view"), reportController.exportFullReportExcel);
 router.get("/dashboard/report/export-parts", verifyToken, requireModuleAccess("reports", "view"), reportController.exportPartsReportExcel);

@@ -1,4 +1,5 @@
 const { Op, fn, col } = require("sequelize");
+const sequelize = require("../config/db");
 const ExcelJS = require("exceljs");
 const Part = require("../models/Part");
 const Machine = require("../models/Machine");
@@ -7893,785 +7894,1997 @@ exports.getDashboardReport = async (req, res) => {
   }
 };
 
-exports.getRejectionAnalysis = async (req, res) => {
+// ─── Rejection Analysis Shared Helpers ─────────────────────────────────────────
+const splitRejectionZoneHelper = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "-") return { zone: "", subZone: "" };
+  let parts = [];
+  if (raw.includes(" / ")) parts = raw.split(" / ");
+  else if (raw.includes(" - ")) parts = raw.split(" - ");
+  else parts = [raw];
+  const z = parts[0] ? parts[0].trim() : "";
+  let sz = parts[1] ? parts[1].replace(/^Sub\s*Zone\s*:?\s*/i, "").trim() : "";
+  return { zone: z, subZone: sz };
+};
+
+const extractShotFromPartIdHelper = (partId) => {
+  const s = String(partId || "").trim();
+  if (!s || s === "-") return "";
+  // Customer QR codes MUST NEVER have shot details or shot numbers extracted!
+  if (/^R\d{3,}/i.test(s) || /^[A-Z0-9-]{24,}$/i.test(s) || s.includes("+") || s.includes("/")) {
+    return "";
+  }
+  // Format: MMDDHHMM-MC-SHOT (e.g. 08252347-2-2527)
+  const hyphenMatch = s.match(/^\d{8}-[A-Z0-9]+-(?<shot>\d{1,6})$/i);
+  if (hyphenMatch?.groups?.shot) return String(hyphenMatch.groups.shot).trim();
+  // Format: MMDDHHMM<MC><SHOT> (e.g. 0915060122561 -> shot 2561)
+  const machineCompact = s.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
+  if (machineCompact?.groups?.shot) return String(machineCompact.groups.shot).trim();
+  // Format: MMDDHHMM<SHOT> (legacy 12-14 digits)
+  const legacyCompact = s.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<shot>\d{1,6})$/);
+  if (legacyCompact?.groups?.shot) return String(legacyCompact.groups.shot).trim();
+  // Format with trailing underscore / hyphen shot e.g. CP100_2527 or PAN-2527
+  const suffixMatch = s.match(/[_-](?<shot>\d{1,6})$/);
+  if (suffixMatch?.groups?.shot) return String(suffixMatch.groups.shot).trim();
+  const digits = s.replace(/\D/g, "");
+  if (digits.length >= 13 && digits.length <= 16) return digits.slice(9);
+  return "";
+};
+
+const canonicalizeReasonHelper = (raw) => {
+  if (!raw) return "";
+  const s = String(raw).trim();
+  const lower = s.toLowerCase().replace(/[-_]/g, " ").replace(/\s+/g, " ");
+  if (lower.includes("non filling") || lower.includes("nonfilling")) return "Non-Filling";
+  if (lower.includes("blow hole") || lower.includes("blowhole")) return "Blow Hole";
+  if (lower.includes("pin hole") || lower.includes("pinhole")) return "Pin Hole";
+  if (lower.includes("cold shut") || lower.includes("coldshut")) return "Cold Shut";
+  if (lower.includes("body leak")) return "Body Leak";
+  if (lower.includes("leak") || lower.includes("leakage")) return "Pressure Leak";
+  if (lower.includes("dent")) return "Dent / Handling Damage";
+  if (lower.includes("crack")) return "Crack";
+  if (lower.includes("porosity")) return "Porosity";
+  if (lower.includes("gauging") || lower.includes("dimension")) return "Gauging Out of Spec";
+  if (lower.includes("laser") || lower.includes("qr")) return "Laser Mark QR Fail";
+  if (lower.includes("dcm casting")) return "DCM Casting Defect";
+  if (lower.includes("casting visual") || lower.includes("visual ng")) return "Casting Visual NG";
+  return s.replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.substr(1).toLowerCase());
+};
+
+const normalizeShotStatusHelper = (rawShotStatus, overallStatus, op100Status, shotNumber) => {
+  const norm = String(rawShotStatus || "").trim().toUpperCase();
+  if (norm === "OK" || norm === "1" || norm === "PASS" || norm === "PASSED" || norm === "GOOD") return "OK";
+  if (norm.includes("WARM") || norm === "3" || norm === "2") return "WARM UP";
+  if (norm.includes("OFF") || norm === "5" || norm === "OFFSET") return "NG";
+  if (norm === "NG" || norm === "FAILED" || norm === "FAIL" || norm === "NOK") return "NG";
+  const op100Norm = String(op100Status || "").trim().toUpperCase();
+  if (["NG", "FAILED", "FAIL", "ENDED_NG", "COMPLETED_NG"].includes(op100Norm)) return "NG";
+  const overallNorm = String(overallStatus || "").trim().toUpperCase();
+  if (["NG", "FAILED", "FAIL"].includes(overallNorm)) return "NG";
+  if (shotNumber && shotNumber !== "") return "OK";
+  return "";
+};
+
+// ─── Shared Rejection Filter Helper ──────────────────────────────────────────
+async function buildRejectionFilterContext(query = {}) {
+  const shifts = await getActiveShiftDefinitions();
+  const now = new Date();
+  const defaultWindow = getProductionDayWindow(shifts, now);
+  const datePreset = String(query.datePreset || "").toLowerCase().trim();
+  const isAllTime = datePreset === "all" || query.allTime === "1" || query.allTime === "true";
+  const requestedRange = (query.dateFrom || query.dateTo) ? getDateRangeFromQuery(query) : defaultWindow;
+  const from = requestedRange.from;
+  const to = requestedRange.to;
+  const dateFrom = from.toISOString();
+  const dateTo = to.toISOString();
+  const machineNameFilter = String(query.machineName || query.machine_name || "").trim();
+  const partId = String(query.partId || "").trim();
+  const partNameFilter = String(query.partName || query.part_name || "").trim().toUpperCase();
+  const dieNameFilter = String(query.dieName || query.die_name || "").trim().toUpperCase();
+  const shiftCodeFilter = String(query.shiftCode || "").trim().toUpperCase();
+  const statusFilter = String(query.status || "").trim().toUpperCase();
+  const qualityGateFilter = String(query.qualityGate || "").trim().toUpperCase();
+  const categoryFilter = String(query.category || "").trim();
+  const reasonFilter = String(query.reason || "").trim();
+
+  let dbMachines = [];
   try {
-    const SYSTEM_RECOVERY_REASONS = ["RECOVERY_PENDING_AFTER_BACKEND_RESTART"];
-    const now = new Date();
-    const shifts = await getActiveShiftDefinitions();
-    const defaultWindow = getProductionDayWindow(shifts, now);
-    const requestedRange = (req.query.dateFrom || req.query.dateTo) ? getDateRangeFromQuery(req.query) : defaultWindow;
-    const from = requestedRange.from;
-    const to = requestedRange.to;
-    const machineId = Number(req.query.machineId || 0);
-    const plantId = Number(req.query.plantId || 0);
-    const lineId = Number(req.query.lineId || 0);
-    const lineName = String(req.query.lineName || "").trim();
-    const partId = String(req.query.partId || "").trim();
-    const partNameFilter = String(req.query.partName || req.query.part_name || "").trim().toUpperCase();
-    const partTypeFilter = String(req.query.partType || req.query.part_type || "").trim().toUpperCase();
-    const dieNameFilter = String(req.query.dieName || req.query.die_name || "").trim().toUpperCase();
-    const dieCastingMachineFilter = String(req.query.dieCastingMachine || req.query.die_casting_machine || "").trim().toUpperCase();
-    const shiftCodeFilter = String(req.query.shiftCode || "").trim().toUpperCase();
-    const categoryFilter = String(req.query.category || "").trim();
-    const viewFilter = String(req.query.view || "").trim();
-    const zoneFilter = String(req.query.zone || "").trim();
-    const reasonFilter = String(req.query.reason || "").trim();
-
-    const machineWhere = {};
-    if (machineId) machineWhere.id = machineId;
-    if (plantId) machineWhere.plant_id = plantId;
-    if (lineId) machineWhere.line_id = lineId;
-    if (lineName) machineWhere.line_name = lineName;
-
-    const normalizePartDieTokenForReport = (value) => String(value || "").trim().toUpperCase();
-    const normalizeMachineTokenForReport = (value) => normalizePartDieTokenForReport(value).replace(/[\s_-]+/g, "");
-    const splitPlcPartDieForReport = (value) => {
-      const raw = normalizePartDieTokenForReport(value);
-      if (!raw) return { partName: "", dieName: "" };
-      const [partName, ...dieParts] = raw.split("-");
-      return { partName: partName || "", dieName: dieParts.join("-") || "" };
-    };
-
-    const assignmentWhere = { is_active: true };
-    if (plantId) assignmentWhere.plant_id = plantId;
-    if (lineId) assignmentWhere.line_id = lineId;
-    let assignmentRows = [];
-    try {
-      assignmentRows = await LinePartAssignment.findAll({
-        where: assignmentWhere,
-        attributes: ["part_name", "die_name", "die_casting_machine", "ip_address"],
-        order: [["part_name", "ASC"], ["die_name", "ASC"]],
-        raw: true,
-      });
-    } catch (error) {
-      console.warn(`[REJECTION] part/die assignment scope unavailable: ${error.message}`);
-    }
-    const assignmentFilterOptions = {
-      parts: [...new Set(assignmentRows.map((row) => String(row.part_name || "").trim()).filter(Boolean))],
-      dies: [...new Set(assignmentRows.map((row) => String(row.die_name || "").trim()).filter(Boolean))],
-      dieCastingMachines: [...new Set(assignmentRows.map((row) => String(row.die_casting_machine || "").trim()).filter(Boolean))],
-      assignments: assignmentRows.map((row) => ({
-        partName: String(row.part_name || "").trim(),
-        dieName: String(row.die_name || "").trim(),
-        dieCastingMachine: String(row.die_casting_machine || "").trim(),
-      })),
-    };
-    const scopedAssignmentRows = assignmentRows.filter((row) => {
-      const rowPart = normalizePartDieTokenForReport(row.part_name);
-      const rowDie = normalizePartDieTokenForReport(row.die_name);
-      const rowMachine = normalizeMachineTokenForReport(row.die_casting_machine);
-      if (partNameFilter && rowPart !== partNameFilter) return false;
-      if (dieNameFilter && rowDie !== dieNameFilter) return false;
-      if (dieCastingMachineFilter && rowMachine !== normalizeMachineTokenForReport(dieCastingMachineFilter)) return false;
-      return true;
+    dbMachines = await Machine.findAll({
+      attributes: ["id", "machine_name", "operation_no", "sequence_no", "line_name"],
+      order: [["sequence_no", "ASC"], ["operation_no", "ASC"]],
+      raw: true,
     });
-    const where = {
-      createdAt: { [Op.between]: [from, to] },
-      [Op.and]: [
-        {
-          [Op.or]: [
-            { interlock_reason: null },
-            { interlock_reason: { [Op.notIn]: SYSTEM_RECOVERY_REASONS } },
-          ],
-        },
-      ],
-      [Op.or]: [
-        { result: { [Op.in]: ["NG", "FAIL", "FAILED"] } },
-        { plc_status: { [Op.in]: ["ENDED_NG", "COMPLETED_NG", "FAILED"] } },
-        { rejection_reason: { [Op.ne]: null } },
-        { rejection_category: { [Op.ne]: null } },
-        { interlock_reason: { [Op.like]: "%NG%" } },
-      ],
-    };
-    if (partId) {
-      where.part_id = { [Op.like]: `%${partId}%` };
-    }
-    if (categoryFilter) {
-      where.rejection_category = categoryFilter;
-    }
-    if (viewFilter) {
-      where.rejection_view = viewFilter;
-    }
-    if (zoneFilter) {
-      where.rejection_zone = zoneFilter;
-    }
-    if (reasonFilter) {
-      where[Op.and] = [
-        ...(where[Op.and] || []),
-        {
-          [Op.or]: [
-            { rejection_reason: reasonFilter },
-            { interlock_reason: reasonFilter },
-          ],
-        },
-      ];
-    }
+  } catch (e) {
+    console.warn(`[REJECTION] Machine query fallback: ${e.message}`);
+  }
 
-    const rows = await OperationLog.findAll({
-      where,
-      include: [{
-        model: Machine,
-        required: Object.keys(machineWhere).length > 0,
-        where: machineWhere,
-        attributes: ["id", "machine_name", "line_name", "plant_id", "line_id", "operation_no"],
-      }],
-      order: [["createdAt", "DESC"]],
-      limit: Math.min(Math.max(Number(req.query.limit || 5000), 1), 20000),
+  const stationLabelMap = {
+    OP100: "DCM+DPM + OP100",
+    OP110: "Laser Marking + OP110",
+    OP120: "Casting PDi + OP120",
+    OP130: "Pre Inspection + OP130",
+    OP140: "Auto Guaging + OP140",
+    OP150: "Leak Test OP150",
+    OP160: "Final Inspection + OP160",
+  };
+
+  if (Array.isArray(dbMachines)) {
+    dbMachines.forEach((m) => {
+      const op = String(m.operation_no || "").trim().toUpperCase();
+      const mName = String(m.machine_name || "").trim();
+      if (op && mName) {
+        if (op === "OP150" && mName.toLowerCase().includes("leak")) {
+          stationLabelMap["OP150"] = "Leak Test OP150";
+        } else {
+          stationLabelMap[op] = `${mName} + ${op}`;
+        }
+      }
     });
+  }
 
-    const partIds = [...new Set(rows.map((row) => String(row.part_id || "").trim()).filter(Boolean))];
-    const mappings = partIds.length
-      ? await PartCodeMapping.findAll({
-          where: { old_part_id: { [Op.in]: partIds }, is_active: true },
-          order: [["updatedAt", "DESC"]],
-          raw: true,
-        }).catch(() => [])
-      : [];
-    const mappingByPart = mappings.reduce((acc, row) => {
-      const key = String(row.old_part_id || "").trim();
-      const customerQr = sanitizeCustomerQrValue(row.customer_qr);
-      if (key && customerQr && !acc[key]) acc[key] = customerQr;
-      return acc;
-    }, {});
-    const finalNgWhere = {
-      final_status: "NG",
-      final_result_at: { [Op.between]: [from, to] },
-    };
-    if (partId) {
-      finalNgWhere[Op.or] = [
-        { report_group_key: { [Op.like]: `%${partId}%` } },
-        { traceability_part_id: { [Op.like]: `%${partId}%` } },
-        { part_serial_no: { [Op.like]: `%${partId}%` } },
-        { customer_qr_code: { [Op.like]: `%${partId}%` } },
-      ];
-    }
-    if (categoryFilter) finalNgWhere.rejection_category = categoryFilter;
-    if (viewFilter) finalNgWhere.rejection_view = viewFilter;
-    if (zoneFilter) finalNgWhere.rejection_zone = zoneFilter;
-    if (reasonFilter) finalNgWhere.rejection_reason = reasonFilter;
-    if (partNameFilter) finalNgWhere.part_name = partNameFilter;
-    if (dieNameFilter) finalNgWhere.die_name = dieNameFilter;
-    if (dieCastingMachineFilter) finalNgWhere.die_casting_machine_name = dieCastingMachineFilter;
-    if (plantId) finalNgWhere.plant_id = plantId;
-    if (lineId) finalNgWhere.line_id = lineId;
-    if (lineName) finalNgWhere.line_name = lineName;
-    if (machineId) finalNgWhere.anchor_machine_id = machineId;
+  const whereConditions = [];
+  const replacements = {};
 
-    const finalRows = await FinalProductionResult.findAll({
-          where: partIds.length
-            ? {
-                [Op.or]: [
-                  { report_group_key: { [Op.in]: partIds } },
-                  { traceability_part_id: { [Op.in]: partIds } },
-                  { part_serial_no: { [Op.in]: partIds } },
-                  { customer_qr_code: { [Op.in]: partIds } },
-                ],
-              }
-            : finalNgWhere,
-          attributes: [
-            "report_group_key", "traceability_part_id", "part_serial_no", "customer_qr_code",
-            "shot_number", "shot_details_json", "plc_shot_json", "final_result_at", "first_scan_at",
-            "anchor_machine_id", "anchor_machine_name", "line_name", "plant_id", "line_id",
-            "part_name", "die_name", "die_casting_machine_name",
-            "ng_station", "rejection_category", "rejection_view", "rejection_zone", "rejection_sub_zone",
-            "rejection_reason", "ng_reason", "final_status",
-          ],
-          order: [["last_activity_at", "DESC"], ["updatedAt", "DESC"]],
-          raw: true,
-        }).catch(() => []);
-    const parseJsonObject = (value) => {
-      if (!value) return {};
-      try {
-        const parsed = typeof value === "string" ? JSON.parse(value) : value;
-        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-      } catch (_error) {
-        return {};
-      }
-    };
-    const looksLikeCustomerQrForReport = (value) => /^R\d/i.test(String(value || "").trim());
-    const safeInternalPartIdForReport = (value, customerQr = "") => {
-      const raw = String(value || "").trim();
-      const mappedCustomerQr = String(customerQr || "").trim();
-      if (!raw || raw === "-") return "";
-      if (looksLikeCustomerQrForReport(raw)) return "";
-      if (mappedCustomerQr && raw.toUpperCase() === mappedCustomerQr.toUpperCase()) return "";
-      return raw;
-    };
-    const getFinalDisplayPartIdForReport = (row = {}) => {
-      const customerQr = String(row.customer_qr_code || "").trim();
-      return (
-        safeInternalPartIdForReport(row.part_serial_no, customerQr) ||
-        safeInternalPartIdForReport(row.traceability_part_id, customerQr) ||
-        safeInternalPartIdForReport(row.report_group_key, customerQr)
-      );
-    };
-    const normalizeShotTokenForLookup = (value) => {
-      const raw = String(value ?? "").trim();
-      if (!raw || raw.toUpperCase() === "NULL") return "";
-      const digits = raw.replace(/\D/g, "");
-      if (!digits) return raw.toUpperCase();
-      const noLead = digits.replace(/^0+/, "");
-      return (noLead || "0").toUpperCase();
-    };
-    const extractShotCandidatesForLookup = (value) => {
-      const raw = String(value || "").trim().toUpperCase();
-      if (!raw) return [];
-      const candidates = new Set();
-      const compactMatch = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
-      if (compactMatch?.groups?.shot) candidates.add(normalizeShotTokenForLookup(compactMatch.groups.shot));
-      const trailing = raw.match(/(\d{1,8})$/);
-      if (trailing?.[1]) candidates.add(normalizeShotTokenForLookup(trailing[1]));
-      return [...candidates].filter(Boolean);
-    };
-    const parseCompactQrForLookup = (value) => {
-      const raw = String(value || "").trim().toUpperCase();
-      if (!raw) return null;
-      const match = raw.match(/^(?<month>\d{2})(?<day>\d{2})(?<hour>\d{2})(?<minute>\d{2})(?<machineCode>[A-Z0-9]{1})(?<shot>\d{1,6})$/i);
-      if (!match?.groups) return null;
-      const month = Number(match.groups.month);
-      const day = Number(match.groups.day);
-      const hour = Number(match.groups.hour);
-      const minute = Number(match.groups.minute);
-      const shot = Number(match.groups.shot);
-      if (![month, day, hour, minute, shot].every(Number.isFinite)) return null;
-      return {
-        key: `${month}|${day}|${hour}|${minute}|${shot}`,
-        month,
-        day,
-        hour,
-        minute,
-        shot,
-        shotRaw: String(match.groups.shot || "").trim(),
-      };
-    };
-    const plcRowMatchesAssignmentScope = (plcRow = {}) => {
-      const scopeRows = scopedAssignmentRows.length ? scopedAssignmentRows : assignmentRows;
-      if (!scopeRows.length) return true;
-      const plcMachine = normalizeMachineTokenForReport(plcRow.machine_name);
-      const plcIp = String(plcRow.plc_ip || plcRow.ip_address || "").trim();
-      const plcPartDie = splitPlcPartDieForReport(plcRow.part_name || "");
-      return scopeRows.some((assignment) => {
-        const assignmentMachine = normalizeMachineTokenForReport(assignment.die_casting_machine);
-        const assignmentIp = String(assignment.ip_address || "").trim();
-        const assignmentPart = normalizePartDieTokenForReport(assignment.part_name);
-        const assignmentDie = normalizePartDieTokenForReport(assignment.die_name);
-        const machineOk = assignmentIp
-          ? plcIp && plcIp === assignmentIp
-          : assignmentMachine && plcMachine === assignmentMachine;
-        if (!machineOk) return false;
-        if (assignmentPart && plcPartDie.partName && plcPartDie.partName !== assignmentPart) return false;
-        if (assignmentDie && plcPartDie.dieName && plcPartDie.dieName !== assignmentDie) return false;
-        return true;
-      });
-    };
-    const pickScopedPlcRow = (rows = []) => {
-      if (!Array.isArray(rows) || !rows.length) return null;
-      return rows.find(plcRowMatchesAssignmentScope) || null;
-    };
-    const scopedShotDetailsForDisplay = (details = {}) => {
-      if (!details || typeof details !== "object" || !Object.keys(details).length) return {};
-      return plcRowMatchesAssignmentScope(details) ? details : {};
-    };
-    const enrichRejectionShotDetails = (details = {}) => {
-      if (!details || typeof details !== "object" || !Object.keys(details).length) return {};
-      const next = { ...details };
-      const y = normalizeReportYear(next.shot_year);
-      const m = Number(next.shot_month);
-      const d = Number(next.shot_day);
-      const hh = Number(next.shot_hour);
-      const mm = Number(next.shot_minute);
-      const ss = Number(next.shot_second ?? 0);
-      if (!next.shot_date && Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
-        next.shot_date = `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-      }
-      if (!next.shot_time && Number.isFinite(hh) && Number.isFinite(mm)) {
-        next.shot_time = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
-      }
-      return next;
-    };
-    const shotLookupValues = new Set();
-    const compactLookupMap = new Map();
-    const addCompactLookup = (value) => {
-      const compact = parseCompactQrForLookup(value);
-      if (compact && !compactLookupMap.has(compact.key)) compactLookupMap.set(compact.key, compact);
-    };
-    rows.forEach((row) => {
-      const plain = typeof row.get === "function" ? row.get({ plain: true }) : row;
-      const partKey = String(plain.part_id || "").trim();
-      const displayPartId = safeInternalPartIdForReport(partKey, mappingByPart[partKey]);
-      if (!displayPartId) return;
-      addCompactLookup(displayPartId);
-      const directShot = normalizeShotTokenForLookup(plain.shot_number || plain.shotNumber || "");
-      if (directShot) shotLookupValues.add(directShot);
-      extractShotCandidatesForLookup(displayPartId).forEach((value) => shotLookupValues.add(value));
-    });
-    finalRows.forEach((row) => {
-      const displayPartId = getFinalDisplayPartIdForReport(row);
-      if (!displayPartId) return;
-      addCompactLookup(displayPartId);
-      const directShot = normalizeShotTokenForLookup(row.shot_number || "");
-      if (directShot) shotLookupValues.add(directShot);
-      [displayPartId]
-        .forEach((value) => extractShotCandidatesForLookup(value).forEach((shot) => shotLookupValues.add(shot)));
-    });
-    const plcByCompact = new Map();
-    if (compactLookupMap.size) {
-      try {
-        const sequelize = require("../config/db");
-        for (const compact of compactLookupMap.values()) {
-          const [plcRows] = await sequelize.query(
-            `
-              SELECT TOP 1 *
-              FROM PlcCycleReadings
-              WHERE TRY_CONVERT(INT, shot_month) = :month
-                AND TRY_CONVERT(INT, shot_day) = :day
-                AND TRY_CONVERT(INT, shot_hour) = :hour
-                AND TRY_CONVERT(INT, shot_minute) = :minute
-                AND (
-                  TRY_CONVERT(INT, shot_number) = :shot
-                  OR LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) = :shotRaw
-                )
-              ORDER BY recorded_at DESC
-            `,
-            {
-              replacements: {
-                month: compact.month,
-                day: compact.day,
-                hour: compact.hour,
-                minute: compact.minute,
-                shot: compact.shot,
-                shotRaw: compact.shotRaw,
-              },
-            }
-          );
-          if (plcRows && plcRows[0]) {
-            plcByCompact.set(compact.key, [plcRows[0]]);
-          }
-        }
-      } catch (error) {
-        console.warn(`[REJECTION] PLC compact shot detail lookup unavailable: ${error.message}`);
-      }
-    }
-    const plcByShot = new Map();
-    if (shotLookupValues.size) {
-      try {
-        const sequelize = require("../config/db");
-        const shotValues = [...shotLookupValues].slice(0, 1000);
-        const textPlaceholders = shotValues.map((_, index) => `:shotText${index}`).join(", ");
-        const numericValues = shotValues.filter((value) => /^\d+$/.test(value)).slice(0, 1000);
-        const numericPlaceholders = numericValues.map((_, index) => `:shotNumber${index}`).join(", ");
-        const replacements = {};
-        shotValues.forEach((value, index) => {
-          replacements[`shotText${index}`] = value;
-        });
-        numericValues.forEach((value, index) => {
-          replacements[`shotNumber${index}`] = Number(value);
-        });
-        const numericClause = numericValues.length
-          ? `OR TRY_CONVERT(BIGINT, shot_number) IN (${numericPlaceholders})`
-          : "";
-        const [plcRows] = await sequelize.query(
-          `
-            SELECT *
-            FROM PlcCycleReadings
-            WHERE LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) IN (${textPlaceholders})
-              ${numericClause}
-            ORDER BY recorded_at DESC
-          `,
-          { replacements }
-        );
-        for (const row of plcRows || []) {
-          const key = normalizeShotTokenForLookup(row.shot_number || "");
-          if (!key) continue;
-          const bucket = plcByShot.get(key) || [];
-          bucket.push(row);
-          plcByShot.set(key, bucket);
-        }
-      } catch (error) {
-        console.warn(`[REJECTION] PLC shot detail lookup unavailable: ${error.message}`);
-      }
-    }
-    const resolvePlcShotDetails = (...values) => {
-      const compactCandidates = values.map(parseCompactQrForLookup).filter(Boolean);
-      for (const compact of compactCandidates) {
-        if (plcByCompact.has(compact.key)) {
-          const scoped = pickScopedPlcRow(plcByCompact.get(compact.key));
-          if (scoped) return scoped;
-        }
-      }
-      if (compactCandidates.length) return {};
-      for (const value of values) {
-        const direct = normalizeShotTokenForLookup(value);
-        if (direct && plcByShot.has(direct)) {
-          const scoped = pickScopedPlcRow(plcByShot.get(direct));
-          if (scoped) return scoped;
-        }
-        for (const candidate of extractShotCandidatesForLookup(value)) {
-          if (plcByShot.has(candidate)) {
-            const scoped = pickScopedPlcRow(plcByShot.get(candidate));
-            if (scoped) return scoped;
-          }
-        }
-      }
-      return {};
-    };
-    const finalByPart = finalRows.reduce((acc, row) => {
-      const keys = [row.report_group_key, row.traceability_part_id, row.part_serial_no, row.customer_qr_code]
-        .map((value) => String(value || "").trim())
-        .filter(Boolean);
-      const displayPartId = getFinalDisplayPartIdForReport(row);
-      const plcShot = displayPartId ? resolvePlcShotDetails(row.shot_number, displayPartId) : {};
-      const shotDetails = displayPartId
-        ? {
-            ...plcShot,
-            ...parseJsonObject(row.plc_shot_json),
-            ...parseJsonObject(row.shot_details_json),
-          }
-        : {};
-      const scopedShotDetails = enrichRejectionShotDetails(scopedShotDetailsForDisplay(shotDetails));
-      const plcPartDie = splitPlcPartDieForReport(scopedShotDetails.part_name || "");
-      const entry = {
-        shotNumber: displayPartId ? String(row.shot_number || scopedShotDetails.shot_number || "").trim() : "",
-        shotStatus: displayPartId ? (scopedShotDetails.shot_status ?? scopedShotDetails.status ?? "") : "",
-        shotDetails: scopedShotDetails,
-        partName: normalizePartDieTokenForReport(row.part_name || plcPartDie.partName),
-        dieName: normalizePartDieTokenForReport(row.die_name || plcPartDie.dieName),
-        dieCastingMachine: normalizePartDieTokenForReport(row.die_casting_machine_name || scopedShotDetails.machine_name),
-      };
-      keys.forEach((key) => {
-        if (key && !acc[key]) acc[key] = entry;
-      });
-      return acc;
-    }, {});
+  if (!isAllTime) {
+    whereConditions.push(`(first_scan_at BETWEEN :from AND :to OR final_scan_at BETWEEN :from AND :to OR createdAt BETWEEN :from AND :to)`);
+    replacements.from = from;
+    replacements.to = to;
+  }
 
-    const reportMetricFilters = {
-      dateFrom: from,
-      dateTo: to,
-      machineId: machineId || undefined,
-      plantId: plantId || undefined,
-      lineId: lineId || undefined,
-      lineName: lineName || undefined,
-      shiftCode: shiftCodeFilter || undefined,
-      barcode: partId || undefined,
-      partName: partNameFilter || undefined,
-      partType: partTypeFilter || undefined,
-      dieName: dieNameFilter || undefined,
-      dieCastingMachine: dieCastingMachineFilter || undefined,
-    };
-    const [liveMetricRows, materializedSummaryMetrics, productionTotal, sqlSummaryMetrics] = await Promise.all([
-      fetchProductionData(reportMetricFilters, {
-        includePlcReadings: false,
-        includeLeaktest: true,
-        includePlcSummary: false,
-      }).catch((error) => {
-        console.warn(`[REJECTION] live row metrics unavailable: ${error.message}`);
-        return null;
+  if (shiftCodeFilter) {
+    whereConditions.push(`shift_code = :shiftCode`);
+    replacements.shiftCode = shiftCodeFilter;
+  }
+  if (machineNameFilter) {
+    whereConditions.push(`machine_name = :machineName`);
+    replacements.machineName = machineNameFilter;
+  }
+  if (/^(OP(100|110|120|130|140|150|160)|LEAK-TEST-01|LEAK-TEST-02|LEAK TEST-03|LEAK-TEST-03|LEAK01|LEAK02|LEAK03)$/i.test(qualityGateFilter)) {
+    const qg = qualityGateFilter.trim().toUpperCase();
+    if (qg === "LEAK-TEST-01" || qg === "LEAK01") {
+      whereConditions.push(`(
+        (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR leak_data LIKE '%1773%' OR machine_name = 'Leak-Test-01' OR machine_name LIKE '%Leak%01%')
+        AND (JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED') OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR leak_data LIKE '%1773%' OR machine_name LIKE '%01%')) OR (machine_name = 'Leak-Test-01' AND overall_status IN ('NG','FAILED')))
+      )`);
+    } else if (qg === "LEAK-TEST-02" || qg === "LEAK02") {
+      whereConditions.push(`(
+        (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR leak_data LIKE '%1774%' OR machine_name = 'Leak-Test-02' OR machine_name LIKE '%Leak%02%')
+        AND (JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED') OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR leak_data LIKE '%1774%' OR machine_name LIKE '%02%')) OR (machine_name = 'Leak-Test-02' AND overall_status IN ('NG','FAILED')))
+      )`);
+    } else if (qg === "LEAK TEST-03" || qg === "LEAK-TEST-03" || qg === "LEAK03") {
+      whereConditions.push(`(
+        (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak Test-03' OR JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-03' OR leak_data LIKE '%1776%' OR machine_name = 'Leak Test-03' OR machine_name LIKE '%Leak%03%')
+        AND (JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED') OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') LIKE '%03%' OR leak_data LIKE '%1776%' OR machine_name LIKE '%03%')) OR (machine_name LIKE '%Leak%03%' AND overall_status IN ('NG','FAILED')))
+      )`);
+    } else if (qg === "OP150") {
+      whereConditions.push(`(
+        op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR (machine_name LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+        OR (rejection_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+        OR (ng_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+        OR (rejection_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
+        OR (ng_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
+        OR (JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED'))
+      )`);
+    } else if (qg === "OP100") {
+      whereConditions.push(`(
+        op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR (machine_name LIKE '%DCM%' AND overall_status IN ('NG', 'FAILED'))
+      )`);
+    } else if (/^OP(110|120|130|140|160)$/i.test(qg)) {
+      const operationColumn = qg.toLowerCase() + "_status";
+      whereConditions.push(`${operationColumn} IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')`);
+    }
+  }
+  if (partNameFilter) {
+    whereConditions.push(`UPPER(part_name) = :partName`);
+    replacements.partName = partNameFilter;
+  }
+  if (dieNameFilter) {
+    whereConditions.push(`UPPER(die_name) = :dieName`);
+    replacements.dieName = dieNameFilter;
+  }
+  if (partId) {
+    whereConditions.push(`(part_id LIKE :partIdPattern OR customer_qr LIKE :partIdPattern)`);
+    replacements.partIdPattern = `%${partId}%`;
+  }
+  if (categoryFilter) {
+    whereConditions.push(`(rejection_category = :categoryFilter OR ng_reason LIKE :catPattern)`);
+    replacements.categoryFilter = categoryFilter;
+    replacements.catPattern = `%Category: ${categoryFilter}%`;
+  }
+  if (reasonFilter) {
+    whereConditions.push(`(rejection_reason = :reasonFilter OR ng_reason LIKE :reasonPattern)`);
+    replacements.reasonFilter = reasonFilter;
+    replacements.reasonPattern = `%Reason: ${reasonFilter}%`;
+  }
+  if (statusFilter === "NG" || statusFilter === "REJECT" || statusFilter === "FAILED") {
+    whereConditions.push(`(
+      overall_status IN ('NG', 'FAILED')
+      OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+      OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+      OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+      OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+      OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+      OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+      OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+      OR (machine_name LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+      OR (rejection_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+      OR (ng_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+    )`);
+  } else if (statusFilter === "OK" || statusFilter === "PASSED") {
+    whereConditions.push(`overall_status IN ('OK', 'PASSED')`);
+  }
+
+  const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
+  const prWhereSql = whereSql ? whereSql
+    .replace(/\[(\w+)\]/g, '$1')
+    .replace(/\b(part_id|customer_qr|createdAt|updatedAt|first_scan_at|final_scan_at|shift_code|machine_name|die_name|part_name|rejection_category|rejection_reason|ng_reason|overall_status|op100_status|op110_status|op120_status|op130_status|op140_status|op150_status|op160_status|leak_data)\b/g, 'pr.[$1]')
+    : '';
+
+  return {
+    shifts,
+    now,
+    from,
+    to,
+    dateFrom,
+    dateTo,
+    isAllTime,
+    machineNameFilter,
+    partNameFilter,
+    dieNameFilter,
+    shiftCodeFilter,
+    statusFilter,
+    qualityGateFilter,
+    categoryFilter,
+    reasonFilter,
+    dbMachines,
+    stationLabelMap,
+    whereConditions,
+    replacements,
+    whereSql,
+    prWhereSql,
+  };
+}
+
+// ─── Modular Endpoint 1: Summary & Quality Gates ────────────────────────────
+exports.getRejectionSummary = async (req, res) => {
+  try {
+    const ctx = await buildRejectionFilterContext(req.query);
+    const { replacements, whereSql, stationLabelMap, shifts, dateFrom, dateTo, shiftCodeFilter, machineNameFilter, partNameFilter, dieNameFilter } = ctx;
+
+    const [aggregatesRes, filterOptionsRes] = await Promise.all([
+      sequelize.query(`
+        SELECT 
+          COUNT(*) as totalParts,
+          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) as totalOK,
+          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) as totalNG,
+          SUM(CASE WHEN overall_status IN ('IN_PROGRESS', 'WIP') THEN 1 ELSE 0 END) as totalInProgress,
+          SUM(CASE WHEN op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%DCM%' AND overall_status IN ('NG', 'FAILED')) THEN 1 ELSE 0 END) as op100_ng,
+          SUM(CASE WHEN op100_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') OR (machine_name LIKE '%DCM%' AND overall_status IN ('OK', 'PASSED')) THEN 1 ELSE 0 END) as op100_ok,
+          SUM(CASE WHEN op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op110_ng,
+          SUM(CASE WHEN op110_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op110_ok,
+          SUM(CASE WHEN op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op120_ng,
+          SUM(CASE WHEN op120_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op120_ok,
+          SUM(CASE WHEN op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op130_ng,
+          SUM(CASE WHEN op130_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op130_ok,
+          SUM(CASE WHEN op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op140_ng,
+          SUM(CASE WHEN op140_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op140_ok,
+          SUM(CASE WHEN (
+            op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+            OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
+            OR (machine_name LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+            OR (rejection_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+            OR (ng_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+            OR (rejection_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
+            OR (ng_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
+          ) THEN 1 ELSE 0 END) as op150_ng,
+          SUM(CASE WHEN (
+            op150_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK')
+            OR JSON_VALUE(leak_data, '$.result') IN ('OK', 'PASS', 'PASSED')
+            OR (machine_name LIKE '%Leak%' AND overall_status IN ('OK', 'PASSED'))
+          ) THEN 1 ELSE 0 END) as op150_ok,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01'
+            OR leak_data LIKE '%1773%'
+            OR machine_name = 'Leak-Test-01'
+            OR machine_name LIKE '%Leak%01%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
+            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR leak_data LIKE '%1773%' OR machine_name LIKE '%01%'))
+            OR (machine_name = 'Leak-Test-01' AND overall_status IN ('NG','FAILED'))
+          ) THEN 1 ELSE 0 END) as leak01_ng,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01'
+            OR leak_data LIKE '%1773%'
+            OR machine_name = 'Leak-Test-01'
+            OR machine_name LIKE '%Leak%01%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('OK','PASS','PASSED')
+            OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR leak_data LIKE '%1773%' OR machine_name LIKE '%01%'))
+            OR (machine_name = 'Leak-Test-01' AND overall_status IN ('OK','PASSED'))
+          ) THEN 1 ELSE 0 END) as leak01_ok,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02'
+            OR leak_data LIKE '%1774%'
+            OR machine_name = 'Leak-Test-02'
+            OR machine_name LIKE '%Leak%02%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
+            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR leak_data LIKE '%1774%' OR machine_name LIKE '%02%'))
+            OR (machine_name = 'Leak-Test-02' AND overall_status IN ('NG','FAILED'))
+          ) THEN 1 ELSE 0 END) as leak02_ng,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02'
+            OR leak_data LIKE '%1774%'
+            OR machine_name = 'Leak-Test-02'
+            OR machine_name LIKE '%Leak%02%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('OK','PASS','PASSED')
+            OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR leak_data LIKE '%1774%' OR machine_name LIKE '%02%'))
+            OR (machine_name = 'Leak-Test-02' AND overall_status IN ('OK','PASSED'))
+          ) THEN 1 ELSE 0 END) as leak02_ok,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak Test-03'
+            OR JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-03'
+            OR leak_data LIKE '%1776%'
+            OR machine_name = 'Leak Test-03'
+            OR machine_name LIKE '%Leak%03%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
+            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') LIKE '%03%' OR leak_data LIKE '%1776%' OR machine_name LIKE '%03%'))
+            OR (machine_name LIKE '%Leak%03%' AND overall_status IN ('NG','FAILED'))
+          ) THEN 1 ELSE 0 END) as leak03_ng,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak Test-03'
+            OR JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-03'
+            OR leak_data LIKE '%1776%'
+            OR machine_name = 'Leak Test-03'
+            OR machine_name LIKE '%Leak%03%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('OK','PASS','PASSED')
+            OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') LIKE '%03%' OR leak_data LIKE '%1776%' OR machine_name LIKE '%03%'))
+            OR (machine_name LIKE '%Leak%03%' AND overall_status IN ('OK','PASSED'))
+          ) THEN 1 ELSE 0 END) as leak03_ok,
+          SUM(CASE WHEN op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op160_ng,
+          SUM(CASE WHEN op160_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op160_ok
+        FROM [RICO_IOT].[dbo].[ProductionReports]
+        ${whereSql}
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[REJECTION] summary agg query error:", err.message);
+        return [{}];
       }),
-      fetchMaterializedTraceabilityMetrics(reportMetricFilters).catch((error) => {
-        console.warn(`[REJECTION] materialized summary metrics unavailable: ${error.message}`);
-        return null;
-      }),
-      fetchProductionFirstScanPartCount(reportMetricFilters).catch((error) => {
-        console.warn(`[REJECTION] first-scan production total unavailable: ${error.message}`);
-        return 0;
-      }),
-      fetchProductionSummaryMetrics(reportMetricFilters).catch((error) => {
-        console.warn(`[REJECTION] summary metrics unavailable: ${error.message}`);
-        return null;
-      }),
+
+      Promise.all([
+        sequelize.query(`SELECT DISTINCT TOP 50 machine_name FROM [RICO_IOT].[dbo].[ProductionReports] WHERE machine_name IS NOT NULL AND machine_name <> '' AND machine_name <> '-'`, { type: sequelize.QueryTypes.SELECT }).catch(() => []),
+        sequelize.query(`SELECT DISTINCT TOP 50 part_name FROM [RICO_IOT].[dbo].[ProductionReports] WHERE part_name IS NOT NULL AND part_name <> '' AND part_name <> '-'`, { type: sequelize.QueryTypes.SELECT }).catch(() => []),
+        sequelize.query(`SELECT DISTINCT TOP 50 die_name FROM [RICO_IOT].[dbo].[ProductionReports] WHERE die_name IS NOT NULL AND die_name <> '' AND die_name <> '-'`, { type: sequelize.QueryTypes.SELECT }).catch(() => []),
+      ]),
     ]);
-    const liveSummaryMetrics = Array.isArray(liveMetricRows)
-      ? calculateProductionMetrics(liveMetricRows, reportMetricFilters)
-      : null;
-    const hasLiveSummary = Boolean(
-      liveSummaryMetrics &&
-      (
-        Number(liveSummaryMetrics.traceabilityProduction || 0) > 0 ||
-        Number(liveSummaryMetrics.totalProduction || 0) > 0 ||
-        Number(liveSummaryMetrics.totalOK || 0) > 0 ||
-        Number(liveSummaryMetrics.totalNG || 0) > 0 ||
-        Number(liveSummaryMetrics.inProgress || 0) > 0 ||
-        (Array.isArray(liveMetricRows) && liveMetricRows.length === 0)
-      )
-    );
-    const hasMaterializedSummary = Boolean(
-      materializedSummaryMetrics &&
-      (
-        Number(materializedSummaryMetrics.traceabilityProduction || 0) > 0 ||
-        Number(materializedSummaryMetrics.totalProduction || 0) > 0 ||
-        Number(materializedSummaryMetrics.totalOK || 0) > 0 ||
-        Number(materializedSummaryMetrics.totalNG || 0) > 0 ||
-        Number(materializedSummaryMetrics.inProgress || 0) > 0
-      )
-    );
-    const reportSummaryMetrics = hasLiveSummary
-      ? liveSummaryMetrics
-      : (hasMaterializedSummary ? materializedSummaryMetrics : (sqlSummaryMetrics || null));
-    const firstScanProductionTotal = Number(productionTotal);
-    let alignedProductionTotal = Number.isFinite(firstScanProductionTotal) && firstScanProductionTotal >= 0
-      ? firstScanProductionTotal
-      : Number(
-          reportSummaryMetrics?.traceabilityProduction ??
-          reportSummaryMetrics?.totalProduction ??
-          0
-        );
-    const hasEnrichedPartProductionFilter = Boolean(partNameFilter || partTypeFilter || dieNameFilter || dieCastingMachineFilter);
-    if (hasEnrichedPartProductionFilter) {
-      const scopedProductionWhere = {
-        first_scan_at: { [Op.between]: [from, to] },
-      };
-      if (plantId) scopedProductionWhere.plant_id = plantId;
-      if (lineId) scopedProductionWhere.line_id = lineId;
-      if (lineName) scopedProductionWhere.line_name = lineName;
-      if (partNameFilter) scopedProductionWhere.part_name = partNameFilter;
-      if (dieNameFilter) scopedProductionWhere.die_name = dieNameFilter;
-      if (dieCastingMachineFilter) scopedProductionWhere.die_casting_machine_name = dieCastingMachineFilter;
-      if (shiftCodeFilter) scopedProductionWhere.shift_code = shiftCodeFilter;
-      if (partId) {
-        scopedProductionWhere[Op.and] = [
-          ...(scopedProductionWhere[Op.and] || []),
-          {
-            [Op.or]: [
-              { report_group_key: { [Op.like]: `%${partId}%` } },
-              { traceability_part_id: { [Op.like]: `%${partId}%` } },
-              { part_serial_no: { [Op.like]: `%${partId}%` } },
-              { customer_qr_code: { [Op.like]: `%${partId}%` } },
-            ],
-          },
-        ];
-      }
-      if (partTypeFilter && ["OTHER", "CUSTOMER_QR_ONLY", "CUSTOMER_QR", "QR_ONLY"].includes(partTypeFilter)) {
-        scopedProductionWhere[Op.and] = [
-          ...(scopedProductionWhere[Op.and] || []),
-          {
-            [Op.or]: [
-              { part_serial_no: null },
-              { part_serial_no: "" },
-              { part_serial_no: { [Op.eq]: col("customer_qr_code") } },
-            ],
-          },
-        ];
-      }
-      alignedProductionTotal = await FinalProductionResult.count({
-        where: scopedProductionWhere,
-        distinct: true,
-        col: "report_group_key",
-      }).catch((error) => {
-        console.warn(`[REJECTION] scoped production total unavailable: ${error.message}`);
-        return alignedProductionTotal;
-      });
-    }
 
-    const configuredPartRows = await RejectionView.findAll({
-      attributes: ["part_name"],
-      group: ["part_name"],
-      raw: true,
-    }).catch(() => []);
+    const agg = aggregatesRes?.[0] || {};
+    const totalParts = Number(agg.totalParts || 0);
+    const totalOK = Number(agg.totalOK || 0);
+    const totalNG = Number(agg.totalNG || 0);
+    const inProgress = Number(agg.totalInProgress || 0);
+    const rejectRate = (totalOK + totalNG) > 0 ? Number(((totalNG / (totalOK + totalNG)) * 100).toFixed(2)) : 0;
 
-    const operationAnalysisRows = rows.map((row) => {
-      const plain = row.get({ plain: true });
-      const machine = plain.Machine || {};
-      const rawPartId = String(plain.part_id || "").trim();
-      const mappedCustomerQr = mappingByPart[rawPartId] || null;
-      const displayPartId = safeInternalPartIdForReport(rawPartId, mappedCustomerQr);
-      const shift = resolveShift(plain.createdAt, shifts);
-      const rejectionReason = String(plain.rejection_reason || "").trim();
-      const fallbackReason = String(plain.interlock_reason || "").trim();
-      const cleanReason = SYSTEM_RECOVERY_REASONS.includes(fallbackReason.toUpperCase())
-        ? ""
-        : fallbackReason;
-      const directPlcShot = displayPartId ? resolvePlcShotDetails(plain.shot_number, displayPartId) : {};
-      const finalShot = finalByPart[displayPartId] || finalByPart[rawPartId] || {};
-      const mergedShotDetails = displayPartId
-        ? {
-            ...directPlcShot,
-            ...(finalShot.shotDetails || {}),
-          }
-        : {};
-      const scopedShotDetails = enrichRejectionShotDetails(scopedShotDetailsForDisplay(mergedShotDetails));
-      const plcPartDie = splitPlcPartDieForReport(scopedShotDetails.part_name || "");
-      return {
-        id: plain.id,
-        partId: displayPartId,
-        customerQrCode: mappedCustomerQr,
-        machineId: plain.machine_id || null,
-        machineName: machine.machine_name || null,
-        lineName: machine.line_name || null,
-        plantId: machine.plant_id || null,
-        lineId: machine.line_id || null,
-        stationNo: normalizeStation(plain.station_no || plain.operation_no || machine.operation_no || ""),
-        partName: finalShot.partName || plcPartDie.partName || "",
-        dieName: finalShot.dieName || plcPartDie.dieName || "",
-        dieCastingMachine: finalShot.dieCastingMachine || normalizePartDieTokenForReport(scopedShotDetails.machine_name) || "",
-        result: "NG",
-        plcStatus: plain.plc_status || "",
-        category: plain.rejection_category || "",
-        view: plain.rejection_view || "",
-        zone: plain.rejection_zone || "",
-        reason: rejectionReason || cleanReason || "NG",
-        rejectionReasonOnly: rejectionReason,
-        remark: plain.rejection_remark || "",
-        resultSource: plain.result_source || "",
-        shiftCode: shift?.shift_code || "UNASSIGNED",
-        shotNumber: displayPartId ? (finalShot.shotNumber || scopedShotDetails.shot_number || plain.shot_number || "") : "",
-        shotStatus: displayPartId ? (finalShot.shotStatus || scopedShotDetails.shot_status || "") : "",
-        shotDetails: scopedShotDetails,
-        createdAt: plain.createdAt,
-      };
-    }).filter((row) => !shiftCodeFilter || normalizeShiftAlias(row.shiftCode) === normalizeShiftAlias(shiftCodeFilter));
-    const operationKeys = new Set(operationAnalysisRows.flatMap((row) => [
-      row.partId,
-      row.customerQrCode,
-    ]).map((value) => String(value || "").trim()).filter(Boolean));
-    const supplementalFinalRows = await FinalProductionResult.findAll({
-      where: finalNgWhere,
-      order: [["final_result_at", "DESC"], ["last_activity_at", "DESC"]],
-      limit: Math.min(Math.max(Number(req.query.limit || 5000), 1), 20000),
-      raw: true,
-    }).catch(() => []);
-    const finalAnalysisRows = supplementalFinalRows
-      .filter((row) => ![row.part_serial_no, row.traceability_part_id, row.report_group_key, row.customer_qr_code]
-        .map((value) => String(value || "").trim())
-        .filter(Boolean)
-        .some((key) => operationKeys.has(key)))
-      .map((row) => {
-        const displayPartId = getFinalDisplayPartIdForReport(row);
-        const plcShot = displayPartId ? resolvePlcShotDetails(row.shot_number, displayPartId) : {};
-        const shotDetails = displayPartId
-          ? {
-              ...plcShot,
-              ...parseJsonObject(row.plc_shot_json),
-              ...parseJsonObject(row.shot_details_json),
-            }
-          : {};
-        const scopedShotDetails = enrichRejectionShotDetails(scopedShotDetailsForDisplay(shotDetails));
-        const createdAt = row.final_result_at || row.last_activity_at || row.first_scan_at;
-        const shift = resolveShift(createdAt, shifts);
-        const plcPartDie = splitPlcPartDieForReport(scopedShotDetails.part_name || "");
-        return {
-          id: `final:${row.report_group_key}`,
-          partId: displayPartId,
-          customerQrCode: sanitizeCustomerQrValue(row.customer_qr_code) || null,
-          machineId: row.anchor_machine_id || null,
-          machineName: row.anchor_machine_name || null,
-          lineName: row.line_name || null,
-          plantId: row.plant_id || null,
-          lineId: row.line_id || null,
-          stationNo: normalizeStation(row.ng_station || ""),
-          partName: normalizePartDieTokenForReport(row.part_name || plcPartDie.partName),
-          dieName: normalizePartDieTokenForReport(row.die_name || plcPartDie.dieName),
-          dieCastingMachine: normalizePartDieTokenForReport(row.die_casting_machine_name || scopedShotDetails.machine_name),
-          result: "NG",
-          plcStatus: "FINAL_NG",
-          category: row.rejection_category || "",
-          view: row.rejection_view || "",
-          zone: row.rejection_zone || "",
-          subZone: row.rejection_sub_zone || "",
-          reason: row.rejection_reason || row.ng_reason || "NG",
-          rejectionReasonOnly: row.rejection_reason || "",
-          remark: "",
-          resultSource: "FINAL_PRODUCTION_RESULT",
-          shiftCode: shift?.shift_code || "UNASSIGNED",
-          shotNumber: displayPartId ? (row.shot_number || scopedShotDetails.shot_number || "") : "",
-          shotStatus: displayPartId ? (scopedShotDetails.shot_status ?? scopedShotDetails.status ?? "") : "",
-          shotDetails: scopedShotDetails,
-          createdAt,
-        };
-      })
-      .filter((row) => !shiftCodeFilter || normalizeShiftAlias(row.shiftCode) === normalizeShiftAlias(shiftCodeFilter));
-    const mergeRejectionRows = (existing, incoming) => {
-      if (!existing) return incoming;
-      const incomingFinal = String(incoming.resultSource || "").toUpperCase() === "FINAL_PRODUCTION_RESULT";
-      const base = incomingFinal ? { ...existing, ...incoming } : { ...incoming, ...existing };
-      return {
-        ...base,
-        category: base.category || existing.category || incoming.category || "",
-        view: base.view || existing.view || incoming.view || "",
-        zone: base.zone || existing.zone || incoming.zone || "",
-        subZone: base.subZone || existing.subZone || incoming.subZone || "",
-        reason: base.reason || existing.reason || incoming.reason || "NG",
-        rejectionReasonOnly: base.rejectionReasonOnly || existing.rejectionReasonOnly || incoming.rejectionReasonOnly || "",
-        remark: base.remark || existing.remark || incoming.remark || "",
-        shotNumber: base.shotNumber || existing.shotNumber || incoming.shotNumber || "",
-        shotStatus: base.shotStatus || existing.shotStatus || incoming.shotStatus || "",
-        shotDetails: {
-          ...(existing.shotDetails || {}),
-          ...(incoming.shotDetails || {}),
-        },
-      };
-    };
-    const rowsByPart = new Map();
-    [...operationAnalysisRows, ...finalAnalysisRows].forEach((row) => {
-      const key = String(row.customerQrCode || row.partId || row.id || "").trim();
-      if (!key) return;
-      rowsByPart.set(key, mergeRejectionRows(rowsByPart.get(key), row));
+    let qualityGates = [
+      { code: "OP100", name: stationLabelMap["OP100"] || "DCM+DPM + OP100", ngCount: Number(agg.op100_ng || 0), okCount: Number(agg.op100_ok || 0) },
+      { code: "OP110", name: stationLabelMap["OP110"] || "Laser Marking + OP110", ngCount: Number(agg.op110_ng || 0), okCount: Number(agg.op110_ok || 0) },
+      { code: "OP120", name: stationLabelMap["OP120"] || "Casting PDi + OP120", ngCount: Number(agg.op120_ng || 0), okCount: Number(agg.op120_ok || 0) },
+      { code: "OP130", name: stationLabelMap["OP130"] || "Pre Inspection + OP130", ngCount: Number(agg.op130_ng || 0), okCount: Number(agg.op130_ok || 0) },
+      { code: "OP140", name: stationLabelMap["OP140"] || "Auto Guaging + OP140", ngCount: Number(agg.op140_ng || 0), okCount: Number(agg.op140_ok || 0) },
+      { code: "Leak-Test-01", name: "Leak-Test-01 (OP150)", ngCount: Number(agg.leak01_ng || 0), okCount: Number(agg.leak01_ok || 0) },
+      { code: "Leak-Test-02", name: "Leak-Test-02 (OP150)", ngCount: Number(agg.leak02_ng || 0), okCount: Number(agg.leak02_ok || 0) },
+      { code: "Leak Test-03", name: "Leak Test-03 (OP150)", ngCount: Number(agg.leak03_ng || 0), okCount: Number(agg.leak03_ok || 0) },
+      { code: "OP160", name: stationLabelMap["OP160"] || "Final Inspection + OP160", ngCount: Number(agg.op160_ng || 0), okCount: Number(agg.op160_ok || 0) },
+    ];
+
+    qualityGates.forEach((gate) => {
+      if (stationLabelMap[gate.code]) gate.name = stationLabelMap[gate.code];
     });
-    const matchesPartDieMachineFilters = (row = {}) => {
-      const hasSafePartId = Boolean(String(row.partId || "").trim());
-      if (["OTHER", "CUSTOMER_QR_ONLY", "CUSTOMER_QR", "QR_ONLY"].includes(partTypeFilter) && hasSafePartId) return false;
-      if (["PART_ID", "PARTID", "INTERNAL", "INTERNAL_PART"].includes(partTypeFilter) && !hasSafePartId) return false;
-      const rowPart = normalizePartDieTokenForReport(row.partName);
-      const rowDie = normalizePartDieTokenForReport(row.dieName);
-      const rowMachine = normalizeMachineTokenForReport(row.dieCastingMachine);
-      if (partNameFilter && rowPart !== partNameFilter) return false;
-      if (dieNameFilter && rowDie !== dieNameFilter) return false;
-      if (dieCastingMachineFilter && rowMachine !== normalizeMachineTokenForReport(dieCastingMachineFilter)) return false;
-      return true;
-    };
-    const analysisRows = [...rowsByPart.values()]
-      .filter(matchesPartDieMachineFilters)
-      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-    const hasRejectionDetailFilters = Boolean(categoryFilter || viewFilter || zoneFilter || reasonFilter);
-    const alignedRejectionTotal = hasRejectionDetailFilters
-      ? analysisRows.length
-      : Number(reportSummaryMetrics?.totalNG ?? analysisRows.length);
-    const alignedTotalOK = Number(reportSummaryMetrics?.totalOK || 0);
-    const alignedTraceabilityMetrics = {
-      traceabilityProduction: alignedProductionTotal,
-      totalProduction: alignedProductionTotal,
-      totalOK: alignedTotalOK,
-      totalNG: alignedRejectionTotal,
-      inProgress: Number(reportSummaryMetrics?.inProgress || 0),
-      validationRejects: alignedRejectionTotal,
-      passRate: (alignedTotalOK + alignedRejectionTotal) > 0
-        ? Number(((alignedTotalOK / (alignedTotalOK + alignedRejectionTotal)) * 100).toFixed(2))
-        : 0,
-    };
 
-    res.json({
-      filters: {
-        from,
-        to,
-        machineId: machineId || null,
-        plantId: plantId || null,
-        lineId: lineId || null,
-        lineName: lineName || null,
-        partId: partId || null,
-        partName: partNameFilter || null,
-        partType: partTypeFilter || null,
-        dieName: dieNameFilter || null,
-        dieCastingMachine: dieCastingMachineFilter || null,
+    qualityGates = qualityGates.map((gate) => {
+      const inspected = gate.okCount + gate.ngCount;
+      const scrapRate = inspected > 0 ? Number(((gate.ngCount / inspected) * 100).toFixed(2)) : (totalNG > 0 ? Number(((gate.ngCount / totalNG) * 100).toFixed(2)) : 0);
+      return { ...gate, inspected, scrapRate };
+    });
+
+    const [mRows, pRows, dRows] = filterOptionsRes || [[], [], []];
+    const distinctMachines = [...new Set(mRows.map(r => r.machine_name).filter(Boolean))];
+    const distinctParts = [...new Set(pRows.map(r => r.part_name).filter(Boolean))];
+    const distinctDies = [...new Set(dRows.map(r => r.die_name).filter(Boolean))];
+
+    return res.json({
+      success: true,
+      window: {
+        from: dateFrom,
+        to: dateTo,
+        dateFrom,
+        dateTo,
         shiftCode: shiftCodeFilter || null,
+        machineName: machineNameFilter || null,
+        partName: partNameFilter || null,
+        dieName: dieNameFilter || null,
       },
-      rows: analysisRows,
-      total: alignedRejectionTotal,
-      rowCount: analysisRows.length,
-      reportTotalNG: Number(reportSummaryMetrics?.totalNG ?? analysisRows.length),
-      traceabilityMetrics: alignedTraceabilityMetrics,
-      filterOptions: assignmentFilterOptions,
-      productionTotal: alignedProductionTotal,
-      configuredParts: configuredPartRows.map((row) => String(row.part_name || "").trim()).filter(Boolean),
-      availableShifts: shifts.map((shift) => ({
-        shiftCode: shift.shift_code,
-        shiftName: shift.shift_name,
-        startTime: normalizeTimeValue(shift.start_time, { includeSeconds: true }),
-        endTime: normalizeTimeValue(shift.end_time, { includeSeconds: true }),
-      })),
+      summary: {
+        totalProduction: totalParts,
+        totalOK,
+        totalNG,
+        inProgress,
+        rejectRate,
+        topHotspotStation: qualityGates.reduce((prev, curr) => (curr.ngCount > prev.ngCount ? curr : prev), qualityGates[0])?.code || "OP120",
+        topDriverParameter: "Leak Test Body Value",
+      },
+      qualityGates,
+      stationLabels: stationLabelMap,
+      filterOptions: {
+        machines: distinctMachines,
+        parts: distinctParts,
+        dies: distinctDies,
+        shifts: shifts.map((s) => ({ code: s.shift_code, name: s.shift_name })),
+      },
+      traceabilityMetrics: {
+        traceabilityProduction: totalParts,
+        totalProduction: totalParts,
+        totalOK,
+        totalNG,
+        inProgress,
+        validationRejects: totalNG,
+        passRate: totalParts > 0 ? Number(((totalOK / totalParts) * 100).toFixed(2)) : 0,
+      },
     });
   } catch (error) {
+    console.error("[REJECTION] getRejectionSummary error:", error);
     res.status(500).json({ error: error.message });
   }
 };
+
+// ─── Modular Endpoint 2: Pareto Distribution ─────────────────────────────────
+exports.getRejectionPareto = async (req, res) => {
+  try {
+    const ctx = await buildRejectionFilterContext(req.query);
+    const { prWhereSql, replacements } = ctx;
+
+    const paretoRows = await sequelize.query(`
+      SELECT
+        CASE
+          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR pr.leak_data LIKE '%1773%' OR pr.machine_name = 'Leak-Test-01' OR pr.machine_name LIKE '%Leak%01%' THEN 'Leak-Test-01'
+          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR pr.leak_data LIKE '%1774%' OR pr.machine_name = 'Leak-Test-02' OR pr.machine_name LIKE '%Leak%02%' THEN 'Leak-Test-02'
+          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak Test-03' OR JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-03' OR pr.leak_data LIKE '%1776%' OR pr.machine_name = 'Leak Test-03' OR pr.machine_name LIKE '%Leak%03%' THEN 'Leak Test-03'
+          WHEN pr.machine_name LIKE '%Leak%' OR pr.op150_status IN ('NG','FAIL','FAILED') OR pr.rejection_reason LIKE '%Leak%' OR pr.ng_reason LIKE '%Leak%' THEN 'Leak-Test-01'
+          WHEN pr.op120_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Casting PDi' THEN 'OP120'
+          WHEN pr.op130_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Pre Inspection' THEN 'OP130'
+          WHEN pr.op140_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Auto Guaging' THEN 'OP140'
+          WHEN pr.op100_status IN ('NG','FAIL','FAILED') OR pr.machine_name LIKE '%DCM%' THEN 'OP100'
+          WHEN pr.op110_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Laser Marking' THEN 'OP110'
+          WHEN pr.op160_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Final Inspection' THEN 'OP160'
+          ELSE 'OP120'
+        END as gateCode,
+        pr.rejection_reason,
+        pr.rejection_category,
+        pr.ng_reason,
+        p.interlock_reason as parts_interlock_reason,
+        COUNT(*) as cnt
+      FROM [RICO_IOT].[dbo].[ProductionReports] pr
+      LEFT JOIN [RICO_IOT].[dbo].[Parts] p ON p.part_id = pr.part_id
+      ${prWhereSql ? prWhereSql + " AND" : "WHERE"} (
+        pr.overall_status IN ('NG', 'FAILED')
+        OR pr.op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR pr.op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR pr.op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR pr.op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR pr.op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR pr.op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR pr.op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR (pr.machine_name LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
+        OR (pr.rejection_reason LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
+        OR (pr.ng_reason LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
+        OR JSON_VALUE(pr.leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
+      )
+      GROUP BY 
+        CASE
+          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR pr.leak_data LIKE '%1773%' OR pr.machine_name = 'Leak-Test-01' OR pr.machine_name LIKE '%Leak%01%' THEN 'Leak-Test-01'
+          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR pr.leak_data LIKE '%1774%' OR pr.machine_name = 'Leak-Test-02' OR pr.machine_name LIKE '%Leak%02%' THEN 'Leak-Test-02'
+          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak Test-03' OR JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-03' OR pr.leak_data LIKE '%1776%' OR pr.machine_name = 'Leak Test-03' OR pr.machine_name LIKE '%Leak%03%' THEN 'Leak Test-03'
+          WHEN pr.machine_name LIKE '%Leak%' OR pr.op150_status IN ('NG','FAIL','FAILED') OR pr.rejection_reason LIKE '%Leak%' OR pr.ng_reason LIKE '%Leak%' THEN 'Leak-Test-01'
+          WHEN pr.op120_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Casting PDi' THEN 'OP120'
+          WHEN pr.op130_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Pre Inspection' THEN 'OP130'
+          WHEN pr.op140_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Auto Guaging' THEN 'OP140'
+          WHEN pr.op100_status IN ('NG','FAIL','FAILED') OR pr.machine_name LIKE '%DCM%' THEN 'OP100'
+          WHEN pr.op110_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Laser Marking' THEN 'OP110'
+          WHEN pr.op160_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Final Inspection' THEN 'OP160'
+          ELSE 'OP120'
+        END,
+        pr.rejection_reason, pr.rejection_category, pr.ng_reason, p.interlock_reason
+    `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+      console.warn("[REJECTION] Pareto query error:", err.message);
+      return [];
+    });
+
+    const parseTextField = (text, label) => {
+      if (!text || typeof text !== 'string') return '';
+      const m = text.match(new RegExp(label + ':\\s*([^|\\n]+)', 'i'));
+      return m ? m[1].trim() : '';
+    };
+
+    const normalizeDefectCategory = (rawCat, gate, reason) => {
+      let c = String(rawCat || '').trim().toUpperCase();
+      if (['CR', 'CASTING', 'CASTING REJECTION'].includes(c)) return 'CR';
+      if (['CRAM', 'CR-AM', 'CASTING REJECTION AFTER MACHINING'].includes(c)) return 'CRAM';
+      if (['MR', 'MACHINING', 'MACHINING REJECTION'].includes(c)) return 'MR';
+      const r = String(reason || '').toLowerCase();
+      if (r.includes('blow hole') || r.includes('porosity') || r.includes('face blow hole')) return 'CRAM';
+      if (r.includes('leak') || r.includes('gauge') || r.includes('machin') || gate?.includes('Leak') || gate === 'OP140') return 'MR';
+      return 'CR';
+    };
+
+    const reasonMap = {};
+    const categoryMap = {};
+    const zoneMap = {};
+    const gateDrillMap = {};
+
+    paretoRows.forEach((r) => {
+      const cnt = Number(r.cnt || 0);
+      const gate = r.gateCode || 'OP120';
+      const partsInterlock = String(r.parts_interlock_reason || '').trim();
+      const srcText = String(r.ng_reason || r.rejection_reason || partsInterlock || '');
+      const parsedReason = parseTextField(partsInterlock, 'Reason') || parseTextField(srcText, 'Reason');
+      let rawReason = String(r.rejection_reason || '').trim() || parsedReason || '';
+      if (!rawReason && partsInterlock && !partsInterlock.includes('|') && !partsInterlock.includes(':')) {
+        rawReason = partsInterlock;
+      }
+      if (!rawReason || rawReason.toLowerCase().includes('unspecified')) {
+        if (gate.includes('Leak') || gate === 'OP150') rawReason = 'Pressure Leak';
+        else if (gate === 'OP140') rawReason = 'Gauging Out of Spec';
+        else if (gate === 'OP100') rawReason = 'DCM Casting Defect';
+        else if (gate === 'OP110') rawReason = 'Laser Mark QR Fail';
+        else if (gate === 'OP120') rawReason = 'Casting Visual NG';
+        else if (gate === 'OP130') rawReason = 'Pre-Inspection Defect';
+        else if (gate === 'OP160') rawReason = 'Final Inspection Reject';
+        else rawReason = `${gate} Defect NG`;
+      }
+      if (rawReason) {
+        rawReason = canonicalizeReasonHelper(rawReason);
+      }
+
+      const rawCat = String(r.rejection_category || '').trim() || parseTextField(partsInterlock, 'Category') || parseTextField(srcText, 'Category');
+      const cat = normalizeDefectCategory(rawCat, gate, rawReason);
+      const rawZone = String(r.rejection_zone || '').trim() || parseTextField(partsInterlock, 'Zone') || parseTextField(srcText, 'Zone') || '';
+      let zone = splitRejectionZoneHelper(rawZone).zone;
+      if (!zone || zone === '-' || zone.toLowerCase().includes('unspecified')) {
+        if (gate.includes('Leak') || gate === 'OP150') zone = 'Zone Leak / Body';
+        else if (gate === 'OP100') zone = 'Zone DCM';
+        else if (rawReason.toLowerCase().includes('dent')) zone = 'Zone C';
+        else if (rawReason.toLowerCase().includes('blow hole') || rawReason.toLowerCase().includes('porosity')) zone = 'Zone Face';
+        else if (rawReason.toLowerCase().includes('non-filling')) zone = 'Zone S';
+        else zone = 'Zone General';
+      }
+
+      const rawView = parseTextField(partsInterlock, 'View') || parseTextField(srcText, 'View') || '';
+      let view = rawView;
+      if (!view || view === '-' || view.toLowerCase().includes('unspecified')) {
+        if (gate.includes('Leak') || gate === 'OP150') view = 'Top View';
+        else if (rawReason.toLowerCase().includes('unclean') || rawReason.toLowerCase().includes('soldering') || rawReason.toLowerCase().includes('porosity')) view = 'Bottom View';
+        else view = 'Top View';
+      }
+
+      const rawSubZone = parseTextField(partsInterlock, 'Sub Zone') || parseTextField(srcText, 'Sub Zone') || '';
+      let subZone = splitRejectionZoneHelper(rawSubZone).subZone;
+      if (!subZone || subZone === '-') subZone = rawSubZone;
+
+      reasonMap[rawReason] = (reasonMap[rawReason] || 0) + cnt;
+      categoryMap[cat] = (categoryMap[cat] || 0) + cnt;
+      zoneMap[zone] = (zoneMap[zone] || 0) + cnt;
+
+      if (!gateDrillMap[gate]) {
+        gateDrillMap[gate] = {
+          categories: {},
+          reasons: {},
+          topReasons: {},
+          views: {},
+          zones: {},
+          subZones: {},
+        };
+      }
+      gateDrillMap[gate].categories[cat] = (gateDrillMap[gate].categories[cat] || 0) + cnt;
+      if (!gateDrillMap[gate].reasons[cat]) {
+        gateDrillMap[gate].reasons[cat] = {};
+      }
+      gateDrillMap[gate].reasons[cat][rawReason] = (gateDrillMap[gate].reasons[cat][rawReason] || 0) + cnt;
+      gateDrillMap[gate].topReasons[rawReason] = (gateDrillMap[gate].topReasons[rawReason] || 0) + cnt;
+      if (view) {
+        gateDrillMap[gate].views[view] = (gateDrillMap[gate].views[view] || 0) + cnt;
+      }
+      if (zone && zone !== '-') {
+        gateDrillMap[gate].zones[zone] = (gateDrillMap[gate].zones[zone] || 0) + cnt;
+      }
+      if (subZone && subZone !== '-') {
+        gateDrillMap[gate].subZones[subZone] = (gateDrillMap[gate].subZones[subZone] || 0) + cnt;
+      }
+    });
+
+    const qualityGateDrillDown = {};
+    Object.entries(gateDrillMap).forEach(([gate, data]) => {
+      const catEntries = Object.entries(data.categories).map(([category, count]) => ({ category, count }));
+      const gateTotal = catEntries.reduce((acc, c) => acc + c.count, 0) || 1;
+      const categories = catEntries
+        .map((c) => ({
+          category: c.category,
+          count: c.count,
+          percentage: Number(((c.count / gateTotal) * 100).toFixed(1)),
+        }))
+        .sort((a, b) => b.count - a.count);
+
+      const reasonsPerCat = {};
+      Object.entries(data.reasons).forEach(([cat, rMap]) => {
+        const rEntries = Object.entries(rMap).map(([reason, count]) => ({ reason, count }));
+        const catTotal = rEntries.reduce((acc, r) => acc + r.count, 0) || 1;
+        reasonsPerCat[cat] = rEntries
+          .map((r) => ({
+            reason: r.reason,
+            count: r.count,
+            percentage: Number(((r.count / catTotal) * 100).toFixed(1)),
+          }))
+          .sort((a, b) => b.count - a.count);
+      });
+
+      const topReasons = Object.entries(data.topReasons || {})
+        .map(([reason, count]) => ({
+          reason,
+          count,
+          percentage: Number(((count / gateTotal) * 100).toFixed(1)),
+        }))
+        .sort((a, b) => b.count - a.count);
+
+      const views = Object.entries(data.views || {})
+        .map(([name, count]) => ({
+          name,
+          count,
+          percentage: Number(((count / gateTotal) * 100).toFixed(1)),
+        }))
+        .sort((a, b) => b.count - a.count);
+
+      const zones = Object.entries(data.zones || {})
+        .map(([zone, count]) => ({
+          zone,
+          count,
+          percentage: Number(((count / gateTotal) * 100).toFixed(1)),
+        }))
+        .sort((a, b) => b.count - a.count);
+
+      const subZones = Object.entries(data.subZones || {})
+        .map(([subZone, count]) => ({
+          subZone,
+          count,
+          percentage: Number(((count / gateTotal) * 100).toFixed(1)),
+        }))
+        .sort((a, b) => b.count - a.count);
+
+      qualityGateDrillDown[gate] = {
+        categories,
+        reasons: reasonsPerCat,
+        topReasons,
+        views,
+        zones,
+        subZones,
+        total: gateTotal,
+      };
+    });
+
+    const buildParetoData = (map, labelKey) => {
+      const sorted = Object.entries(map).sort((a, b) => b[1] - a[1]);
+      const grandTotal = sorted.reduce((sum, [, val]) => sum + val, 0);
+      let cumulative = 0;
+      return sorted.map(([item, count]) => {
+        cumulative += count;
+        const percentage = grandTotal > 0 ? Number(((count / grandTotal) * 100).toFixed(1)) : 0;
+        const cumulativePercentage = grandTotal > 0 ? Number(((cumulative / grandTotal) * 100).toFixed(1)) : 0;
+        return {
+          [labelKey]: item,
+          count,
+          percentage,
+          cumulativePercentage,
+        };
+      });
+    };
+
+    const paretoData = buildParetoData(reasonMap, "reason");
+    const categoryPareto = buildParetoData(categoryMap, "category");
+    const zonePareto = buildParetoData(zoneMap, "zone");
+
+    return res.json({
+      success: true,
+      pareto: paretoData,
+      categoryPareto,
+      zonePareto,
+      qualityGateDrillDown,
+    });
+  } catch (error) {
+    console.error("[REJECTION] getRejectionPareto error:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ─── Modular Endpoint 3: Shift Scrap ─────────────────────────────────────────
+exports.getRejectionShiftScrap = async (req, res) => {
+  try {
+    const ctx = await buildRejectionFilterContext(req.query);
+    const { replacements, whereSql } = ctx;
+
+    const shiftScrapRes = await sequelize.query(`
+      SELECT
+        COALESCE(NULLIF(shift_code, ''), 'A') as shift,
+        COUNT(*) as total,
+        SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) as scrap,
+        SUM(CASE WHEN overall_status IN ('OK', 'PASSED') AND NOT (JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) as ok,
+        ROUND(CASE WHEN COUNT(*) > 0 THEN (CAST(SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*)) * 100 ELSE 0 END, 2) as scrapRate
+      FROM [RICO_IOT].[dbo].[ProductionReports]
+      ${whereSql}
+      GROUP BY COALESCE(NULLIF(shift_code, ''), 'A')
+      ORDER BY shift ASC
+    `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+      console.warn("[REJECTION] shift query error:", err.message);
+      return [];
+    });
+
+    return res.json({
+      success: true,
+      shiftScrap: shiftScrapRes,
+    });
+  } catch (error) {
+    console.error("[REJECTION] getRejectionShiftScrap error:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ─── Modular Endpoint 4: ML Insights & Telemetry ─────────────────────────────
+exports.getRejectionMlInsights = async (req, res) => {
+  try {
+    const ctx = await buildRejectionFilterContext(req.query);
+    const { replacements, whereSql, dieNameFilter, partNameFilter, machineNameFilter } = ctx;
+
+    const [mlTelemetryRes, latestLimitsRes] = await Promise.all([
+      sequelize.query(`
+        SELECT
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN metal_pressure ELSE NULL END) as metal_pressure_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN metal_pressure ELSE NULL END) as metal_pressure_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN metal_pressure ELSE NULL END) as metal_pressure_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN furnace_metal_temp ELSE NULL END) as furnace_metal_temp_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN furnace_metal_temp ELSE NULL END) as furnace_metal_temp_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN furnace_metal_temp ELSE NULL END) as furnace_metal_temp_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN biscuit_thickness ELSE NULL END) as biscuit_thickness_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN biscuit_thickness ELSE NULL END) as biscuit_thickness_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN biscuit_thickness ELSE NULL END) as biscuit_thickness_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN v1_speed ELSE NULL END) as v1_speed_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN v1_speed ELSE NULL END) as v1_speed_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN v1_speed ELSE NULL END) as v1_speed_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN v2_speed ELSE NULL END) as v2_speed_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN v2_speed ELSE NULL END) as v2_speed_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN v2_speed ELSE NULL END) as v2_speed_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN v3_speed ELSE NULL END) as v3_speed_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN v3_speed ELSE NULL END) as v3_speed_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN v3_speed ELSE NULL END) as v3_speed_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN v4_speed ELSE NULL END) as v4_speed_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN v4_speed ELSE NULL END) as v4_speed_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN v4_speed ELSE NULL END) as v4_speed_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN intensification_time ELSE NULL END) as intensification_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN intensification_time ELSE NULL END) as intensification_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN intensification_time ELSE NULL END) as intensification_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN curing_time ELSE NULL END) as curing_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN curing_time ELSE NULL END) as curing_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN curing_time ELSE NULL END) as curing_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN spray_time ELSE NULL END) as spray_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN spray_time ELSE NULL END) as spray_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN spray_time ELSE NULL END) as spray_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_close_core_in_time ELSE NULL END) as die_close_core_in_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_close_core_in_time ELSE NULL END) as die_close_core_in_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN die_close_core_in_time ELSE NULL END) as die_close_core_in_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN pouring_time ELSE NULL END) as pouring_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN pouring_time ELSE NULL END) as pouring_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN pouring_time ELSE NULL END) as pouring_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN shot_fwd_time ELSE NULL END) as shot_fwd_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN shot_fwd_time ELSE NULL END) as shot_fwd_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN shot_fwd_time ELSE NULL END) as shot_fwd_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN ejector_time ELSE NULL END) as ejector_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN ejector_time ELSE NULL END) as ejector_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN ejector_time ELSE NULL END) as ejector_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN extract_time ELSE NULL END) as extract_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN extract_time ELSE NULL END) as extract_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN extract_time ELSE NULL END) as extract_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN accel_point ELSE NULL END) as accel_point_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN accel_point ELSE NULL END) as accel_point_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN accel_point ELSE NULL END) as accel_point_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN deaccel_point ELSE NULL END) as deaccel_point_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN deaccel_point ELSE NULL END) as deaccel_point_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN deaccel_point ELSE NULL END) as deaccel_point_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_low_pct ELSE NULL END) as clamp_tonnage_he_low_pct_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_low_pct ELSE NULL END) as clamp_tonnage_he_low_pct_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_he_low_pct ELSE NULL END) as clamp_tonnage_he_low_pct_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_low_mn ELSE NULL END) as clamp_tonnage_he_low_mn_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_low_mn ELSE NULL END) as clamp_tonnage_he_low_mn_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_he_low_mn ELSE NULL END) as clamp_tonnage_he_low_mn_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_up_pct ELSE NULL END) as clamp_tonnage_op_up_pct_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_up_pct ELSE NULL END) as clamp_tonnage_op_up_pct_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_op_up_pct ELSE NULL END) as clamp_tonnage_op_up_pct_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_low_pct ELSE NULL END) as clamp_tonnage_op_low_pct_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_low_pct ELSE NULL END) as clamp_tonnage_op_low_pct_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_op_low_pct ELSE NULL END) as clamp_tonnage_op_low_pct_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_up_pct ELSE NULL END) as clamp_tonnage_he_up_pct_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_up_pct ELSE NULL END) as clamp_tonnage_he_up_pct_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_he_up_pct ELSE NULL END) as clamp_tonnage_he_up_pct_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN jet_cooling_pressure ELSE NULL END) as jet_cooling_pressure_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN jet_cooling_pressure ELSE NULL END) as jet_cooling_pressure_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN jet_cooling_pressure ELSE NULL END) as jet_cooling_pressure_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN vacuum_pressure ELSE NULL END) as vacuum_pressure_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN vacuum_pressure ELSE NULL END) as vacuum_pressure_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN vacuum_pressure ELSE NULL END) as vacuum_pressure_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN cooling_water_mov ELSE NULL END) as cooling_water_mov_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN cooling_water_mov ELSE NULL END) as cooling_water_mov_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN cooling_water_mov ELSE NULL END) as cooling_water_mov_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN cooling_water_sta ELSE NULL END) as cooling_water_sta_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN cooling_water_sta ELSE NULL END) as cooling_water_sta_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN cooling_water_sta ELSE NULL END) as cooling_water_sta_mean_ng
+        FROM [RICO_IOT].[dbo].[ProductionReports]
+        ${whereSql}
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[REJECTION] ml telemetry query error:", err.message);
+        return [{}];
+      }),
+
+      (async () => {
+        try {
+          let rows = [];
+          if (dieNameFilter || partNameFilter || machineNameFilter) {
+            const plcWhere = ['(biscuit_thickness_upper_limit IS NOT NULL OR metal_pressure_upper_limit IS NOT NULL)'];
+            const plcReplacements = {};
+            if (dieNameFilter) {
+              plcWhere.push('(part_name = :plcDieName OR part_name LIKE :plcDieLike)');
+              plcReplacements.plcDieName = dieNameFilter;
+              plcReplacements.plcDieLike = `%${dieNameFilter.replace(/[^a-zA-Z0-9]/g, '%')}%`;
+            } else if (partNameFilter) {
+              if (partNameFilter.toUpperCase().includes('OIL PAN') || partNameFilter.toUpperCase().includes('K-12') || partNameFilter.toUpperCase().includes('K12')) {
+                plcWhere.push('(part_name LIKE :plcK12 OR part_name LIKE :plcOilPan)');
+                plcReplacements.plcK12 = '%K12%';
+                plcReplacements.plcOilPan = '%OILPAN%';
+              } else {
+                plcWhere.push('(part_name = :plcPartName OR part_name LIKE :plcPartLike)');
+                plcReplacements.plcPartName = partNameFilter;
+                plcReplacements.plcPartLike = `%${partNameFilter.replace(/[^a-zA-Z0-9]/g, '%')}%`;
+              }
+            }
+            if (machineNameFilter) {
+              plcWhere.push('machine_name = :plcMachineName');
+              plcReplacements.plcMachineName = machineNameFilter;
+            }
+            rows = await sequelize.query(`
+              SELECT TOP 1 *
+              FROM [RICO_IOT].[dbo].[PlcCycleReadings]
+              WHERE ${plcWhere.join(' AND ')}
+              ORDER BY id DESC
+            `, { replacements: plcReplacements, type: sequelize.QueryTypes.SELECT });
+          }
+          if (!rows || rows.length === 0) {
+            rows = await sequelize.query(`
+              SELECT TOP 1 *
+              FROM [RICO_IOT].[dbo].[PlcCycleReadings]
+              WHERE biscuit_thickness_upper_limit IS NOT NULL OR metal_pressure_upper_limit IS NOT NULL
+              ORDER BY id DESC
+            `, { type: sequelize.QueryTypes.SELECT });
+          }
+          return rows;
+        } catch (e) {
+          console.warn("[REJECTION] latestLimits query error:", e.message);
+          return [{}];
+        }
+      })(),
+    ]);
+
+    const mlRaw = mlTelemetryRes?.[0] || {};
+    const limitsRow = latestLimitsRes?.[0] || {};
+
+    const PARAM_SPECS = [
+      { key: "die_close_core_in_time", label: "Die Close Core In Time", unit: "s", defaultLower: 3.0, defaultUpper: 6.5, icon: "clock" },
+      { key: "pouring_time", label: "Pouring Time", unit: "s", defaultLower: 2.0, defaultUpper: 5.8, icon: "clock" },
+      { key: "shot_fwd_time", label: "Shot Forward Time", unit: "s", defaultLower: 1.7, defaultUpper: 2.2, icon: "clock" },
+      { key: "curing_time", label: "Curing Time", unit: "s", defaultLower: 10.0, defaultUpper: 16.0, icon: "hourglass" },
+      { key: "die_open_core_out_time", label: "Die Open Core Out Time", unit: "s", defaultLower: 4.0, defaultUpper: 5.6, icon: "clock" },
+      { key: "ejector_time", label: "Ejector Time", unit: "s", defaultLower: 4.5, defaultUpper: 6.0, icon: "clock" },
+      { key: "extract_time", label: "Extract Time", unit: "s", defaultLower: 10.0, defaultUpper: 16.5, icon: "clock" },
+      { key: "spray_time", label: "Spray Time", unit: "s", defaultLower: 11.5, defaultUpper: 25.0, icon: "droplet" },
+      { key: "v1_speed", label: "V1 Speed", unit: "m/s", defaultLower: 0.22, defaultUpper: 0.35, icon: "zap" },
+      { key: "v2_speed", label: "V2 Speed", unit: "m/s", defaultLower: 0.20, defaultUpper: 0.35, icon: "zap" },
+      { key: "v3_speed", label: "V3 Speed", unit: "m/s", defaultLower: 2.50, defaultUpper: 3.50, icon: "zap" },
+      { key: "v4_speed", label: "V4 Speed", unit: "m/s", defaultLower: 3.20, defaultUpper: 3.80, icon: "zap" },
+      { key: "accel_point", label: "Acceleration Point", unit: "mm", defaultLower: 340, defaultUpper: 400, icon: "activity" },
+      { key: "deaccel_point", label: "Deacceleration Point", unit: "mm", defaultLower: 700, defaultUpper: 730, icon: "activity" },
+      { key: "intensification_time", label: "Intensification Time", unit: "ms", defaultLower: 35, defaultUpper: 85, icon: "clock" },
+      { key: "biscuit_thickness", label: "Biscuit Thickness", unit: "mm", defaultLower: 20, defaultUpper: 30, icon: "layers" },
+      { key: "metal_pressure", label: "Metal Pressure", unit: "MPa", defaultLower: 63.0, defaultUpper: 74.0, icon: "gauge" },
+      { key: "clamp_tonnage_he_low_pct", label: "Clamp Tonnage - HE Low (%)", unit: "%", defaultLower: 94, defaultUpper: 106, icon: "shield" },
+      { key: "clamp_tonnage_he_low_mn", label: "Clamp Tonnage - HE Low (MN)", unit: "MN", defaultLower: 7.5, defaultUpper: 8.8, icon: "shield" },
+      { key: "clamp_tonnage_op_up_pct", label: "Clamp Tonnage - OP Up", unit: "%", defaultLower: 90, defaultUpper: 105, icon: "shield" },
+      { key: "clamp_tonnage_op_low_pct", label: "Clamp Tonnage - OP Low", unit: "%", defaultLower: 90, defaultUpper: 101, icon: "shield" },
+      { key: "clamp_tonnage_he_up_pct", label: "Clamp Tonnage - HE Up", unit: "%", defaultLower: 90, defaultUpper: 115, icon: "shield" },
+      { key: "jet_cooling_pressure", label: "Jet Cooling Pressure", unit: "bar", defaultLower: 0, defaultUpper: 99, icon: "droplet" },
+      { key: "vacuum_pressure", label: "Vacuum Pressure", unit: "bar", defaultLower: 0, defaultUpper: 0, icon: "wind" },
+      { key: "cooling_water_mov", label: "Cooling Water - Moving", unit: "°C", defaultLower: 12.5, defaultUpper: 28.0, icon: "thermometer" },
+      { key: "cooling_water_sta", label: "Cooling Water - Stationary", unit: "°C", defaultLower: 12.5, defaultUpper: 43.0, icon: "thermometer" },
+      { key: "furnace_metal_temp", label: "Furnace Metal Temperature", unit: "°C", defaultLower: 640, defaultUpper: 660, icon: "thermometer" },
+    ];
+
+    const featureAnalysis = PARAM_SPECS.map((spec) => {
+      const meanOk = Number(mlRaw[`${spec.key}_mean_ok`] || 0);
+      const stdOk = Number(mlRaw[`${spec.key}_std_ok`] || 0);
+      const meanNg = Number(mlRaw[`${spec.key}_mean_ng`] || 0);
+
+      const delta = meanNg - meanOk;
+      const driftPct = meanOk !== 0 ? Number(((delta / Math.abs(meanOk)) * 100).toFixed(2)) : 0;
+      const importanceScore = stdOk > 0 ? Math.min(100, Number(((Math.abs(delta) / stdOk) * 20).toFixed(1))) : Math.min(100, Math.abs(driftPct));
+
+      const rawDbUpper = limitsRow?.[ `${spec.key}_upper_limit` ];
+      const rawDbLower = limitsRow?.[ `${spec.key}_lower_limit` ];
+
+      const isDummyUpper = Number(rawDbUpper) >= 900 && spec.defaultUpper < 100;
+      const isDummyLower = Number(rawDbLower) <= 0 && spec.defaultLower > 0;
+
+      let dbUpper = (rawDbUpper !== undefined && rawDbUpper !== null && Number(rawDbUpper) > 0 && !isDummyUpper)
+        ? Number(rawDbUpper)
+        : (spec.defaultUpper !== undefined ? spec.defaultUpper : null);
+      let dbLower = (rawDbLower !== undefined && rawDbLower !== null && Number(rawDbLower) > 0 && !isDummyLower)
+        ? Number(rawDbLower)
+        : (spec.defaultLower !== undefined ? spec.defaultLower : null);
+
+      // If upper is less than or equal to lower, repair using spec defaults
+      if (dbUpper !== null && dbLower !== null && dbUpper <= dbLower) {
+        if (spec.defaultUpper !== undefined && spec.defaultLower !== undefined && spec.defaultUpper > spec.defaultLower) {
+          dbUpper = spec.defaultUpper;
+          dbLower = spec.defaultLower;
+        }
+      }
+
+      const usl = dbUpper !== null ? dbUpper : (stdOk > 0 ? Number((meanOk + 2 * stdOk).toFixed(2)) : Number((meanOk * 1.08).toFixed(2)));
+      const lsl = dbLower !== null ? dbLower : (stdOk > 0 ? Number((meanOk - 2 * stdOk).toFixed(2)) : Number((meanOk * 0.92).toFixed(2)));
+      const setPoint = (dbUpper !== null && dbLower !== null && dbUpper > dbLower)
+        ? Number(((dbUpper + dbLower) / 2).toFixed(2))
+        : (meanOk > 0 ? Number(meanOk.toFixed(2)) : (spec.defaultLower != null && spec.defaultUpper != null ? Number(((spec.defaultLower + spec.defaultUpper) / 2).toFixed(2)) : 0));
+      const deltaSetNg = Number((meanNg - setPoint).toFixed(2));
+      const deltaSetNgPct = setPoint !== 0 ? Number(((deltaSetNg / Math.abs(setPoint)) * 100).toFixed(2)) : 0;
+
+      let riskLevel = "LOW";
+      if (importanceScore >= 35 || Math.abs(driftPct) > 10) riskLevel = "CRITICAL";
+      else if (importanceScore >= 15 || Math.abs(driftPct) > 3) riskLevel = "MODERATE";
+
+      return {
+        ...spec,
+        meanOk: Number(meanOk.toFixed(2)),
+        stdOk: Number(stdOk.toFixed(2)),
+        meanNg: Number(meanNg.toFixed(2)),
+        driftPct,
+        importanceScore,
+        setUpperLimit: dbUpper,
+        setLowerLimit: dbLower,
+        setPoint,
+        deltaSetNg,
+        deltaSetNgPct,
+        usl,
+        lsl,
+        riskLevel,
+      };
+    }).sort((a, b) => b.importanceScore - a.importanceScore);
+
+    // Fast query for sample telemetry rows and anomaly candidate parts
+    const [sampleRows, anomalyCandidates] = await Promise.all([
+      sequelize.query(`
+        SELECT * FROM (
+          SELECT TOP 400
+            id, part_id as partId, customer_qr as customerQrCode, machine_name as machineName,
+            shift_code as shiftCode, overall_status as status,
+            rejection_category as category, rejection_reason as reason, ng_reason as ngReason,
+            shot_number,
+            metal_pressure, furnace_metal_temp, biscuit_thickness, cycle_time,
+            v1_speed, v2_speed, v3_speed, v4_speed, intensification_time,
+            die_close_core_in_time, die_open_core_out_time, curing_time, pouring_time,
+            spray_time, ejector_time, extract_time, clamp_tonnage_he_low_mn,
+            cooling_water_mov, cooling_water_sta, accel_point, deaccel_point,
+            leak_body_leak_value, first_scan_at, createdAt
+          FROM [RICO_IOT].[dbo].[ProductionReports] WITH (NOLOCK)
+          WHERE (overall_status IN ('OK', 'PASSED') OR (overall_status = 'IN_PROGRESS' AND op100_status = 'OK'))
+            AND (
+              (metal_pressure IS NOT NULL AND metal_pressure > 0)
+              OR (furnace_metal_temp IS NOT NULL AND furnace_metal_temp > 0)
+              OR (biscuit_thickness IS NOT NULL AND biscuit_thickness > 0)
+              OR (intensification_time IS NOT NULL AND intensification_time > 0)
+            )
+          ORDER BY id DESC
+        ) as okParts
+        UNION ALL
+        SELECT * FROM (
+          SELECT TOP 300
+            id, part_id as partId, customer_qr as customerQrCode, machine_name as machineName,
+            shift_code as shiftCode, overall_status as status,
+            rejection_category as category, rejection_reason as reason, ng_reason as ngReason,
+            shot_number,
+            metal_pressure, furnace_metal_temp, biscuit_thickness, cycle_time,
+            v1_speed, v2_speed, v3_speed, v4_speed, intensification_time,
+            die_close_core_in_time, die_open_core_out_time, curing_time, pouring_time,
+            spray_time, ejector_time, extract_time, clamp_tonnage_he_low_mn,
+            cooling_water_mov, cooling_water_sta, accel_point, deaccel_point,
+            leak_body_leak_value, first_scan_at, createdAt
+          FROM [RICO_IOT].[dbo].[ProductionReports] WITH (NOLOCK)
+          WHERE (
+            overall_status IN ('NG', 'FAILED')
+            OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+            OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+            OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+            OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+            OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+            OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+            OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          )
+          AND (
+            (metal_pressure IS NOT NULL AND metal_pressure > 0)
+            OR (furnace_metal_temp IS NOT NULL AND furnace_metal_temp > 0)
+            OR (biscuit_thickness IS NOT NULL AND biscuit_thickness > 0)
+            OR (intensification_time IS NOT NULL AND intensification_time > 0)
+          )
+          ORDER BY id DESC
+        ) as ngParts
+      `, { type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[REJECTION] sampleRows query error:", err.message);
+        return [];
+      }),
+
+      sequelize.query(`
+        SELECT TOP 100
+          id, part_id as partId, customer_qr as customerQrCode, machine_name as machineName,
+          shift_code as shiftCode, overall_status as status,
+          rejection_category as category, rejection_reason as reason, ng_reason as ngReason,
+          shot_number,
+          metal_pressure, furnace_metal_temp, biscuit_thickness, cycle_time,
+          leak_body_leak_value, first_scan_at, createdAt
+        FROM [RICO_IOT].[dbo].[ProductionReports] WITH (NOLOCK)
+        ${whereSql ? whereSql + " AND" : "WHERE"} overall_status IN ('NG', 'FAILED')
+          AND (
+            (metal_pressure IS NOT NULL AND metal_pressure > 0)
+            OR (biscuit_thickness IS NOT NULL AND biscuit_thickness > 0)
+            OR (furnace_metal_temp IS NOT NULL AND furnace_metal_temp > 0)
+            OR (intensification_time IS NOT NULL AND intensification_time > 0)
+          )
+        ORDER BY id DESC
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[REJECTION] anomalyCandidates query error:", err.message);
+        return [];
+      }),
+    ]);
+
+    // Calculate worst deviating parameter and Z-score for each anomaly candidate
+    const topAnomalies = (anomalyCandidates || []).map((row) => {
+      let maxZ = 0;
+      let worstParam = "Process Parameter Drift";
+      let worstLimits = "Exceeded Limits";
+
+      featureAnalysis.forEach((f) => {
+        const val = Number(row[f.key]);
+        if (Number.isFinite(val) && f.stdOk > 0) {
+          const z = Math.abs(val - f.meanOk) / f.stdOk;
+          if (z > maxZ) {
+            maxZ = z;
+            const sign = val >= f.meanOk ? "+" : "-";
+            worstParam = `${f.label} (${val.toFixed(1)} ${f.unit}, ${sign}${z.toFixed(1)}σ)`;
+            worstLimits = `${f.lsl} – ${f.usl} ${f.unit} (Target: ${f.setPoint})`;
+          }
+        }
+      });
+
+      return {
+        ...row,
+        worstDeviatingParam: worstParam,
+        worstParamLimits: worstLimits,
+        anomalyScore: Number(maxZ.toFixed(1)) || 2.1,
+      };
+    });
+
+    return res.json({
+      success: true,
+      mlInsights: {
+        features: featureAnalysis,
+        topAnomalies,
+        setParams: limitsRow,
+      },
+      telemetryRows: sampleRows,
+      rows: sampleRows,
+      setParams: limitsRow,
+    });
+  } catch (error) {
+    console.error("[REJECTION] getRejectionMlInsights error:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ─── Backward-Compatible Full Rejection Analysis ────────────────────────────
+exports.getRejectionAnalysis = async (req, res) => {
+  try {
+    const ctx = await buildRejectionFilterContext(req.query);
+    const {
+      from, to, dateFrom, dateTo, isAllTime, shifts, stationLabelMap,
+      machineNameFilter, partNameFilter, dieNameFilter, shiftCodeFilter,
+      whereSql, prWhereSql, replacements,
+    } = ctx;
+
+    // Run aggregations in parallel without the slow OUTER APPLY
+    const [aggregatesRes, shiftScrapRes, paretoRes] = await Promise.all([
+      sequelize.query(`
+        SELECT 
+          COUNT(*) as totalParts,
+          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) as totalOK,
+          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) as totalNG,
+          SUM(CASE WHEN overall_status IN ('IN_PROGRESS', 'WIP') THEN 1 ELSE 0 END) as totalInProgress,
+          SUM(CASE WHEN op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%DCM%' AND overall_status IN ('NG', 'FAILED')) THEN 1 ELSE 0 END) as op100_ng,
+          SUM(CASE WHEN op100_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') OR (machine_name LIKE '%DCM%' AND overall_status IN ('OK', 'PASSED')) THEN 1 ELSE 0 END) as op100_ok,
+          SUM(CASE WHEN op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op110_ng,
+          SUM(CASE WHEN op110_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op110_ok,
+          SUM(CASE WHEN op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op120_ng,
+          SUM(CASE WHEN op120_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op120_ok,
+          SUM(CASE WHEN op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op130_ng,
+          SUM(CASE WHEN op130_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op130_ok,
+          SUM(CASE WHEN op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op140_ng,
+          SUM(CASE WHEN op140_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op140_ok,
+          SUM(CASE WHEN (
+            op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+            OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
+            OR (machine_name LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+            OR (rejection_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+            OR (ng_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+            OR (rejection_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
+            OR (ng_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
+          ) THEN 1 ELSE 0 END) as op150_ng,
+          SUM(CASE WHEN (
+            op150_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK')
+            OR JSON_VALUE(leak_data, '$.result') IN ('OK', 'PASS', 'PASSED')
+            OR (machine_name LIKE '%Leak%' AND overall_status IN ('OK', 'PASSED'))
+          ) THEN 1 ELSE 0 END) as op150_ok,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01'
+            OR leak_data LIKE '%1773%'
+            OR machine_name = 'Leak-Test-01'
+            OR machine_name LIKE '%Leak%01%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
+            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR leak_data LIKE '%1773%' OR machine_name LIKE '%01%'))
+            OR (machine_name = 'Leak-Test-01' AND overall_status IN ('NG','FAILED'))
+          ) THEN 1 ELSE 0 END) as leak01_ng,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01'
+            OR leak_data LIKE '%1773%'
+            OR machine_name = 'Leak-Test-01'
+            OR machine_name LIKE '%Leak%01%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('OK','PASS','PASSED')
+            OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR leak_data LIKE '%1773%' OR machine_name LIKE '%01%'))
+            OR (machine_name = 'Leak-Test-01' AND overall_status IN ('OK','PASSED'))
+          ) THEN 1 ELSE 0 END) as leak01_ok,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02'
+            OR leak_data LIKE '%1774%'
+            OR machine_name = 'Leak-Test-02'
+            OR machine_name LIKE '%Leak%02%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
+            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR leak_data LIKE '%1774%' OR machine_name LIKE '%02%'))
+            OR (machine_name = 'Leak-Test-02' AND overall_status IN ('NG','FAILED'))
+          ) THEN 1 ELSE 0 END) as leak02_ng,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02'
+            OR leak_data LIKE '%1774%'
+            OR machine_name = 'Leak-Test-02'
+            OR machine_name LIKE '%Leak%02%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('OK','PASS','PASSED')
+            OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR leak_data LIKE '%1774%' OR machine_name LIKE '%02%'))
+            OR (machine_name = 'Leak-Test-02' AND overall_status IN ('OK','PASSED'))
+          ) THEN 1 ELSE 0 END) as leak02_ok,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak Test-03'
+            OR JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-03'
+            OR leak_data LIKE '%1776%'
+            OR machine_name = 'Leak Test-03'
+            OR machine_name LIKE '%Leak%03%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
+            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') LIKE '%03%' OR leak_data LIKE '%1776%' OR machine_name LIKE '%03%'))
+            OR (machine_name LIKE '%Leak%03%' AND overall_status IN ('NG','FAILED'))
+          ) THEN 1 ELSE 0 END) as leak03_ng,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak Test-03'
+            OR JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-03'
+            OR leak_data LIKE '%1776%'
+            OR machine_name = 'Leak Test-03'
+            OR machine_name LIKE '%Leak%03%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('OK','PASS','PASSED')
+            OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') LIKE '%03%' OR leak_data LIKE '%1776%' OR machine_name LIKE '%03%'))
+            OR (machine_name LIKE '%Leak%03%' AND overall_status IN ('OK','PASSED'))
+          ) THEN 1 ELSE 0 END) as leak03_ok,
+          SUM(CASE WHEN op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op160_ng,
+          SUM(CASE WHEN op160_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op160_ok
+        FROM [RICO_IOT].[dbo].[ProductionReports]
+        ${whereSql}
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[REJECTION] agg query error:", err.message);
+        return [{}];
+      }),
+
+      sequelize.query(`
+        SELECT
+          COALESCE(NULLIF(shift_code, ''), 'A') as shift,
+          COUNT(*) as total,
+          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) as scrap,
+          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') AND NOT (JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) as ok,
+          ROUND(CASE WHEN COUNT(*) > 0 THEN (CAST(SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*)) * 100 ELSE 0 END, 2) as scrapRate
+        FROM [RICO_IOT].[dbo].[ProductionReports]
+        ${whereSql}
+        GROUP BY COALESCE(NULLIF(shift_code, ''), 'A')
+        ORDER BY shift ASC
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[REJECTION] shift query error:", err.message);
+        return [];
+      }),
+
+      sequelize.query(`
+        SELECT
+          CASE
+            WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR pr.leak_data LIKE '%1773%' OR pr.machine_name = 'Leak-Test-01' OR pr.machine_name LIKE '%Leak%01%' THEN 'Leak-Test-01'
+            WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR pr.leak_data LIKE '%1774%' OR pr.machine_name = 'Leak-Test-02' OR pr.machine_name LIKE '%Leak%02%' THEN 'Leak-Test-02'
+            WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak Test-03' OR JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-03' OR pr.leak_data LIKE '%1776%' OR pr.machine_name = 'Leak Test-03' OR pr.machine_name LIKE '%Leak%03%' THEN 'Leak Test-03'
+            WHEN pr.machine_name LIKE '%Leak%' OR pr.op150_status IN ('NG','FAIL','FAILED') OR pr.rejection_reason LIKE '%Leak%' OR pr.ng_reason LIKE '%Leak%' THEN 'Leak-Test-01'
+            WHEN pr.op120_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Casting PDi' THEN 'OP120'
+            WHEN pr.op130_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Pre Inspection' THEN 'OP130'
+            WHEN pr.op140_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Auto Guaging' THEN 'OP140'
+            WHEN pr.op100_status IN ('NG','FAIL','FAILED') OR pr.machine_name LIKE '%DCM%' THEN 'OP100'
+            WHEN pr.op110_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Laser Marking' THEN 'OP110'
+            WHEN pr.op160_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Final Inspection' THEN 'OP160'
+            ELSE 'OP120'
+          END as gateCode,
+          pr.rejection_reason,
+          pr.rejection_category,
+          pr.ng_reason,
+          p.interlock_reason as parts_interlock_reason,
+          COUNT(*) as cnt
+        FROM [RICO_IOT].[dbo].[ProductionReports] pr
+        LEFT JOIN [RICO_IOT].[dbo].[Parts] p ON p.part_id = pr.part_id
+        ${prWhereSql ? prWhereSql + " AND" : "WHERE"} (
+          pr.overall_status IN ('NG', 'FAILED')
+          OR pr.op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR pr.op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR pr.op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR pr.op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR pr.op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR pr.op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR pr.op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR (pr.machine_name LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
+          OR (pr.rejection_reason LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
+          OR (pr.ng_reason LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
+          OR JSON_VALUE(pr.leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
+        )
+        GROUP BY 
+          CASE
+            WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR pr.leak_data LIKE '%1773%' OR pr.machine_name = 'Leak-Test-01' OR pr.machine_name LIKE '%Leak%01%' THEN 'Leak-Test-01'
+            WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR pr.leak_data LIKE '%1774%' OR pr.machine_name = 'Leak-Test-02' OR pr.machine_name LIKE '%Leak%02%' THEN 'Leak-Test-02'
+            WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak Test-03' OR JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-03' OR pr.leak_data LIKE '%1776%' OR pr.machine_name = 'Leak Test-03' OR pr.machine_name LIKE '%Leak%03%' THEN 'Leak Test-03'
+            WHEN pr.machine_name LIKE '%Leak%' OR pr.op150_status IN ('NG','FAIL','FAILED') OR pr.rejection_reason LIKE '%Leak%' OR pr.ng_reason LIKE '%Leak%' THEN 'Leak-Test-01'
+            WHEN pr.op120_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Casting PDi' THEN 'OP120'
+            WHEN pr.op130_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Pre Inspection' THEN 'OP130'
+            WHEN pr.op140_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Auto Guaging' THEN 'OP140'
+            WHEN pr.op100_status IN ('NG','FAIL','FAILED') OR pr.machine_name LIKE '%DCM%' THEN 'OP100'
+            WHEN pr.op110_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Laser Marking' THEN 'OP110'
+            WHEN pr.op160_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Final Inspection' THEN 'OP160'
+            ELSE 'OP120'
+          END,
+          pr.rejection_reason, pr.rejection_category, pr.ng_reason, p.interlock_reason
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[REJECTION] Pareto query error:", err.message);
+        return [];
+      }),
+    ]);
+
+    const agg = aggregatesRes?.[0] || {};
+    const totalParts = Number(agg.totalParts || 0);
+    const totalOK = Number(agg.totalOK || 0);
+    const totalNG = Number(agg.totalNG || 0);
+    const inProgress = Number(agg.totalInProgress || 0);
+    const rejectRate = (totalOK + totalNG) > 0 ? Number(((totalNG / (totalOK + totalNG)) * 100).toFixed(2)) : 0;
+
+    let qualityGates = [
+      { code: "OP100", name: stationLabelMap["OP100"] || "DCM+DPM + OP100", ngCount: Number(agg.op100_ng || 0), okCount: Number(agg.op100_ok || 0) },
+      { code: "OP110", name: stationLabelMap["OP110"] || "Laser Marking + OP110", ngCount: Number(agg.op110_ng || 0), okCount: Number(agg.op110_ok || 0) },
+      { code: "OP120", name: stationLabelMap["OP120"] || "Casting PDi + OP120", ngCount: Number(agg.op120_ng || 0), okCount: Number(agg.op120_ok || 0) },
+      { code: "OP130", name: stationLabelMap["OP130"] || "Pre Inspection + OP130", ngCount: Number(agg.op130_ng || 0), okCount: Number(agg.op130_ok || 0) },
+      { code: "OP140", name: stationLabelMap["OP140"] || "Auto Guaging + OP140", ngCount: Number(agg.op140_ng || 0), okCount: Number(agg.op140_ok || 0) },
+      { code: "Leak-Test-01", name: "Leak-Test-01 (OP150)", ngCount: Number(agg.leak01_ng || 0), okCount: Number(agg.leak01_ok || 0) },
+      { code: "Leak-Test-02", name: "Leak-Test-02 (OP150)", ngCount: Number(agg.leak02_ng || 0), okCount: Number(agg.leak02_ok || 0) },
+      { code: "Leak Test-03", name: "Leak Test-03 (OP150)", ngCount: Number(agg.leak03_ng || 0), okCount: Number(agg.leak03_ok || 0) },
+      { code: "OP160", name: stationLabelMap["OP160"] || "Final Inspection + OP160", ngCount: Number(agg.op160_ng || 0), okCount: Number(agg.op160_ok || 0) },
+    ];
+
+    qualityGates.forEach((gate) => {
+      if (stationLabelMap[gate.code]) gate.name = stationLabelMap[gate.code];
+    });
+
+    qualityGates = qualityGates.map((gate) => {
+      const inspected = gate.okCount + gate.ngCount;
+      const scrapRate = inspected > 0 ? Number(((gate.ngCount / inspected) * 100).toFixed(2)) : (totalNG > 0 ? Number(((gate.ngCount / totalNG) * 100).toFixed(2)) : 0);
+      return { ...gate, inspected, scrapRate };
+    });
+
+    const parseTextField = (text, label) => {
+      if (!text || typeof text !== 'string') return '';
+      const m = text.match(new RegExp(label + ':\\s*([^|\\n]+)', 'i'));
+      return m ? m[1].trim() : '';
+    };
+
+    const normalizeDefectCategory = (rawCat, gate, reason) => {
+      let c = String(rawCat || '').trim().toUpperCase();
+      if (['CR', 'CASTING', 'CASTING REJECTION'].includes(c)) return 'CR';
+      if (['CRAM', 'CR-AM', 'CASTING REJECTION AFTER MACHINING'].includes(c)) return 'CRAM';
+      if (['MR', 'MACHINING', 'MACHINING REJECTION'].includes(c)) return 'MR';
+      const r = String(reason || '').toLowerCase();
+      if (r.includes('blow hole') || r.includes('porosity') || r.includes('face blow hole')) return 'CRAM';
+      if (r.includes('leak') || r.includes('gauge') || r.includes('machin') || gate?.includes('Leak') || gate === 'OP140') return 'MR';
+      return 'CR';
+    };
+
+    const reasonMap = {};
+    const categoryMap = {};
+    const zoneMap = {};
+    const gateDrillMap = {};
+
+    (paretoRes || []).forEach((r) => {
+      const cnt = Number(r.cnt || 0);
+      const gate = r.gateCode || 'OP120';
+      const partsInterlock = String(r.parts_interlock_reason || '').trim();
+      const srcText = String(r.ng_reason || r.rejection_reason || partsInterlock || '');
+      const parsedReason = parseTextField(partsInterlock, 'Reason') || parseTextField(srcText, 'Reason');
+      let rawReason = String(r.rejection_reason || '').trim() || parsedReason || '';
+      if (!rawReason && partsInterlock && !partsInterlock.includes('|') && !partsInterlock.includes(':')) {
+        rawReason = partsInterlock;
+      }
+      if (!rawReason || rawReason.toLowerCase().includes('unspecified')) {
+        if (gate.includes('Leak') || gate === 'OP150') rawReason = 'Pressure Leak';
+        else if (gate === 'OP140') rawReason = 'Gauging Out of Spec';
+        else if (gate === 'OP100') rawReason = 'DCM Casting Defect';
+        else if (gate === 'OP110') rawReason = 'Laser Mark QR Fail';
+        else if (gate === 'OP120') rawReason = 'Casting Visual NG';
+        else if (gate === 'OP130') rawReason = 'Pre-Inspection Defect';
+        else if (gate === 'OP160') rawReason = 'Final Inspection Reject';
+        else rawReason = `${gate} Defect NG`;
+      }
+      if (rawReason) {
+        rawReason = canonicalizeReasonHelper(rawReason);
+      }
+
+      const rawCat = String(r.rejection_category || '').trim() || parseTextField(partsInterlock, 'Category') || parseTextField(srcText, 'Category');
+      const cat = normalizeDefectCategory(rawCat, gate, rawReason);
+      const rawZone = String(r.rejection_zone || '').trim() || parseTextField(partsInterlock, 'Zone') || parseTextField(srcText, 'Zone') || '';
+      let zone = splitRejectionZoneHelper(rawZone).zone;
+      if (!zone || zone === '-' || zone.toLowerCase().includes('unspecified')) {
+        if (gate.includes('Leak') || gate === 'OP150') zone = 'Zone Leak / Body';
+        else if (gate === 'OP100') zone = 'Zone DCM';
+        else if (rawReason.toLowerCase().includes('dent')) zone = 'Zone C';
+        else if (rawReason.toLowerCase().includes('blow hole') || rawReason.toLowerCase().includes('porosity')) zone = 'Zone Face';
+        else if (rawReason.toLowerCase().includes('non-filling')) zone = 'Zone S';
+        else zone = 'Zone General';
+      }
+
+      reasonMap[rawReason] = (reasonMap[rawReason] || 0) + cnt;
+      categoryMap[cat] = (categoryMap[cat] || 0) + cnt;
+      zoneMap[zone] = (zoneMap[zone] || 0) + cnt;
+
+      if (!gateDrillMap[gate]) {
+        gateDrillMap[gate] = { categories: {}, reasons: {} };
+      }
+      gateDrillMap[gate].categories[cat] = (gateDrillMap[gate].categories[cat] || 0) + cnt;
+      if (!gateDrillMap[gate].reasons[cat]) {
+        gateDrillMap[gate].reasons[cat] = {};
+      }
+      gateDrillMap[gate].reasons[cat][rawReason] = (gateDrillMap[gate].reasons[cat][rawReason] || 0) + cnt;
+    });
+
+    const qualityGateDrillDown = {};
+    Object.entries(gateDrillMap).forEach(([gate, data]) => {
+      const catEntries = Object.entries(data.categories).map(([category, count]) => ({ category, count }));
+      const gateTotal = catEntries.reduce((acc, c) => acc + c.count, 0) || 1;
+      const categories = catEntries
+        .map((c) => ({
+          category: c.category,
+          count: c.count,
+          percentage: Number(((c.count / gateTotal) * 100).toFixed(1)),
+        }))
+        .sort((a, b) => b.count - a.count);
+
+      const reasonsPerCat = {};
+      Object.entries(data.reasons).forEach(([cat, rMap]) => {
+        const rEntries = Object.entries(rMap).map(([reason, count]) => ({ reason, count }));
+        const catTotal = rEntries.reduce((acc, r) => acc + r.count, 0) || 1;
+        reasonsPerCat[cat] = rEntries
+          .map((r) => ({
+            reason: r.reason,
+            count: r.count,
+            percentage: Number(((r.count / catTotal) * 100).toFixed(1)),
+          }))
+          .sort((a, b) => b.count - a.count);
+      });
+
+      qualityGateDrillDown[gate] = { categories, reasons: reasonsPerCat, total: gateTotal };
+    });
+
+    const buildParetoData = (map, labelKey) => {
+      const sorted = Object.entries(map).sort((a, b) => b[1] - a[1]);
+      const grandTotal = sorted.reduce((sum, [, val]) => sum + val, 0);
+      let cumulative = 0;
+      return sorted.map(([item, count]) => {
+        cumulative += count;
+        const percentage = grandTotal > 0 ? Number(((count / grandTotal) * 100).toFixed(1)) : 0;
+        const cumulativePercentage = grandTotal > 0 ? Number(((cumulative / grandTotal) * 100).toFixed(1)) : 0;
+        return {
+          [labelKey]: item,
+          count,
+          percentage,
+          cumulativePercentage,
+        };
+      });
+    };
+
+    const paretoData = buildParetoData(reasonMap, "reason");
+    const categoryPareto = buildParetoData(categoryMap, "category");
+    const zonePareto = buildParetoData(zoneMap, "zone");
+
+    return res.json({
+      success: true,
+      window: {
+        from: dateFrom,
+        to: dateTo,
+        dateFrom,
+        dateTo,
+        shiftCode: shiftCodeFilter || null,
+        machineName: machineNameFilter || null,
+        partName: partNameFilter || null,
+        dieName: dieNameFilter || null,
+      },
+      summary: {
+        totalProduction: totalParts,
+        totalOK,
+        totalNG,
+        inProgress,
+        rejectRate,
+        topHotspotStation: qualityGates.reduce((prev, curr) => (curr.ngCount > prev.ngCount ? curr : prev), qualityGates[0])?.code || "OP120",
+        topDriverParameter: "Furnace Metal Temp",
+      },
+      qualityGates,
+      qualityGateDrillDown,
+      stationLabels: stationLabelMap,
+      mlInsights: { features: [], topAnomalies: [], setParams: {} },
+      setParams: {},
+      pareto: paretoData,
+      categoryPareto,
+      zonePareto,
+      shiftScrap: shiftScrapRes,
+      rows: [],
+      filterOptions: {
+        machines: [],
+        parts: [],
+        dies: [],
+        shifts: shifts.map((s) => ({ code: s.shift_code, name: s.shift_name })),
+      },
+      traceabilityMetrics: {
+        traceabilityProduction: totalParts,
+        totalProduction: totalParts,
+        totalOK,
+        totalNG,
+        inProgress,
+        validationRejects: totalNG,
+        passRate: totalParts > 0 ? Number(((totalOK / totalParts) * 100).toFixed(2)) : 0,
+      },
+      total: totalNG,
+      rowCount: 0,
+      reportTotalNG: totalNG,
+      productionTotal: totalParts,
+    });
+  } catch (error) {
+    console.error("[REJECTION] getRejectionAnalysis controller error:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ─── Fast Dedicated Rows Endpoint ────────────────────────────────────────────
+// GET /rejection-rows  — returns paginated NG records quickly without heavy ML
+exports.getRejectionRows = async (req, res) => {
+  try {
+    const {
+      page = 1, pageSize = 100,
+      dateFrom, dateTo, datePreset, allTime,
+      shiftCode, machineName, qualityGate, status, search,
+      category, reason, view, zone,
+    } = req.query;
+
+    const pgNum = Math.max(1, parseInt(page, 10) || 1);
+    const pgSize = Math.min(10000, Math.max(10, parseInt(pageSize, 10) || 100));
+    const offset = (pgNum - 1) * pgSize;
+
+    const whereConditions = [];
+    const replacements = {};
+
+    if (allTime !== '1' && datePreset !== 'all') {
+      if (dateFrom && dateTo) {
+        whereConditions.push(`(
+          (first_scan_at BETWEEN :dateFrom AND :dateTo) OR
+          (final_scan_at BETWEEN :dateFrom AND :dateTo) OR
+          (createdAt BETWEEN :dateFrom AND :dateTo)
+        )`);
+        replacements.dateFrom = new Date(dateFrom);
+        replacements.dateTo = new Date(dateTo);
+      } else if (dateFrom) {
+        whereConditions.push(`(first_scan_at >= :dateFrom OR final_scan_at >= :dateFrom OR createdAt >= :dateFrom)`);
+        replacements.dateFrom = new Date(dateFrom);
+      } else if (dateTo) {
+        whereConditions.push(`(first_scan_at <= :dateTo OR final_scan_at <= :dateTo OR createdAt <= :dateTo)`);
+        replacements.dateTo = new Date(dateTo);
+      } else {
+        const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        whereConditions.push(`(first_scan_at >= :sinceDate OR final_scan_at >= :sinceDate OR createdAt >= :sinceDate)`);
+        replacements.sinceDate = since;
+      }
+    }
+
+    if (shiftCode) { whereConditions.push('shift_code = :shiftCode'); replacements.shiftCode = shiftCode; }
+    if (machineName) { whereConditions.push('machine_name = :machineName'); replacements.machineName = machineName; }
+    const qualityGateFilter = String(qualityGate || '').trim().toUpperCase();
+    if (/^(OP(100|110|120|130|140|150|160)|LEAK-TEST-01|LEAK-TEST-02|LEAK TEST-03|LEAK-TEST-03|LEAK01|LEAK02|LEAK03)$/i.test(qualityGateFilter)) {
+      if (qualityGateFilter === 'OP150' || qualityGateFilter.startsWith('LEAK')) {
+        whereConditions.push(`(
+          op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR (machine_name LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+          OR (rejection_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+          OR (ng_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+          OR (rejection_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
+          OR (ng_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
+          OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
+        )`);
+      } else if (qualityGateFilter === 'OP100') {
+        whereConditions.push(`(
+          op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR (machine_name LIKE '%DCM%' AND overall_status IN ('NG', 'FAILED'))
+          OR rejection_reason LIKE '%OP100%'
+          OR ng_reason LIKE '%OP100%'
+        )`);
+      } else if (qualityGateFilter === 'OP120') {
+        whereConditions.push(`(
+          op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR (machine_name LIKE '%PDi%' AND overall_status IN ('NG', 'FAILED'))
+          OR rejection_reason LIKE '%OP120%'
+          OR ng_reason LIKE '%OP120%'
+        )`);
+      } else if (qualityGateFilter === 'OP130') {
+        whereConditions.push(`(
+          op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR (machine_name LIKE '%Pre%' AND overall_status IN ('NG', 'FAILED'))
+          OR rejection_reason LIKE '%OP130%'
+          OR ng_reason LIKE '%OP130%'
+        )`);
+      } else if (qualityGateFilter === 'OP140') {
+        whereConditions.push(`(
+          op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR (machine_name LIKE '%Guag%' AND overall_status IN ('NG', 'FAILED'))
+          OR rejection_reason LIKE '%OP140%'
+          OR ng_reason LIKE '%OP140%'
+        )`);
+      } else if (qualityGateFilter === 'OP160') {
+        whereConditions.push(`(
+          op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+          OR (machine_name LIKE '%Final%' AND overall_status IN ('NG', 'FAILED'))
+          OR rejection_reason LIKE '%OP160%'
+          OR ng_reason LIKE '%OP160%'
+        )`);
+      } else {
+        whereConditions.push(`${qualityGateFilter.toLowerCase()}_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')`);
+      }
+    }
+
+    const categoryFilter = String(category || '').trim();
+    if (categoryFilter) {
+      whereConditions.push(`(
+        rejection_category = :categoryFilter
+        OR ng_reason LIKE :catPattern
+      )`);
+      replacements.categoryFilter = categoryFilter;
+      replacements.catPattern = `%Category: ${categoryFilter}%`;
+    }
+
+    const reasonFilter = String(reason || '').trim();
+    if (reasonFilter) {
+      whereConditions.push(`(
+        rejection_reason = :reasonFilter
+        OR rejection_reason LIKE :reasonLike
+        OR ng_reason LIKE :reasonPattern
+      )`);
+      replacements.reasonFilter = reasonFilter;
+      replacements.reasonLike = `%${reasonFilter}%`;
+      replacements.reasonPattern = `%${reasonFilter}%`;
+    }
+
+    const viewFilter = String(view || '').trim();
+    if (viewFilter && viewFilter.toLowerCase() !== 'all') {
+      whereConditions.push(`(ng_reason LIKE :viewPattern OR rejection_reason LIKE :viewPattern)`);
+      replacements.viewPattern = `%${viewFilter}%`;
+    }
+
+    const zoneFilter = String(zone || '').trim();
+    if (zoneFilter) {
+      whereConditions.push(`(ng_reason LIKE :zonePattern OR rejection_reason LIKE :zonePattern)`);
+      replacements.zonePattern = `%${zoneFilter}%`;
+    }
+
+    if (search && typeof search === 'string' && search.trim()) {
+      whereConditions.push(`(
+        [part_id] LIKE :searchTerm
+        OR [customer_qr] LIKE :searchTerm
+        OR [ng_reason] LIKE :searchTerm
+        OR [rejection_reason] LIKE :searchTerm
+        OR [rejection_category] LIKE :searchTerm
+      )`);
+      replacements.searchTerm = `%${search.trim()}%`;
+    }
+
+    const statusUpper = String(status || 'NG').toUpperCase();
+    if (statusUpper === 'NG') {
+      whereConditions.push(`(
+        overall_status IN ('NG', 'FAILED')
+        OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+        OR (machine_name LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+        OR (rejection_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+        OR (ng_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+      )`);
+    } else if (statusUpper === 'OK') {
+      whereConditions.push(`overall_status IN ('OK', 'PASSED')`);
+    }
+
+    const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+    const prWhereSql = whereSql ? whereSql
+      .replace(/\[(\w+)\]/g, '$1')
+      .replace(/\b(part_id|customer_qr|createdAt|updatedAt|first_scan_at|final_scan_at|shift_code|machine_name|die_name|part_name|rejection_category|rejection_reason|ng_reason|overall_status|op100_status|op110_status|op120_status|op130_status|op140_status|op150_status|op160_status)\b/g, 'pr.[$1]')
+      : '';
+
+    const [countRes] = await sequelize.query(
+      `SELECT COUNT(*) as total FROM [RICO_IOT].[dbo].[ProductionReports] pr ${prWhereSql}`,
+      { replacements, type: sequelize.QueryTypes.SELECT }
+    ).catch(() => [{ total: 0 }]);
+
+    const total = Number(countRes?.total || 0);
+
+    const rows = await sequelize.query(`
+      SELECT
+        pr.[id],
+        pr.[part_id],
+        pr.[customer_qr], pr.[part_name], pr.[die_name], pr.[machine_name], pr.[shift_code],
+        pr.[overall_status], pr.[first_scan_at], pr.[final_scan_at], pr.[ng_reason], pr.[rejection_category],
+        pr.[rejection_reason], 
+        pr.[cycle_time], 
+        pr.[createdAt], pr.[updatedAt],
+        pr.[op100_status], pr.[op110_status], pr.[op120_status], pr.[op130_status], pr.[op140_status], pr.[op150_status], pr.[op160_status],
+        pr.[shot_number], 
+        pr.[plc_cycle_time], 
+        pr.[die_close_core_in_time], 
+        pr.[pouring_time], 
+        pr.[shot_fwd_time], 
+        pr.[curing_time],
+        pr.[die_open_core_out_time], 
+        pr.[ejector_time], 
+        pr.[extract_time], 
+        pr.[spray_time], 
+        pr.[v1_speed], 
+        pr.[v2_speed], 
+        pr.[v3_speed], 
+        pr.[v4_speed],
+        pr.[metal_pressure], 
+        pr.[furnace_metal_temp], 
+        pr.[cooling_water_mov], 
+        pr.[cooling_water_sta], 
+        pr.[accel_point], 
+        pr.[deaccel_point],
+        pr.[intensification_time], 
+        pr.[biscuit_thickness], 
+        pr.[jet_cooling_pressure], 
+        pr.[clamp_tonnage_he_low_pct], 
+        pr.[clamp_tonnage_he_low_mn],
+        pr.[clamp_tonnage_op_up_pct], 
+        pr.[clamp_tonnage_op_low_pct], 
+        pr.[clamp_tonnage_he_up_pct], 
+        pr.[vacuum_pressure], 
+        pr.[clamp_force_pct],
+        pr.[clamp_tonnage], 
+        pr.[shot_acc_pressure], 
+        pr.[intensification_acc_pressure], 
+        pr.[fixed_die_temp_f1], 
+        pr.[fixed_die_temp_f2],
+        pr.[moving_die_temp_m1], 
+        pr.[moving_die_temp_m2], 
+        pr.[slide_temp_s1], 
+        pr.[fix_1_flow], 
+        pr.[fix_2_flow], 
+        pr.[fix_3_flow],
+        pr.[mov_1_flow], 
+        pr.[mov_2_flow], 
+        pr.[mov_3_flow], 
+        pr.[vacuum_pressure_mmhg], 
+        pr.[average_die_clamp_tonnage_count],
+        pr.[time_for_stroke], 
+        pr.[stroke], 
+        pr.[shot_status], 
+        pr.[leak_body_leak_value], pr.[leak_gall_1], pr.[leak_gall_2],
+        pr.[leak_cycle_time], pr.[leak_running_mode], pr.[leak_dry_wey_both],
+        pr.[leak_data],
+        p.[interlock_reason] as parts_interlock_reason
+      FROM [RICO_IOT].[dbo].[ProductionReports] pr
+      LEFT JOIN [RICO_IOT].[dbo].[Parts] p ON p.part_id = pr.part_id
+      ${prWhereSql}
+      ORDER BY pr.id DESC
+      OFFSET ${offset} ROWS FETCH NEXT ${pgSize} ROWS ONLY
+    `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+      console.warn('[REJECTION ROWS] query error:', err.message);
+      return [];
+    });
+
+    // Fast batch enrichment for casting parameters if missing on current page
+    if (rows.length > 0 && rows.some((r) => r.metal_pressure == null)) {
+      const keysToLookup = [
+        ...new Set(
+          rows
+            .filter((r) => r.metal_pressure == null && (r.customer_qr || r.part_id))
+            .flatMap((r) => [r.customer_qr, r.part_id])
+            .filter((k) => k && k !== '-' && !String(k).startsWith('R437'))
+        ),
+      ].slice(0, 100);
+
+      if (keysToLookup.length > 0) {
+        const castRows = await sequelize.query(`
+          SELECT TOP 200
+            part_id, customer_qr, metal_pressure, furnace_metal_temp, biscuit_thickness,
+            shot_number, plc_cycle_time, cycle_time
+          FROM [RICO_IOT].[dbo].[ProductionReports]
+          WHERE (customer_qr IN (:keys) OR part_id IN (:keys))
+            AND metal_pressure IS NOT NULL
+          ORDER BY id DESC
+        `, { replacements: { keys: keysToLookup }, type: sequelize.QueryTypes.SELECT }).catch(() => []);
+
+        if (castRows.length > 0) {
+          const castMap = new Map();
+          castRows.forEach((c) => {
+            if (c.customer_qr && !castMap.has(c.customer_qr)) castMap.set(c.customer_qr, c);
+            if (c.part_id && !castMap.has(c.part_id)) castMap.set(c.part_id, c);
+          });
+
+          rows.forEach((r) => {
+            if (r.metal_pressure == null) {
+              const matched = (r.customer_qr && castMap.get(r.customer_qr)) || (r.part_id && castMap.get(r.part_id));
+              if (matched) {
+                r.metal_pressure = matched.metal_pressure;
+                r.furnace_metal_temp = r.furnace_metal_temp ?? matched.furnace_metal_temp;
+                r.biscuit_thickness = r.biscuit_thickness ?? matched.biscuit_thickness;
+                r.shot_number = r.shot_number ?? matched.shot_number;
+                r.plc_cycle_time = r.plc_cycle_time ?? matched.plc_cycle_time;
+                r.cycle_time = r.cycle_time ?? matched.cycle_time;
+              }
+            }
+          });
+        }
+      }
+    }
+
+    const parseTextField = (text, label) => {
+      if (!text || typeof text !== 'string') return '';
+      const m = text.match(new RegExp(label + ':\\s*([^|\\n]+)', 'i'));
+      return m ? m[1].trim() : '';
+    };
+    const looksLikeQr = (val) => {
+      if (!val || typeof val !== 'string') return false;
+      const s = val.trim();
+      return /^R\d{3,}/i.test(s) || /^[A-Z0-9-]{24,}$/i.test(s) || s.includes('+') || s.includes('/');
+    };
+
+    const formatted = rows.map((row, idx) => {
+      const isOp150Ng = ['NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG'].includes(String(row.op150_status || '').trim().toUpperCase())
+        || (String(row.machine_name || '').toLowerCase().includes('leak') && ['NG', 'FAILED'].includes(String(row.overall_status || '').trim().toUpperCase()))
+        || (String(row.rejection_reason || '').toLowerCase().includes('leak') && ['NG', 'FAILED'].includes(String(row.overall_status || '').trim().toUpperCase()))
+        || (String(row.ng_reason || '').toLowerCase().includes('leak') && ['NG', 'FAILED'].includes(String(row.overall_status || '').trim().toUpperCase()));
+
+      const isOp100Ng = ['NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG'].includes(String(row.op100_status || '').trim().toUpperCase())
+        || (String(row.machine_name || '').toLowerCase().includes('dcm') && ['NG', 'FAILED'].includes(String(row.overall_status || '').trim().toUpperCase()));
+
+      const ngGates = ['100','110','120','130','140','150','160']
+        .filter((op) => {
+          if (op === '150') return isOp150Ng;
+          if (op === '100') return isOp100Ng;
+          return ['NG','FAIL','FAILED','ENDED_NG','COMPLETED_NG'].includes(String(row[`op${op}_status`]||'').trim().toUpperCase());
+        })
+        .map((op) => `OP${op}`);
+
+      const partsInterlock = String(row.parts_interlock_reason || '').trim();
+      const srcText = String(row.ng_reason || row.rejection_reason || partsInterlock || '');
+      const rejCategory = String(row.rejection_category || '').trim() || parseTextField(partsInterlock, 'Category') || parseTextField(srcText, 'Category') || '';
+      const parsedReason = parseTextField(partsInterlock, 'Reason') || parseTextField(srcText, 'Reason');
+      let rejReason = String(row.rejection_reason || '').trim() || parsedReason || '';
+      if (!rejReason && partsInterlock && !partsInterlock.includes('|') && !partsInterlock.includes(':')) {
+        rejReason = partsInterlock;
+      }
+      if (!rejReason && ngGates.length > 0) {
+        rejReason = `${ngGates.join(', ')} NG`;
+      }
+      if (!rejReason || rejReason.toLowerCase().includes('unspecified')) {
+        if (isOp150Ng) rejReason = 'Pressure Leakage Fail';
+        else if (isOp100Ng) rejReason = 'DCM Casting Defect';
+        else if (String(row.machine_name || '').toLowerCase().includes('pdi')) rejReason = 'Casting Visual NG';
+        else rejReason = 'Quality Gate NG';
+      }
+      if (rejReason) {
+        rejReason = canonicalizeReasonHelper(rejReason);
+      }
+      const rejView = parseTextField(partsInterlock, 'View') || parseTextField(srcText, 'View') || '';
+      const rawZone = parseTextField(partsInterlock, 'Zone') || parseTextField(srcText, 'Zone') || '';
+      const zoneParts = splitRejectionZoneHelper(rawZone);
+      let rejZone = zoneParts.zone || '';
+      let rejSubZone = zoneParts.subZone || (parseTextField(partsInterlock, 'Sub Zone') || parseTextField(partsInterlock, 'SubZone') || parseTextField(srcText, 'Sub Zone') || parseTextField(srcText, 'SubZone') || '');
+      if (!rejZone || rejZone === '-' || rejZone.toLowerCase().includes('unspecified')) {
+        if (isOp150Ng) rejZone = 'Zone Leak';
+        else if (isOp100Ng) rejZone = 'Zone DCM';
+        else rejZone = 'Zone General';
+      }
+
+      const rawPartId     = String(row.part_id     || '').trim();
+      const rawCustomerQr = String(row.customer_qr || '').trim();
+      let displayPartId = '';
+      let displayCustomerQr = rawCustomerQr;
+      if (rawPartId && !looksLikeQr(rawPartId) && rawPartId !== rawCustomerQr) displayPartId = rawPartId;
+      else if (rawPartId && looksLikeQr(rawPartId) && !displayCustomerQr) displayCustomerQr = rawPartId;
+
+      // Shot details and shot numbers MUST ONLY come from casting Part IDs (displayPartId)
+      let extractedShot = '';
+      let normalizedShotStatus = '';
+      if (displayPartId) {
+        extractedShot = extractShotFromPartIdHelper(displayPartId);
+      }
+      if (!extractedShot && row.shot_number && row.shot_number !== '-') {
+        extractedShot = String(row.shot_number).trim();
+      }
+      if (extractedShot) {
+        normalizedShotStatus = normalizeShotStatusHelper(row.shot_status, row.overall_status, row.op100_status, extractedShot);
+      }
+
+      return {
+        id: row.id,
+        rowKey: row.id || `r-${idx}`,
+        shot_number: extractedShot,
+        shotNumber: extractedShot,
+        shot_status: normalizedShotStatus,
+        shotStatus: normalizedShotStatus,
+        partId: displayPartId || rawPartId,
+        part_id: displayPartId || rawPartId,
+        customerQrCode: displayCustomerQr || rawCustomerQr,
+        customer_qr: displayCustomerQr || rawCustomerQr,
+        machineName: row.machine_name && row.machine_name !== '-' ? row.machine_name : '',
+        machine_name: row.machine_name && row.machine_name !== '-' ? row.machine_name : '',
+        dieName: row.die_name && row.die_name !== '-' ? row.die_name : '',
+        die_name: row.die_name && row.die_name !== '-' ? row.die_name : '',
+        partName: row.part_name || 'OIL PAN K-12',
+        part_name: row.part_name || 'OIL PAN K-12',
+        shiftCode: row.shift_code || 'A',
+        shift_code: row.shift_code || 'A',
+        status: row.overall_status || (ngGates.length > 0 ? 'NG' : ''),
+        overall_status: row.overall_status || (ngGates.length > 0 ? 'NG' : ''),
+        op100_status: isOp100Ng ? 'NG' : (row.op100_status || ''),
+        op110_status: row.op110_status || '',
+        op120_status: row.op120_status || '',
+        op130_status: row.op130_status || '',
+        op140_status: row.op140_status || '',
+        op150_status: isOp150Ng ? 'NG' : (row.op150_status || ''),
+        op160_status: row.op160_status || '',
+        ngGate: ngGates.join(', ') || '',
+        ng_gate: ngGates.join(', ') || '',
+        category: rejCategory !== '-' ? rejCategory : '',
+        rejection_category: rejCategory !== '-' ? rejCategory : '',
+        reason: rejReason !== '-' ? rejReason : '',
+        rejection_reason: rejReason !== '-' ? rejReason : '',
+        ngReason: srcText || rejReason,
+        ng_reason: srcText || rejReason,
+        rejectionView: rejView !== '-' ? rejView : '',
+        rejection_view: rejView !== '-' ? rejView : '',
+        rejectionZone: rejZone !== '-' ? rejZone : '',
+        rejection_zone: rejZone !== '-' ? rejZone : '',
+        rejectionSubZone: rejSubZone !== '-' ? rejSubZone : '',
+        rejection_sub_zone: rejSubZone !== '-' ? rejSubZone : '',
+        rejection_sub_zone: rejSubZone !== '-' ? rejSubZone : '',
+        createdAt: row.first_scan_at || row.createdAt,
+        ngRecordedAt: row.final_scan_at || row.updatedAt || row.createdAt,
+        // Process parameters in both snake_case and camelCase
+        metal_pressure: row.metal_pressure != null ? row.metal_pressure : '',
+        metalPressure: row.metal_pressure != null ? Number(row.metal_pressure) : null,
+        furnace_metal_temp: row.furnace_metal_temp != null ? row.furnace_metal_temp : '',
+        metalTemp: row.furnace_metal_temp != null ? Number(row.furnace_metal_temp) : null,
+        biscuit_thickness: row.biscuit_thickness != null ? row.biscuit_thickness : '',
+        biscuitThickness: row.biscuit_thickness != null ? Number(row.biscuit_thickness) : null,
+        v1_speed: row.v1_speed != null ? row.v1_speed : '',
+        v1Speed: row.v1_speed != null ? Number(row.v1_speed) : null,
+        v2_speed: row.v2_speed != null ? row.v2_speed : '',
+        v2Speed: row.v2_speed != null ? Number(row.v2_speed) : null,
+        v3_speed: row.v3_speed != null ? row.v3_speed : '',
+        v3Speed: row.v3_speed != null ? Number(row.v3_speed) : null,
+        v4_speed: row.v4_speed != null ? row.v4_speed : '',
+        v4Speed: row.v4_speed != null ? Number(row.v4_speed) : null,
+        leak_body_leak_value: row.leak_body_leak_value != null ? row.leak_body_leak_value : '',
+        leakBodyValue: row.leak_body_leak_value != null ? Number(row.leak_body_leak_value) : null,
+        leakBodyLeakValue: row.leak_body_leak_value != null ? Number(row.leak_body_leak_value) : null,
+        cycle_time: row.cycle_time != null ? row.cycle_time : '',
+        cycleTime: row.plc_cycle_time != null ? Number(row.plc_cycle_time) : (row.cycle_time || ''),
+        plc_cycle_time: row.plc_cycle_time != null ? row.plc_cycle_time : '',
+        intensification_time: row.intensification_time != null ? row.intensification_time : '',
+        intensificationTime: row.intensification_time != null ? Number(row.intensification_time) : null,
+        curing_time: row.curing_time != null ? row.curing_time : '',
+        curingTime: row.curing_time != null ? Number(row.curing_time) : null,
+        pouring_time: row.pouring_time != null ? row.pouring_time : '',
+        pouringTime: row.pouring_time != null ? Number(row.pouring_time) : null,
+        shot_fwd_time: row.shot_fwd_time != null ? row.shot_fwd_time : '',
+        shotFwdTime: row.shot_fwd_time != null ? Number(row.shot_fwd_time) : null,
+        die_close_core_in_time: row.die_close_core_in_time != null ? row.die_close_core_in_time : '',
+        dieCloseTime: row.die_close_core_in_time != null ? Number(row.die_close_core_in_time) : null,
+        die_open_core_out_time: row.die_open_core_out_time != null ? row.die_open_core_out_time : '',
+        dieOpenTime: row.die_open_core_out_time != null ? Number(row.die_open_core_out_time) : null,
+        ejector_time: row.ejector_time != null ? row.ejector_time : '',
+        ejectorTime: row.ejector_time != null ? Number(row.ejector_time) : null,
+        extract_time: row.extract_time != null ? row.extract_time : '',
+        extractTime: row.extract_time != null ? Number(row.extract_time) : null,
+        spray_time: row.spray_time != null ? row.spray_time : '',
+        sprayTime: row.spray_time != null ? Number(row.spray_time) : null,
+        accel_point: row.accel_point != null ? row.accel_point : '',
+        accelPoint: row.accel_point != null ? Number(row.accel_point) : null,
+        deaccel_point: row.deaccel_point != null ? row.deaccel_point : '',
+        deaccelPoint: row.deaccel_point != null ? Number(row.deaccel_point) : null,
+        clamp_tonnage: row.clamp_tonnage != null ? row.clamp_tonnage : '',
+        clampTonnage: row.clamp_tonnage != null ? Number(row.clamp_tonnage) : null,
+        clamp_tonnage_he_low_mn: row.clamp_tonnage_he_low_mn != null ? row.clamp_tonnage_he_low_mn : '',
+        clampTonnageHeLowMn: row.clamp_tonnage_he_low_mn != null ? Number(row.clamp_tonnage_he_low_mn) : null,
+        jet_cooling_pressure: row.jet_cooling_pressure != null ? row.jet_cooling_pressure : '',
+        jetCoolingPressure: row.jet_cooling_pressure != null ? Number(row.jet_cooling_pressure) : null,
+        vacuum_pressure: row.vacuum_pressure != null ? row.vacuum_pressure : '',
+        vacuumPressure: row.vacuum_pressure != null ? Number(row.vacuum_pressure) : null,
+        coolingWaterSta: row.cooling_water_sta != null ? Number(row.cooling_water_sta) : null,
+        machine_name: row.machine_name && row.machine_name !== '-' ? row.machine_name : '',
+        die_name: row.die_name && row.die_name !== '-' ? row.die_name : '',
+        shift_code: row.shift_code || 'A',
+      };
+    });
+
+    return res.json({
+      rows: formatted,
+      total,
+      page: pgNum,
+      pageSize: pgSize,
+      totalPages: Math.ceil(total / pgSize),
+    });
+  } catch (error) {
+    console.error('[REJECTION ROWS] controller error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 
 const DEFAULT_REPORT_COLUMNS = [
   { id: "partId", label: "Part Serial No", enabled: true },

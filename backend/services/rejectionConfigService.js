@@ -13,6 +13,9 @@ const {
 } = require("../constants/defaultRejectionMaster");
 
 function normalizePartName(value) {
+  if (value && typeof value === "object") {
+    value = value.partName || value.part_name || value.partId || value.part_id || "";
+  }
   return String(value || DEFAULT_PART_NAME).trim().toUpperCase() || DEFAULT_PART_NAME;
 }
 
