@@ -3739,11 +3739,22 @@ exports.getPartCatalog = async (req, res) => {
   }
 };
 
+// Short-TTL cache to absorb repeated rapid telemetry polls
+const machineStationStatsCache = new Map();
+const STATS_CACHE_TTL_MS = 2500;
+
 exports.getMachineStationStats = async (req, res) => {
   try {
     const machineId = Number(req.query.machineId || 0);
     if (!machineId) {
       return res.status(400).json({ error: "machineId query param is required" });
+    }
+
+    const requestedShiftCode = String(req.query.shiftCode || req.query.shift_code || "").trim().toUpperCase();
+    const cacheKey = `${machineId}:${requestedShiftCode}:${req.query.from || ""}:${req.query.to || ""}`;
+    const cachedEntry = machineStationStatsCache.get(cacheKey);
+    if (cachedEntry && Date.now() - cachedEntry.timestamp < STATS_CACHE_TTL_MS) {
+      return res.json(cachedEntry.data);
     }
 
     const machine = await Machine.findByPk(machineId);
@@ -3762,7 +3773,6 @@ exports.getMachineStationStats = async (req, res) => {
     const stationNo = getMachineOperationStage(machine);
     const shifts = await getActiveShiftDefinitions();
     const currentShift = resolveShift(new Date(), shifts);
-    const requestedShiftCode = String(req.query.shiftCode || req.query.shift_code || "").trim().toUpperCase();
     const effectiveShiftCode = isAllShiftToken(requestedShiftCode)
       ? ""
       : (requestedShiftCode || String(currentShift?.shift_code || "").trim().toUpperCase());
@@ -3781,21 +3791,36 @@ exports.getMachineStationStats = async (req, res) => {
       limit: 800,
     });
 
-    const partIdsForCustomerQr = [...new Set(logs.map((row) => String(row.part_id || "").trim()).filter(Boolean))];
-    const partCodeMappings = partIdsForCustomerQr.length > 0
-      ? await PartCodeMapping.findAll({
-          where: {
-            [Op.or]: [
-              { old_part_id: { [Op.in]: partIdsForCustomerQr } },
-              { customer_qr: { [Op.in]: partIdsForCustomerQr } },
-            ],
-            is_active: true,
-          },
+    // Targeted PartCodeMapping lookup: only look up parts that actually need customer QR
+    // (the recent 25 visible parts + any log with recovery pending)
+    const recoveryRows = logs.filter((row) => {
+      const reason = String(row?.interlock_reason || "").toUpperCase();
+      return reason.includes("RECOVERY");
+    });
+    const candidatePartIds = new Set([
+      ...logs.slice(0, 25).map((r) => String(r.part_id || "").trim()),
+      ...recoveryRows.map((r) => String(r.part_id || "").trim()),
+    ]);
+    candidatePartIds.delete("");
+    const targetPartIds = Array.from(candidatePartIds);
+
+    let partCodeMappings = [];
+    if (targetPartIds.length > 0) {
+      const [byOld, byCust] = await Promise.all([
+        PartCodeMapping.findAll({
+          where: { old_part_id: { [Op.in]: targetPartIds }, is_active: true },
           attributes: ["old_part_id", "customer_qr"],
-          order: [["updatedAt", "DESC"]],
           raw: true,
-        })
-      : [];
+        }),
+        PartCodeMapping.findAll({
+          where: { customer_qr: { [Op.in]: targetPartIds }, is_active: true },
+          attributes: ["old_part_id", "customer_qr"],
+          raw: true,
+        }),
+      ]);
+      partCodeMappings = byOld.concat(byCust);
+    }
+
     const customerQrByPartId = partCodeMappings.reduce((acc, row) => {
       const key = String(row.old_part_id || "").trim().toUpperCase();
       const customerKey = String(row.customer_qr || "").trim().toUpperCase();
@@ -3864,7 +3889,7 @@ exports.getMachineStationStats = async (req, res) => {
     const plcCircuit = getPlcCircuitSnapshot().find((entry) => entry.key === `machine:${machine.id}`) || null;
     const scannerBundle = await buildMachineScannerBundle(machine.id);
 
-    res.json({
+    const resultPayload = {
       machine: {
         id: machine.id,
         machineName: machine.machine_name,
@@ -3924,7 +3949,17 @@ exports.getMachineStationStats = async (req, res) => {
         }
         : null,
       recentParts,
-    });
+    };
+
+    machineStationStatsCache.set(cacheKey, { timestamp: Date.now(), data: resultPayload });
+    if (machineStationStatsCache.size > 200) {
+      const cutoff = Date.now() - 30000;
+      for (const [k, v] of machineStationStatsCache.entries()) {
+        if (v.timestamp < cutoff) machineStationStatsCache.delete(k);
+      }
+    }
+
+    return res.json(resultPayload);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

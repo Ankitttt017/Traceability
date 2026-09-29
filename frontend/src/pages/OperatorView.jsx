@@ -20,7 +20,7 @@ import { getStationFeatureSettings, getStationFeatures, saveStationFeatureSettin
 import { useLanguage } from "../context/LanguageContext";
 
 
-const LIVE_REFRESH_COOLDOWN = 350;
+const LIVE_REFRESH_COOLDOWN = 800;
 const QR_EVENT_DEDUPE_MS = 3000;
 const POPUP_EVENT_DEDUPE_MS = 1800;
 const QR_STORAGE_KEY = "operator-last-qr-signal";
@@ -1074,20 +1074,40 @@ const OperatorView = () => {
     if (showLoader && !hasLoadedTelemetryRef.current) setLoadingStats(true); else setRefreshing(true);
     try {
       const shiftCode = selectedShiftCode === "CURRENT" ? "" : selectedShiftCode;
-      const [live, stats] = await Promise.all([
-        traceabilityApi.liveState(id),
-        traceabilityApi.machineStats(id, shiftCode ? { shiftCode } : {}),
+      const [liveResult, statsResult] = await Promise.allSettled([
+        traceabilityApi.liveState(id, { suppressGlobalError: !showLoader }),
+        traceabilityApi.machineStats(id, shiftCode ? { shiftCode } : {}, { suppressGlobalError: true }),
       ]);
-      setLiveState(live || null); setStationStats(stats || null);
-      hasLoadedTelemetryRef.current = true;
-      if (live?.stationSettings) {
-        setStationSettings(prev => ({
-          ...prev,
-          [String(live.machine?.stationNo || "").trim().toUpperCase()]: live.stationSettings
-        }));
+
+      if (liveResult.status === "fulfilled" && liveResult.value) {
+        const live = liveResult.value;
+        setLiveState(live);
+        hasLoadedTelemetryRef.current = true;
+        if (live?.stationSettings) {
+          setStationSettings((prev) => ({
+            ...prev,
+            [String(live.machine?.stationNo || "").trim().toUpperCase()]: live.stationSettings,
+          }));
+        }
       }
-    } catch (e) { if (showLoader) setPopup({ type: "ERROR", title: t("operatorView.stationDataError", "Station Data Error"), message: e.response?.data?.error || t("operatorView.unableLoadTelemetry", "Unable to load machine telemetry") }); }
-    finally { setLoadingStats(false); setRefreshing(false); }
+
+      if (statsResult.status === "fulfilled" && statsResult.value) {
+        setStationStats(statsResult.value);
+      }
+
+      if (showLoader && liveResult.status === "rejected" && !hasLoadedTelemetryRef.current) {
+        setPopup({
+          type: "ERROR",
+          title: t("operatorView.stationDataError", "Station Data Error"),
+          message: liveResult.reason?.response?.data?.error || t("operatorView.unableLoadTelemetry", "Unable to load machine telemetry"),
+        });
+      }
+    } catch (_unexpected) {
+      // Fallback safeguard
+    } finally {
+      setLoadingStats(false);
+      setRefreshing(false);
+    }
   }, [selectedShiftCode]);
 
   const scheduleLiveRefresh = useCallback(() => {

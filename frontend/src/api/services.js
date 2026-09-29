@@ -369,16 +369,19 @@ export const traceabilityApi = {
     const { data } = await apiClient.get(ENDPOINTS.traceability.parts, { params });
     return data;
   },
-  historyByPart: async (partId) => {
-    const { data } = await apiClient.get(ENDPOINTS.traceability.byPart(partId));
+  historyByPart: async (partId, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.traceability.byPart(partId), config);
     return data;
   },
-  journeyByPart: async (partId) => {
-    const { data } = await apiClient.get(ENDPOINTS.traceability.journeyByPart(partId));
+  journeyByPart: async (partId, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.traceability.journeyByPart(partId), config);
     return data;
   },
-  liveState: async (machineId) => {
-    const { data } = await apiClient.get(ENDPOINTS.traceability.liveState, { params: { machineId } });
+  liveState: async (machineId, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.traceability.liveState, {
+      params: { machineId },
+      ...config,
+    });
     return data;
   },
   ioSnapshot: async ({ machineId, plcIp, force } = {}, config = {}) => {
@@ -399,21 +402,24 @@ export const traceabilityApi = {
     });
     return data;
   },
-  machineStats: async (machineId, params = {}) => {
+  machineStats: async (machineId, params = {}, config = {}) => {
     const { data } = await apiClient.get(ENDPOINTS.traceability.machineStats, {
       params: { ...params, machineId },
+      ...config,
     });
     return data;
   },
-  plcHealth: async (machineId) => {
+  plcHealth: async (machineId, config = {}) => {
     const { data } = await apiClient.get(ENDPOINTS.traceability.plcHealth, {
       params: machineId ? { machineId } : undefined,
+      ...config,
     });
     return data;
   },
-  scannerHealth: async (machineId) => {
+  scannerHealth: async (machineId, config = {}) => {
     const { data } = await apiClient.get(ENDPOINTS.traceability.scannerHealth, {
       params: machineId ? { machineId } : undefined,
+      ...config,
     });
     return data;
   },
