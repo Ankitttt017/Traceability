@@ -6609,129 +6609,354 @@ function buildReportFileTimestamp(now = new Date()) {
 
 exports.getDashboardSummary = async (req, res) => {
   try {
-    const { from, to } = getDateRangeFromQuery(req.query);
-    const lineNameFilter = normalizeLineName(req.query.lineName);
-    const machineIdFilter = Number(req.query.machineId || 0) || null;
-    const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
-    const machineWhere = {};
-    if (lineNameFilter) {
-      machineWhere.line_name = lineNameFilter;
+    const shifts = await getActiveShiftDefinitions();
+    const now = new Date();
+    const defaultWindow = getProductionDayWindow(shifts, now);
+    const datePreset = String(req.query.datePreset || "").toLowerCase().trim();
+    const isAllTime = datePreset === "all" || req.query.allTime === "1" || req.query.allTime === "true";
+    const requestedRange = (req.query.dateFrom || req.query.dateTo) ? getDateRangeFromQuery(req.query) : defaultWindow;
+    const from = requestedRange.from;
+    const to = requestedRange.to;
+
+    const whereConditions = [];
+    const replacements = {};
+
+    if (!isAllTime) {
+      whereConditions.push(`(first_scan_at BETWEEN :from AND :to OR final_scan_at BETWEEN :from AND :to OR createdAt BETWEEN :from AND :to)`);
+      replacements.from = from;
+      replacements.to = to;
     }
 
-    const machineRows = await Machine.findAll({
-      where: Object.keys(machineWhere).length > 0 ? machineWhere : undefined,
-      attributes: ["id", "machine_name", "operation_no", "line_name", "machine_number", "is_active", "updatedAt"],
-      raw: true,
-    });
-    const uniqueMachines = dedupeMachines(machineRows);
-    const scopedMachineIds = uniqueMachines
-      .filter((row) => row.is_active !== false)
-      .map((row) => Number(row.id))
-      .filter((id) => Number.isFinite(id) && id > 0);
-    const filteredMachineIds = machineIdFilter ? [machineIdFilter] : scopedMachineIds;
+    const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
 
-    const logWhere = {
-      createdAt: { [Op.gte]: from, [Op.lte]: to },
-      ...(filteredMachineIds.length > 0 ? { machine_id: { [Op.in]: filteredMachineIds } } : {}),
+    let dbMachines = [];
+    try {
+      dbMachines = await Machine.findAll({
+        attributes: ["id", "machine_name", "operation_no", "sequence_no", "line_name", "is_active"],
+        order: [["sequence_no", "ASC"], ["operation_no", "ASC"]],
+        raw: true,
+      });
+    } catch (e) {
+      console.warn(`[DASHBOARD] Machine query fallback: ${e.message}`);
+    }
+
+    const stationLabelMap = {
+      OP100: "DCM+DPM (OP100)",
+      OP110: "Laser Marking (OP110)",
+      OP120: "Casting PDi (OP120)",
+      OP130: "Pre Inspection (OP130)",
+      OP140: "Auto Guaging (OP140)",
+      OP150: "Leak Test OP150 (Total)",
+      OP160: "Final Inspection (OP160)",
     };
 
-    const [partCounts, recentRows, qualityRows, shifts] = await Promise.all([
-      Part.findAll({
-        attributes: ["status", [fn("COUNT", col("id")), "count"]],
-        group: ["status"],
-        raw: true,
-      }),
-      OperationLog.findAll({
-        where: logWhere,
-        order: [["createdAt", "DESC"]],
-        limit: 50,
-        raw: true,
-      }),
-      ProductionLog.findAll({
-        where: logWhere,
-        attributes: ["status", "createdAt", "machine_id"],
-        raw: true,
-      }),
-      getActiveShiftDefinitions(),
-    ]);
-
-    const filteredQualityRows = applyShiftFilter(qualityRows, shiftCodeFilter, shifts, { from, to });
-    const filteredRecentRows = applyShiftFilter(recentRows, shiftCodeFilter, shifts, { from, to }).slice(0, 20);
-    const okLogs = filteredQualityRows.filter((row) => row.status === "OK").length;
-    const ngLogs = filteredQualityRows.filter((row) => row.status === "NG").length;
-
-    const statusMap = partCounts.reduce((acc, row) => {
-      acc[row.status] = Number(row.count) || 0;
-      return acc;
-    }, {});
-
-    const shiftProduction = shifts.reduce((acc, shift) => {
-      acc[shift.shift_code] = { total: 0, ok: 0, ng: 0 };
-      return acc;
-    }, {});
-    shiftProduction.UNASSIGNED = { total: 0, ok: 0, ng: 0 };
-
-    for (const row of filteredQualityRows) {
-      const code = resolveShiftCodeForDate(row.createdAt, shifts);
-      if (!shiftProduction[code]) {
-        shiftProduction[code] = { total: 0, ok: 0, ng: 0 };
-      }
-      shiftProduction[code].total += 1;
-      if (row.status === "OK") {
-        shiftProduction[code].ok += 1;
-      } else {
-        shiftProduction[code].ng += 1;
-      }
+    if (Array.isArray(dbMachines)) {
+      dbMachines.forEach((m) => {
+        const op = String(m.operation_no || "").trim().toUpperCase();
+        const mName = String(m.machine_name || "").trim();
+        if (op && mName) {
+          if (op === "OP150" && mName.toLowerCase().includes("leak")) {
+            stationLabelMap["OP150"] = "Leak Test OP150 (Total)";
+          } else {
+            stationLabelMap[op] = `${mName} (${op})`;
+          }
+        }
+      });
     }
 
-    const machineMap = uniqueMachines.reduce((acc, row) => {
-      acc[row.id] = row;
-      return acc;
-    }, {});
+    // Run parallel queries on RICO_IOT ProductionReports
+    const [aggregatesRes, shiftScrapRes, recentScansRes, topDefectsRes] = await Promise.all([
+      sequelize.query(`
+        SELECT 
+          COUNT(*) as totalParts,
+          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) as totalOK,
+          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) as totalNG,
+          SUM(CASE WHEN overall_status IN ('IN_PROGRESS', 'WIP') THEN 1 ELSE 0 END) as totalInProgress,
+          SUM(CASE WHEN op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%DCM%' AND overall_status IN ('NG', 'FAILED')) THEN 1 ELSE 0 END) as op100_ng,
+          SUM(CASE WHEN op100_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') OR (machine_name LIKE '%DCM%' AND overall_status IN ('OK', 'PASSED')) THEN 1 ELSE 0 END) as op100_ok,
+          SUM(CASE WHEN op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op110_ng,
+          SUM(CASE WHEN op110_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op110_ok,
+          SUM(CASE WHEN op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op120_ng,
+          SUM(CASE WHEN op120_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op120_ok,
+          SUM(CASE WHEN op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op130_ng,
+          SUM(CASE WHEN op130_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op130_ok,
+          SUM(CASE WHEN op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op140_ng,
+          SUM(CASE WHEN op140_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op140_ok,
+          SUM(CASE WHEN (
+            op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+            OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
+            OR (machine_name LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+            OR (rejection_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+            OR (ng_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+            OR (rejection_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
+            OR (ng_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
+          ) THEN 1 ELSE 0 END) as op150_ng,
+          SUM(CASE WHEN (
+            op150_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK')
+            OR JSON_VALUE(leak_data, '$.result') IN ('OK', 'PASS', 'PASSED')
+            OR (machine_name LIKE '%Leak%' AND overall_status IN ('OK', 'PASSED'))
+          ) THEN 1 ELSE 0 END) as op150_ok,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01'
+            OR leak_data LIKE '%1773%'
+            OR machine_name = 'Leak-Test-01'
+            OR machine_name LIKE '%Leak%01%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
+            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR leak_data LIKE '%1773%' OR machine_name LIKE '%01%'))
+            OR (machine_name = 'Leak-Test-01' AND overall_status IN ('NG','FAILED'))
+          ) THEN 1 ELSE 0 END) as leak01_ng,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01'
+            OR leak_data LIKE '%1773%'
+            OR machine_name = 'Leak-Test-01'
+            OR machine_name LIKE '%Leak%01%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('OK','PASS','PASSED')
+            OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR leak_data LIKE '%1773%' OR machine_name LIKE '%01%'))
+            OR (machine_name = 'Leak-Test-01' AND overall_status IN ('OK','PASSED'))
+          ) THEN 1 ELSE 0 END) as leak01_ok,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02'
+            OR leak_data LIKE '%1774%'
+            OR machine_name = 'Leak-Test-02'
+            OR machine_name LIKE '%Leak%02%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
+            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR leak_data LIKE '%1774%' OR machine_name LIKE '%02%'))
+            OR (machine_name = 'Leak-Test-02' AND overall_status IN ('NG','FAILED'))
+          ) THEN 1 ELSE 0 END) as leak02_ng,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02'
+            OR leak_data LIKE '%1774%'
+            OR machine_name = 'Leak-Test-02'
+            OR machine_name LIKE '%Leak%02%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('OK','PASS','PASSED')
+            OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR leak_data LIKE '%1774%' OR machine_name LIKE '%02%'))
+            OR (machine_name = 'Leak-Test-02' AND overall_status IN ('OK','PASSED'))
+          ) THEN 1 ELSE 0 END) as leak02_ok,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak Test-03'
+            OR JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-03'
+            OR leak_data LIKE '%1776%'
+            OR machine_name = 'Leak Test-03'
+            OR machine_name LIKE '%Leak%03%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
+            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') LIKE '%03%' OR leak_data LIKE '%1776%' OR machine_name LIKE '%03%'))
+            OR (machine_name LIKE '%Leak%03%' AND overall_status IN ('NG','FAILED'))
+          ) THEN 1 ELSE 0 END) as leak03_ng,
+          SUM(CASE WHEN (
+            JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak Test-03'
+            OR JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-03'
+            OR leak_data LIKE '%1776%'
+            OR machine_name = 'Leak Test-03'
+            OR machine_name LIKE '%Leak%03%'
+          ) AND (
+            JSON_VALUE(leak_data, '$.result') IN ('OK','PASS','PASSED')
+            OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') LIKE '%03%' OR leak_data LIKE '%1776%' OR machine_name LIKE '%03%'))
+            OR (machine_name LIKE '%Leak%03%' AND overall_status IN ('OK','PASSED'))
+          ) THEN 1 ELSE 0 END) as leak03_ok,
+          SUM(CASE WHEN op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op160_ng,
+          SUM(CASE WHEN op160_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op160_ok
+        FROM [RICO_IOT].[dbo].[ProductionReports]
+        ${whereSql}
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[DASHBOARD] aggregate query error:", err.message);
+        return [{}];
+      }),
 
-    const recentScans = filteredRecentRows.map((row) => {
-      const machine = machineMap[row.machine_id] || {};
-      const start = row.plc_start_time || row.plc_start_at || row.createdAt;
-      const end = row.plc_end_time || row.plc_end_at || null;
-      let cycleTime = null;
-      if (start && end) {
-        cycleTime = Math.max(0, (new Date(end).getTime() - new Date(start).getTime()) / 1000).toFixed(1);
-      }
+      sequelize.query(`
+        SELECT
+          COALESCE(NULLIF(shift_code, ''), 'A') as shift,
+          COUNT(*) as total,
+          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) as ng,
+          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') AND NOT (JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) as ok,
+          ROUND(CASE WHEN COUNT(*) > 0 THEN (CAST(SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*)) * 100 ELSE 0 END, 2) as scrapRate
+        FROM [RICO_IOT].[dbo].[ProductionReports]
+        ${whereSql}
+        GROUP BY COALESCE(NULLIF(shift_code, ''), 'A')
+        ORDER BY shift ASC
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[DASHBOARD] shift query error:", err.message);
+        return [];
+      }),
+
+      sequelize.query(`
+        SELECT TOP 25
+          id,
+          part_id as partId,
+          customer_qr as customerQr,
+          machine_name as machine,
+          overall_status as overallStatus,
+          op100_status,
+          op110_status,
+          op120_status,
+          op130_status,
+          op140_status,
+          op150_status,
+          op160_status,
+          cycle_time as cycleTime,
+          rejection_reason as rejectionReason,
+          shift_code as shiftCode,
+          createdAt,
+          first_scan_at as firstScanAt,
+          final_scan_at as finalScanAt
+        FROM [RICO_IOT].[dbo].[ProductionReports]
+        ${whereSql}
+        ORDER BY COALESCE(final_scan_at, first_scan_at, createdAt) DESC
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[DASHBOARD] recent scans query error:", err.message);
+        return [];
+      }),
+
+      sequelize.query(`
+        SELECT TOP 10
+          COALESCE(NULLIF(rejection_reason, ''), NULLIF(ng_reason, ''), 'Visual Surface Defect') as reason,
+          COALESCE(NULLIF(rejection_category, ''), 'CR') as category,
+          COUNT(*) as count
+        FROM [RICO_IOT].[dbo].[ProductionReports]
+        ${whereSql ? whereSql + " AND" : "WHERE"} (
+          overall_status IN ('NG', 'FAILED')
+          OR op100_status IN ('NG', 'FAIL', 'FAILED')
+          OR op110_status IN ('NG', 'FAIL', 'FAILED')
+          OR op120_status IN ('NG', 'FAIL', 'FAILED')
+          OR op130_status IN ('NG', 'FAIL', 'FAILED')
+          OR op140_status IN ('NG', 'FAIL', 'FAILED')
+          OR op150_status IN ('NG', 'FAIL', 'FAILED')
+          OR op160_status IN ('NG', 'FAIL', 'FAILED')
+          OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
+        )
+        GROUP BY 
+          COALESCE(NULLIF(rejection_reason, ''), NULLIF(ng_reason, ''), 'Visual Surface Defect'),
+          COALESCE(NULLIF(rejection_category, ''), 'CR')
+        ORDER BY count DESC
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[DASHBOARD] top defects query error:", err.message);
+        return [];
+      }),
+    ]);
+
+    const agg = aggregatesRes?.[0] || {};
+    const totalParts = Number(agg.totalParts || 0);
+    const totalOK = Number(agg.totalOK || 0);
+    const totalNG = Number(agg.totalNG || 0);
+    const totalInProgress = Number(agg.totalInProgress || 0);
+    const scrapRate = (totalOK + totalNG) > 0 ? Number(((totalNG / (totalOK + totalNG)) * 100).toFixed(2)) : (totalParts > 0 ? Number(((totalNG / totalParts) * 100).toFixed(2)) : 0);
+    const okRate = (totalOK + totalNG) > 0 ? Number(((totalOK / (totalOK + totalNG)) * 100).toFixed(2)) : 100;
+
+    // Station-Wise Quality Gates breakdown (matching Rejection Analysis)
+    let qualityGates = [
+      { code: "OP100", name: stationLabelMap["OP100"] || "DCM+DPM (OP100)", okCount: Number(agg.op100_ok || 0), ngCount: Number(agg.op100_ng || 0) },
+      { code: "OP110", name: stationLabelMap["OP110"] || "Laser Marking (OP110)", okCount: Number(agg.op110_ok || 0), ngCount: Number(agg.op110_ng || 0) },
+      { code: "OP120", name: stationLabelMap["OP120"] || "Casting PDi (OP120)", okCount: Number(agg.op120_ok || 0), ngCount: Number(agg.op120_ng || 0) },
+      { code: "OP130", name: stationLabelMap["OP130"] || "Pre Inspection (OP130)", okCount: Number(agg.op130_ok || 0), ngCount: Number(agg.op130_ng || 0) },
+      { code: "OP140", name: stationLabelMap["OP140"] || "Auto Guaging (OP140)", okCount: Number(agg.op140_ok || 0), ngCount: Number(agg.op140_ng || 0) },
+      { code: "OP150", name: "Leak Test OP150 (Total)", okCount: Number(agg.op150_ok || 0), ngCount: Number(agg.op150_ng || 0) },
+      { code: "Leak-Test-01", name: "Leak-Test-01", okCount: Number(agg.leak01_ok || 0), ngCount: Number(agg.leak01_ng || 0) },
+      { code: "Leak-Test-02", name: "Leak-Test-02", okCount: Number(agg.leak02_ok || 0), ngCount: Number(agg.leak02_ng || 0) },
+      { code: "Leak Test-03", name: "Leak Test-03", okCount: Number(agg.leak03_ok || 0), ngCount: Number(agg.leak03_ng || 0) },
+      { code: "OP160", name: stationLabelMap["OP160"] || "Final Inspection (OP160)", okCount: Number(agg.op160_ok || 0), ngCount: Number(agg.op160_ng || 0) },
+    ];
+
+    qualityGates = qualityGates.map((gate) => {
+      const inspected = gate.okCount + gate.ngCount;
+      const gateScrapRate = inspected > 0 ? Number(((gate.ngCount / inspected) * 100).toFixed(2)) : 0;
+      const gateOkRate = inspected > 0 ? Number(((gate.okCount / inspected) * 100).toFixed(2)) : 100;
+      return { ...gate, inspected, scrapRate: gateScrapRate, okRate: gateOkRate };
+    });
+
+    // Shift Production
+    const shiftProduction = (shiftScrapRes || []).reduce((acc, row) => {
+      const sKey = String(row.shift || "").replace(/^SHIFT_/, "").trim() || "A";
+      const stats = {
+        shift: sKey,
+        total: Number(row.total || 0),
+        ok: Number(row.ok || 0),
+        ng: Number(row.ng || 0),
+        scrapRate: Number(row.scrapRate || 0),
+      };
+      acc[sKey] = stats;
+      acc[row.shift] = stats;
+      return acc;
+    }, { A: { shift: "A", total: 0, ok: 0, ng: 0, scrapRate: 0 }, B: { shift: "B", total: 0, ok: 0, ng: 0, scrapRate: 0 }, C: { shift: "C", total: 0, ok: 0, ng: 0, scrapRate: 0 } });
+
+    // Recent Scans mapping
+    const recentScans = (recentScansRes || []).map((row) => {
+      const resVal = row.overallStatus || "OK";
       return {
-        partId: row.part_id,
-        stationNo: row.station_no || machine.operation_no || null,
-        station: row.station_no || machine.operation_no || null,
-        machine: machine.machine_name || null,
-        lineName: machine.line_name || null,
-        result: row.result || (["STARTED", "PENDING"].includes(String(row.plc_status).toUpperCase()) ? "WIP" : row.plc_status),
-        plcStatus: row.plc_status,
-        cycleTime,
-        timestamp: row.createdAt,
+        partId: row.partId || row.customerQr,
+        customerQr: row.customerQr,
+        machine: row.machine,
+        result: resVal,
+        overallStatus: resVal,
+        cycleTime: row.cycleTime || null,
+        rejectionReason: row.rejectionReason || null,
+        shiftCode: row.shiftCode || "A",
+        timestamp: row.createdAt || row.finalScanAt || row.firstScanAt,
+        op100: row.op100_status,
+        op110: row.op110_status,
+        op120: row.op120_status,
+        op130: row.op130_status,
+        op140: row.op140_status,
+        op150: row.op150_status,
+        op160: row.op160_status,
       };
     });
 
-    const interlockedCount = Number(statusMap.INTERLOCKED || 0);
-    const reworkCount = Number(statusMap.REWORK || 0);
+    // Line OEE and OA metrics
+    const hoursSpan = Math.max(1, (new Date(to).getTime() - new Date(from).getTime()) / 3600000);
+    const plannedTarget = Math.max(50, Math.round(hoursSpan * 55));
+    const qualityFactor = totalParts > 0 ? (totalOK / totalParts) : 1;
+    const performanceFactor = totalParts > 0 ? Math.min(1.0, Math.max(0.65, totalParts / plannedTarget)) : 0.85;
+    const availabilityFactor = totalParts > 0 ? Math.min(0.98, Math.max(0.72, (totalParts * 50) / (hoursSpan * 3600 * 0.85))) : 0.88;
+    const lineOeeVal = Math.min(100, Math.max(0, Math.round(availabilityFactor * performanceFactor * qualityFactor * 100)));
+    const lineOaVal = Math.min(100, Math.max(0, Math.round(availabilityFactor * 100)));
+
+    const uniqueMachines = dedupeMachines(dbMachines);
     const activeCount = uniqueMachines.filter((row) => row.is_active !== false).length;
     const availableLines = uniqueStages(uniqueMachines.map((row) => String(row.line_name || "").trim()).filter(Boolean));
 
     res.json({
+      summary: {
+        totalParts,
+        totalOK,
+        totalNG,
+        totalInProgress,
+        scrapRate,
+        okRate,
+      },
+      qualityGates,
+      lineOee: {
+        oee: lineOeeVal,
+        oa: lineOaVal,
+        quality: Math.round(qualityFactor * 100),
+        performance: Math.round(performanceFactor * 100),
+        availability: Math.round(availabilityFactor * 100),
+        target: plannedTarget,
+        actual: totalParts,
+        status: lineOeeVal >= 85 ? "World Class" : lineOeeVal >= 70 ? "Optimal" : "Attention Needed",
+      },
       machines: {
         total: uniqueMachines.length,
         active: activeCount,
         inactive: Math.max(uniqueMachines.length - activeCount, 0),
       },
       parts: {
-        inProgress: statusMap.IN_PROGRESS || 0,
-        completed: statusMap.COMPLETED || 0,
-        ng: statusMap.NG || 0,
-        interlocked: interlockedCount,
-        rework: reworkCount,
+        total: totalParts,
+        completed: totalOK,
+        inProgress: totalInProgress,
+        ng: totalNG,
+        scrapRate,
+        okRate,
       },
       quality: {
-        ok: okLogs,
-        ng: ngLogs,
-        interlocked: interlockedCount,
+        ok: totalOK,
+        ng: totalNG,
+        total: totalParts,
+        scrapRate,
+        okRate,
       },
       shiftProduction,
       availableShifts: shifts.map((shift) => ({
@@ -6742,63 +6967,64 @@ exports.getDashboardSummary = async (req, res) => {
       })),
       availableLines,
       recentScans,
+      topDefects: topDefectsRes || [],
+      dateRange: { from, to },
     });
   } catch (error) {
+    console.error("[DASHBOARD] getDashboardSummary error:", error);
     res.status(500).json({ error: error.message });
   }
 };
 
 exports.getDashboardTrends = async (req, res) => {
   try {
-    const { from, to } = getDateRangeFromQuery(req.query);
-    const lineNameFilter = normalizeLineName(req.query.lineName);
-    const machineIdFilter = Number(req.query.machineId || 0) || null;
-    const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
-    const machineWhere = {};
-    if (lineNameFilter) {
-      machineWhere.line_name = lineNameFilter;
+    const shifts = await getActiveShiftDefinitions();
+    const now = new Date();
+    const defaultWindow = getProductionDayWindow(shifts, now);
+    const datePreset = String(req.query.datePreset || "").toLowerCase().trim();
+    const isAllTime = datePreset === "all" || req.query.allTime === "1" || req.query.allTime === "true";
+    const requestedRange = (req.query.dateFrom || req.query.dateTo) ? getDateRangeFromQuery(req.query) : defaultWindow;
+    const from = requestedRange.from;
+    const to = requestedRange.to;
+
+    const whereConditions = [];
+    const replacements = {};
+
+    if (!isAllTime) {
+      whereConditions.push(`(first_scan_at BETWEEN :from AND :to OR final_scan_at BETWEEN :from AND :to OR createdAt BETWEEN :from AND :to)`);
+      replacements.from = from;
+      replacements.to = to;
     }
-    const machineRows = await Machine.findAll({
-      where: Object.keys(machineWhere).length ? machineWhere : undefined,
-      attributes: ["id", "machine_number", "machine_name", "line_name", "operation_no", "updatedAt", "is_active"],
-      raw: true,
+
+    const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
+
+    const trendsRes = await sequelize.query(`
+      SELECT 
+        FORMAT(COALESCE(first_scan_at, createdAt), 'yyyy-MM-dd HH:00') as hour,
+        COUNT(*) as total,
+        SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) as ok,
+        SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) as ng
+      FROM [RICO_IOT].[dbo].[ProductionReports]
+      ${whereSql}
+      GROUP BY FORMAT(COALESCE(first_scan_at, createdAt), 'yyyy-MM-dd HH:00')
+      ORDER BY hour ASC
+    `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+      console.warn("[DASHBOARD] trends query error:", err.message);
+      return [];
     });
-    const uniqueMachines = dedupeMachines(machineRows).filter((row) => row.is_active !== false);
-    const scopedIds = machineIdFilter
-      ? [machineIdFilter]
-      : uniqueMachines.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
 
-    const [rows, shifts] = await Promise.all([
-      ProductionLog.findAll({
-        where: {
-          createdAt: { [Op.gte]: from, [Op.lte]: to },
-          ...(scopedIds.length ? { machine_id: { [Op.in]: scopedIds } } : {}),
-        },
-        attributes: ["status", "createdAt"],
-        raw: true,
-      }),
-      getActiveShiftDefinitions(),
-    ]);
-
-    const filteredRows = applyShiftFilter(rows, shiftCodeFilter, shifts, { from, to });
-    const map = filteredRows.reduce((acc, row) => {
-      const key = formatHourBucket(row.createdAt);
-      if (!acc[key]) {
-        acc[key] = { hour: key, ok: 0, ng: 0, total: 0 };
-      }
-      if (row.status === "OK") {
-        acc[key].ok += 1;
-      } else {
-        acc[key].ng += 1;
-      }
-      acc[key].total += 1;
-      return acc;
-    }, {});
-
-    const trends = Object.values(map).sort((a, b) => String(a.hour).localeCompare(String(b.hour)));
+    const trends = (trendsRes || []).map((r) => ({
+      hour: r.hour,
+      displayHour: r.hour ? r.hour.slice(-5) : "",
+      total: Number(r.total || 0),
+      ok: Number(r.ok || 0),
+      ng: Number(r.ng || 0),
+      scrapRate: Number(r.total || 0) > 0 ? Number(((Number(r.ng || 0) / Number(r.total || 0)) * 100).toFixed(1)) : 0,
+    }));
 
     res.json(trends);
   } catch (error) {
+    console.error("[DASHBOARD] getDashboardTrends error:", error);
     res.status(500).json({ error: error.message });
   }
 };
@@ -7986,6 +8212,7 @@ async function buildRejectionFilterContext(query = {}) {
   const qualityGateFilter = String(query.qualityGate || "").trim().toUpperCase();
   const categoryFilter = String(query.category || "").trim();
   const reasonFilter = String(query.reason || "").trim();
+  const partCategory = String(query.partCategory || "").trim().toUpperCase();
 
   let dbMachines = [];
   try {
@@ -8114,6 +8341,14 @@ async function buildRejectionFilterContext(query = {}) {
     )`);
   } else if (statusFilter === "OK" || statusFilter === "PASSED") {
     whereConditions.push(`overall_status IN ('OK', 'PASSED')`);
+  }
+
+  if (partCategory) {
+    if (partCategory === 'HPDC') {
+      whereConditions.push(`(part_name IS NOT NULL AND part_name <> '')`);
+    } else if (partCategory === 'OTHER') {
+      whereConditions.push(`(part_name IS NULL OR part_name = '')`);
+    }
   }
 
   const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
@@ -8648,12 +8883,84 @@ exports.getRejectionMlInsights = async (req, res) => {
     const [mlTelemetryRes, latestLimitsRes] = await Promise.all([
       sequelize.query(`
         SELECT
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN metal_pressure ELSE NULL END) as metal_pressure_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN metal_pressure ELSE NULL END) as metal_pressure_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN metal_pressure ELSE NULL END) as metal_pressure_mean_ng,
+          -- 1. Machine Process Parameters (9)
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN COALESCE(plc_cycle_time, cycle_time) ELSE NULL END) as plc_cycle_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN COALESCE(plc_cycle_time, cycle_time) ELSE NULL END) as plc_cycle_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN COALESCE(plc_cycle_time, cycle_time) ELSE NULL END) as plc_cycle_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_close_core_in_time ELSE NULL END) as die_close_core_in_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_close_core_in_time ELSE NULL END) as die_close_core_in_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN die_close_core_in_time ELSE NULL END) as die_close_core_in_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN ejector_time ELSE NULL END) as ejector_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN ejector_time ELSE NULL END) as ejector_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN ejector_time ELSE NULL END) as ejector_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN extract_time ELSE NULL END) as extract_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN extract_time ELSE NULL END) as extract_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN extract_time ELSE NULL END) as extract_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN pouring_time ELSE NULL END) as pouring_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN pouring_time ELSE NULL END) as pouring_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN pouring_time ELSE NULL END) as pouring_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN shot_fwd_time ELSE NULL END) as shot_fwd_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN shot_fwd_time ELSE NULL END) as shot_fwd_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN shot_fwd_time ELSE NULL END) as shot_fwd_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN spray_time ELSE NULL END) as spray_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN spray_time ELSE NULL END) as spray_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN spray_time ELSE NULL END) as spray_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN curing_time ELSE NULL END) as curing_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN curing_time ELSE NULL END) as curing_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN curing_time ELSE NULL END) as curing_time_mean_ng,
+
+          -- 2. Product Parameters (22)
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_low_mn ELSE NULL END) as clamp_tonnage_he_low_mn_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_low_mn ELSE NULL END) as clamp_tonnage_he_low_mn_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_he_low_mn ELSE NULL END) as clamp_tonnage_he_low_mn_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_up_pct ELSE NULL END) as clamp_tonnage_he_up_pct_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_up_pct ELSE NULL END) as clamp_tonnage_he_up_pct_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_he_up_pct ELSE NULL END) as clamp_tonnage_he_up_pct_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_low_pct ELSE NULL END) as clamp_tonnage_op_low_pct_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_low_pct ELSE NULL END) as clamp_tonnage_op_low_pct_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_op_low_pct ELSE NULL END) as clamp_tonnage_op_low_pct_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_up_pct ELSE NULL END) as clamp_tonnage_op_up_pct_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_up_pct ELSE NULL END) as clamp_tonnage_op_up_pct_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_op_up_pct ELSE NULL END) as clamp_tonnage_op_up_pct_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN average_die_clamp_tonnage_count ELSE NULL END) as average_die_clamp_tonnage_count_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN average_die_clamp_tonnage_count ELSE NULL END) as average_die_clamp_tonnage_count_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN average_die_clamp_tonnage_count ELSE NULL END) as average_die_clamp_tonnage_count_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN accel_point ELSE NULL END) as accel_point_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN accel_point ELSE NULL END) as accel_point_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN accel_point ELSE NULL END) as accel_point_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN deaccel_point ELSE NULL END) as deaccel_point_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN deaccel_point ELSE NULL END) as deaccel_point_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN deaccel_point ELSE NULL END) as deaccel_point_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage ELSE NULL END) as clamp_tonnage_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage ELSE NULL END) as clamp_tonnage_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage ELSE NULL END) as clamp_tonnage_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_force_pct ELSE NULL END) as clamp_force_pct_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_force_pct ELSE NULL END) as clamp_force_pct_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_force_pct ELSE NULL END) as clamp_force_pct_mean_ng,
           AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN furnace_metal_temp ELSE NULL END) as furnace_metal_temp_mean_ok,
           STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN furnace_metal_temp ELSE NULL END) as furnace_metal_temp_std_ok,
           AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN furnace_metal_temp ELSE NULL END) as furnace_metal_temp_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN metal_pressure ELSE NULL END) as metal_pressure_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN metal_pressure ELSE NULL END) as metal_pressure_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN metal_pressure ELSE NULL END) as metal_pressure_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN intensification_time ELSE NULL END) as intensification_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN intensification_time ELSE NULL END) as intensification_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN intensification_time ELSE NULL END) as intensification_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN intensification_acc_pressure ELSE NULL END) as intensification_acc_pressure_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN intensification_acc_pressure ELSE NULL END) as intensification_acc_pressure_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN intensification_acc_pressure ELSE NULL END) as intensification_acc_pressure_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN stroke ELSE NULL END) as stroke_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN stroke ELSE NULL END) as stroke_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN stroke ELSE NULL END) as stroke_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN time_for_stroke ELSE NULL END) as time_for_stroke_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN time_for_stroke ELSE NULL END) as time_for_stroke_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN time_for_stroke ELSE NULL END) as time_for_stroke_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN shot_acc_pressure ELSE NULL END) as shot_acc_pressure_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN shot_acc_pressure ELSE NULL END) as shot_acc_pressure_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN shot_acc_pressure ELSE NULL END) as shot_acc_pressure_mean_ng,
           AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN biscuit_thickness ELSE NULL END) as biscuit_thickness_mean_ok,
           STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN biscuit_thickness ELSE NULL END) as biscuit_thickness_std_ok,
           AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN biscuit_thickness ELSE NULL END) as biscuit_thickness_mean_ng,
@@ -8669,66 +8976,55 @@ exports.getRejectionMlInsights = async (req, res) => {
           AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN v4_speed ELSE NULL END) as v4_speed_mean_ok,
           STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN v4_speed ELSE NULL END) as v4_speed_std_ok,
           AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN v4_speed ELSE NULL END) as v4_speed_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN intensification_time ELSE NULL END) as intensification_time_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN intensification_time ELSE NULL END) as intensification_time_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN intensification_time ELSE NULL END) as intensification_time_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN curing_time ELSE NULL END) as curing_time_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN curing_time ELSE NULL END) as curing_time_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN curing_time ELSE NULL END) as curing_time_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN spray_time ELSE NULL END) as spray_time_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN spray_time ELSE NULL END) as spray_time_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN spray_time ELSE NULL END) as spray_time_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_close_core_in_time ELSE NULL END) as die_close_core_in_time_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_close_core_in_time ELSE NULL END) as die_close_core_in_time_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN die_close_core_in_time ELSE NULL END) as die_close_core_in_time_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN pouring_time ELSE NULL END) as pouring_time_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN pouring_time ELSE NULL END) as pouring_time_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN pouring_time ELSE NULL END) as pouring_time_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN shot_fwd_time ELSE NULL END) as shot_fwd_time_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN shot_fwd_time ELSE NULL END) as shot_fwd_time_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN shot_fwd_time ELSE NULL END) as shot_fwd_time_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN ejector_time ELSE NULL END) as ejector_time_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN ejector_time ELSE NULL END) as ejector_time_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN ejector_time ELSE NULL END) as ejector_time_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN extract_time ELSE NULL END) as extract_time_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN extract_time ELSE NULL END) as extract_time_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN extract_time ELSE NULL END) as extract_time_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN accel_point ELSE NULL END) as accel_point_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN accel_point ELSE NULL END) as accel_point_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN accel_point ELSE NULL END) as accel_point_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN deaccel_point ELSE NULL END) as deaccel_point_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN deaccel_point ELSE NULL END) as deaccel_point_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN deaccel_point ELSE NULL END) as deaccel_point_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_low_pct ELSE NULL END) as clamp_tonnage_he_low_pct_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_low_pct ELSE NULL END) as clamp_tonnage_he_low_pct_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_he_low_pct ELSE NULL END) as clamp_tonnage_he_low_pct_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_low_mn ELSE NULL END) as clamp_tonnage_he_low_mn_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_low_mn ELSE NULL END) as clamp_tonnage_he_low_mn_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_he_low_mn ELSE NULL END) as clamp_tonnage_he_low_mn_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_up_pct ELSE NULL END) as clamp_tonnage_op_up_pct_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_up_pct ELSE NULL END) as clamp_tonnage_op_up_pct_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_op_up_pct ELSE NULL END) as clamp_tonnage_op_up_pct_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_low_pct ELSE NULL END) as clamp_tonnage_op_low_pct_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_op_low_pct ELSE NULL END) as clamp_tonnage_op_low_pct_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_op_low_pct ELSE NULL END) as clamp_tonnage_op_low_pct_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_up_pct ELSE NULL END) as clamp_tonnage_he_up_pct_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN clamp_tonnage_he_up_pct ELSE NULL END) as clamp_tonnage_he_up_pct_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN clamp_tonnage_he_up_pct ELSE NULL END) as clamp_tonnage_he_up_pct_mean_ng,
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN jet_cooling_pressure ELSE NULL END) as jet_cooling_pressure_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN jet_cooling_pressure ELSE NULL END) as jet_cooling_pressure_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN jet_cooling_pressure ELSE NULL END) as jet_cooling_pressure_mean_ng,
           AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN vacuum_pressure ELSE NULL END) as vacuum_pressure_mean_ok,
           STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN vacuum_pressure ELSE NULL END) as vacuum_pressure_std_ok,
           AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN vacuum_pressure ELSE NULL END) as vacuum_pressure_mean_ng,
+
+          -- 3. Flow & Pressure Parameters (9)
           AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN cooling_water_mov ELSE NULL END) as cooling_water_mov_mean_ok,
           STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN cooling_water_mov ELSE NULL END) as cooling_water_mov_std_ok,
           AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN cooling_water_mov ELSE NULL END) as cooling_water_mov_mean_ng,
           AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN cooling_water_sta ELSE NULL END) as cooling_water_sta_mean_ok,
           STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN cooling_water_sta ELSE NULL END) as cooling_water_sta_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN cooling_water_sta ELSE NULL END) as cooling_water_sta_mean_ng
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN cooling_water_sta ELSE NULL END) as cooling_water_sta_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN fix_1_flow ELSE NULL END) as fix_1_flow_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN fix_1_flow ELSE NULL END) as fix_1_flow_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN fix_1_flow ELSE NULL END) as fix_1_flow_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN fix_2_flow ELSE NULL END) as fix_2_flow_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN fix_2_flow ELSE NULL END) as fix_2_flow_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN fix_2_flow ELSE NULL END) as fix_2_flow_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN fix_3_flow ELSE NULL END) as fix_3_flow_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN fix_3_flow ELSE NULL END) as fix_3_flow_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN fix_3_flow ELSE NULL END) as fix_3_flow_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN jet_cooling_pressure ELSE NULL END) as jet_cooling_pressure_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN jet_cooling_pressure ELSE NULL END) as jet_cooling_pressure_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN jet_cooling_pressure ELSE NULL END) as jet_cooling_pressure_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN mov_1_flow ELSE NULL END) as mov_1_flow_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN mov_1_flow ELSE NULL END) as mov_1_flow_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN mov_1_flow ELSE NULL END) as mov_1_flow_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN mov_2_flow ELSE NULL END) as mov_2_flow_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN mov_2_flow ELSE NULL END) as mov_2_flow_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN mov_2_flow ELSE NULL END) as mov_2_flow_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN mov_3_flow ELSE NULL END) as mov_3_flow_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN mov_3_flow ELSE NULL END) as mov_3_flow_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN mov_3_flow ELSE NULL END) as mov_3_flow_mean_ng,
+
+          -- 4. Die Temperature Parameters (5)
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN fixed_die_temp_f1 ELSE NULL END) as fixed_die_temp_f1_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN fixed_die_temp_f1 ELSE NULL END) as fixed_die_temp_f1_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN fixed_die_temp_f1 ELSE NULL END) as fixed_die_temp_f1_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN fixed_die_temp_f2 ELSE NULL END) as fixed_die_temp_f2_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN fixed_die_temp_f2 ELSE NULL END) as fixed_die_temp_f2_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN fixed_die_temp_f2 ELSE NULL END) as fixed_die_temp_f2_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN moving_die_temp_m1 ELSE NULL END) as moving_die_temp_m1_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN moving_die_temp_m1 ELSE NULL END) as moving_die_temp_m1_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN moving_die_temp_m1 ELSE NULL END) as moving_die_temp_m1_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN moving_die_temp_m2 ELSE NULL END) as moving_die_temp_m2_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN moving_die_temp_m2 ELSE NULL END) as moving_die_temp_m2_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN moving_die_temp_m2 ELSE NULL END) as moving_die_temp_m2_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN slide_temp_s1 ELSE NULL END) as slide_temp_s1_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN slide_temp_s1 ELSE NULL END) as slide_temp_s1_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN slide_temp_s1 ELSE NULL END) as slide_temp_s1_mean_ng
         FROM [RICO_IOT].[dbo].[ProductionReports]
         ${whereSql}
       `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
@@ -8787,34 +9083,60 @@ exports.getRejectionMlInsights = async (req, res) => {
     const mlRaw = mlTelemetryRes?.[0] || {};
     const limitsRow = latestLimitsRes?.[0] || {};
 
+    // ── 4 USER-SPECIFIED CATEGORIES (Total 45 Parameters) ────────────────────
     const PARAM_SPECS = [
-      { key: "die_close_core_in_time", label: "Die Close Core In Time", unit: "s", defaultLower: 3.0, defaultUpper: 6.5, icon: "clock" },
-      { key: "pouring_time", label: "Pouring Time", unit: "s", defaultLower: 2.0, defaultUpper: 5.8, icon: "clock" },
-      { key: "shot_fwd_time", label: "Shot Forward Time", unit: "s", defaultLower: 1.7, defaultUpper: 2.2, icon: "clock" },
-      { key: "curing_time", label: "Curing Time", unit: "s", defaultLower: 10.0, defaultUpper: 16.0, icon: "hourglass" },
-      { key: "die_open_core_out_time", label: "Die Open Core Out Time", unit: "s", defaultLower: 4.0, defaultUpper: 5.6, icon: "clock" },
-      { key: "ejector_time", label: "Ejector Time", unit: "s", defaultLower: 4.5, defaultUpper: 6.0, icon: "clock" },
-      { key: "extract_time", label: "Extract Time", unit: "s", defaultLower: 10.0, defaultUpper: 16.5, icon: "clock" },
-      { key: "spray_time", label: "Spray Time", unit: "s", defaultLower: 11.5, defaultUpper: 25.0, icon: "droplet" },
-      { key: "v1_speed", label: "V1 Speed", unit: "m/s", defaultLower: 0.22, defaultUpper: 0.35, icon: "zap" },
-      { key: "v2_speed", label: "V2 Speed", unit: "m/s", defaultLower: 0.20, defaultUpper: 0.35, icon: "zap" },
-      { key: "v3_speed", label: "V3 Speed", unit: "m/s", defaultLower: 2.50, defaultUpper: 3.50, icon: "zap" },
-      { key: "v4_speed", label: "V4 Speed", unit: "m/s", defaultLower: 3.20, defaultUpper: 3.80, icon: "zap" },
-      { key: "accel_point", label: "Acceleration Point", unit: "mm", defaultLower: 340, defaultUpper: 400, icon: "activity" },
-      { key: "deaccel_point", label: "Deacceleration Point", unit: "mm", defaultLower: 700, defaultUpper: 730, icon: "activity" },
-      { key: "intensification_time", label: "Intensification Time", unit: "ms", defaultLower: 35, defaultUpper: 85, icon: "clock" },
-      { key: "biscuit_thickness", label: "Biscuit Thickness", unit: "mm", defaultLower: 20, defaultUpper: 30, icon: "layers" },
-      { key: "metal_pressure", label: "Metal Pressure", unit: "MPa", defaultLower: 63.0, defaultUpper: 74.0, icon: "gauge" },
-      { key: "clamp_tonnage_he_low_pct", label: "Clamp Tonnage - HE Low (%)", unit: "%", defaultLower: 94, defaultUpper: 106, icon: "shield" },
-      { key: "clamp_tonnage_he_low_mn", label: "Clamp Tonnage - HE Low (MN)", unit: "MN", defaultLower: 7.5, defaultUpper: 8.8, icon: "shield" },
-      { key: "clamp_tonnage_op_up_pct", label: "Clamp Tonnage - OP Up", unit: "%", defaultLower: 90, defaultUpper: 105, icon: "shield" },
-      { key: "clamp_tonnage_op_low_pct", label: "Clamp Tonnage - OP Low", unit: "%", defaultLower: 90, defaultUpper: 101, icon: "shield" },
-      { key: "clamp_tonnage_he_up_pct", label: "Clamp Tonnage - HE Up", unit: "%", defaultLower: 90, defaultUpper: 115, icon: "shield" },
-      { key: "jet_cooling_pressure", label: "Jet Cooling Pressure", unit: "bar", defaultLower: 0, defaultUpper: 99, icon: "droplet" },
-      { key: "vacuum_pressure", label: "Vacuum Pressure", unit: "bar", defaultLower: 0, defaultUpper: 0, icon: "wind" },
-      { key: "cooling_water_mov", label: "Cooling Water - Moving", unit: "°C", defaultLower: 12.5, defaultUpper: 28.0, icon: "thermometer" },
-      { key: "cooling_water_sta", label: "Cooling Water - Stationary", unit: "°C", defaultLower: 12.5, defaultUpper: 43.0, icon: "thermometer" },
-      { key: "furnace_metal_temp", label: "Furnace Metal Temperature", unit: "°C", defaultLower: 640, defaultUpper: 660, icon: "thermometer" },
+      // 1. Machine Process Parameter — 9
+      { sNo: 1, key: "plc_cycle_time", altKeys: ["cycle_time", "cycleTime"], label: "Cycle Time", unit: "sec", defaultLower: null, defaultUpper: null, category: "Machine Process Parameter", icon: "clock" },
+      { sNo: 2, key: "die_open_core_out_time", altKeys: ["dieOpenTime", "die_open_time"], label: "Die Open Core Out Time", unit: "sec", defaultLower: null, defaultUpper: null, category: "Machine Process Parameter", icon: "clock" },
+      { sNo: 3, key: "die_close_core_in_time", altKeys: ["dieCloseTime", "die_close_time"], label: "Die-Close Core In Time", unit: "sec", defaultLower: null, defaultUpper: null, category: "Machine Process Parameter", icon: "clock" },
+      { sNo: 4, key: "ejector_time", altKeys: ["ejectorTime"], label: "Ejector Time", unit: "sec", defaultLower: null, defaultUpper: null, category: "Machine Process Parameter", icon: "clock" },
+      { sNo: 5, key: "extract_time", altKeys: ["extractTime"], label: "Extract Time", unit: "sec", defaultLower: null, defaultUpper: null, category: "Machine Process Parameter", icon: "clock" },
+      { sNo: 6, key: "pouring_time", altKeys: ["pouringTime"], label: "Pouring Time", unit: "sec", defaultLower: null, defaultUpper: null, category: "Machine Process Parameter", icon: "clock" },
+      { sNo: 7, key: "shot_fwd_time", altKeys: ["shotFwdTime"], label: "Shot FWD Time", unit: "sec", defaultLower: null, defaultUpper: null, category: "Machine Process Parameter", icon: "clock" },
+      { sNo: 8, key: "spray_time", altKeys: ["sprayTime"], label: "Spray Time", unit: "sec", defaultLower: null, defaultUpper: null, category: "Machine Process Parameter", icon: "droplet" },
+      { sNo: 9, key: "curing_time", altKeys: ["curingTime", "cooling_time"], label: "Curing Time (Cooling Time)", unit: "sec", defaultLower: null, defaultUpper: null, category: "Machine Process Parameter", icon: "hourglass" },
+
+      // 2. Product Parameter — 22
+      { sNo: 1, key: "clamp_tonnage_he_low_mn", altKeys: ["clamp_tonnage_he_low"], label: "Clamp Tonnage (HE.Low)", unit: "MN", defaultLower: null, defaultUpper: null, category: "Product Parameter", icon: "shield" },
+      { sNo: 2, key: "clamp_tonnage_he_up_pct", altKeys: ["clamp_tonnage_he_up_mn"], label: "Clamp Tonnage (HE.Up)", unit: "%", defaultLower: null, defaultUpper: null, category: "Product Parameter", icon: "shield" },
+      { sNo: 3, key: "clamp_tonnage_op_low_pct", altKeys: ["clamp_tonnage_op_low_mn"], label: "Clamp Tonnage (OP.Low)", unit: "%", defaultLower: null, defaultUpper: null, category: "Product Parameter", icon: "shield" },
+      { sNo: 4, key: "clamp_tonnage_op_up_pct", altKeys: ["clamp_tonnage_op_up_mn"], label: "Clamp Tonnage (OP.Up)", unit: "%", defaultLower: null, defaultUpper: null, category: "Product Parameter", icon: "shield" },
+      { sNo: 5, key: "average_die_clamp_tonnage_count", altKeys: ["averageDieClampTonnageCount"], label: "Average Die Clamp Tonnage Count", unit: "T", defaultLower: null, defaultUpper: null, category: "Product Parameter", icon: "shield" },
+      { sNo: 6, key: "accel_point", altKeys: ["accelPoint"], label: "Accel. Point", unit: "mm", defaultLower: 300.0, defaultUpper: 400.0, category: "Product Parameter", icon: "activity" },
+      { sNo: 7, key: "deaccel_point", altKeys: ["deaccelPoint"], label: "Deaccel. Point", unit: "mm", defaultLower: 700.0, defaultUpper: 730.0, category: "Product Parameter", icon: "activity" },
+      { sNo: 8, key: "clamp_tonnage", altKeys: ["clampTonnage"], label: "Clamp Tonnage", unit: "T", defaultLower: 550.0, defaultUpper: 650.0, category: "Product Parameter", icon: "shield" },
+      { sNo: 9, key: "clamp_force_pct", altKeys: ["clampForcePct"], label: "Clamp Force", unit: "%", defaultLower: 94.0, defaultUpper: 106.0, category: "Product Parameter", icon: "shield" },
+      { sNo: 10, key: "furnace_metal_temp", altKeys: ["metalTemp", "metal_temp"], label: "Furnace Metal Temp.", unit: "°C", defaultLower: 640.0, defaultUpper: 680.0, category: "Product Parameter", icon: "thermometer" },
+      { sNo: 11, key: "metal_pressure", altKeys: ["metalPressure"], label: "Metal Press.", unit: "MPa", defaultLower: 65.0, defaultUpper: 74.0, category: "Product Parameter", icon: "gauge" },
+      { sNo: 12, key: "intensification_time", altKeys: ["intensificationTime", "inten_time"], label: "Inten. Time", unit: "msec", defaultLower: 30.0, defaultUpper: 85.0, category: "Product Parameter", icon: "clock" },
+      { sNo: 13, key: "intensification_acc_pressure", altKeys: ["intensificationAccPressure"], label: "Intensification Acc. Pressure", unit: "MPa", defaultLower: null, defaultUpper: null, category: "Product Parameter", icon: "gauge" },
+      { sNo: 14, key: "stroke", altKeys: [], label: "Stroke", unit: "mm", defaultLower: null, defaultUpper: null, category: "Product Parameter", icon: "activity" },
+      { sNo: 15, key: "time_for_stroke", altKeys: ["timeForStroke"], label: "Time for Stroke", unit: "ms", defaultLower: null, defaultUpper: null, category: "Product Parameter", icon: "clock" },
+      { sNo: 16, key: "shot_acc_pressure", altKeys: ["shotAccPressure"], label: "Shot Acc. Pressure", unit: "MPa", defaultLower: null, defaultUpper: null, category: "Product Parameter", icon: "gauge" },
+      { sNo: 17, key: "biscuit_thickness", altKeys: ["biscuitThickness"], label: "Biscuit Thickness", unit: "mm", defaultLower: 20.0, defaultUpper: 30.0, category: "Product Parameter", icon: "layers" },
+      { sNo: 18, key: "v1_speed", altKeys: ["v1Speed", "v1"], label: "V1", unit: "m/sec", defaultLower: 0.15, defaultUpper: 0.35, category: "Product Parameter", icon: "zap" },
+      { sNo: 19, key: "v2_speed", altKeys: ["v2Speed", "v2"], label: "V2", unit: "m/sec", defaultLower: 0.20, defaultUpper: 0.38, category: "Product Parameter", icon: "zap" },
+      { sNo: 20, key: "v3_speed", altKeys: ["v3Speed", "v3"], label: "V3", unit: "m/sec", defaultLower: 2.50, defaultUpper: 3.70, category: "Product Parameter", icon: "zap" },
+      { sNo: 21, key: "v4_speed", altKeys: ["v4Speed", "v4"], label: "V4", unit: "m/sec", defaultLower: 3.20, defaultUpper: 4.30, category: "Product Parameter", icon: "zap" },
+      { sNo: 22, key: "vacuum_pressure", altKeys: ["vacuumPressure", "vacuum_pressure_mmhg"], label: "Vacuum Pressure", unit: "mbar", defaultLower: null, defaultUpper: null, category: "Product Parameter", icon: "wind" },
+
+      // 3. Flow & Pressure Parameter — 9
+      { sNo: 1, key: "cooling_water_mov", altKeys: ["coolingWaterMov"], label: "Cooling Water Flow Rate (Mov.)", unit: "L/min", defaultLower: null, defaultUpper: null, category: "Flow & Pressure Parameter", icon: "droplet" },
+      { sNo: 2, key: "cooling_water_sta", altKeys: ["coolingWaterSta"], label: "Cooling Water Flow Rate (Sta.)", unit: "L/min", defaultLower: null, defaultUpper: null, category: "Flow & Pressure Parameter", icon: "droplet" },
+      { sNo: 3, key: "fix_1_flow", altKeys: ["fix1Flow"], label: "FIX. 1 Flow", unit: "Lpm", defaultLower: null, defaultUpper: null, category: "Flow & Pressure Parameter", icon: "droplet" },
+      { sNo: 4, key: "fix_2_flow", altKeys: ["fix2Flow"], label: "FIX. 2 Flow", unit: "Lpm", defaultLower: null, defaultUpper: null, category: "Flow & Pressure Parameter", icon: "droplet" },
+      { sNo: 5, key: "fix_3_flow", altKeys: ["fix3Flow"], label: "FIX. 3 Flow", unit: "Lpm", defaultLower: null, defaultUpper: null, category: "Flow & Pressure Parameter", icon: "droplet" },
+      { sNo: 6, key: "jet_cooling_pressure", altKeys: ["jetCoolingPressure"], label: "Jet Cooling Pressure", unit: "kgf/cm²", defaultLower: null, defaultUpper: null, category: "Flow & Pressure Parameter", icon: "droplet" },
+      { sNo: 7, key: "mov_1_flow", altKeys: ["mov1Flow"], label: "Mov. 1 Flow", unit: "Lpm", defaultLower: null, defaultUpper: null, category: "Flow & Pressure Parameter", icon: "droplet" },
+      { sNo: 8, key: "mov_2_flow", altKeys: ["mov2Flow"], label: "Mov. 2 Flow", unit: "Lpm", defaultLower: null, defaultUpper: null, category: "Flow & Pressure Parameter", icon: "droplet" },
+      { sNo: 9, key: "mov_3_flow", altKeys: ["mov3Flow"], label: "Mov. 3 Flow", unit: "Lpm", defaultLower: null, defaultUpper: null, category: "Flow & Pressure Parameter", icon: "droplet" },
+
+      // 4. Die Temperature Parameter — 5
+      { sNo: 1, key: "fixed_die_temp_f1", altKeys: ["fixedDieTempF1"], label: "Fixed Die Temp (F-1)", unit: "°C", defaultLower: null, defaultUpper: null, category: "Die Temperature Parameter", icon: "thermometer" },
+      { sNo: 2, key: "fixed_die_temp_f2", altKeys: ["fixedDieTempF2"], label: "Fixed Die Temp (F-2)", unit: "°C", defaultLower: null, defaultUpper: null, category: "Die Temperature Parameter", icon: "thermometer" },
+      { sNo: 3, key: "moving_die_temp_m1", altKeys: ["movingDieTempM1"], label: "Moving Die Temp (M-1)", unit: "°C", defaultLower: null, defaultUpper: null, category: "Die Temperature Parameter", icon: "thermometer" },
+      { sNo: 4, key: "moving_die_temp_m2", altKeys: ["movingDieTempM2"], label: "Moving Die Temp (M-2)", unit: "°C", defaultLower: null, defaultUpper: null, category: "Die Temperature Parameter", icon: "thermometer" },
+      { sNo: 5, key: "slide_temp_s1", altKeys: ["slideTempS1"], label: "Slide Temp -1 (S-1)", unit: "°C", defaultLower: null, defaultUpper: null, category: "Die Temperature Parameter", icon: "thermometer" },
     ];
 
     const featureAnalysis = PARAM_SPECS.map((spec) => {
@@ -8829,31 +9151,37 @@ exports.getRejectionMlInsights = async (req, res) => {
       const rawDbUpper = limitsRow?.[ `${spec.key}_upper_limit` ];
       const rawDbLower = limitsRow?.[ `${spec.key}_lower_limit` ];
 
-      const isDummyUpper = Number(rawDbUpper) >= 900 && spec.defaultUpper < 100;
-      const isDummyLower = Number(rawDbLower) <= 0 && spec.defaultLower > 0;
+      const isDummyUpper = Number(rawDbUpper) >= 900 && spec.defaultUpper !== null && spec.defaultUpper < 100;
+      const isDummyLower = Number(rawDbLower) <= 0 && spec.defaultLower !== null && spec.defaultLower > 0;
 
       let dbUpper = (rawDbUpper !== undefined && rawDbUpper !== null && Number(rawDbUpper) > 0 && !isDummyUpper)
         ? Number(rawDbUpper)
-        : (spec.defaultUpper !== undefined ? spec.defaultUpper : null);
+        : (spec.defaultUpper !== undefined && spec.defaultUpper !== null ? spec.defaultUpper : null);
       let dbLower = (rawDbLower !== undefined && rawDbLower !== null && Number(rawDbLower) > 0 && !isDummyLower)
         ? Number(rawDbLower)
-        : (spec.defaultLower !== undefined ? spec.defaultLower : null);
+        : (spec.defaultLower !== undefined && spec.defaultLower !== null ? spec.defaultLower : null);
 
       // If upper is less than or equal to lower, repair using spec defaults
       if (dbUpper !== null && dbLower !== null && dbUpper <= dbLower) {
-        if (spec.defaultUpper !== undefined && spec.defaultLower !== undefined && spec.defaultUpper > spec.defaultLower) {
+        if (spec.defaultUpper !== null && spec.defaultLower !== null && spec.defaultUpper > spec.defaultLower) {
           dbUpper = spec.defaultUpper;
           dbLower = spec.defaultLower;
         }
       }
 
-      const usl = dbUpper !== null ? dbUpper : (stdOk > 0 ? Number((meanOk + 2 * stdOk).toFixed(2)) : Number((meanOk * 1.08).toFixed(2)));
-      const lsl = dbLower !== null ? dbLower : (stdOk > 0 ? Number((meanOk - 2 * stdOk).toFixed(2)) : Number((meanOk * 0.92).toFixed(2)));
-      const setPoint = (dbUpper !== null && dbLower !== null && dbUpper > dbLower)
+      // DO NOT invent fake / random limits if none exist!
+      const hasStaticLimits = dbUpper !== null && dbLower !== null;
+      const aiPredictedSet = meanOk > 0 ? Number(meanOk.toFixed(2)) : null;
+      const setPoint = hasStaticLimits
         ? Number(((dbUpper + dbLower) / 2).toFixed(2))
-        : (meanOk > 0 ? Number(meanOk.toFixed(2)) : (spec.defaultLower != null && spec.defaultUpper != null ? Number(((spec.defaultLower + spec.defaultUpper) / 2).toFixed(2)) : 0));
-      const deltaSetNg = Number((meanNg - setPoint).toFixed(2));
-      const deltaSetNgPct = setPoint !== 0 ? Number(((deltaSetNg / Math.abs(setPoint)) * 100).toFixed(2)) : 0;
+        : null;
+
+      const deltaSetNg = (meanNg > 0 && setPoint !== null) ? Number((meanNg - setPoint).toFixed(2)) : 0;
+      const deltaSetNgPct = (setPoint !== null && setPoint !== 0) ? Number(((deltaSetNg / Math.abs(setPoint)) * 100).toFixed(2)) : 0;
+
+      const driftDirection = deltaSetNg > 0.05 ? "UP" : (deltaSetNg < -0.05 ? "DOWN" : "OPTIMAL");
+      const usl = dbUpper !== null ? dbUpper : null;
+      const lsl = dbLower !== null ? dbLower : null;
 
       let riskLevel = "LOW";
       if (importanceScore >= 35 || Math.abs(driftPct) > 10) riskLevel = "CRITICAL";
@@ -8861,10 +9189,13 @@ exports.getRejectionMlInsights = async (req, res) => {
 
       return {
         ...spec,
+        hasStaticLimits,
+        aiPredictedSet,
         meanOk: Number(meanOk.toFixed(2)),
         stdOk: Number(stdOk.toFixed(2)),
         meanNg: Number(meanNg.toFixed(2)),
         driftPct,
+        driftDirection,
         importanceScore,
         setUpperLimit: dbUpper,
         setLowerLimit: dbLower,
@@ -8877,7 +9208,7 @@ exports.getRejectionMlInsights = async (req, res) => {
       };
     }).sort((a, b) => b.importanceScore - a.importanceScore);
 
-    // Fast query for sample telemetry rows and anomaly candidate parts
+    // Fast query for sample telemetry rows with ALL 45 parameters
     const [sampleRows, anomalyCandidates] = await Promise.all([
       sequelize.query(`
         SELECT * FROM (
@@ -8886,21 +9217,43 @@ exports.getRejectionMlInsights = async (req, res) => {
             shift_code as shiftCode, overall_status as status,
             rejection_category as category, rejection_reason as reason, ng_reason as ngReason,
             shot_number,
-            metal_pressure, furnace_metal_temp, biscuit_thickness, cycle_time,
-            v1_speed, v2_speed, v3_speed, v4_speed, intensification_time,
-            die_close_core_in_time, die_open_core_out_time, curing_time, pouring_time,
-            spray_time, ejector_time, extract_time, clamp_tonnage_he_low_mn,
-            cooling_water_mov, cooling_water_sta, accel_point, deaccel_point,
-            leak_body_leak_value, first_scan_at, createdAt
+            -- 1. Machine Process Parameters (9)
+            plc_cycle_time, cycle_time, die_open_core_out_time, die_close_core_in_time,
+            ejector_time, extract_time, pouring_time, shot_fwd_time, spray_time, curing_time,
+            -- 2. Product Parameters (22)
+            clamp_tonnage_he_low_mn, clamp_tonnage_he_up_pct, clamp_tonnage_op_low_pct, clamp_tonnage_op_up_pct,
+            average_die_clamp_tonnage_count, accel_point, deaccel_point, clamp_tonnage, clamp_force_pct,
+            furnace_metal_temp, metal_pressure, intensification_time, intensification_acc_pressure,
+            stroke, time_for_stroke, shot_acc_pressure, biscuit_thickness,
+            v1_speed, v2_speed, v3_speed, v4_speed, vacuum_pressure, vacuum_pressure_mmhg,
+            -- 3. Flow & Pressure Parameters (9)
+            cooling_water_mov, cooling_water_sta, fix_1_flow, fix_2_flow, fix_3_flow,
+            jet_cooling_pressure, mov_1_flow, mov_2_flow, mov_3_flow,
+            -- 4. Die Temperature Parameters (5)
+            fixed_die_temp_f1, fixed_die_temp_f2, moving_die_temp_m1, moving_die_temp_m2, slide_temp_s1,
+            leak_body_leak_value, leak_data, first_scan_at, createdAt
           FROM [RICO_IOT].[dbo].[ProductionReports] WITH (NOLOCK)
-          WHERE (overall_status IN ('OK', 'PASSED') OR (overall_status = 'IN_PROGRESS' AND op100_status = 'OK'))
+          ${whereSql ? whereSql + " AND" : "WHERE"} (overall_status IN ('OK', 'PASSED') OR (overall_status = 'IN_PROGRESS' AND op100_status = 'OK'))
             AND (
               (metal_pressure IS NOT NULL AND metal_pressure > 0)
               OR (furnace_metal_temp IS NOT NULL AND furnace_metal_temp > 0)
               OR (biscuit_thickness IS NOT NULL AND biscuit_thickness > 0)
               OR (intensification_time IS NOT NULL AND intensification_time > 0)
+              OR (v1_speed IS NOT NULL AND v1_speed > 0)
+              OR (v3_speed IS NOT NULL AND v3_speed > 0)
+              OR (cycle_time IS NOT NULL AND cycle_time > 0)
+              OR (plc_cycle_time IS NOT NULL AND plc_cycle_time > 0)
             )
-          ORDER BY id DESC
+          ORDER BY (
+            CASE WHEN metal_pressure IS NOT NULL AND metal_pressure > 0 THEN 2 ELSE 0 END +
+            CASE WHEN furnace_metal_temp IS NOT NULL AND furnace_metal_temp > 0 THEN 2 ELSE 0 END +
+            CASE WHEN biscuit_thickness IS NOT NULL AND biscuit_thickness > 0 THEN 2 ELSE 0 END +
+            CASE WHEN intensification_time IS NOT NULL AND intensification_time > 0 THEN 2 ELSE 0 END +
+            CASE WHEN v1_speed IS NOT NULL AND v1_speed > 0 THEN 1 ELSE 0 END +
+            CASE WHEN v4_speed IS NOT NULL AND v4_speed > 0 THEN 1 ELSE 0 END +
+            CASE WHEN pouring_time IS NOT NULL AND pouring_time > 0 THEN 1 ELSE 0 END +
+            CASE WHEN curing_time IS NOT NULL AND curing_time > 0 THEN 1 ELSE 0 END
+          ) DESC, id DESC
         ) as okParts
         UNION ALL
         SELECT * FROM (
@@ -8909,14 +9262,23 @@ exports.getRejectionMlInsights = async (req, res) => {
             shift_code as shiftCode, overall_status as status,
             rejection_category as category, rejection_reason as reason, ng_reason as ngReason,
             shot_number,
-            metal_pressure, furnace_metal_temp, biscuit_thickness, cycle_time,
-            v1_speed, v2_speed, v3_speed, v4_speed, intensification_time,
-            die_close_core_in_time, die_open_core_out_time, curing_time, pouring_time,
-            spray_time, ejector_time, extract_time, clamp_tonnage_he_low_mn,
-            cooling_water_mov, cooling_water_sta, accel_point, deaccel_point,
-            leak_body_leak_value, first_scan_at, createdAt
+            -- 1. Machine Process Parameters (9)
+            plc_cycle_time, cycle_time, die_open_core_out_time, die_close_core_in_time,
+            ejector_time, extract_time, pouring_time, shot_fwd_time, spray_time, curing_time,
+            -- 2. Product Parameters (22)
+            clamp_tonnage_he_low_mn, clamp_tonnage_he_up_pct, clamp_tonnage_op_low_pct, clamp_tonnage_op_up_pct,
+            average_die_clamp_tonnage_count, accel_point, deaccel_point, clamp_tonnage, clamp_force_pct,
+            furnace_metal_temp, metal_pressure, intensification_time, intensification_acc_pressure,
+            stroke, time_for_stroke, shot_acc_pressure, biscuit_thickness,
+            v1_speed, v2_speed, v3_speed, v4_speed, vacuum_pressure, vacuum_pressure_mmhg,
+            -- 3. Flow & Pressure Parameters (9)
+            cooling_water_mov, cooling_water_sta, fix_1_flow, fix_2_flow, fix_3_flow,
+            jet_cooling_pressure, mov_1_flow, mov_2_flow, mov_3_flow,
+            -- 4. Die Temperature Parameters (5)
+            fixed_die_temp_f1, fixed_die_temp_f2, moving_die_temp_m1, moving_die_temp_m2, slide_temp_s1,
+            leak_body_leak_value, leak_data, first_scan_at, createdAt
           FROM [RICO_IOT].[dbo].[ProductionReports] WITH (NOLOCK)
-          WHERE (
+          ${whereSql ? whereSql + " AND" : "WHERE"} (
             overall_status IN ('NG', 'FAILED')
             OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
             OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
@@ -8925,16 +9287,30 @@ exports.getRejectionMlInsights = async (req, res) => {
             OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
             OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
             OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
+            OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
           )
           AND (
             (metal_pressure IS NOT NULL AND metal_pressure > 0)
             OR (furnace_metal_temp IS NOT NULL AND furnace_metal_temp > 0)
             OR (biscuit_thickness IS NOT NULL AND biscuit_thickness > 0)
             OR (intensification_time IS NOT NULL AND intensification_time > 0)
+            OR (v1_speed IS NOT NULL AND v1_speed > 0)
+            OR (v3_speed IS NOT NULL AND v3_speed > 0)
+            OR (cycle_time IS NOT NULL AND cycle_time > 0)
+            OR (plc_cycle_time IS NOT NULL AND plc_cycle_time > 0)
           )
-          ORDER BY id DESC
+          ORDER BY (
+            CASE WHEN metal_pressure IS NOT NULL AND metal_pressure > 0 THEN 2 ELSE 0 END +
+            CASE WHEN furnace_metal_temp IS NOT NULL AND furnace_metal_temp > 0 THEN 2 ELSE 0 END +
+            CASE WHEN biscuit_thickness IS NOT NULL AND biscuit_thickness > 0 THEN 2 ELSE 0 END +
+            CASE WHEN intensification_time IS NOT NULL AND intensification_time > 0 THEN 2 ELSE 0 END +
+            CASE WHEN v1_speed IS NOT NULL AND v1_speed > 0 THEN 1 ELSE 0 END +
+            CASE WHEN v4_speed IS NOT NULL AND v4_speed > 0 THEN 1 ELSE 0 END +
+            CASE WHEN pouring_time IS NOT NULL AND pouring_time > 0 THEN 1 ELSE 0 END +
+            CASE WHEN curing_time IS NOT NULL AND curing_time > 0 THEN 1 ELSE 0 END
+          ) DESC, id DESC
         ) as ngParts
-      `, { type: sequelize.QueryTypes.SELECT }).catch((err) => {
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
         console.warn("[REJECTION] sampleRows query error:", err.message);
         return [];
       }),
@@ -8976,7 +9352,7 @@ exports.getRejectionMlInsights = async (req, res) => {
             maxZ = z;
             const sign = val >= f.meanOk ? "+" : "-";
             worstParam = `${f.label} (${val.toFixed(1)} ${f.unit}, ${sign}${z.toFixed(1)}σ)`;
-            worstLimits = `${f.lsl} – ${f.usl} ${f.unit} (Target: ${f.setPoint})`;
+            worstLimits = f.lsl != null && f.usl != null ? `${f.lsl} – ${f.usl} ${f.unit} (Target: ${f.setPoint || '—'})` : `Live Measured (${f.unit})`;
           }
         }
       });
@@ -9006,7 +9382,6 @@ exports.getRejectionMlInsights = async (req, res) => {
   }
 };
 
-// ─── Backward-Compatible Full Rejection Analysis ────────────────────────────
 exports.getRejectionAnalysis = async (req, res) => {
   try {
     const ctx = await buildRejectionFilterContext(req.query);
@@ -9408,7 +9783,7 @@ exports.getRejectionRows = async (req, res) => {
       page = 1, pageSize = 100,
       dateFrom, dateTo, datePreset, allTime,
       shiftCode, machineName, qualityGate, status, search,
-      category, reason, view, zone,
+      category, reason, view, zone, partCategory, dieName
     } = req.query;
 
     const pgNum = Math.max(1, parseInt(page, 10) || 1);
@@ -9419,29 +9794,26 @@ exports.getRejectionRows = async (req, res) => {
     const replacements = {};
 
     if (allTime !== '1' && datePreset !== 'all') {
-      if (dateFrom && dateTo) {
-        whereConditions.push(`(
-          (first_scan_at BETWEEN :dateFrom AND :dateTo) OR
-          (final_scan_at BETWEEN :dateFrom AND :dateTo) OR
-          (createdAt BETWEEN :dateFrom AND :dateTo)
-        )`);
-        replacements.dateFrom = new Date(dateFrom);
-        replacements.dateTo = new Date(dateTo);
-      } else if (dateFrom) {
-        whereConditions.push(`(first_scan_at >= :dateFrom OR final_scan_at >= :dateFrom OR createdAt >= :dateFrom)`);
-        replacements.dateFrom = new Date(dateFrom);
-      } else if (dateTo) {
-        whereConditions.push(`(first_scan_at <= :dateTo OR final_scan_at <= :dateTo OR createdAt <= :dateTo)`);
-        replacements.dateTo = new Date(dateTo);
-      } else {
-        const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-        whereConditions.push(`(first_scan_at >= :sinceDate OR final_scan_at >= :sinceDate OR createdAt >= :sinceDate)`);
-        replacements.sinceDate = since;
-      }
+      const requestedRange = (dateFrom || dateTo) ? getDateRangeFromQuery(req.query) : { 
+        from: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), 
+        to: new Date() 
+      };
+      whereConditions.push(`(
+        (first_scan_at BETWEEN :dateFrom AND :dateTo) OR
+        (final_scan_at BETWEEN :dateFrom AND :dateTo) OR
+        (createdAt BETWEEN :dateFrom AND :dateTo)
+      )`);
+      replacements.dateFrom = requestedRange.from;
+      replacements.dateTo = requestedRange.to;
     }
 
     if (shiftCode) { whereConditions.push('shift_code = :shiftCode'); replacements.shiftCode = shiftCode; }
     if (machineName) { whereConditions.push('machine_name = :machineName'); replacements.machineName = machineName; }
+    const dieNameFilter = String(dieName || "").trim().toUpperCase();
+    if (dieNameFilter) {
+      whereConditions.push(`UPPER(die_name) = :dieName`);
+      replacements.dieName = dieNameFilter;
+    }
     const qualityGateFilter = String(qualityGate || '').trim().toUpperCase();
     if (/^(OP(100|110|120|130|140|150|160)|LEAK-TEST-01|LEAK-TEST-02|LEAK TEST-03|LEAK-TEST-03|LEAK01|LEAK02|LEAK03)$/i.test(qualityGateFilter)) {
       if (qualityGateFilter === 'OP150' || qualityGateFilter.startsWith('LEAK')) {
@@ -9553,15 +9925,25 @@ exports.getRejectionRows = async (req, res) => {
         OR (machine_name LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
         OR (rejection_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
         OR (ng_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+        OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
       )`);
     } else if (statusUpper === 'OK') {
       whereConditions.push(`overall_status IN ('OK', 'PASSED')`);
     }
 
+    const categoryPartFilter = String(partCategory || '').trim().toUpperCase();
+    if (categoryPartFilter) {
+      if (categoryPartFilter === 'HPDC') {
+        whereConditions.push(`(part_name IS NOT NULL AND part_name <> '')`);
+      } else if (categoryPartFilter === 'OTHER') {
+        whereConditions.push(`(part_name IS NULL OR part_name = '')`);
+      }
+    }
+
     const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
     const prWhereSql = whereSql ? whereSql
       .replace(/\[(\w+)\]/g, '$1')
-      .replace(/\b(part_id|customer_qr|createdAt|updatedAt|first_scan_at|final_scan_at|shift_code|machine_name|die_name|part_name|rejection_category|rejection_reason|ng_reason|overall_status|op100_status|op110_status|op120_status|op130_status|op140_status|op150_status|op160_status)\b/g, 'pr.[$1]')
+      .replace(/\b(part_id|customer_qr|createdAt|updatedAt|first_scan_at|final_scan_at|shift_code|machine_name|die_name|part_name|rejection_category|rejection_reason|ng_reason|overall_status|op100_status|op110_status|op120_status|op130_status|op140_status|op150_status|op160_status|leak_data)\b/g, 'pr.[$1]')
       : '';
 
     const [countRes] = await sequelize.query(
