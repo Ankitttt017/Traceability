@@ -7,40 +7,90 @@ import { getDefaultBackendOrigin, resolveBackendUrl } from "../constants/network
 |--------------------------------------------------------------------------
 | BASE URL CONFIG
 |--------------------------------------------------------------------------
-| Uncomment according to environment
-|--------------------------------------------------------------------------
 */
 
 const DEFAULT_SERVER_URL =
   typeof window !== "undefined" ? getDefaultBackendOrigin() : "http://localhost:9090";
 
-// Production-safe default:
-// 1) Use VITE_API_BASE_URL when provided.
-// 2) Else call same-origin backend path (/api/v1), avoiding hardcoded LAN IP in live deploy.
 const ENV_API_BASE_URL = String(import.meta.env.VITE_API_BASE_URL || "").trim();
 const BASE_URL = resolveBackendUrl(ENV_API_BASE_URL || `${DEFAULT_SERVER_URL}/api/v1`);
-
-// Live Production / LAN
-// const BASE_URL = "http://172.16.9.110:4000/api/v1";
-
-// Company Server
-// const BASE_URL = "http://192.168.1.100:4000/api/v1";
-
-// Public Domain
-// const BASE_URL = "https://yourdomain.com/api/v1";
 
 export const API_BASE_URL = BASE_URL;
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 15000,
+  timeout: 30000,
 });
+
+let consecutiveNetworkFailures = 0;
+let isOfflineEmitted = false;
+let verifyHealthTimer = null;
 
 function emitConnectivityStatus(status, detail = {}) {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent("traceability:connectivity", {
-    detail: { status, ...detail },
-  }));
+
+  if (status === "online") {
+    isOfflineEmitted = false;
+    consecutiveNetworkFailures = 0;
+  } else if (status === "offline") {
+    isOfflineEmitted = true;
+  }
+
+  window.dispatchEvent(
+    new CustomEvent("traceability:connectivity", {
+      detail: { status, ...detail },
+    })
+  );
+}
+
+function verifyServerUnreachable(reason) {
+  if (typeof window === "undefined") return;
+
+  // If browser is physically disconnected, emit offline immediately
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    emitConnectivityStatus("offline", {
+      reason: "browser",
+      message: "Browser network offline. Check internet or LAN cable.",
+    });
+    return;
+  }
+
+  // Double-check via lightweight health probe to avoid false alarms
+  clearTimeout(verifyHealthTimer);
+  verifyHealthTimer = setTimeout(async () => {
+    try {
+      const healthUrl = `${API_BASE_URL.replace(/\/+$/, "")}/health`;
+      const ctrl = new AbortController();
+      const tid = setTimeout(() => ctrl.abort(), 3500);
+
+      const res = await fetch(healthUrl, {
+        method: "GET",
+        cache: "no-store",
+        signal: ctrl.signal,
+        headers: { Accept: "application/json" },
+      });
+      clearTimeout(tid);
+
+      if (res.ok) {
+        // Health endpoint responded OK! The server is actually alive
+        consecutiveNetworkFailures = 0;
+        if (isOfflineEmitted) {
+          emitConnectivityStatus("online");
+        }
+        return;
+      }
+    } catch (_probeErr) {
+      // Probe also failed — confirmed offline
+    }
+
+    emitConnectivityStatus("offline", {
+      reason,
+      message:
+        reason === "timeout"
+          ? "Server timeout. Check API/DB connection."
+          : "Unable to reach server. Please check network or backend service status.",
+    });
+  }, 1000);
 }
 
 apiClient.interceptors.request.use((config) => {
@@ -65,12 +115,28 @@ function isAuthEndpoint(url = "") {
 
 apiClient.interceptors.response.use(
   (response) => {
-    emitConnectivityStatus("online");
+    consecutiveNetworkFailures = 0;
+    if (isOfflineEmitted) {
+      emitConnectivityStatus("online");
+    }
     return response;
   },
 
   (error) => {
+    // 1. Ignore user-aborted / canceled requests (e.g., page navigation, debounced queries)
+    if (axios.isCancel(error) || error?.code === "ERR_CANCELED") {
+      return Promise.reject(error);
+    }
+
     const status = Number(error?.response?.status || 0);
+
+    // 2. If status was returned by the server (4xx or 5xx), the server IS REACHABLE
+    if (status > 0) {
+      consecutiveNetworkFailures = 0;
+      if (isOfflineEmitted) {
+        emitConnectivityStatus("online");
+      }
+    }
 
     const requestUrl = String(error?.config?.url || "");
 
@@ -95,28 +161,27 @@ apiClient.interceptors.response.use(
     const globalIsTimeout =
       error?.code === "ECONNABORTED" ||
       globalNormalized.includes("timeout") ||
-      globalNormalized.includes("15000ms");
+      globalNormalized.includes("30000ms");
     const globalIsNetworkDown =
       error?.message === "Network Error" ||
       error?.code === "ERR_NETWORK" ||
       globalNormalized.includes("failed to fetch");
 
-    if (status !== 401 && status !== 403 && (globalIsTimeout || globalIsNetworkDown)) {
-      emitConnectivityStatus("offline", {
-        reason: globalIsTimeout ? "timeout" : "network",
-        message: globalIsTimeout
-          ? "Server timeout. Check API/DB connection."
-          : "Unable to reach server. Please check network or backend service status.",
-      });
+    // 3. Only count as network failure when status is 0 (no HTTP response received at all)
+    if (status === 0 && (globalIsTimeout || globalIsNetworkDown)) {
+      consecutiveNetworkFailures += 1;
+
+      const isBrowserOffline = typeof navigator !== "undefined" && navigator.onLine === false;
+      // Require at least 2 consecutive failures or true browser offline before showing overlay
+      if (isBrowserOffline || consecutiveNetworkFailures >= 2) {
+        verifyServerUnreachable(globalIsTimeout ? "timeout" : "network");
+      }
     }
 
     if (authFailure && !isAuthEndpointReq && typeof window !== "undefined") {
       clearAuthSession();
 
-      localStorage.setItem(
-        "auth_error_reason",
-        "SESSION_EXPIRED"
-      );
+      localStorage.setItem("auth_error_reason", "SESSION_EXPIRED");
 
       if (!window.location.pathname.startsWith("/login")) {
         window.location.assign("/login");
@@ -137,11 +202,12 @@ apiClient.interceptors.response.use(
       const isTimeout =
         error?.code === "ECONNABORTED" ||
         normalized.includes("timeout") ||
-        normalized.includes("15000ms");
+        normalized.includes("30000ms");
       const isNetworkDown =
-        error?.message === "Network Error" ||
-        error?.code === "ERR_NETWORK" ||
-        normalized.includes("failed to fetch");
+        status === 0 &&
+        (error?.message === "Network Error" ||
+          error?.code === "ERR_NETWORK" ||
+          normalized.includes("failed to fetch"));
 
       let errorMessage = rawMessage || "An unexpected error occurred.";
       if (isTimeout) {

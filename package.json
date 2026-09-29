@@ -1,4 +1,11 @@
 {
+  "name": "traceability-root",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev"
+  },
   "dependencies": {
     "msnodesqlv8": "^5.2.0"
   }
