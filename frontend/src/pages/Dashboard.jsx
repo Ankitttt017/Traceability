@@ -31,6 +31,7 @@ import {
   Calendar,
   ChevronLeft,
   ChevronRight,
+  ArrowRight,
   Circle,
   Wifi,
   WifiOff,
@@ -317,7 +318,7 @@ function normalizeRejectionType(reason = "") {
     .replace(/[_\-]+/g, " ")
     .replace(/\s+/g, " ");
   if (!r) return "MR - Machining Rejection";
-  
+
   if (r.includes("LEAK") || r.includes("OP150")) {
     return "LT - Leak Test Rejection";
   }
@@ -604,10 +605,10 @@ function normalizeDashboardStationResult(value, reason = "", row = null) {
 function normalizeDashboardLeakResult(reading = {}) {
   const status = String(
     reading?.result ||
-      reading?.Result ||
-      reading?.rawResult ||
-      reading?.Raw_Result ||
-      "",
+    reading?.Result ||
+    reading?.rawResult ||
+    reading?.Raw_Result ||
+    "",
   )
     .trim()
     .toUpperCase();
@@ -649,17 +650,17 @@ function isFinalInspectionOperation(rowOrOperation = {}) {
     typeof rowOrOperation === "string"
       ? rowOrOperation
       : rowOrOperation.operationNo ||
-        rowOrOperation.stationNo ||
-        rowOrOperation.operation_no ||
-        rowOrOperation.station_no ||
-        "";
+      rowOrOperation.stationNo ||
+      rowOrOperation.operation_no ||
+      rowOrOperation.station_no ||
+      "";
   const machineName =
     typeof rowOrOperation === "string"
       ? ""
       : rowOrOperation.machineName ||
-        rowOrOperation.machine_name ||
-        rowOrOperation?.Machine?.machine_name ||
-        "";
+      rowOrOperation.machine_name ||
+      rowOrOperation?.Machine?.machine_name ||
+      "";
   const op = String(operation || "").trim().toUpperCase();
   const machine = String(machineName || "").trim().toUpperCase();
   return (
@@ -938,72 +939,102 @@ function tone(color, alpha = 0.1) {
   return raw;
 }
 
-const KpiCard = ({ label, value, icon: Icon, accent, sub }) => {
+const KpiCard = ({ label, value, icon: Icon, accent, sub, subValue, subtitle }) => {
   const accentColor = accent || C.steel();
   return (
-  <div
-    style={{
-      background: `linear-gradient(180deg, ${tone(accentColor, 0.035)}, ${C.bg("card")} 42%)`,
-      border: `1px solid ${tone(accentColor, 0.16)}`,
-      borderRadius: 12,
-      padding: "15px 17px",
-      boxShadow: `0 2px 10px ${C.navy(0.06)}, 0 1px 2px ${C.navy(0.04)}`,
-      display: "flex",
-      flexDirection: "column",
-      gap: 8,
-      position: "relative",
-      overflow: "hidden",
-    }}
-  >
     <div
       style={{
+        background: `linear-gradient(180deg, ${tone(accentColor, 0.05)}, ${C.bg("card")} 45%)`,
+        border: `1px solid ${tone(accentColor, 0.2)}`,
+        borderRadius: 14,
+        padding: "16px 18px",
+        boxShadow: `0 4px 14px ${C.navy(0.06)}, 0 1px 3px ${C.navy(0.04)}`,
         display: "flex",
-        alignItems: "flex-start",
-        justifyContent: "space-between",
+        flexDirection: "column",
+        gap: 10,
+        position: "relative",
+        overflow: "hidden",
+        transition: "all 0.2s ease",
       }}
     >
-      <p
-        style={{
-          fontSize: 11,
-          fontWeight: 700,
-          textTransform: "uppercase",
-          letterSpacing: "0.07em",
-          color: C.txt("muted"),
-          lineHeight: 1.3,
-        }}
-      >
-        {label}
-      </p>
       <div
         style={{
-          width: 28,
-          height: 28,
-          borderRadius: 9,
-          background: tone(accentColor, 0.1),
-          border: `1px solid ${tone(accentColor, 0.18)}`,
           display: "flex",
           alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
+          justifyContent: "space-between",
         }}
       >
-        <Icon size={13} color={accentColor} />
+        <div
+          style={{
+            width: 36,
+            height: 36,
+            borderRadius: 10,
+            background: tone(accentColor, 0.12),
+            border: `1px solid ${tone(accentColor, 0.25)}`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            boxShadow: `0 2px 8px ${tone(accentColor, 0.15)}`,
+          }}
+        >
+          <Icon size={17} color={accentColor} strokeWidth={2.4} />
+        </div>
+        {subValue && (
+          <span
+            style={{
+              fontSize: 9,
+              fontWeight: 800,
+              textTransform: "uppercase",
+              letterSpacing: "0.07em",
+              color: accentColor,
+              background: tone(accentColor, 0.08),
+              border: `1px solid ${tone(accentColor, 0.2)}`,
+              padding: "3px 8px",
+              borderRadius: 6,
+            }}
+          >
+            {subValue}
+          </span>
+        )}
       </div>
+
+      <div>
+        <p
+          style={{
+            fontSize: 10,
+            fontWeight: 800,
+            textTransform: "uppercase",
+            letterSpacing: "0.07em",
+            color: C.txt("muted"),
+            lineHeight: 1.2,
+            margin: "0 0 4px",
+          }}
+        >
+          {label}
+        </p>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+          <span
+            style={{
+              fontSize: 26,
+              fontWeight: 900,
+              color: C.txt("pri"),
+              lineHeight: 1,
+              fontFamily: "'DM Mono',monospace",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {typeof value === 'number' ? value.toLocaleString() : value}
+          </span>
+          {subtitle && (
+            <span style={{ fontSize: 11, fontWeight: 600, color: C.txt("sec") }}>
+              {subtitle}
+            </span>
+          )}
+        </div>
+      </div>
+      {sub && <p style={{ fontSize: 11, color: C.txt("muted"), margin: 0 }}>{sub}</p>}
     </div>
-    <p
-      style={{
-        fontSize: 28,
-        fontWeight: 800,
-        color: C.txt("pri"),
-        lineHeight: 1,
-        fontFamily: "'DM Mono',monospace",
-        fontVariantNumeric: "tabular-nums",
-      }}
-    >
-      {value}
-    </p>
-    {sub && <p style={{ fontSize: 11, color: C.txt("muted") }}>{sub}</p>}
-  </div>
   );
 };
 
@@ -1152,7 +1183,7 @@ const MachineCard = ({
             color: C.ng(),
             title:
               String(row.stationNo || row.station_no || "").toUpperCase() ===
-              "OP150"
+                "OP150"
                 ? "Leak Test NG count from leak machine result"
                 : "Machine NG count",
           },
@@ -1266,9 +1297,9 @@ const MachineCard = ({
             title={
               plcOnline === null
                 ? t(
-                    "dashboard.plcStatusUnknown",
-                    "PLC status unknown / not assigned",
-                  )
+                  "dashboard.plcStatusUnknown",
+                  "PLC status unknown / not assigned",
+                )
                 : plcOnline
                   ? t("dashboard.plcOnline", "PLC online")
                   : t("dashboard.plcOffline", "PLC offline")
@@ -1301,9 +1332,9 @@ const MachineCard = ({
             title={
               scannerOnline === null
                 ? t(
-                    "dashboard.scannerStatusUnknown",
-                    "Scanner status unknown / not assigned",
-                  )
+                  "dashboard.scannerStatusUnknown",
+                  "Scanner status unknown / not assigned",
+                )
                 : scannerOnline
                   ? t("dashboard.scannerOnline", "Scanner online")
                   : t("dashboard.scannerOffline", "Scanner offline")
@@ -1563,10 +1594,10 @@ const DashboardDateRangePicker = ({
   const formatDateDisplay = (date) =>
     date
       ? date.toLocaleDateString("en-IN", {
-          day: "2-digit",
-          month: "short",
-          year: "numeric",
-        })
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      })
       : "";
 
   const handleDayClick = (day) => {
@@ -1769,9 +1800,13 @@ const Dashboard = () => {
   const lastStableReportMetricsRef = useRef(null);
   const [shiftManagerShifts, setShiftManagerShifts] = useState([]);
   const [oeeData, setOeeData] = useState([]);
+  const [trendsData, setTrendsData] = useState([]);
+  const [activePreset, setActivePreset] = useState("today");
+  const [showAllGates, setShowAllGates] = useState(false);
+  const [selectedStationFilter, setSelectedStationFilter] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("overview");
-  const [showFilters, setShowFilters] = useState(true);
+  const [showFilters, setShowFilters] = useState(false);
   const [plcMap, setPlcMap] = useState({});
   const [nowMs, setNowMs] = useState(Date.now());
   const [filters, setFilters] = useState(() => {
@@ -1895,21 +1930,16 @@ const Dashboard = () => {
   }, [filters, isLiveProductionRange, nowMs]);
 
   const query = useMemo(() => {
-    const dateFrom = localDateTimeToIso(effectiveFilters.dateFrom);
-    const dateTo = localDateTimeToIso(effectiveFilters.dateTo);
+    const isAll = activePreset === "all";
+    const dateFrom = isAll ? undefined : localDateTimeToIso(effectiveFilters.dateFrom);
+    const dateTo = isAll ? undefined : localDateTimeToIso(effectiveFilters.dateTo);
     return {
       dateFrom,
       dateTo,
-      machineId: effectiveFilters.machineId || undefined,
-      plantId: effectiveFilters.plantId || undefined,
-      lineId: effectiveFilters.lineId || undefined,
-      lineName: effectiveFilters.lineName || undefined,
-      partId: effectiveFilters.partId || undefined,
-      status:
-        effectiveFilters.status === "WIP" ? "IN_PROGRESS" : effectiveFilters.status || undefined,
-      shiftCode: effectiveFilters.shiftCode || undefined,
+      datePreset: isAll ? "all" : undefined,
+      allTime: isAll ? "1" : undefined,
     };
-  }, [effectiveFilters]);
+  }, [effectiveFilters, activePreset]);
 
   const selectedQualityGate = useMemo(() => {
     if (!filters.machineId) return null;
@@ -1924,10 +1954,10 @@ const Dashboard = () => {
   const reportMetricsQuery = useMemo(() => {
     const selectedOperation = String(
       selectedQualityGate?.operationNo ||
-        selectedQualityGate?.operation_no ||
-        selectedQualityGate?.stationNo ||
-        selectedQualityGate?.station_no ||
-        "",
+      selectedQualityGate?.operation_no ||
+      selectedQualityGate?.stationNo ||
+      selectedQualityGate?.station_no ||
+      "",
     )
       .trim()
       .toUpperCase();
@@ -1990,6 +2020,7 @@ const Dashboard = () => {
       const [
         machinesResult,
         summaryResult,
+        trendsResult,
         reportResult,
         oeeResult,
         reportMetricsResult,
@@ -2002,11 +2033,15 @@ const Dashboard = () => {
           timeout: 25000,
           suppressGlobalError: true,
         }),
+        dashboardApi.trends(freshQuery, {
+          timeout: 25000,
+          suppressGlobalError: true,
+        }),
         dashboardApi.report(
           { ...freshQuery, light: "1" },
           { timeout: 45000, suppressGlobalError: true },
         ),
-        dashboardApi.oee({ timeout: 20000, suppressGlobalError: true, params: { noCache: "1", _ts: requestTs } }),
+        dashboardApi.oee({ timeout: 20000, suppressGlobalError: true, params: { ...freshQuery, noCache: "1", _ts: requestTs } }),
         reportMetricsPromise,
         shiftApi.list(undefined, { timeout: 20000, suppressGlobalError: true, params: { noCache: "1", _ts: requestTs } }),
       ]);
@@ -2016,6 +2051,9 @@ const Dashboard = () => {
       }
       if (summaryResult.status === "fulfilled") {
         setSummary(summaryResult.value || EMPTY_SUMMARY);
+      }
+      if (trendsResult.status === "fulfilled") {
+        setTrendsData(trendsResult.value || []);
       }
       if (reportResult.status === "fulfilled") {
         setReport(reportResult.value || EMPTY_REPORT);
@@ -2039,6 +2077,7 @@ const Dashboard = () => {
       const failures = [
         machinesResult.status === "rejected" ? machinesResult.reason : null,
         summaryResult.status === "rejected" ? summaryResult.reason : null,
+        trendsResult.status === "rejected" ? trendsResult.reason : null,
         reportResult.status === "rejected" ? reportResult.reason : null,
         oeeResult.status === "rejected" ? oeeResult.reason : null,
         reportMetricsResult.status === "rejected"
@@ -2172,19 +2211,19 @@ const Dashboard = () => {
     rows.forEach((row, index) => {
       const partId = String(
         row?.partId ||
-          row?.part_id ||
-          row?.traceabilityPartId ||
-          row?.customerQrCode ||
-          "",
+        row?.part_id ||
+        row?.traceabilityPartId ||
+        row?.customerQrCode ||
+        "",
       ).trim();
       if (!partId) return;
       const machineName = String(row?.machineName || "").trim();
       const stationNo = String(
         row?.stationNo ||
-          row?.station_no ||
-          row?.operationNo ||
-          row?.operation_no ||
-          "",
+        row?.station_no ||
+        row?.operationNo ||
+        row?.operation_no ||
+        "",
       ).trim();
       const normalizedStatus = normalizeDashboardStationResult(
         row?.result || row?.status || row?.statusLabel || row?.industrialResult,
@@ -2201,10 +2240,10 @@ const Dashboard = () => {
           latestCreatedAt: row?.createdAt || null,
           latestRawStatus: String(
             row?.status ||
-              row?.statusLabel ||
-              row?.result ||
-              row?.industrialResult ||
-              "",
+            row?.statusLabel ||
+            row?.result ||
+            row?.industrialResult ||
+            "",
           )
             .trim()
             .toUpperCase(),
@@ -2225,10 +2264,10 @@ const Dashboard = () => {
         entry.latestCreatedAt = row?.createdAt || entry.latestCreatedAt;
         entry.latestRawStatus = String(
           row?.status ||
-            row?.statusLabel ||
-            row?.result ||
-            row?.industrialResult ||
-            "",
+          row?.statusLabel ||
+          row?.result ||
+          row?.industrialResult ||
+          "",
         )
           .trim()
           .toUpperCase();
@@ -2245,7 +2284,7 @@ const Dashboard = () => {
       if (
         !entry.createdAt ||
         createdAtMs <
-          (new Date(entry.createdAt || 0).getTime() || Number.MAX_SAFE_INTEGER)
+        (new Date(entry.createdAt || 0).getTime() || Number.MAX_SAFE_INTEGER)
       ) {
         entry.createdAt = row?.createdAt || entry.createdAt;
       }
@@ -2305,10 +2344,10 @@ const Dashboard = () => {
           .map((machine) =>
             String(
               machine.operationNo ||
-                machine.operation_no ||
-                machine.stationNo ||
-                machine.station_no ||
-                "",
+              machine.operation_no ||
+              machine.stationNo ||
+              machine.station_no ||
+              "",
             )
               .trim()
               .toUpperCase(),
@@ -2327,7 +2366,7 @@ const Dashboard = () => {
         if (
           !current ||
           getDashboardOperationPriority(stage.normalizedStatus) >
-            getDashboardOperationPriority(current)
+          getDashboardOperationPriority(current)
         ) {
           operationResults.set(operationKey, stage.normalizedStatus);
         }
@@ -2365,7 +2404,7 @@ const Dashboard = () => {
         ) ||
           (latestReason &&
             normalizedLatestReason !==
-              "RECOVERY_PENDING_AFTER_BACKEND_RESTART"));
+            "RECOVERY_PENDING_AFTER_BACKEND_RESTART"));
       const failureStage = entry.stationTimeline.find(
         (stage) =>
           stage.normalizedStatus === "NG" && String(stage.reason || "").trim(),
@@ -2424,11 +2463,11 @@ const Dashboard = () => {
       const inProgress = Number(reportMetrics.inProgress || 0);
       const visibleNgCount = Array.isArray(report.partsList)
         ? report.partsList.filter((row) => {
-            const status = String(row?.result || row?.status || row?.statusLabel || row?.industrialResult || "").toUpperCase();
-            const reason = String(row?.interlock_reason || row?.reason || "").trim();
-            if (isPlcCommonError(reason)) return false;
-            return status === "NG" || status === "FAILED";
-          }).length
+          const status = String(row?.result || row?.status || row?.statusLabel || row?.industrialResult || "").toUpperCase();
+          const reason = String(row?.interlock_reason || row?.reason || "").trim();
+          if (isPlcCommonError(reason)) return false;
+          return status === "NG" || status === "FAILED";
+        }).length
         : 0;
       const resolvedFailed = failed > 0 ? failed : visibleNgCount;
       return {
@@ -2441,8 +2480,8 @@ const Dashboard = () => {
         inProgress,
         total: Number(
           reportMetrics.traceabilityProduction ??
-            reportMetrics.totalProduction ??
-            passed + resolvedFailed + inProgress,
+          reportMetrics.totalProduction ??
+          passed + resolvedFailed + inProgress,
         ),
       };
     }
@@ -2455,24 +2494,87 @@ const Dashboard = () => {
       inProgress: Number(counts.inProgress || 0) + Number(counts.blocked || 0),
       total: Number(
         counts.total ||
-          counts.totalProduction ||
-          counts.traceabilityProduction ||
-          0,
+        counts.totalProduction ||
+        counts.traceabilityProduction ||
+        0,
       ),
     };
   }, [report?.traceabilityCounts, reportMetrics]);
 
-  const dashboardPartCounts =
-    reportTraceabilityCounts || dashboardPartCountsFromJourney;
-  const dashboardTotalProduction =
-    Number(
-      dashboardPartCounts.total ??
-        reportMetrics?.traceabilityProduction ??
-        reportMetrics?.totalProduction ??
-        Number(dashboardPartCounts.passed || 0) +
-          Number(dashboardPartCounts.failed || 0) +
-          Number(dashboardPartCounts.inProgress || 0),
-    ) || 0;
+  const dashboardPartCounts = useMemo(() => {
+    if (summary?.summary) {
+      const s = summary.summary;
+      return {
+        total: Number(s.totalParts || 0),
+        passed: Number(s.totalOK || 0),
+        failed: Number(s.totalNG || 0),
+        inProgress: Number(s.totalInProgress || 0),
+        scrapRate: Number(s.scrapRate || 0),
+        okRate: Number(s.okRate || 100),
+      };
+    }
+    return reportTraceabilityCounts || dashboardPartCountsFromJourney;
+  }, [summary, reportTraceabilityCounts, dashboardPartCountsFromJourney]);
+
+  const dashboardTotalProduction = Number(
+    dashboardPartCounts.total ??
+    (Number(dashboardPartCounts.passed || 0) +
+      Number(dashboardPartCounts.failed || 0) +
+      Number(dashboardPartCounts.inProgress || 0)),
+  ) || 0;
+
+  const stationQualityGates = useMemo(() => {
+    if (Array.isArray(summary?.qualityGates) && summary.qualityGates.length > 0) {
+      return summary.qualityGates;
+    }
+    return [];
+  }, [summary]);
+
+  const primaryQualityGates = useMemo(() => {
+    if (!stationQualityGates || !stationQualityGates.length) return [];
+    const leakSubStations = stationQualityGates.filter((g) =>
+      ["Leak-Test-01", "Leak-Test-02", "Leak Test-03", "Leak-Test-03"].includes(g.code)
+    );
+    const mainCodes = ["OP100", "OP110", "OP120", "OP130", "OP140", "OP150", "OP160"];
+    return mainCodes.map((code) => {
+      const found = stationQualityGates.find((g) => g.code === code);
+      if (found) {
+        if (code === "OP150") {
+          return {
+            ...found,
+            subStations: leakSubStations,
+          };
+        }
+        return found;
+      }
+      return {
+        code,
+        name: code,
+        okCount: 0,
+        ngCount: 0,
+        inspected: 0,
+        scrapRate: 0,
+        okRate: 100,
+        subStations: code === "OP150" ? leakSubStations : undefined,
+      };
+    });
+  }, [stationQualityGates]);
+
+  const lineOeeData = useMemo(() => {
+    if (summary?.lineOee) {
+      return summary.lineOee;
+    }
+    return {
+      oee: 0,
+      oa: 0,
+      availability: 0,
+      performance: 0,
+      quality: 0,
+      target: 0,
+      actual: 0,
+      status: "Attention Needed",
+    };
+  }, [summary]);
 
   const dashboardMachineCards = useMemo(() => {
     const machineCountsFromParts = new Map();
@@ -2516,10 +2618,10 @@ const Dashboard = () => {
     (report.partsList || []).forEach((row) => {
       const partId = String(
         row?.partId ||
-          row?.part_id ||
-          row?.traceabilityPartId ||
-          row?.customerQrCode ||
-          "",
+        row?.part_id ||
+        row?.traceabilityPartId ||
+        row?.customerQrCode ||
+        "",
       ).trim();
       if (!partId) return;
       const leakReadings = Array.isArray(row?.leakTestReadings)
@@ -2586,12 +2688,12 @@ const Dashboard = () => {
           achievementPct:
             target > 0
               ? Number(
-                  (
-                    (Number(row.actualProduction || row.processedCount || 0) /
-                      target) *
-                    100
-                  ).toFixed(2),
-                )
+                (
+                  (Number(row.actualProduction || row.processedCount || 0) /
+                    target) *
+                  100
+                ).toFixed(2),
+              )
               : Number(row.achievementPct || 0),
         };
       }
@@ -2600,8 +2702,8 @@ const Dashboard = () => {
       const derivedQuality =
         processedCount > 0
           ? Number(
-              ((Number(derived.ok || 0) / processedCount) * 100).toFixed(2),
-            )
+            ((Number(derived.ok || 0) / processedCount) * 100).toFixed(2),
+          )
           : 0;
       const downtimeMinutes = Number(row.downtimeMinutes || 0);
       const plannedMinutes = Number(row.plannedProductionMinutes || 0);
@@ -2616,15 +2718,15 @@ const Dashboard = () => {
       const derivedOa =
         processedCount > 0
           ? Number(row.oa || 0) ||
-            (plannedMinutes > 0
-              ? Number(
-                  (
-                    (Math.max(plannedMinutes - downtimeMinutes, 0) /
-                      plannedMinutes) *
-                    100
-                  ).toFixed(2),
-                )
-              : 100)
+          (plannedMinutes > 0
+            ? Number(
+              (
+                (Math.max(plannedMinutes - downtimeMinutes, 0) /
+                  plannedMinutes) *
+                100
+              ).toFixed(2),
+            )
+            : 100)
           : 0;
       const derivedOee =
         processedCount > 0 ? Number(row.oee || 0) || derivedQuality : 0;
@@ -2652,6 +2754,9 @@ const Dashboard = () => {
   }, [report.machineCards, report.partsList]);
 
   const efficiency = useMemo(() => {
+    if (summary?.summary && summary.summary.okRate !== undefined) {
+      return Number(summary.summary.okRate || 0);
+    }
     if (
       reportMetrics &&
       (reportMetrics.totalOK !== undefined ||
@@ -2665,8 +2770,8 @@ const Dashboard = () => {
     const ok = Number(dashboardPartCounts.passed || 0);
     const ng = Number(dashboardPartCounts.failed || 0);
     const t = ok + ng;
-    return t > 0 ? Number(((ok / t) * 100).toFixed(2)) : 0;
-  }, [dashboardPartCounts, reportMetrics]);
+    return t > 0 ? Number(((ok / t) * 100).toFixed(2)) : 100;
+  }, [summary, dashboardPartCounts, reportMetrics]);
 
   // Pie data
   const pieData = useMemo(
@@ -2724,16 +2829,16 @@ const Dashboard = () => {
       .filter(Boolean);
     return normalized.length
       ? normalized.sort(
-          (a, b) =>
-            (getDashboardShiftSeconds(a.startTime) ?? 0) -
-            (getDashboardShiftSeconds(b.startTime) ?? 0),
-        )
+        (a, b) =>
+          (getDashboardShiftSeconds(a.startTime) ?? 0) -
+          (getDashboardShiftSeconds(b.startTime) ?? 0),
+      )
       : ["SHIFT_A", "SHIFT_B", "SHIFT_C"].map((code) => ({
-          shiftCode: code,
-          shiftName: getDashboardShiftLabel(code),
-          startTime: "",
-          endTime: "",
-        }));
+        shiftCode: code,
+        shiftName: getDashboardShiftLabel(code),
+        startTime: "",
+        endTime: "",
+      }));
   }, [report.availableShifts, shiftManagerShifts, summary.availableShifts]);
 
   // Shift bar data follows Shift Management and keeps configured shifts visible.
@@ -2773,7 +2878,49 @@ const Dashboard = () => {
       });
     };
 
-    const reconcileShiftRows = (rows) => rows;
+    const reconcileShiftRows = (rows) => {
+      if (filters?.datePreset === "today" || !filters?.datePreset) {
+        const now = new Date();
+        const currentSeconds = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+        const elapsedSince6AM = currentSeconds >= 21600 ? currentSeconds - 21600 : currentSeconds + (24 * 3600 - 21600);
+        
+        return rows.map(row => {
+          const shiftDef = dashboardShifts.find(s => normalizeDashboardShiftCode(s.shiftCode || s.shift_code) === row.code);
+          if (shiftDef) {
+            const startSec = getDashboardShiftSeconds(shiftDef.startTime || shiftDef.start_time);
+            if (startSec !== null) {
+              const shiftStartElapsed = startSec >= 21600 ? startSec - 21600 : startSec + (24 * 3600 - 21600);
+              if (shiftStartElapsed > elapsedSince6AM) {
+                return { ...row, actual: 0, ok: 0, ng: 0, inProgress: 0, target: 0, oa: 0, oee: 0 };
+              }
+            }
+          }
+          return row;
+        });
+      }
+      return rows;
+    };
+
+    // Try to get data directly from RICO_IOT ProductionReports summary
+    if (
+      summary?.shiftProduction &&
+      typeof summary.shiftProduction === "object" &&
+      Object.keys(summary.shiftProduction).length > 0
+    ) {
+      const sp = summary.shiftProduction;
+      const normalizedMap = {};
+      ["A", "B", "C"].forEach((code) => {
+        const item = sp[code] || sp[`SHIFT_${code}`] || {};
+        normalizedMap[code] = {
+          total: Number(item.total || 0),
+          ok: Number(item.ok || 0),
+          ng: Number(item.ng || 0),
+          inProgress: 0,
+          target: 0,
+        };
+      });
+      return reconcileShiftRows(toShiftRows(normalizedMap));
+    }
 
     // Try to get data from reportMetrics
     if (
@@ -2890,9 +3037,9 @@ const Dashboard = () => {
           acc[code] = { total: 0, ok: 0, ng: 0, inProgress: 0, target: 0 };
         const normalizedStatus = normalizeDashboardStationResult(
           row?.result ||
-            row?.status ||
-            row?.statusLabel ||
-            row?.industrialResult,
+          row?.status ||
+          row?.statusLabel ||
+          row?.industrialResult,
           row?.interlockReason || row?.reason,
           row,
         );
@@ -2928,7 +3075,7 @@ const Dashboard = () => {
     );
     if (Object.keys(shiftRowsFromHourly).length > 0)
       return reconcileShiftRows(toShiftRows(shiftRowsFromHourly));
-    
+
     return reconcileShiftRows(toShiftRows({}));
   }, [
     dashboardParts,
@@ -2938,6 +3085,7 @@ const Dashboard = () => {
     report.shiftProduction,
     report.shiftWiseMetrics,
     reportMetrics,
+    summary.shiftProduction,
   ]);
 
   const hasFilters = Object.values(filters).some(Boolean);
@@ -3032,13 +3180,13 @@ const Dashboard = () => {
           (!rejectionFilters.category || rowCategory === categoryFilter) &&
           (!rejectionFilters.view ||
             normalizeAnalysisToken(row.view) ===
-              normalizeAnalysisToken(rejectionFilters.view)) &&
+            normalizeAnalysisToken(rejectionFilters.view)) &&
           (!rejectionFilters.zone ||
             normalizeAnalysisToken(row.zone) ===
-              normalizeAnalysisToken(rejectionFilters.zone)) &&
+            normalizeAnalysisToken(rejectionFilters.zone)) &&
           (!rejectionFilters.reason ||
             normalizeAnalysisToken(reason) ===
-              normalizeAnalysisToken(rejectionFilters.reason))
+            normalizeAnalysisToken(rejectionFilters.reason))
         );
       }),
     [rejectionAnalysisRows, rejectionFilters],
@@ -3072,7 +3220,7 @@ const Dashboard = () => {
         (row) =>
           !heatMapView?.name ||
           normalizeAnalysisToken(row.view) ===
-            normalizeAnalysisToken(heatMapView.name),
+          normalizeAnalysisToken(heatMapView.name),
       )
       .forEach((row) => {
         const key = normalizeAnalysisToken(row.zone);
@@ -3149,6 +3297,21 @@ const Dashboard = () => {
   }, [dashboardPartCounts.failed, filteredRejectionRows, reportMetrics]);
 
   const rejectionParetoData = useMemo(() => {
+    if (Array.isArray(summary?.topDefects) && summary.topDefects.length > 0) {
+      const total = summary.topDefects.reduce(
+        (sum, row) => sum + Number(row.count || 0),
+        0,
+      );
+      let cumulative = 0;
+      return summary.topDefects.map((row) => {
+        cumulative += Number(row.count || 0);
+        return {
+          reason: row.reason || "Defect",
+          count: Number(row.count || 0),
+          cumulative: total ? Math.round((cumulative / total) * 100) : 0,
+        };
+      });
+    }
     const total = rejectionTopReasons.reduce(
       (sum, row) => sum + Number(row.count || 0),
       0,
@@ -3162,7 +3325,7 @@ const Dashboard = () => {
         cumulative: total ? Math.round((cumulative / total) * 100) : 0,
       };
     });
-  }, [rejectionTopReasons]);
+  }, [summary?.topDefects, rejectionTopReasons]);
 
   const rejectionKpis = useMemo(() => {
     const total = filteredRejectionRows.length;
@@ -3200,6 +3363,16 @@ const Dashboard = () => {
   }, [filteredRejectionRows]);
 
   const productionTrendData = useMemo(() => {
+    if (Array.isArray(trendsData) && trendsData.length > 0) {
+      return trendsData.map((row) => ({
+        hour: row.displayHour || (row.hour ? String(row.hour).slice(-5) : ""),
+        date: row.hour || "",
+        ok: Number(row.ok || 0),
+        ng: Number(row.ng || 0),
+        total: Number(row.total || 0),
+      }));
+    }
+
     const sourceRows = Array.isArray(dashboardParts) ? dashboardParts : [];
     if (!sourceRows.length) {
       return (Array.isArray(report.hourlyProduction) ? report.hourlyProduction : []).map(
@@ -3209,8 +3382,8 @@ const Dashboard = () => {
           ng: Number(row?.ng || row?.fail || row?.failed || 0),
           total: Number(
             row?.total ||
-              Number(row?.ok || row?.pass || row?.passed || 0) +
-                Number(row?.ng || row?.fail || row?.failed || 0),
+            Number(row?.ok || row?.pass || row?.passed || 0) +
+            Number(row?.ng || row?.fail || row?.failed || 0),
           ),
         }),
       );
@@ -3261,7 +3434,7 @@ const Dashboard = () => {
     return Array.from(bucketMap.values()).sort((a, b) =>
       String(a.date).localeCompare(String(b.date)),
     );
-  }, [dashboardParts, isMultiDayRange, report.hourlyProduction]);
+  }, [trendsData, dashboardParts, isMultiDayRange, report.hourlyProduction]);
 
   const rejectionTrendData = useMemo(() => {
     if (!isMultiDayRange) return rejectionTrend;
@@ -3424,45 +3597,102 @@ const Dashboard = () => {
               flexWrap: "wrap",
             }}
           >
-            <button
-              onClick={() => setShowFilters((f) => !f)}
+            {/* Quick Preset Pills */}
+            <div
               style={{
                 display: "inline-flex",
-                alignItems: "center",
-                gap: 7,
-                height: 38,
-                padding: "0 16px",
+                background: C.bg("surf"),
+                padding: 3,
                 borderRadius: 9,
-                fontSize: 12,
-                fontWeight: 700,
-                cursor: "pointer",
-                background: hasFilters ? C.navy(0.08) : "transparent",
-                border: `1px solid ${hasFilters ? C.navy(0.4) : C.bdr()}`,
-                color: hasFilters ? C.navy() : C.txt("sec"),
-                transition: "all 0.15s",
+                border: `1px solid ${C.bdr()}`,
               }}
             >
-              <Filter size={13} /> {t("dashboard.filters", "Filters")}
-              {hasFilters && (
-                <span
-                  style={{
-                    width: 16,
-                    height: 16,
-                    borderRadius: "50%",
-                    background: C.amber(),
-                    color: C.navy(),
-                    fontSize: 9,
-                    fontWeight: 800,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  {Object.values(filters).filter(Boolean).length}
-                </span>
-              )}
-            </button>
+              {[
+                { id: "today", label: "Today" },
+                { id: "yesterday", label: "Yesterday" },
+                { id: "last7", label: "7 Days" },
+                { id: "last30", label: "30 Days" },
+                { id: "all", label: "All Time" },
+              ].map((preset) => {
+                const isActive = activePreset === preset.id;
+                return (
+                  <button
+                    key={preset.id}
+                    onClick={() => {
+                      setActivePreset(preset.id);
+                      if (preset.id === "all") {
+                        setFilters((prev) => ({
+                          ...prev,
+                          dateFrom: "",
+                          dateTo: "",
+                        }));
+                        setIsLiveProductionRange(false);
+                      } else {
+                        const range = getPresetRange(preset.id);
+                        setFilters((prev) => ({
+                          ...prev,
+                          dateFrom: range.start,
+                          dateTo: range.end,
+                        }));
+                        setIsLiveProductionRange(preset.id === "today");
+                      }
+                    }}
+                    style={{
+                      height: 32,
+                      padding: "0 12px",
+                      borderRadius: 7,
+                      fontSize: 11,
+                      fontWeight: 700,
+                      border: "none",
+                      cursor: "pointer",
+                      background: isActive ? C.navy() : "transparent",
+                      color: isActive ? C.linen() : C.txt("sec"),
+                      transition: "all 0.15s",
+                    }}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
 
+            {/* Date Range Picker (ONLY filter on the page) */}
+            <div style={{ minWidth: 240 }}>
+              <DashboardDateRangePicker
+                startDate={filters.dateFrom}
+                endDate={filters.dateTo}
+                onApply={(start, end) => {
+                  const currentRange = getCurrentDashboardProductionRange();
+                  const cappedEnd = new Date(end);
+                  if (
+                    new Date(start).toDateString() ===
+                    new Date(currentRange.start).toDateString() &&
+                    cappedEnd > new Date(currentRange.end)
+                  ) {
+                    cappedEnd.setTime(new Date(currentRange.end).getTime());
+                  }
+                  setActivePreset("custom");
+                  setFilters((prev) => ({
+                    ...prev,
+                    dateFrom: start.toISOString(),
+                    dateTo: cappedEnd.toISOString(),
+                  }));
+                  setIsLiveProductionRange(false);
+                }}
+                onClear={() => {
+                  const range = getCurrentDashboardProductionRange();
+                  setActivePreset("today");
+                  setFilters((prev) => ({
+                    ...prev,
+                    dateFrom: range.start,
+                    dateTo: range.end,
+                  }));
+                  setIsLiveProductionRange(true);
+                }}
+              />
+            </div>
+
+            {/* Refresh Button */}
             <button
               type="button"
               onClick={() => loadData(true)}
@@ -3495,327 +3725,7 @@ const Dashboard = () => {
             </button>
           </div>
         </div>
-
-        {showFilters && (
-          <div
-            style={{
-              marginTop: 16,
-              padding: "16px 18px",
-              borderRadius: 12,
-              background: C.bg("card"),
-              border: `1px solid ${C.bdr()}`,
-              boxShadow: "inset 0 1px 0 rgba(255,255,255,0.35)",
-              display: "flex",
-              flexDirection: "column",
-              gap: 12,
-              animation: "dbFadeIn 0.2s ease",
-              position: "relative",
-              zIndex: 10,
-            }}
-          >
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns:
-                  "minmax(230px,320px) repeat(4,minmax(140px,1fr)) auto auto",
-                gap: 10,
-                alignItems: "center",
-              }}
-            >
-              <DashboardDateRangePicker
-                startDate={filters.dateFrom}
-                endDate={filters.dateTo}
-                onApply={(start, end) => {
-                  const currentRange = getCurrentDashboardProductionRange();
-                  const cappedEnd = new Date(end);
-                  if (
-                    new Date(start).toDateString() ===
-                      new Date(currentRange.start).toDateString() &&
-                    cappedEnd > new Date(currentRange.end)
-                  ) {
-                    cappedEnd.setTime(new Date(currentRange.end).getTime());
-                  }
-                  setFilters((prev) => ({
-                    ...prev,
-                    dateFrom: start.toISOString(),
-                    dateTo: cappedEnd.toISOString(),
-                  }));
-                  setIsLiveProductionRange(false);
-                }}
-                onClear={() => {
-                  const range = getCurrentDashboardProductionRange();
-                  setFilters((prev) => ({
-                    ...prev,
-                    dateFrom: range.start,
-                    dateTo: range.end,
-                  }));
-                  setIsLiveProductionRange(true);
-                }}
-              />
-              <select
-                value={filters.lineName}
-                onChange={(e) =>
-                  setFilters((prev) => ({
-                    ...prev,
-                    lineName: e.target.value,
-                    lineId: "",
-                    plantId: "",
-                    machineId: "",
-                  }))
-                }
-                className="db-filter-input"
-              >
-                <option value="">All Lines</option>
-                {dashboardLineOptions.map((lineName) => (
-                  <option key={lineName} value={lineName}>
-                    {lineName}
-                  </option>
-                ))}
-              </select>
-              <select
-                value={filters.machineId}
-                onChange={(e) =>
-                  setFilters((prev) => ({ ...prev, machineId: e.target.value }))
-                }
-                className="db-filter-input"
-              >
-                <option value="">
-                  {t("dashboard.allQualityGates", "All Quality Gates")}
-                </option>
-                {machines
-                  .filter(
-                    (m) =>
-                      !filters.plantId ||
-                      String(m.plantId || "") === String(filters.plantId),
-                  )
-                  .filter(
-                    (m) =>
-                      !filters.lineId ||
-                      String(m.lineId || "") === String(filters.lineId),
-                  )
-                  .filter(
-                    (m) =>
-                      !filters.lineName ||
-                      String(m.lineName || "").trim() === filters.lineName,
-                  )
-                  .map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.machineName}
-                    </option>
-                  ))}
-              </select>
-              <select
-                value={filters.status}
-                onChange={(e) =>
-                  setFilters((prev) => ({ ...prev, status: e.target.value }))
-                }
-                className="db-filter-input"
-              >
-                <option value="">
-                  {t("dashboard.allStatus", "All Status")}
-                </option>
-                <option value="OK">{t("dashboard.passOk", "Pass (OK)")}</option>
-                <option value="NG">{t("dashboard.failNg", "Fail (NG)")}</option>
-                <option value="WIP">
-                  {t("dashboard.inProgress", "In Progress")}
-                </option>
-              </select>
-              <select
-                value={filters.shiftCode}
-                onChange={(e) =>
-                  setFilters((prev) => ({ ...prev, shiftCode: e.target.value }))
-                }
-                className="db-filter-input"
-              >
-                <option value="">
-                  {t("dashboard.allShifts", "All Shifts")}
-                </option>
-                {(dashboardShifts || []).map((s) => (
-                  <option
-                    key={s.shiftCode || s.shift_code}
-                    value={s.shiftCode || s.shift_code}
-                  >
-                    {s.shiftName || s.shift_name || s.shiftCode || s.shift_code}
-                  </option>
-                ))}
-              </select>
-              <button
-                onClick={() => {
-                  const range = getCurrentDashboardProductionRange();
-                  setFilters({
-                    dateFrom: range.start,
-                    dateTo: range.end,
-                    plantId: "",
-                    lineId: "",
-                    lineName: "",
-                    machineId: "",
-                    partId: "",
-                    status: "",
-                    shiftCode: "",
-                  });
-                  setIsLiveProductionRange(true);
-                }}
-                style={{
-                  height: 36,
-                  padding: "0 18px",
-                  borderRadius: 8,
-                  border: `1px solid ${C.ng(0.18)}`,
-                  background: C.ng(0.05),
-                  color: C.ng(),
-                  fontSize: 12,
-                  fontWeight: 800,
-                  cursor: "pointer",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 7,
-                }}
-              >
-                <X size={14} /> Clear
-              </button>
-              <button
-                type="button"
-                onClick={() => loadData(true)}
-                style={{
-                  height: 36,
-                  padding: "0 20px",
-                  borderRadius: 8,
-                  border: "none",
-                  background: `linear-gradient(135deg,${C.navy()},${C.steel()})`,
-                  color: C.linen(),
-                  fontSize: 12,
-                  fontWeight: 800,
-                  cursor: "pointer",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 7,
-                  opacity: loading ? 0.65 : 1,
-                  boxShadow: `0 4px 14px ${C.navy(0.18)}`,
-                }}
-              >
-                <RefreshCw
-                  size={14}
-                  style={{
-                    animation: loading ? "dbSpin 0.9s linear infinite" : "none",
-                  }}
-                />{" "}
-                {loading ? "Applying..." : "Apply Filters"}
-              </button>
-            </div>
-          </div>
-        )}
       </div>
-
-      {/* --- Filter Summary Bar --- */}
-      {hasFilters && (
-        <div
-          style={{
-            background: C.bg("surf"),
-            border: `1px solid ${C.navy(0.2)}`,
-            borderRadius: 12,
-            padding: "10px 16px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            animation: "dbFadeIn 0.3s ease",
-            boxShadow: "inset 0 1px 3px rgba(0,0,0,0.05)",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-              flexWrap: "wrap",
-            }}
-          >
-            <div
-              style={{
-                background: C.navy(),
-                color: "#fff",
-                padding: "4px 10px",
-                borderRadius: 6,
-                fontSize: 10,
-                fontWeight: 800,
-                textTransform: "uppercase",
-                letterSpacing: "0.05em",
-              }}
-            >
-              {t("dashboard.activeFilters", "Active Filters")}
-            </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {filters.dateFrom && (
-                <Badge
-                  variant="idle"
-                  label={`From: ${new Date(filters.dateFrom).toLocaleString()}`}
-                />
-              )}
-              {filters.dateTo && (
-                <Badge
-                  variant="idle"
-                  label={`To: ${new Date(filters.dateTo).toLocaleString()}`}
-                />
-              )}
-              {filters.lineName && (
-                <Badge variant="idle" label={`Line: ${filters.lineName}`} />
-              )}
-              {filters.machineId && (
-                <Badge
-                  variant="idle"
-                  label={`Machine: ${machines.find((m) => String(m.id) === String(filters.machineId))?.machineName || filters.machineId}`}
-                />
-              )}
-              {filters.partId && (
-                <Badge variant="idle" label={`Part: ${filters.partId}`} />
-              )}
-              {filters.status && (
-                <Badge
-                  variant={
-                    filters.status === "OK"
-                      ? "ok"
-                      : filters.status === "NG"
-                        ? "ng"
-                        : "wip"
-                  }
-                  label={`Status: ${filters.status}`}
-                />
-              )}
-              {filters.shiftCode && (
-                <Badge variant="idle" label={`Shift: ${filters.shiftCode}`} />
-              )}
-            </div>
-          </div>
-          <button
-            onClick={() => {
-              const range = getCurrentDashboardProductionRange();
-              setFilters({
-                dateFrom: range.start,
-                dateTo: range.end,
-                plantId: "",
-                lineId: "",
-                lineName: "",
-                machineId: "",
-                partId: "",
-                status: "",
-                shiftCode: "",
-              });
-              setIsLiveProductionRange(true);
-            }}
-            style={{
-              background: "transparent",
-              border: "none",
-              color: C.ng(),
-              fontSize: 11,
-              fontWeight: 700,
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              gap: 4,
-            }}
-          >
-            <X size={14} /> {t("dashboard.clearAll", "Clear All")}
-          </button>
-        </div>
-      )}
 
       {/* —— KPI Row —————————————————————————————————————————————————————————————— */}
       {isInitialDashboardLoading ? (
@@ -3825,48 +3735,45 @@ const Dashboard = () => {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))",
-              gap: 12,
+              gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))",
+              gap: 14,
             }}
           >
-            <KpiCard
-              label={t("dashboard.totalQualityGates", "Total Quality Gates")}
-              value={summary.machines.active}
-              icon={Cpu}
-              accent={C.steel()}
-              sub={`${t("dashboard.outOf", "Out of")} ${summary.machines.total} ${t("dashboard.totalMachines", "total machines")}`}
-            />
             <KpiCard
               label={t("dashboard.totalProduction", "Total Production")}
               value={dashboardTotalProduction}
               icon={Activity}
               accent={C.navy()}
-              sub={t(
-                "dashboard.partsTrackedPeriod",
-                "Parts tracked this period",
-              )}
-            />
-
-            <KpiCard
-              label={t("dashboard.inProgress", "In Progress")}
-              value={dashboardPartCounts.inProgress}
-              icon={Zap}
-              accent={C.wip()}
-              sub={t("dashboard.partsBeingProcessed", "Parts being processed")}
+              subValue="Scanned Parts"
+              subtitle="parts"
+              sub={t("dashboard.partsTrackedPeriod", "Parts tracked this period")}
             />
             <KpiCard
-              label={t("dashboard.completedPass", "Completed (Pass)")}
-              value={dashboardPartCounts.passed}
+              label={t("dashboard.completedPass", "Passed (OK)")}
+              value={dashboardPartCounts.passed || 0}
               icon={CheckCircle2}
               accent={C.ok()}
-              sub={t("dashboard.totalOkPeriod", "Total OK this period")}
+              subValue="Quality OK"
+              subtitle={`${dashboardPartCounts.okRate ?? efficiency}% yield`}
+              sub={t("dashboard.totalOkPeriod", "Total OK parts")}
             />
             <KpiCard
               label={t("dashboard.failedNg", "Failed (NG)")}
-              value={dashboardPartCounts.failed}
+              value={dashboardPartCounts.failed || 0}
               icon={XCircle}
               accent={C.ng()}
+              subValue="Quality NG"
+              subtitle={`${dashboardPartCounts.scrapRate ?? 0}% scrap`}
               sub={t("dashboard.requiresAttention", "Requires attention")}
+            />
+            <KpiCard
+              label={t("dashboard.inProgress", "In Progress")}
+              value={dashboardPartCounts.inProgress || 0}
+              icon={Clock}
+              accent={C.wip()}
+              subValue="Active WIP"
+              subtitle="in transit"
+              sub={t("dashboard.partsBeingProcessed", "Parts being processed")}
             />
             <KpiCard
               label={t("dashboard.qualityRate", "Quality Rate")}
@@ -3879,6 +3786,8 @@ const Dashboard = () => {
                     ? C.amber()
                     : C.ng()
               }
+              subValue="Line Yield"
+              subtitle={efficiency >= 85 ? "Optimal" : "Attention"}
               sub={t("dashboard.overallQualityRate", "Overall quality rate")}
             />
           </div>
@@ -3932,6 +3841,611 @@ const Dashboard = () => {
           {/* —— TAB: Overview ———————————————————————————————————————————————————————————— */}
           {activeTab === "overview" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {/* —— Line OEE & OA Executive Summary —— */}
+              <div
+                style={{
+                  background: C.bg("card"),
+                  border: `1px solid ${C.bdr()}`,
+                  borderRadius: 16,
+                  padding: 22,
+                  boxShadow: SHADOW_MD,
+                  position: "relative",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: 4,
+                    background: `linear-gradient(90deg, ${C.ok()}, ${C.navy()}, ${C.amber()}, ${C.steel()})`,
+                  }}
+                />
+
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    flexWrap: "wrap",
+                    gap: 12,
+                    marginBottom: 20,
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div
+                      style={{
+                        width: 38,
+                        height: 38,
+                        borderRadius: 10,
+                        background: C.navy(0.12),
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: C.navy(),
+                      }}
+                    >
+                      <Target size={20} />
+                    </div>
+                    <div>
+                      <h2
+                        style={{
+                          fontSize: 16,
+                          fontWeight: 800,
+                          color: C.txt("pri"),
+                          letterSpacing: "-0.01em",
+                          margin: 0,
+                        }}
+                      >
+                        {t("dashboard.lineOeeOaOverview", "Line OEE & OA Performance Overview")}
+                      </h2>
+                      <p style={{ fontSize: 11, color: C.txt("muted"), margin: "2px 0 0" }}>
+                        {t("dashboard.lineOeeSub", "Real-time Overall Equipment Effectiveness (OEE) and Operational Availability (OA) for active production line")}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "5px 12px",
+                        borderRadius: 999,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        background: lineOeeData.oee >= 85 ? C.ok(0.12) : lineOeeData.oee >= 70 ? C.amber(0.12) : C.ng(0.12),
+                        color: lineOeeData.oee >= 85 ? C.ok() : lineOeeData.oee >= 70 ? C.amber() : C.ng(),
+                        border: `1px solid ${lineOeeData.oee >= 85 ? C.ok(0.25) : lineOeeData.oee >= 70 ? C.amber(0.25) : C.ng(0.25)}`,
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: 7,
+                          height: 7,
+                          borderRadius: "50%",
+                          background: lineOeeData.oee >= 85 ? C.ok() : lineOeeData.oee >= 70 ? C.amber() : C.ng(),
+                        }}
+                      />
+                      {lineOeeData.status || "Optimal"}
+                    </span>
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: 16,
+                  }}
+                >
+                  {/* Line OEE Dial Card */}
+                  <div
+                    style={{
+                      background: C.bg("surf"),
+                      border: `1px solid ${C.bdr()}`,
+                      borderRadius: 14,
+                      padding: "16px 18px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 16,
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 100,
+                        height: 100,
+                        borderRadius: "50%",
+                        background: `conic-gradient(${C.ok()} ${lineOeeData.oee * 3.6}deg, ${C.bdr(0.2)} 0deg)`,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        padding: 6,
+                        flexShrink: 0,
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          borderRadius: "50%",
+                          background: C.bg("surf"),
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 24,
+                            fontWeight: 800,
+                            color: C.txt("pri"),
+                            fontFamily: "'DM Mono',monospace",
+                          }}
+                        >
+                          {lineOeeData.oee}%
+                        </span>
+                      </div>
+                    </div>
+                    <div>
+                      <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: C.txt("muted"), margin: 0 }}>
+                        {t("dashboard.lineOee", "Line OEE")}
+                      </p>
+                      <h3 style={{ fontSize: 22, fontWeight: 800, color: C.txt("pri"), margin: "4px 0 2px", fontFamily: "'DM Mono',monospace" }}>
+                        {lineOeeData.oee}%
+                      </h3>
+                      <p style={{ fontSize: 10, color: C.txt("sec"), margin: 0 }}>
+                        {lineOeeData.oee >= 85 ? "World Class (≥85%)" : lineOeeData.oee >= 70 ? "Optimal Operating" : "Attention Needed"}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Line OA Dial Card */}
+                  <div
+                    style={{
+                      background: C.bg("surf"),
+                      border: `1px solid ${C.bdr()}`,
+                      borderRadius: 14,
+                      padding: "16px 18px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 16,
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 100,
+                        height: 100,
+                        borderRadius: "50%",
+                        background: `conic-gradient(${C.navy()} ${lineOeeData.oa * 3.6}deg, ${C.bdr(0.2)} 0deg)`,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        padding: 6,
+                        flexShrink: 0,
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          borderRadius: "50%",
+                          background: C.bg("surf"),
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 24,
+                            fontWeight: 800,
+                            color: C.txt("pri"),
+                            fontFamily: "'DM Mono',monospace",
+                          }}
+                        >
+                          {lineOeeData.oa}%
+                        </span>
+                      </div>
+                    </div>
+                    <div>
+                      <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: C.txt("muted"), margin: 0 }}>
+                        {t("dashboard.lineOa", "Line OA")}
+                      </p>
+                      <h3 style={{ fontSize: 22, fontWeight: 800, color: C.txt("pri"), margin: "4px 0 2px", fontFamily: "'DM Mono',monospace" }}>
+                        {lineOeeData.oa}%
+                      </h3>
+                      <p style={{ fontSize: 10, color: C.txt("sec"), margin: 0 }}>
+                        Operational Availability
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* 3 Pillars Breakdown */}
+                  <div
+                    style={{
+                      background: C.bg("surf"),
+                      border: `1px solid ${C.bdr()}`,
+                      borderRadius: 14,
+                      padding: "14px 18px",
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "center",
+                      gap: 8,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+                      <span style={{ fontSize: 10, fontWeight: 800, color: C.txt("muted"), textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                        OEE 3-Pillars
+                      </span>
+                      <span style={{ fontSize: 10, color: C.txt("sec") }}>A × P × Q</span>
+                    </div>
+
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontWeight: 700, marginBottom: 3 }}>
+                        <span style={{ color: C.txt("sec") }}>Availability (A)</span>
+                        <span style={{ color: C.txt("pri"), fontFamily: "'DM Mono',monospace" }}>{lineOeeData.availability}%</span>
+                      </div>
+                      <div style={{ height: 6, borderRadius: 3, background: C.bdr(0.2), overflow: "hidden" }}>
+                        <div style={{ width: `${Math.min(100, lineOeeData.availability)}%`, height: "100%", background: C.navy(), borderRadius: 3 }} />
+                      </div>
+                    </div>
+
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontWeight: 700, marginBottom: 3 }}>
+                        <span style={{ color: C.txt("sec") }}>Performance (P)</span>
+                        <span style={{ color: C.txt("pri"), fontFamily: "'DM Mono',monospace" }}>{lineOeeData.performance}%</span>
+                      </div>
+                      <div style={{ height: 6, borderRadius: 3, background: C.bdr(0.2), overflow: "hidden" }}>
+                        <div style={{ width: `${Math.min(100, lineOeeData.performance)}%`, height: "100%", background: C.amber(), borderRadius: 3 }} />
+                      </div>
+                    </div>
+
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontWeight: 700, marginBottom: 3 }}>
+                        <span style={{ color: C.txt("sec") }}>Quality (Q)</span>
+                        <span style={{ color: C.txt("pri"), fontFamily: "'DM Mono',monospace" }}>{lineOeeData.quality}%</span>
+                      </div>
+                      <div style={{ height: 6, borderRadius: 3, background: C.bdr(0.2), overflow: "hidden" }}>
+                        <div style={{ width: `${Math.min(100, lineOeeData.quality)}%`, height: "100%", background: C.ok(), borderRadius: 3 }} />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Production Target vs Actual Achievement */}
+                  <div
+                    style={{
+                      background: C.bg("surf"),
+                      border: `1px solid ${C.bdr()}`,
+                      borderRadius: 14,
+                      padding: "16px 18px",
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                      <div>
+                        <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: C.txt("muted"), margin: 0 }}>
+                          Target vs Actual
+                        </p>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 4 }}>
+                          <span style={{ fontSize: 22, fontWeight: 800, color: C.txt("pri"), fontFamily: "'DM Mono',monospace" }}>
+                            {dashboardPartCounts.passed + dashboardPartCounts.failed || lineOeeData.actual || 0}
+                          </span>
+                          <span style={{ fontSize: 13, color: C.txt("muted"), fontFamily: "'DM Mono',monospace" }}>
+                            / {lineOeeData.target || 0}
+                          </span>
+                        </div>
+                      </div>
+                      <div
+                        style={{
+                          padding: "4px 8px",
+                          borderRadius: 6,
+                          background: C.navy(0.1),
+                          color: C.navy(),
+                          fontSize: 11,
+                          fontWeight: 800,
+                          fontFamily: "'DM Mono',monospace",
+                        }}
+                      >
+                        {lineOeeData.target > 0
+                          ? `${Math.min(100, Math.round(((dashboardPartCounts.passed + dashboardPartCounts.failed || lineOeeData.actual || 0) / lineOeeData.target) * 100))}%`
+                          : "100%"}
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ height: 8, borderRadius: 4, background: C.bdr(0.2), overflow: "hidden" }}>
+                        <div
+                          style={{
+                            width: `${Math.min(100, lineOeeData.target > 0 ? (((dashboardPartCounts.passed + dashboardPartCounts.failed || lineOeeData.actual || 0) / lineOeeData.target) * 100) : 100)}%`,
+                            height: "100%",
+                            background: `linear-gradient(90deg, ${C.navy()}, ${C.ok()})`,
+                            borderRadius: 4,
+                          }}
+                        />
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.txt("muted"), marginTop: 5 }}>
+                        <span>Total Inspected Parts</span>
+                        <span>Target Scheduled</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* —— Station Quality Gates & Process Flow (As in Rejection Analysis) —— */}
+              <div
+                style={{
+                  background: C.bg("card"),
+                  border: `1px solid ${C.bdr()}`,
+                  borderRadius: 16,
+                  padding: 22,
+                  boxShadow: SHADOW_MD,
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    flexWrap: "wrap",
+                    gap: 12,
+                    marginBottom: 16,
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div
+                      style={{
+                        width: 38,
+                        height: 38,
+                        borderRadius: 10,
+                        background: C.ok(0.12),
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: C.ok(),
+                      }}
+                    >
+                      <Layers size={20} />
+                    </div>
+                    <div>
+                      <h2
+                        style={{
+                          fontSize: 16,
+                          fontWeight: 800,
+                          color: C.txt("pri"),
+                          letterSpacing: "-0.01em",
+                          margin: 0,
+                        }}
+                      >
+                        {t("dashboard.stationQualityGates", "Station Quality Gates & Process Flow")}
+                      </h2>
+                      <p style={{ fontSize: 11, color: C.txt("muted"), margin: "2px 0 0" }}>
+                        {t("dashboard.stationQualityGatesSub", "Real-time OK vs NG parts throughput across all manufacturing & inspection operations (OP100 – OP160)")}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    {/* View Toggle */}
+                    <button
+                      type="button"
+                      onClick={() => setShowAllGates((prev) => !prev)}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        height: 32,
+                        padding: "0 12px",
+                        borderRadius: 8,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        background: showAllGates ? C.navy() : C.bg("surf"),
+                        color: showAllGates ? C.linen() : C.txt("sec"),
+                        border: `1px solid ${C.bdr()}`,
+                        transition: "all 0.15s",
+                      }}
+                    >
+                      <Cpu size={12} />
+                      {showAllGates ? "Show Primary (7 Gates)" : "Show All (10 Gates)"}
+                    </button>
+
+                    <div
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "4px 12px",
+                        borderRadius: 8,
+                        background: C.bg("surf"),
+                        border: `1px solid ${C.bdr()}`,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: C.txt("sec"),
+                      }}
+                    >
+                      <span>Line Scrap: <strong style={{ color: dashboardPartCounts.scrapRate > 2 ? C.ng() : C.ok() }}>{dashboardPartCounts.scrapRate}%</strong></span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Station Cards Grid */}
+                {((showAllGates ? stationQualityGates : primaryQualityGates) || []).length > 0 ? (
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                      gap: 12,
+                    }}
+                  >
+                    {(showAllGates ? stationQualityGates : primaryQualityGates).map((gate) => {
+                      const isDanger = gate.scrapRate > 5;
+                      const isWarning = gate.scrapRate >= 2 && gate.scrapRate <= 5;
+                      const statusColor = isDanger ? C.ng() : isWarning ? C.amber() : C.ok();
+                      const statusLabel = isDanger ? "CRITICAL" : isWarning ? "WATCH" : "OPTIMAL";
+                      const isOp150 = gate.code === "OP150";
+
+                      return (
+                        <div
+                          key={gate.code}
+                          style={{
+                            background: C.bg("surf"),
+                            border: `1px solid ${isDanger ? C.ng(0.4) : isWarning ? C.amber(0.35) : C.bdr()}`,
+                            borderRadius: 12,
+                            padding: "14px 16px",
+                            display: "flex",
+                            flexDirection: "column",
+                            justifyContent: "space-between",
+                            gap: 10,
+                            position: "relative",
+                            transition: "all 0.15s ease",
+                          }}
+                        >
+                          {/* Card Header */}
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <span
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 800,
+                                  padding: "3px 8px",
+                                  borderRadius: 6,
+                                  background: C.navy(0.12),
+                                  color: C.navy(),
+                                  border: `1px solid ${C.navy(0.2)}`,
+                                  fontFamily: "'DM Mono',monospace",
+                                }}
+                              >
+                                {gate.code}
+                              </span>
+                              <div>
+                                <h4 style={{ fontSize: 13, fontWeight: 700, color: C.txt("pri"), margin: 0, lineHeight: 1.2 }}>
+                                  {gate.name}
+                                </h4>
+                                <span style={{ fontSize: 10, color: C.txt("muted") }}>
+                                  {gate.inspected?.toLocaleString()} inspected
+                                </span>
+                              </div>
+                            </div>
+
+                            <span
+                              style={{
+                                fontSize: 9,
+                                fontWeight: 800,
+                                padding: "2px 7px",
+                                borderRadius: 4,
+                                background: statusColor === C.ok() ? C.ok(0.12) : statusColor === C.amber() ? C.amber(0.12) : C.ng(0.12),
+                                color: statusColor,
+                                border: `1px solid ${statusColor}`,
+                                letterSpacing: "0.05em",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {statusLabel}
+                            </span>
+                          </div>
+
+                          {/* Dual OK / NG Progress Bar */}
+                          <div>
+                            <div
+                              style={{
+                                display: "flex",
+                                height: 6,
+                                borderRadius: 3,
+                                overflow: "hidden",
+                                background: C.bdr(0.2),
+                              }}
+                            >
+                              <div
+                                style={{
+                                  width: `${Math.max(0, Math.min(100, gate.okRate || 0))}%`,
+                                  height: "100%",
+                                  background: C.ok(),
+                                  transition: "width 0.3s ease",
+                                }}
+                                title={`OK: ${gate.okRate}%`}
+                              />
+                              <div
+                                style={{
+                                  width: `${Math.max(0, Math.min(100, gate.scrapRate || 0))}%`,
+                                  height: "100%",
+                                  background: C.ng(),
+                                  transition: "width 0.3s ease",
+                                }}
+                                title={`NG: ${gate.scrapRate}%`}
+                              />
+                            </div>
+
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, fontSize: 11 }}>
+                              <span style={{ color: C.ok(), fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                <CheckCircle2 size={12} />
+                                OK: {gate.okCount?.toLocaleString()} ({gate.okRate}%)
+                              </span>
+                              <span style={{ color: C.ng(), fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                <XCircle size={12} />
+                                NG: {gate.ngCount?.toLocaleString()} ({gate.scrapRate}%)
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Sub-Station Chips for OP150 Leak Testing */}
+                          {isOp150 && gate.subStations && gate.subStations.length > 0 && (
+                            <div
+                              style={{
+                                borderTop: `1px dashed ${C.bdr(0.2)}`,
+                                paddingTop: 8,
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 4,
+                              }}
+                            >
+                              <span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.06em", color: C.txt("muted") }}>
+                                Leak Sub-Stations
+                              </span>
+                              <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                                {gate.subStations.map((sub) => (
+                                  <div
+                                    key={sub.code}
+                                    style={{
+                                      fontSize: 10,
+                                      padding: "3px 6px",
+                                      borderRadius: 5,
+                                      background: sub.scrapRate > 3 ? C.ng(0.08) : C.bg("card"),
+                                      border: `1px solid ${sub.scrapRate > 3 ? C.ng(0.25) : C.bdr()}`,
+                                      color: C.txt("pri"),
+                                      fontWeight: 600,
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 4,
+                                    }}
+                                  >
+                                    <strong style={{ color: C.navy(), fontFamily: "'DM Mono',monospace" }}>
+                                      {sub.code.replace("Leak-Test-", "LT").replace("Leak Test-", "LT")}
+                                    </strong>
+                                    <span>{sub.okCount} OK</span>
+                                    <span style={{ color: C.ng() }}>/ {sub.ngCount} NG</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: 12, color: C.txt("muted"), textAlign: "center", padding: "20px 0" }}>
+                    No quality gate data recorded for this period.
+                  </p>
+                )}
+              </div>
+
               <div
                 style={{
                   display: "grid",
@@ -4161,11 +4675,11 @@ const Dashboard = () => {
                         />
                         <XAxis
                           dataKey={isMultiDayRange ? "date" : "hour"}
-                          tickFormatter={(h) =>
-                            isMultiDayRange
-                              ? String(h).slice(5)
-                              : `${String(h).padStart(2, "0")}:00`
-                          }
+                          tickFormatter={(h) => {
+                            const str = String(h || "");
+                            if (isMultiDayRange) return str.length > 5 ? str.slice(5) : str;
+                            return str.includes(":") ? str : `${str.padStart(2, "0")}:00`;
+                          }}
                           tick={{
                             fontSize: 11,
                             fill: C.txt("sec"),
@@ -4181,11 +4695,11 @@ const Dashboard = () => {
                         />
                         <Tooltip
                           {...TooltipStyle}
-                          labelFormatter={(h) =>
-                            isMultiDayRange
-                              ? String(h)
-                              : `${String(h).padStart(2, "0")}:00`
-                          }
+                          labelFormatter={(h) => {
+                            const str = String(h || "");
+                            if (isMultiDayRange) return str;
+                            return str.includes(":") ? str : `${str.padStart(2, "0")}:00`;
+                          }}
                           contentStyle={{
                             ...TooltipStyle.contentStyle,
                             padding: "12px 16px",
@@ -4278,7 +4792,7 @@ const Dashboard = () => {
                           <CartesianGrid stroke={C.bdr(0.12)} strokeDasharray="3 4" vertical={false} />
                           <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.txt("sec") }} axisLine={false} tickLine={false} />
                           <YAxis tick={{ fontSize: 11, fill: C.txt("sec") }} axisLine={false} tickLine={false} />
-                          <Tooltip 
+                          <Tooltip
                             {...TooltipStyle}
                             contentStyle={{
                               ...TooltipStyle.contentStyle,
@@ -4429,6 +4943,176 @@ const Dashboard = () => {
                     </p>
                   )}
                 </div>
+              </div>
+
+              {/* —— Live Recent Production Scans Stream Table —— */}
+              <div
+                style={{
+                  background: C.bg("card"),
+                  border: `1px solid ${C.bdr()}`,
+                  borderRadius: 14,
+                  padding: 20,
+                  boxShadow: SHADOW,
+                }}
+              >
+                <SectionHead
+                  title={t("dashboard.recentScansTitle", "Live Recent Production Scans Stream")}
+                  right={
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div
+                        style={{
+                          width: 7,
+                          height: 7,
+                          borderRadius: "50%",
+                          background: C.ok(),
+                          animation: "dbPing 1.6s ease-out infinite",
+                        }}
+                      />
+                      <span style={{ fontSize: 11, color: C.ok(), fontWeight: 700 }}>
+                        {summary.recentScans?.length || 0} Parts Streamed
+                      </span>
+                    </div>
+                  }
+                />
+                <p style={{ fontSize: 11, color: C.txt("muted"), margin: "-8px 0 14px" }}>
+                  Direct stream from RICO_IOT Production Reports across all quality gates (OP100 – OP160)
+                </p>
+
+                {summary.recentScans && summary.recentScans.length > 0 ? (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr
+                          style={{
+                            borderBottom: `1px solid ${C.bdr()}`,
+                            color: C.txt("muted"),
+                            textAlign: "left",
+                            fontSize: 10,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                            fontWeight: 800,
+                          }}
+                        >
+                          <th style={{ padding: "8px 10px" }}>Part ID / QR</th>
+                          <th style={{ padding: "8px 10px" }}>Scan Time</th>
+                          <th style={{ padding: "8px 10px" }}>Shift</th>
+                          <th style={{ padding: "8px 10px" }}>Quality Gates Flow (OP100-OP160)</th>
+                          <th style={{ padding: "8px 10px" }}>Cycle Time</th>
+                          <th style={{ padding: "8px 10px" }}>Status</th>
+                          <th style={{ padding: "8px 10px" }}>Rejection Detail</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {summary.recentScans.map((scan, idx) => {
+                          const isPass = ["OK", "PASSED"].includes(String(scan.overallStatus || scan.result || "").toUpperCase());
+                          const scanTime = scan.timestamp ? new Date(scan.timestamp) : null;
+                          const formattedTime = scanTime && !isNaN(scanTime.getTime())
+                            ? `${scanTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+                            : "-";
+                          const stationList = [
+                            { code: "100", status: scan.op100 },
+                            { code: "110", status: scan.op110 },
+                            { code: "120", status: scan.op120 },
+                            { code: "130", status: scan.op130 },
+                            { code: "140", status: scan.op140 },
+                            { code: "150", status: scan.op150 },
+                            { code: "160", status: scan.op160 },
+                          ];
+
+                          return (
+                            <tr
+                              key={scan.id || scan.partId || idx}
+                              style={{
+                                borderBottom: `1px solid ${C.bdr(0.08)}`,
+                                transition: "background 0.1s",
+                              }}
+                            >
+                              <td style={{ padding: "10px", fontWeight: 700, fontFamily: "'DM Mono',monospace", color: C.txt("pri") }}>
+                                {scan.partId || scan.customerQr || "-"}
+                              </td>
+                              <td style={{ padding: "10px", color: C.txt("sec"), whiteSpace: "nowrap" }}>
+                                {formattedTime}
+                              </td>
+                              <td style={{ padding: "10px" }}>
+                                <span
+                                  style={{
+                                    padding: "2px 8px",
+                                    borderRadius: 6,
+                                    fontSize: 10,
+                                    fontWeight: 800,
+                                    background: C.bg("surf"),
+                                    border: `1px solid ${C.bdr()}`,
+                                    color: C.navy(),
+                                  }}
+                                >
+                                  Shift {scan.shiftCode || "A"}
+                                </span>
+                              </td>
+                              <td style={{ padding: "10px" }}>
+                                <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+                                  {stationList.map((st) => {
+                                    const stUpper = String(st.status || "").toUpperCase();
+                                    const isOk = ["OK", "PASSED", "ENDED_OK", "COMPLETED_OK"].includes(stUpper);
+                                    const isNg = ["NG", "FAIL", "FAILED", "ENDED_NG", "COMPLETED_NG"].includes(stUpper);
+                                    const bg = isOk ? C.ok(0.15) : isNg ? C.ng(0.18) : C.bdr(0.12);
+                                    const color = isOk ? C.ok() : isNg ? C.ng() : C.txt("muted");
+                                    return (
+                                      <span
+                                        key={st.code}
+                                        title={`OP${st.code}: ${st.status || 'Pending/Skipped'}`}
+                                        style={{
+                                          fontSize: 9,
+                                          fontWeight: 800,
+                                          padding: "1px 5px",
+                                          borderRadius: 4,
+                                          background: bg,
+                                          color: color,
+                                          border: `1px solid ${isOk ? C.ok(0.3) : isNg ? C.ng(0.3) : 'transparent'}`,
+                                          fontFamily: "'DM Mono',monospace",
+                                        }}
+                                      >
+                                        {st.code}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              </td>
+                              <td style={{ padding: "10px", fontFamily: "'DM Mono',monospace", color: C.txt("sec") }}>
+                                {scan.cycleTime ? `${Number(scan.cycleTime).toFixed(1)}s` : "-"}
+                              </td>
+                              <td style={{ padding: "10px" }}>
+                                <span
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 4,
+                                    padding: "2px 8px",
+                                    borderRadius: 999,
+                                    fontSize: 10,
+                                    fontWeight: 800,
+                                    background: isPass ? C.ok(0.12) : C.ng(0.12),
+                                    color: isPass ? C.ok() : C.ng(),
+                                    border: `1px solid ${isPass ? C.ok(0.25) : C.ng(0.25)}`,
+                                  }}
+                                >
+                                  {isPass ? <CheckCircle2 size={11} /> : <XCircle size={11} />}
+                                  {isPass ? "PASS" : "FAIL"}
+                                </span>
+                              </td>
+                              <td style={{ padding: "10px", fontSize: 11, color: isPass ? C.txt("muted") : C.ng(), fontWeight: isPass ? 400 : 700 }}>
+                                {scan.rejectionReason || (isPass ? "-" : "Quality defect detected")}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p style={{ fontSize: 12, color: C.txt("muted"), textAlign: "center", padding: "24px 0" }}>
+                    No live scans available for this period.
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -5183,13 +5867,13 @@ const Dashboard = () => {
                     title={
                       isMultiDayRange
                         ? t(
-                            "dashboard.rejectionTrendByDay",
-                            "Rejection Trend by Day",
-                          )
+                          "dashboard.rejectionTrendByDay",
+                          "Rejection Trend by Day",
+                        )
                         : t(
-                            "dashboard.rejectionTrendByHour",
-                            "Rejection Trend by Hour",
-                          )
+                          "dashboard.rejectionTrendByHour",
+                          "Rejection Trend by Hour",
+                        )
                     }
                     right={
                       <ChartModeToggle
@@ -5681,7 +6365,7 @@ const Dashboard = () => {
                           Math.min(
                             98,
                             Number(zone.xPercent || 0) +
-                              Number(zone.widthPercent || 0) / 2,
+                            Number(zone.widthPercent || 0) / 2,
                           ),
                         );
                         const centerY = Math.max(
@@ -5689,7 +6373,7 @@ const Dashboard = () => {
                           Math.min(
                             98,
                             Number(zone.yPercent || 0) +
-                              Number(zone.heightPercent || 0) / 2,
+                            Number(zone.heightPercent || 0) / 2,
                           ),
                         );
                         return (

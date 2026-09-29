@@ -542,18 +542,36 @@
 /* --- KPI Stats Grid --- */
 .rej-kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+}
+
+@media (max-width: 1400px) {
+  .rej-kpi-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .rej-kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 480px) {
+  .rej-kpi-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .rej-kpi-card {
   background: var(--app-bg-card, #ffffff);
   border: 1px solid var(--app-border, rgba(226, 232, 240, 0.8));
   border-radius: 14px;
-  padding: 18px 20px;
+  padding: 15px 16px;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   position: relative;
   overflow: hidden;
   box-shadow: 0 2px 12px -1px rgba(0, 0, 0, 0.04);
@@ -687,13 +705,13 @@
 
 /* Clean Standard Industrial Station Cards */
 .rej-gate-card {
-  flex: 0 0 170px;
-  min-width: 170px;
-  max-width: 170px;
+  flex: 0 0 196px;
+  min-width: 196px;
+  max-width: 196px;
   background: var(--app-bg-card, #ffffff);
   border: 1.5px solid var(--app-border, #e2e8f0);
   border-radius: 12px;
-  padding: 12px 14px 10px 14px;
+  padding: 12px 12px 10px 12px;
   position: relative;
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
@@ -733,7 +751,9 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 6px;
   margin-bottom: 2px;
+  min-height: 24px;
 }
 
 .rej-gate-code {
@@ -745,6 +765,23 @@
   background: #f1f5f9;
   border: 1px solid #e2e8f0;
   letter-spacing: 0.02em;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.rej-gate-op-tag {
+  font-size: 8.5px;
+  font-weight: 800;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  padding: 1px 4px;
+  border-radius: 4px;
+  margin-left: 4px;
+  display: inline-block;
+  white-space: nowrap;
 }
 
 .rej-gate-badge-status {
@@ -754,6 +791,8 @@
   padding: 2px 6px;
   border-radius: 5px;
   text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .rej-gate-badge-status.ok {
   color: #166534;
@@ -823,6 +862,140 @@
 .stat-dot.green { background: #10b981; }
 .stat-dot.red { background: #ef4444; }
 
+/* ── Pipeline Wire Connector (between speedometer cards) ─────────────────── */
+.rej-pipeline-connector {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 4px;
+  position: relative;
+  align-self: center;
+  min-width: 64px;
+}
+
+.rej-pipeline-connector.parallel {
+  min-width: 52px;
+  gap: 2px;
+  padding: 0 2px;
+}
+
+.rej-parallel-connector-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  width: 100%;
+  padding: 4px 0;
+}
+
+.rej-parallel-track {
+  position: absolute;
+  top: 16px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: repeating-linear-gradient(90deg, #93c5fd 0, #93c5fd 4px, transparent 4px, transparent 8px);
+  z-index: 1;
+}
+
+.rej-parallel-badge {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  border: 1.5px solid #3b82f6;
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
+  color: #1d4ed8;
+  transition: all 0.2s ease;
+  cursor: default;
+}
+
+.rej-pipeline-connector.parallel:hover .rej-parallel-badge {
+  transform: scale(1.12);
+  background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+  border-color: #2563eb;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+}
+
+.rej-parallel-label {
+  font-size: 8px;
+  font-weight: 800;
+  color: #2563eb;
+  letter-spacing: 0.04em;
+  margin-top: 5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.rej-wire-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+  border: 1.5px solid #f59e0b;
+  border-radius: 8px;
+  padding: 3px 8px;
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.22);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.rej-wire-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.rej-wire-title {
+  font-size: 9px;
+  font-weight: 800;
+  color: #b45309;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.rej-wire-arrow {
+  font-size: 11px;
+  font-weight: 900;
+  color: #d97706;
+  line-height: 1;
+}
+
+.rej-wire-count {
+  font-size: 13px;
+  font-weight: 900;
+  color: #78350f;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+}
+
+.rej-wire-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+  flex-shrink: 0;
+  animation: wire-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes wire-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.45); opacity: 0.7; }
+}
+
 /* --- Speedometer SVG Component Elements --- */
 .rej-speedometer-wrap {
   display: flex;
@@ -834,7 +1007,8 @@
 }
 
 .rej-speedometer-wrap.compact {
-  max-width: 130px;
+  max-width: 172px;
+  width: 100%;
 }
 
 .rej-speedometer-wrap.featured {
@@ -1730,66 +1904,368 @@
 /* --- SPC KPI Diagnostic Grid --- */
 .rej-spc-kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 14px;
-  margin-bottom: 18px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
 }
 
 .rej-spc-kpi-card {
   background: var(--app-bg-card, #ffffff);
   border: 1px solid var(--app-border, #e2e8f0);
-  border-radius: 14px;
-  padding: 14px 18px;
+  border-radius: 10px;
+  padding: 10px 14px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+  gap: 2px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.04);
   transition: all 0.2s ease;
 }
 
 .rej-spc-kpi-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.07);
 }
 
 .rej-spc-kpi-card.golden-window {
-  background: linear-gradient(135deg, rgba(34, 197, 94, 0.06), rgba(16, 185, 129, 0.02));
-  border-color: rgba(34, 197, 94, 0.4);
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.05), rgba(16, 185, 129, 0.01));
+  border-color: rgba(34, 197, 94, 0.35);
 }
 
 .rej-spc-kpi-card.target-center {
-  background: linear-gradient(135deg, rgba(37, 99, 235, 0.06), rgba(59, 130, 246, 0.02));
-  border-color: rgba(37, 99, 235, 0.35);
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.05), rgba(59, 130, 246, 0.01));
+  border-color: rgba(37, 99, 235, 0.3);
 }
 
 .rej-spc-kpi-card.drift-card {
-  background: linear-gradient(135deg, rgba(239, 68, 68, 0.06), rgba(244, 63, 94, 0.02));
-  border-color: rgba(239, 68, 68, 0.35);
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.05), rgba(244, 63, 94, 0.01));
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.rej-spc-kpi-card.capability-card {
+  background: linear-gradient(135deg, rgba(5, 150, 105, 0.05), rgba(16, 185, 129, 0.01));
+  border-color: rgba(5, 150, 105, 0.3);
 }
 
 .rej-spc-kpi-label {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
   color: #64748b;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .rej-spc-kpi-value {
-  font-size: 20px;
-  font-weight: 800;
+  font-size: 17px;
+  font-weight: 900;
   color: #0f172a;
   font-family: var(--font-mono, monospace);
-  line-height: 1.2;
+  line-height: 1.15;
 }
 
 .rej-spc-kpi-sub {
-  font-size: 11px;
+  font-size: 10px;
   color: #64748b;
   font-weight: 500;
+  line-height: 1.3;
+}
+
+/* SPC Area Chart drag-select zoom overlay */
+.rej-spc-chart-container {
+  position: relative;
+  cursor: crosshair;
+}
+
+.rej-spc-chart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rej-spc-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.rej-spc-toolbar-btn:hover {
+  background: #e2e8f0;
+  border-color: #94a3b8;
+}
+
+.rej-spc-toolbar-btn.active {
+  background: #2563eb;
+  color: #fff;
+  border-color: #1d4ed8;
+}
+
+.rej-spc-toolbar-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Per-Part Parameter Compliance Matrix & Carousel */
+.rej-part-compliance-section {
+  margin-top: 22px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 18px 20px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+}
+
+.rej-compliance-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.rej-compliance-carousel-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.rej-part-compliance-carousel {
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  padding: 6px 4px 16px 4px;
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: #94a3b8 #f1f5f9;
+}
+
+.rej-part-compliance-carousel::-webkit-scrollbar {
+  height: 8px;
+}
+
+.rej-part-compliance-carousel::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 6px;
+}
+
+.rej-part-compliance-carousel::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 6px;
+}
+
+.rej-part-compliance-carousel::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.rej-part-compliance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.rej-part-compliance-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 14px 16px;
+  min-width: 380px;
+  max-width: 440px;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.04);
+}
+
+.rej-part-compliance-grid .rej-part-compliance-card {
+  min-width: 0;
+  max-width: none;
+  flex-shrink: 1;
+}
+
+.rej-part-compliance-card:hover {
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  border-color: #cbd5e1;
+  transform: translateY(-2px);
+}
+
+.rej-part-compliance-card.ng-part {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: linear-gradient(180deg, rgba(254, 242, 242, 0.45) 0%, #ffffff 65px);
+}
+
+.rej-part-compliance-card.ok-part {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: linear-gradient(180deg, rgba(240, 253, 244, 0.45) 0%, #ffffff 65px);
+}
+
+.rej-part-compliance-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+}
+
+.rej-part-compliance-serial {
+  font-size: 13px;
+  font-weight: 800;
+  color: #0f172a;
+  font-family: var(--font-mono, monospace);
+  letter-spacing: -0.01em;
+}
+
+.rej-compliance-status-pill {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 9px;
+  border-radius: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rej-compliance-status-pill.ok {
+  background: rgba(34, 197, 94, 0.15);
+  color: #15803d;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.rej-compliance-status-pill.ng {
+  background: rgba(239, 68, 68, 0.15);
+  color: #dc2626;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.rej-compliance-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.rej-compliance-table th {
+  text-align: left;
+  padding: 4px 6px;
+  font-size: 10px;
+  font-weight: 750;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.rej-compliance-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: middle;
+}
+
+.rej-compliance-table tr:last-child td {
+  border-bottom: none;
+}
+
+.rej-compliance-table tr:hover td {
+  background: rgba(241, 245, 249, 0.6);
+}
+
+.rej-compliance-in-range {
+  color: #15803d;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.rej-compliance-out-range {
+  color: #dc2626;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.rej-spc-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  color: #1e3a8a;
+  font-size: 13px;
+  font-weight: 750;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.rej-spc-back-btn:hover {
+  background: #f0f9ff;
+  border-color: #0284c7;
+  color: #0284c7;
+  transform: translateX(-2px);
+  box-shadow: 0 4px 12px rgba(2, 132, 199, 0.15);
+}
+
+/* SPC Run Chart Horizontal Scroll Stream */
+.rej-spc-chart-scroll-wrapper {
+  position: relative;
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #94a3b8 #f1f5f9;
+  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #f1f5f9;
+  padding: 4px 0;
+}
+
+.rej-spc-chart-scroll-wrapper::-webkit-scrollbar {
+  height: 9px;
+}
+
+.rej-spc-chart-scroll-wrapper::-webkit-scrollbar-track {
+  background: #f8fafc;
+  border-radius: 6px;
+}
+
+.rej-spc-chart-scroll-wrapper::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 6px;
+}
+
+.rej-spc-chart-scroll-wrapper::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+@media (max-width: 900px) {
+  .rej-spc-kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 540px) {
+  .rej-spc-kpi-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* --- Rejection Methodology Card --- */
@@ -2285,6 +2761,14 @@
   border: 1px solid rgba(34, 197, 94, 0.4);
 }
 
+.rej-viewport-status-badge.info {
+  background: rgba(14, 165, 233, 0.25);
+  color: #e0f2fe;
+  border: 1px solid rgba(56, 189, 248, 0.65);
+  box-shadow: 0 0 12px rgba(14, 165, 233, 0.35);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
 .rej-viewport-canvas {
   position: relative;
   width: 100%;
@@ -2325,6 +2809,50 @@
   font-size: 12px;
   font-weight: 600;
   background: #0f172a;
+}
+
+.rej-sensor-viewport-banner {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(8px);
+  border: 1.5px solid rgba(59, 130, 246, 0.5);
+  color: #bfdbfe;
+  font-size: 11px;
+  font-weight: 750;
+  padding: 6px 16px;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 15;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.rej-pass-viewport-banner {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(8px);
+  border: 1.5px solid rgba(34, 197, 94, 0.5);
+  color: #bbf7d0;
+  font-size: 11px;
+  font-weight: 750;
+  padding: 6px 16px;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 15;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 /* Crisp CAD Overlays */
@@ -3154,6 +3682,264 @@
   animation: rejSkeletonShimmer 1.6s infinite ease-in-out;
   border-radius: 4px 4px 0 0;
   width: 42px;
+}
+
+/* ── Tab 3: Two Category Telemetry & Stacked Multi-Timeline Charts (Image 2 style) ── */
+.rej-telemetry-header-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 12px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+}
+
+.rej-telemetry-category-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rej-category-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.rej-category-tab-btn:hover {
+  background: #f1f5f9;
+  color: #1e293b;
+  border-color: #94a3b8;
+}
+
+.rej-category-tab-btn.active {
+  background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%);
+  color: #ffffff;
+  border-color: #1d4ed8;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+}
+
+.rej-category-count-badge {
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 800;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.rej-category-tab-btn.active .rej-category-count-badge {
+  background: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+}
+
+.rej-telemetry-view-toggles {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #f1f5f9;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+}
+
+.rej-view-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.rej-view-toggle-btn.active {
+  background: #ffffff;
+  color: #0f172a;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* Stacked Timeline Grid */
+.rej-stacked-charts-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.rej-stacked-chart-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 12px 18px 10px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.03);
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.rej-stacked-chart-card:hover {
+  border-color: #cbd5e1;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
+}
+
+.rej-stacked-chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rej-param-sno-badge {
+  font-size: 11px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #e2e8f0;
+}
+
+.rej-stacked-chart-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 800;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+
+.rej-stacked-chart-subtitle {
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.rej-param-stat-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  color: #334155;
+}
+
+.rej-inspect-spc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #2563eb;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.rej-inspect-spc-btn:hover {
+  background: #eff6ff;
+  border-color: #93c5fd;
+}
+
+/* Shift Markers Header across graph */
+.rej-shift-marker-header {
+  display: flex;
+  justify-content: space-around;
+  padding: 2px 40px;
+  margin-bottom: 2px;
+  border-bottom: 1px dashed #f1f5f9;
+}
+
+.rej-shift-tag {
+  font-size: 10px;
+  font-weight: 750;
+  color: #94a3b8;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+/* Stacked Timeline Tooltip */
+.rej-stacked-tooltip {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 10px 14px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  font-size: 12px;
+  min-width: 190px;
+}
+
+.rej-stacked-tooltip-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 800;
+  color: #0f172a;
+  margin-bottom: 3px;
+}
+
+.rej-shift-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #eff6ff;
+  color: #2563eb;
+  font-weight: 700;
+  border: 1px solid #bfdbfe;
+}
+
+.rej-stacked-tooltip-time {
+  font-size: 10px;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+
+.rej-stacked-tooltip-part {
+  font-size: 11px;
+  color: #334155;
+  font-family: monospace;
+  margin-bottom: 6px;
+}
+
+.rej-stacked-tooltip-val {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.rej-stacked-tooltip-ng {
+  margin-top: 6px;
+  padding: 3px 6px;
+  background: #fef2f2;
+  color: #dc2626;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
 }
 
 
