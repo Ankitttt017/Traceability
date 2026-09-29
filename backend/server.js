@@ -153,6 +153,21 @@ app.use("/api", v1Routes);
 app.get("/api/audit", getAuditLog);
 app.get("/api/v1/audit", getAuditLog);
 
+// Lightweight health check endpoints for frontend connectivity probes
+const handleHealthCheck = (_req, res) => {
+  return res.status(200).json({
+    ok: true,
+    status: "healthy",
+    dbAvailable,
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+};
+
+app.get("/health", handleHealthCheck);
+app.get("/api/health", handleHealthCheck);
+app.get("/api/v1/health", handleHealthCheck);
+
 app.get("/", (_req, res) => {
   res.send("Traceability Backend Running");
 });

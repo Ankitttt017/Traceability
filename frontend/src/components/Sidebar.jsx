@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   ChevronLeft,
   ChevronDown,
   ChevronRight,
+  X,
   UserCog,
   Wrench,
   Boxes,
@@ -93,8 +94,12 @@ const Sidebar = ({ onClose }) => {
   const location = useLocation();
   const userRole = getUserRole();
 
+  const prevPathRef = useRef(location.pathname);
   useEffect(() => {
-    if (onClose) onClose();
+    if (prevPathRef.current !== location.pathname) {
+      prevPathRef.current = location.pathname;
+      if (onClose) onClose();
+    }
   }, [location.pathname, onClose]);
 
   const traceabilityNavigation = useMemo(
@@ -326,6 +331,9 @@ const Sidebar = ({ onClose }) => {
         key={item.path}
         to={item.path}
         end
+        onClick={() => {
+          if (onClose) onClose();
+        }}
         target={item.newTab ? "_blank" : undefined}
         rel={item.newTab ? "noopener noreferrer" : undefined}
         title={collapsed ? item.name : undefined}
@@ -422,25 +430,41 @@ const Sidebar = ({ onClose }) => {
       <div className="h-16 flex items-center justify-between px-4 border-b border-gray-200/60 bg-gradient-to-r from-white to-indigo-50/30">
         <Logo collapsed={collapsed} />
 
-        {!collapsed ? (
+        <div className="flex items-center gap-1">
+          {/* Mobile close button: only on screens < xl */}
           <button
             type="button"
-            onClick={() => setCollapsed(true)}
-            className="p-1.5 rounded-lg hover:bg-indigo-100 text-gray-400 hover:text-indigo-600 transition-all duration-200 flex-shrink-0 ml-1 group"
-            title="Collapse sidebar"
+            onClick={onClose}
+            className="xl:hidden p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-800 transition"
+            aria-label="Close sidebar"
+            title="Close sidebar"
           >
-            <ChevronLeft size={16} className="group-hover:-translate-x-0.5 transition-transform" />
+            <X size={18} />
           </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setCollapsed(false)}
-            className="absolute top-4 right-[-12px] bg-white border-2 border-indigo-200 rounded-full p-1 shadow-lg hover:shadow-indigo-200/50 transition-all duration-200 hover:border-indigo-400 hover:scale-110 z-20"
-            title="Expand sidebar"
-          >
-            <ChevronRight size={14} className="text-indigo-600" />
-          </button>
-        )}
+
+          {/* Desktop collapse button: only on >= xl */}
+          <div className="hidden xl:block">
+            {!collapsed ? (
+              <button
+                type="button"
+                onClick={() => setCollapsed(true)}
+                className="p-1.5 rounded-lg hover:bg-indigo-100 text-gray-400 hover:text-indigo-600 transition-all duration-200 flex-shrink-0 group"
+                title="Collapse sidebar"
+              >
+                <ChevronLeft size={16} className="group-hover:-translate-x-0.5 transition-transform" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setCollapsed(false)}
+                className="absolute top-4 right-[-12px] bg-white border-2 border-indigo-200 rounded-full p-1 shadow-lg hover:shadow-indigo-200/50 transition-all duration-200 hover:border-indigo-400 hover:scale-110 z-20"
+                title="Expand sidebar"
+              >
+                <ChevronRight size={14} className="text-indigo-600" />
+              </button>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Navigation */}
