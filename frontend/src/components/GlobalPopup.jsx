@@ -1462,7 +1462,7 @@ const GlobalPopup = ({
         if (!journeyData && !hasBlockingError) {
           setLoading(true);
         }
-        const res = await traceabilityApi.journeyByPart(partId);
+        const res = await traceabilityApi.journeyByPart(partId, { suppressGlobalError: true });
         if (isActive) setJourneyData(res);
       } catch (error) {
         console.warn("[GlobalPopup] Journey fetch failed:", error?.message || error);
