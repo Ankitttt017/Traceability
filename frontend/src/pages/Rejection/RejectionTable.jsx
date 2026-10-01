@@ -111,8 +111,14 @@ const RejectionTable = ({
   });
 
   const virtualItems = rowVirtualizer.getVirtualItems();
-  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
-  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
+  // Fallback: If virtualizer has not computed items (e.g. initial render before measurement or inside unmeasured container), render all pagedRows directly
+  const isVirtualActive = virtualItems.length > 0;
+  const itemsToRender = isVirtualActive
+    ? virtualItems.map((v) => ({ index: v.index, row: pagedRows[v.index] }))
+    : pagedRows.map((row, index) => ({ index, row }));
+
+  const paddingTop = isVirtualActive ? virtualItems[0].start : 0;
+  const paddingBottom = isVirtualActive ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
 
   const rangeStart = totalRows > 0 ? (currentPage - 1) * effectivePageSize + 1 : 0;
   const rangeEnd = totalRows > 0 ? Math.min(totalRows, (currentPage - 1) * effectivePageSize + pagedRows.length) : 0;
@@ -235,10 +241,8 @@ const RejectionTable = ({
                 </tr>
               )}
 
-              {virtualItems.map((virtualRow) => {
-                const row = pagedRows[virtualRow.index];
+              {itemsToRender.map(({ index: rowIndex, row }) => {
                 if (!row) return null;
-                const rowIndex = virtualRow.index;
                 const isEven = rowIndex % 2 === 0;
                 const rowBgClass = isEven ? "bg-white" : "bg-slate-50/70";
 
