@@ -260,6 +260,28 @@ const extractShotFromPartId = (partId) => {
   return "";
 };
 
+const extractShotDateTimeFromPartId = (partId) => {
+  const s = String(partId || "").trim();
+  if (!s || s === "-" || looksLikeCustomerQr(s) || (s.startsWith("0408") && s.length >= 20)) return null;
+
+  // Extract MMDDHHMM from beginning of standard 13-digit casting part ID (e.g. 0816164228580 -> Month 08, Day 16, 16:42)
+  const m = s.match(/^(\d{2})(\d{2})(\d{2})(\d{2})/);
+  if (m) {
+    const month = parseInt(m[1], 10);
+    const day = parseInt(m[2], 10);
+    const hour = parseInt(m[3], 10);
+    const minute = parseInt(m[4], 10);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      const year = new Date().getFullYear();
+      const d = new Date(year, month - 1, day, hour, minute, 0);
+      if (!Number.isNaN(d.getTime())) {
+        return d.toISOString();
+      }
+    }
+  }
+  return null;
+};
+
 const splitZoneString = (val) => {
   const raw = String(val || "").trim();
   if (!raw || raw === "-") return { zone: "", subZone: "" };
@@ -314,9 +336,10 @@ const canonicalizeReason = (raw) => {
   if (lower.includes("blow hole") || lower.includes("blowhole")) return "Blow Hole";
   if (lower.includes("pin hole") || lower.includes("pinhole")) return "Pin Hole";
   if (lower.includes("cold shut") || lower.includes("coldshut")) return "Cold Shut";
-  if (lower.includes("body leak")) return "Body Leak";
-  if (lower.includes("pressure leak")) return "Pressure Leak";
-  if (lower.includes("leak") || lower.includes("leakage")) return "Body Leak";
+  if (lower.includes("op150") || lower.includes("op 150")) return "Pressure Leakage Fail (OP150)";
+  if (lower.includes("body leak")) return "Body Leak Fail";
+  if (lower.includes("pressure leak")) return "Pressure Leakage Fail (OP150)";
+  if (lower.includes("leak") || lower.includes("leakage")) return "Pressure Leakage Fail (OP150)";
   if (lower.includes("dent")) return "Dent";
   if (lower.includes("crack")) return "Crack";
   if (lower.includes("porosity")) return "Porosity";
@@ -1168,6 +1191,8 @@ export default function RejectionAnalysis() {
   const [zoneParetoData, setZoneParetoData] = useState([]);
   const [shiftScrap, setShiftScrap] = useState([]);
   const [rows, setRows] = useState([]);
+  const [dieStats, setDieStats] = useState([]);
+  const [selectedDieFilter, setSelectedDieFilter] = useState("ALL");
   const [filterOptions, setFilterOptions] = useState({ machines: [], parts: [], dies: [], shifts: [] });
   const [dataErrors, setDataErrors] = useState([]);
 
@@ -1425,6 +1450,7 @@ export default function RejectionAnalysis() {
         const res = summaryResult.value;
         if (res.summary) setSummary(res.summary);
         if (Array.isArray(res.qualityGates)) setQualityGates(res.qualityGates);
+        if (Array.isArray(res.dieStats)) setDieStats(res.dieStats);
         if (res.filterOptions) setFilterOptions(res.filterOptions);
         if (res.stationLabels) setStationLabels((prev) => ({ ...prev, ...res.stationLabels }));
       } else {
@@ -1476,6 +1502,7 @@ export default function RejectionAnalysis() {
           if (fallbackRes) {
             if (fallbackRes.summary) setSummary(fallbackRes.summary);
             if (Array.isArray(fallbackRes.qualityGates)) setQualityGates(fallbackRes.qualityGates);
+            if (Array.isArray(fallbackRes.dieStats)) setDieStats(fallbackRes.dieStats);
             if (fallbackRes.qualityGateDrillDown) setQualityGateDrillDown(fallbackRes.qualityGateDrillDown);
             if (fallbackRes.mlInsights) setMlInsights(fallbackRes.mlInsights);
             if (Array.isArray(fallbackRes.pareto)) setPareto(fallbackRes.pareto);
@@ -1708,6 +1735,11 @@ export default function RejectionAnalysis() {
           shiftCode: filters.shiftCode,
           machineName: filters.machineName,
           qualityGate: filters.qualityGate,
+          partName: filters.partName,
+          partCategory: filters.partCategory,
+          dieName: filters.dieName,
+          category: filters.category,
+          search: tableSearch || undefined,
           page: "1",
           pageSize: "10000",
         });
@@ -1724,6 +1756,7 @@ export default function RejectionAnalysis() {
 
     sheet.columns = [
       { header: "Shot No", key: "shotNumber", width: 14 },
+      { header: "Shot Date & Time", key: "shotDateTime", width: 22 },
       { header: "Part Serial No", key: "partId", width: 26 },
       { header: "Customer QR", key: "customerQrCode", width: 32 },
       { header: "Status", key: "status", width: 12 },
@@ -1768,10 +1801,27 @@ export default function RejectionAnalysis() {
     };
 
     exportSource.forEach((r) => {
+      const rawPartId = String(r.partId || r.part_id || r.barcode || "").trim();
+      const rawCustomerQr = String(r.customerQrCode || r.customerCode || r.customer_qr || "").trim();
+      const isQrInPartId = looksLikeCustomerQr(rawPartId) || rawPartId === rawCustomerQr;
+      const displayPartId = !isQrInPartId && rawPartId !== "-" ? rawPartId : "—";
+      const displayCustomerQr = rawCustomerQr !== "-" && rawCustomerQr ? rawCustomerQr : (isQrInPartId ? rawPartId : "—");
+      const isCasted = Boolean(displayPartId && displayPartId !== "—" && !looksLikeCustomerQr(displayPartId));
+      const shotNum = isCasted ? (r.shotNumber || r.shot_number || extractShotFromPartId(displayPartId) || "—") : "—";
+      const decodedShotDate = isCasted ? extractShotDateTimeFromPartId(displayPartId) : null;
+      const rawShotDate = decodedShotDate || r.shot_datetime || r.shot_time || r.first_scan_at || (isCasted ? r.createdAt : null);
+      const shotDateTime = (isCasted && rawShotDate && rawShotDate !== "-") ? formatResultTimestamp(rawShotDate) : "—";
+
+      let z = r.rejectionZone || r.rejection_zone || r.zone || "-";
+      if (String(z).toLowerCase().includes("leak") || String(z).toLowerCase().includes("150")) {
+        z = "Leak Test";
+      }
+
       sheet.addRow({
-        shotNumber: r.shotNumber || r.shot_number || "-",
-        partId: r.partId || r.part_id || "-",
-        customerQrCode: r.customerQrCode || r.customer_qr || "-",
+        shotNumber: shotNum,
+        shotDateTime: shotDateTime,
+        partId: displayPartId,
+        customerQrCode: displayCustomerQr,
         status: r.status || r.overall_status || "-",
         ngGate: r.ngGate || "-",
         ngRecordedAt: formatResultTimestamp(r.ngRecordedAt || r.final_scan_at),
@@ -1782,7 +1832,7 @@ export default function RejectionAnalysis() {
         op140: r.op140_status || "-",
         op150: r.op150_status || "-",
         op160: r.op160_status || "-",
-        zone: r.rejectionZone || r.rejection_zone || "-",
+        zone: z,
         subZone: r.rejectionSubZone || r.rejection_sub_zone || "-",
         reason: r.reason || r.rejection_reason || r.ngReason || r.ng_reason || "-",
         category: r.category || r.rejection_category || "-",
@@ -1974,53 +2024,70 @@ export default function RejectionAnalysis() {
       const displayPartId = !isQrInPartId && rawPartId !== "-" ? rawPartId : "";
       const displayCustomerQr = rawCustomerQr !== "-" ? rawCustomerQr : (isQrInPartId ? rawPartId : "");
 
+      // Shot details and shot timestamp are strictly valid ONLY for genuine casted parts with Part ID
+      const isCastedPart = Boolean(displayPartId && displayPartId !== "-" && !looksLikeCustomerQr(displayPartId));
       const rawShot = r.shot_number || r.shotNumber || "";
-      const shotNum = displayPartId ? (rawShot && rawShot !== "-" ? rawShot : extractShotFromPartId(displayPartId)) : "";
-      const shotStat = displayPartId && shotNum ? (r.shot_status || r.shotStatus || "OK") : "";
+      const shotNum = isCastedPart ? (rawShot && rawShot !== "-" ? rawShot : extractShotFromPartId(displayPartId)) : "";
+      const shotStat = isCastedPart && shotNum ? (r.shot_status || r.shotStatus || "OK") : "";
+      const decodedShotDate = isCastedPart ? extractShotDateTimeFromPartId(displayPartId) : null;
+      const rawShotDate = decodedShotDate || r.shot_datetime || r.shot_time || r.first_scan_at || (isCastedPart ? r.createdAt : null);
+      const shotDateTime = (isCastedPart && rawShotDate && rawShotDate !== "-")
+        ? formatResultTimestamp(rawShotDate)
+        : "";
 
-      let isLeakNg = r.isOp150Ng || r.op150_status === 'NG' || r.op150_status === 'FAIL' || r.op150_status === 'FAILED';
+      let isLeakNg = r.isOp150Ng || r.isLeakNg || r.op150_status === 'NG' || r.op150_status === 'FAIL' || r.op150_status === 'FAILED';
       let parsedLeakData = null;
       if (r.leak_data) {
         try {
           parsedLeakData = typeof r.leak_data === 'string' ? JSON.parse(r.leak_data) : r.leak_data;
-          const res = String(parsedLeakData?.result || parsedLeakData?.status || '').toUpperCase();
+          const res = String(parsedLeakData?.result || parsedLeakData?.Raw_Result || parsedLeakData?.status || '').toUpperCase();
           if (res === 'NG' || res === 'FAIL' || res === 'FAILED') {
             isLeakNg = true;
           }
         } catch(e) {}
       }
 
+      const rawNgStation = r.ngStation || r.ng_station || "";
+      let ng_station = rawNgStation;
+      if (!ng_station) {
+        if (r.op100_status === 'NG' || r.op100_status === 'FAIL' || r.op100_status === 'FAILED') ng_station = "DCM+DPM (OP100)";
+        else if (r.op110_status === 'NG' || r.op110_status === 'FAIL' || r.op110_status === 'FAILED') ng_station = "Laser Marking (OP110)";
+        else if (r.op120_status === 'NG' || r.op120_status === 'FAIL' || r.op120_status === 'FAILED') ng_station = "Casting PDi (OP120)";
+        else if (r.op130_status === 'NG' || r.op130_status === 'FAIL' || r.op130_status === 'FAILED') ng_station = "Pre Inspection (OP130)";
+        else if (r.op140_status === 'NG' || r.op140_status === 'FAIL' || r.op140_status === 'FAILED') ng_station = "Auto Guaging (OP140)";
+        else if (isLeakNg) ng_station = (parsedLeakData?.matchedMachineName || parsedLeakData?.machineName || "Leak-Test-01") + " (OP150)";
+        else if (r.op160_status === 'NG' || r.op160_status === 'FAIL' || r.op160_status === 'FAILED') ng_station = "Final Inspection (OP160)";
+        else ng_station = r.machine_name || "";
+      }
+
+      let isAnyGateNg = ['NG', 'FAILED'].includes(String(r.status || r.overall_status || '').toUpperCase())
+        || isLeakNg || Boolean(r.op100_status === 'NG' || r.op110_status === 'NG' || r.op120_status === 'NG' || r.op130_status === 'NG' || r.op140_status === 'NG' || r.op160_status === 'NG');
+
       const srcText = String(r.ng_reason || r.ngReason || r.reason || r.rejection_reason || (isLeakNg ? "Leak Test Failure" : ""));
-      const catParsed = r.category || r.rejection_category || parseFieldFromText(srcText, "Category") || (isLeakNg ? "LEAK TEST" : "");
-      const reasonParsed = r.reason || r.rejection_reason || r.ngReason || parseFieldFromText(srcText, "Reason") || (isLeakNg ? (parsedLeakData?.body_leak_value ? `Body Leak: ${parsedLeakData.body_leak_value} cc/min` : "Leak Test NG") : "");
-      const viewParsed = r.rejectionView || r.rejection_view || r.view || parseFieldFromText(srcText, "View") || "";
-      const rawZone = r.rejectionZone || r.rejection_zone || r.zone || parseFieldFromText(srcText, "Zone") || (isLeakNg ? "BODY" : "");
+      const catParsed = r.category || r.rejection_category || parseFieldFromText(srcText, "Category") || (isLeakNg ? "MR" : "");
+      let reasonParsed = r.reason || r.rejection_reason || r.ngReason || parseFieldFromText(srcText, "Reason");
+      if ((!reasonParsed || String(reasonParsed).toLowerCase().includes("op150") || String(reasonParsed).toLowerCase().includes("quality gate")) && isLeakNg) {
+        const bodyVal = r.leak_body_leak_value || parsedLeakData?.bodyLeakValue || parsedLeakData?.body_leak_value;
+        reasonParsed = bodyVal ? `Body Leak Fail (${bodyVal} bar)` : "Pressure Leakage Fail (OP150)";
+      } else if (reasonParsed && (String(reasonParsed).toLowerCase().includes("op150") || String(reasonParsed).toLowerCase() === "op150 ng")) {
+        reasonParsed = "Pressure Leakage Fail (OP150)";
+      }
+      const viewParsed = r.rejectionView || r.rejection_view || r.view || parseFieldFromText(srcText, "View") || (isLeakNg ? "Leak Testing" : "");
+      let rawZone = r.rejectionZone || r.rejection_zone || r.zone || parseFieldFromText(srcText, "Zone") || (isLeakNg ? "Leak Test" : "");
+      if (String(rawZone).toLowerCase().includes("leak") || String(rawZone).toLowerCase().includes("150")) {
+        rawZone = "Leak Test";
+      }
       const zoneParts = splitZoneString(rawZone);
       const zoneParsed = zoneParts.zone !== "-" ? zoneParts.zone : (rawZone !== "-" ? rawZone : "");
       const subZoneParsed = r.rejectionSubZone || r.rejection_sub_zone || r.subZone || (zoneParts.subZone !== "-" ? zoneParts.subZone : parseFieldFromText(srcText, "Sub Zone")) || "";
 
-      let isAnyGateNg = false;
-      let ng_station = "";
-      if (r.op100_status === 'NG' || r.op100_status === 'FAIL' || r.op100_status === 'FAILED') { ng_station = "OP100"; isAnyGateNg = true; }
-      else if (r.op110_status === 'NG' || r.op110_status === 'FAIL' || r.op110_status === 'FAILED') { ng_station = "OP110"; isAnyGateNg = true; }
-      else if (r.op120_status === 'NG' || r.op120_status === 'FAIL' || r.op120_status === 'FAILED') { ng_station = "OP120"; isAnyGateNg = true; }
-      else if (r.op130_status === 'NG' || r.op130_status === 'FAIL' || r.op130_status === 'FAILED') { ng_station = "OP130"; isAnyGateNg = true; }
-      else if (r.op140_status === 'NG' || r.op140_status === 'FAIL' || r.op140_status === 'FAILED') { ng_station = "OP140"; isAnyGateNg = true; }
-      else if (isLeakNg) { ng_station = "OP150"; isAnyGateNg = true; }
-      else if (r.op160_status === 'NG' || r.op160_status === 'FAIL' || r.op160_status === 'FAILED') { ng_station = "OP160"; isAnyGateNg = true; }
-      else ng_station = r.machine_name || "";
-
-      let finalOverallStatus = String(r.status || r.overall_status || "").trim();
-      if (isAnyGateNg || reasonParsed || catParsed) {
-        finalOverallStatus = "NG";
-      } else if (!finalOverallStatus) {
-        finalOverallStatus = "";
-      }
+      let finalOverallStatus = isAnyGateNg ? "NG" : (r.status || r.overall_status || "");
 
       return {
         id: r.id || `row-${i}`,
-        shot_number: shotNum,
-        shot_datetime: formatResultTimestamp(r.createdAt || r.first_scan_at),
+        shot_number: shotNum || "—",
+        shot_status: shotStat || "—",
+        shot_datetime: shotDateTime || "—",
         barcode: displayPartId,
         customerCode: displayCustomerQr,
         ng_station,
@@ -2086,7 +2153,6 @@ export default function RejectionAnalysis() {
         average_die_clamp_tonnage_count: fmtNum(r.average_die_clamp_tonnage_count),
         time_for_stroke: fmtNum(r.time_for_stroke),
         stroke: fmtNum(r.stroke),
-        shot_status: r.shot_status || "-",
 
         // Leak test values
         leak_body_leak_value: fmtNum(r.leakBodyValue ?? r.leak_body_leak_value ?? parsedLeakData?.body_leak_value ?? parsedLeakData?.bodyLeakValue),
@@ -2119,6 +2185,274 @@ export default function RejectionAnalysis() {
     );
   }, [recordsRows, rejectedRows, tableSearch]);
 
+  // ── Die Analysis Computations (Tab: Die Wise Analysis) ─────────────────
+  const enrichedDieStats = useMemo(() => {
+    if (!Array.isArray(dieStats) || dieStats.length === 0) return [];
+    const mapped = dieStats.map((d) => {
+      const rawName = String(d.die_name || d.dieName || d.die || "").trim();
+      const ok = Number(d.ok_count ?? d.totalOK ?? d.ok ?? 0);
+      const ng = Number(d.ng_count ?? d.totalNG ?? d.ng ?? 0);
+      const total = Number(d.total_shots ?? d.totalParts ?? d.total ?? (ok + ng));
+      const inspected = ok + ng;
+      const scrapRate = d.scrapRate != null && !isNaN(Number(d.scrapRate))
+        ? Number(Number(d.scrapRate).toFixed(2))
+        : (inspected > 0 ? Number(((ng / inspected) * 100).toFixed(2)) : 0);
+      const yieldRate = Number((100 - scrapRate).toFixed(2));
+      return {
+        die_name: rawName && rawName.toUpperCase() !== "UNKNOWN" && rawName !== "-" ? rawName : "Unknown Die",
+        total_shots: total,
+        ok_count: ok,
+        ng_count: ng,
+        inspected,
+        scrapRate,
+        yieldRate,
+      };
+    }).sort((a, b) => b.total_shots - a.total_shots);
+
+    // Filter out unnamed/unknown dies if actual named tooling dies exist (S14, S16, S17, S18)
+    const namedOnly = mapped.filter((d) => d.die_name && d.die_name !== "Unknown Die");
+    return namedOnly.length > 0 ? namedOnly : mapped;
+  }, [dieStats]);
+
+  // Overall Die KPI metrics
+  const dieKpiSummary = useMemo(() => {
+    if (enrichedDieStats.length === 0) {
+      return { totalDies: 0, totalOutput: 0, totalOk: 0, totalNg: 0, totalInspected: 0, avgScrapRate: 0, yieldRate: 100, bestDie: null, worstDie: null };
+    }
+    const totalOutput = enrichedDieStats.reduce((acc, d) => acc + d.total_shots, 0);
+    const totalOk = enrichedDieStats.reduce((acc, d) => acc + d.ok_count, 0);
+    const totalNg = enrichedDieStats.reduce((acc, d) => acc + d.ng_count, 0);
+    const totalInspected = enrichedDieStats.reduce((acc, d) => acc + d.inspected, 0);
+    const avgScrapRate = totalInspected > 0 ? Number(((totalNg / totalInspected) * 100).toFixed(2)) : 0;
+    const yieldRate = totalInspected > 0 ? Number(((totalOk / totalInspected) * 100).toFixed(2)) : 100;
+
+    // Filter for dies with reasonable production volume (>= 50 shots) for realistic best/worst identification
+    const validVolume = enrichedDieStats.filter((d) => d.total_shots >= 50);
+    const pool = validVolume.length > 0 ? validVolume : enrichedDieStats;
+    const sortedByScrap = [...pool].sort((a, b) => b.scrapRate - a.scrapRate);
+    const worstDie = sortedByScrap[0];
+    const bestDie = sortedByScrap[sortedByScrap.length - 1];
+
+    return {
+      totalDies: enrichedDieStats.length,
+      totalOutput,
+      totalOk,
+      totalNg,
+      totalInspected,
+      avgScrapRate,
+      yieldRate,
+      bestDie,
+      worstDie,
+    };
+  }, [enrichedDieStats]);
+
+  // Die-specific defect breakdown (Top defect reasons)
+  const dieDefectBreakdown = useMemo(() => {
+    const targetDie = selectedDieFilter;
+    const pool = (filteredTableRows && filteredTableRows.length > 0)
+      ? filteredTableRows
+      : (recordsRows.length > 0 ? recordsRows : (rows.length > 0 ? rows : []));
+
+    const matchingRows = targetDie === "ALL" ? pool : pool.filter((r) => {
+      const dName = String(r.die_name || r.dieName || "").trim().toUpperCase();
+      return dName === targetDie.toUpperCase();
+    });
+
+    const defectCounts = {};
+    matchingRows.forEach((r) => {
+      const rawReason = r.ngReason || r.rejection_reason || r.reason || r.ng_reason;
+      if (rawReason && rawReason !== "-" && rawReason !== "Quality Gate Ng") {
+        const rLower = String(rawReason).toLowerCase();
+        let reason = rawReason;
+        if (rLower.includes("op150") || rLower.includes("op 150") || rLower.includes("leak")) {
+          const bodyVal = r.leak_body_leak_value || r.leakBodyValue;
+          reason = bodyVal ? `Body Leak Fail (${bodyVal} bar)` : "Pressure Leakage Fail (OP150)";
+        } else {
+          reason = canonicalizeReason(rawReason);
+        }
+        defectCounts[reason] = (defectCounts[reason] || 0) + 1;
+      }
+    });
+
+    return Object.entries(defectCounts)
+      .map(([reason, count]) => ({
+        reason,
+        count,
+        isLeakTest: reason.toLowerCase().includes("leak") || reason.toLowerCase().includes("op150")
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+  }, [selectedDieFilter, filteredTableRows, recordsRows, rows]);
+
+  // ── Die Tooling Scrap Excel Export ─────────────────────────────────────
+  const handleExportDieExcel = async () => {
+    if (!enrichedDieStats.length) return;
+    const workbook = new ExcelJS.Workbook();
+
+    // ── Sheet 1: Die Production & Scrap Summary ──
+    const summarySheet = workbook.addWorksheet("Die Tooling Performance");
+    summarySheet.columns = [
+      { header: "Die Tool", key: "die_name", width: 14 },
+      { header: "Total Shots Tracked", key: "total_shots", width: 22 },
+      { header: "Passed (OK)", key: "ok_count", width: 16 },
+      { header: "Scrapped (NG)", key: "ng_count", width: 16 },
+      { header: "Total Inspected", key: "inspected", width: 18 },
+      { header: "Scrap Rate (%)", key: "scrapRate", width: 16 },
+      { header: "Yield Rate (%)", key: "yieldRate", width: 16 },
+      { header: "Tooling Health Status", key: "status", width: 24 },
+    ];
+
+    const header1 = summarySheet.getRow(1);
+    header1.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    header1.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF059669" }, // Emerald green
+    };
+
+    enrichedDieStats.forEach((d) => {
+      const isHealthy = d.scrapRate <= 4;
+      const isWarning = d.scrapRate > 4 && d.scrapRate <= 10;
+      summarySheet.addRow({
+        die_name: `Die ${d.die_name}`,
+        total_shots: d.total_shots,
+        ok_count: d.ok_count,
+        ng_count: d.ng_count,
+        inspected: d.inspected,
+        scrapRate: `${d.scrapRate}%`,
+        yieldRate: `${d.yieldRate}%`,
+        status: isHealthy ? "OPTIMAL (<4% Scrap)" : isWarning ? "MODERATE (4-10% Scrap)" : "CRITICAL (>10% Scrap)",
+      });
+    });
+
+    // ── Sheet 2: Die Defect Reasons Breakdown ──
+    const defectSheet = workbook.addWorksheet("Die-wise Defect Breakdown");
+    defectSheet.columns = [
+      { header: "Die Tool", key: "die", width: 14 },
+      { header: "Rejection Defect Reason", key: "reason", width: 34 },
+      { header: "Defect Count", key: "count", width: 16 },
+      { header: "Category", key: "category", width: 14 },
+    ];
+
+    const header2 = defectSheet.getRow(1);
+    header2.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    header2.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFDC2626" }, // Crimson red
+    };
+
+    const pool = (filteredTableRows && filteredTableRows.length > 0)
+      ? filteredTableRows
+      : (recordsRows.length > 0 ? recordsRows : (rows.length > 0 ? rows : []));
+
+    enrichedDieStats.forEach((die) => {
+      const dieRows = pool.filter((r) => {
+        const dName = String(r.die_name || r.dieName || "").trim().toUpperCase();
+        return dName === die.die_name.toUpperCase();
+      });
+
+      const dieReasonMap = {};
+      dieRows.forEach((r) => {
+        const rawReason = r.ngReason || r.rejection_reason || r.reason || r.ng_reason;
+        if (rawReason && rawReason !== "-" && rawReason !== "Quality Gate Ng") {
+          const rLower = String(rawReason).toLowerCase();
+          let reason = rawReason;
+          if (rLower.includes("op150") || rLower.includes("op 150") || rLower.includes("leak")) {
+            const bodyVal = r.leak_body_leak_value || r.leakBodyValue;
+            reason = bodyVal ? `Body Leak Fail (${bodyVal} bar)` : "Pressure Leakage Fail (OP150)";
+          } else {
+            reason = canonicalizeReason(rawReason);
+          }
+          const cat = r.rejection_category || r.category || "CR";
+          const key = `${reason}__${cat}`;
+          if (!dieReasonMap[key]) dieReasonMap[key] = { reason, category: cat, count: 0 };
+          dieReasonMap[key].count += 1;
+        }
+      });
+
+      Object.values(dieReasonMap)
+        .sort((a, b) => b.count - a.count)
+        .forEach((item) => {
+          defectSheet.addRow({
+            die: `Die ${die.die_name}`,
+            reason: item.reason,
+            count: item.count,
+            category: item.category,
+          });
+        });
+    });
+
+    // ── Sheet 3: Die Scrap Traceability Log ──
+    const logSheet = workbook.addWorksheet("Die Scrap Parts Log");
+    logSheet.columns = [
+      { header: "Part ID (DMC Serial)", key: "partId", width: 28 },
+      { header: "Customer QR Code", key: "customerCode", width: 32 },
+      { header: "Shot Number", key: "shotNumber", width: 14 },
+      { header: "Die Tool", key: "die_name", width: 14 },
+      { header: "NG Station", key: "ng_station", width: 24 },
+      { header: "Rejection Reason", key: "ngReason", width: 32 },
+      { header: "Category", key: "rejection_category", width: 14 },
+      { header: "View", key: "rejection_view", width: 16 },
+      { header: "Zone", key: "rejection_zone", width: 16 },
+      { header: "Sub Zone", key: "rejection_sub_zone", width: 16 },
+      { header: "Recorded At", key: "shot_datetime", width: 22 },
+    ];
+
+    const header3 = logSheet.getRow(1);
+    header3.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    header3.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF2563EB" }, // Royal blue
+    };
+
+    pool.slice(0, 5000).forEach((r) => {
+      const rawPartId = String(r.barcode || r.partId || r.part_id || "").trim();
+      const rawCustomerQr = String(r.customerCode || r.customerQrCode || r.customer_qr || "").trim();
+      const isQrInPartId = looksLikeCustomerQr(rawPartId) || rawPartId === rawCustomerQr;
+      const displayPartId = !isQrInPartId && rawPartId !== "-" ? rawPartId : "—";
+      const displayCustomerQr = rawCustomerQr !== "-" && rawCustomerQr ? rawCustomerQr : (isQrInPartId ? rawPartId : "—");
+      const isCasted = Boolean(displayPartId && displayPartId !== "—" && !looksLikeCustomerQr(displayPartId));
+      const shotNum = isCasted ? (r.shot_number || r.shotNumber || extractShotFromPartId(displayPartId) || "—") : "—";
+      const decodedShotDate = isCasted ? extractShotDateTimeFromPartId(displayPartId) : null;
+      const rawShotDate = decodedShotDate || r.shot_datetime || r.ngRecordedAt || r.final_scan_at || r.first_scan_at || r.createdAt;
+      const shotDateTime = (isCasted && rawShotDate && rawShotDate !== "-") ? formatResultTimestamp(rawShotDate) : "—";
+
+      const rawReason = r.ngReason || r.rejection_reason || r.reason || r.ng_reason;
+      const rLower = String(rawReason || "").toLowerCase();
+      let reason = rawReason;
+      if (rLower.includes("op150") || rLower.includes("op 150") || rLower.includes("leak")) {
+        const bodyVal = r.leak_body_leak_value || r.leakBodyValue;
+        reason = bodyVal ? `Body Leak Fail (${bodyVal} bar)` : "Pressure Leakage Fail (OP150)";
+      } else if (rawReason) {
+        reason = canonicalizeReason(rawReason);
+      }
+
+      let z = r.rejection_zone || r.zone || r.rejectionZone || "—";
+      if (String(z).toLowerCase().includes("leak") || String(z).toLowerCase().includes("150")) {
+        z = "Leak Test";
+      }
+
+      logSheet.addRow({
+        partId: displayPartId,
+        customerCode: displayCustomerQr,
+        shotNumber: shotNum,
+        die_name: r.die_name || r.dieName || "-",
+        ng_station: r.ng_station || r.ngStation || r.machine_name || r.machineName || "-",
+        ngReason: reason || "-",
+        rejection_category: r.rejection_category || r.category || "-",
+        rejection_view: r.rejection_view || r.view || "-",
+        rejection_zone: z,
+        rejection_sub_zone: r.rejection_sub_zone || r.subZone || "-",
+        shot_datetime: shotDateTime,
+      });
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    saveAs(new Blob([buffer]), `Die_Tooling_Scrap_Report_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   // ── Outlier Scanner Table Columns & Rows (Tab 2) ────────────────────────
   const outlierColumns = useMemo(() => [
     { key: "shot_number", label: "Shot #", width: 90 },
@@ -2146,14 +2480,23 @@ export default function RejectionAnalysis() {
 
     if (anomalies.length === 0 && allRejectionRecords.length > 0) {
       anomalies = allRejectionRecords
-        .filter((r) => r.metalPressure || r.metal_pressure || r.biscuitThickness || r.biscuit_thickness || r.furnaceTemp || r.metalTemp || r.cycleTime)
-        .slice(0, 100)
-        .map((r) => ({
-          ...r,
-          worstDeviatingParam: (r.metalPressure || r.metal_pressure) ? `Metal Pressure (${r.metalPressure || r.metal_pressure} bar)` : ((r.biscuitThickness || r.biscuit_thickness) ? `Biscuit (${r.biscuitThickness || r.biscuit_thickness} mm)` : "Process Excursion"),
-          worstParamLimits: "Exceeded Recipe Limits",
-          anomalyScore: "2.5",
-        }));
+        .slice(0, 500)
+        .map((r) => {
+          const rReason = r.reason || r.rejection_reason || r.ngReason || "Quality Gate Rejection";
+          const hasPress = Number(r.metalPressure || r.metal_pressure) > 0;
+          const hasBisc = Number(r.biscuitThickness || r.biscuit_thickness) > 0;
+          const worstParam = hasPress
+            ? `Metal Pressure (${r.metalPressure || r.metal_pressure} bar)`
+            : (hasBisc
+              ? `Biscuit (${r.biscuitThickness || r.biscuit_thickness} mm)`
+              : rReason);
+          return {
+            ...r,
+            worstDeviatingParam: worstParam,
+            worstParamLimits: (hasPress || hasBisc) ? "Exceeded Recipe Limits" : "Quality Specification Standard",
+            anomalyScore: (hasPress || hasBisc) ? "2.5" : null,
+          };
+        });
     }
 
     const mapped = anomalies.map((part, idx) => {
@@ -2163,9 +2506,16 @@ export default function RejectionAnalysis() {
       const displayPartId = !isQrInPartId && rawPartId !== "-" ? rawPartId : "";
       const displayCustomerQr = rawCustomerQr !== "-" ? rawCustomerQr : (isQrInPartId ? rawPartId : "");
 
+      // Shot details and shot timestamp are strictly valid ONLY for genuine casted parts with Part ID
+      const isCastedPart = Boolean(displayPartId && displayPartId !== "-" && !looksLikeCustomerQr(displayPartId));
       const rawShot = part.shotNumber || part.shot_number || "";
-      const shotNum = displayPartId ? (rawShot && rawShot !== "-" ? rawShot : extractShotFromPartId(displayPartId)) : "";
-      const shotStat = displayPartId && shotNum ? (part.shot_status || part.shotStatus || (part.status === "NG" ? "NG" : "OK")) : "";
+      const shotNum = isCastedPart ? (rawShot && rawShot !== "-" ? rawShot : extractShotFromPartId(displayPartId)) : "";
+      const shotStat = isCastedPart && shotNum ? (part.shot_status || part.shotStatus || (part.status === "NG" ? "NG" : "OK")) : "";
+      const decodedShotDate = isCastedPart ? extractShotDateTimeFromPartId(displayPartId) : null;
+      const rawShotDate = decodedShotDate || part.shot_datetime || part.shot_time || part.first_scan_at || (isCastedPart ? part.createdAt : null);
+      const shotDateTime = (isCastedPart && rawShotDate && rawShotDate !== "-")
+        ? formatResultTimestamp(rawShotDate)
+        : "";
 
       const srcText = String(part.ng_reason || part.ngReason || part.reason || part.rejection_reason || "");
       const catParsed = part.category || part.rejection_category || parseFieldFromText(srcText, "Category") || "";
@@ -2178,9 +2528,9 @@ export default function RejectionAnalysis() {
 
       return {
         id: part.rowKey || part.id || `outlier-${idx}`,
-        shot_number: shotNum,
-        shot_status: shotStat,
-        shot_datetime: formatResultTimestamp(part.createdAt || part.first_scan_at),
+        shot_number: shotNum || "—",
+        shot_status: shotStat || "—",
+        shot_datetime: shotDateTime || "—",
         barcode: displayPartId,
         customerCode: displayCustomerQr,
         machine_name: part.machineName && part.machineName !== "-" ? part.machineName : (part.machine_name && part.machine_name !== "-" ? part.machine_name : ""),
@@ -2190,9 +2540,9 @@ export default function RejectionAnalysis() {
         rejection_view: viewParsed !== "-" ? viewParsed : "",
         rejection_zone: zoneParsed !== "-" ? zoneParsed : "",
         rejection_sub_zone: subZoneParsed !== "-" ? subZoneParsed : "",
-        worstDeviatingParam: part.worstDeviatingParam && part.worstDeviatingParam !== "-" ? part.worstDeviatingParam : "",
-        recipe_limits: part.worstParamLimits && part.worstParamLimits !== "-" ? part.worstParamLimits : "",
-        anomalyScore: part.anomalyScore ? `${part.anomalyScore} σ` : "",
+        worstDeviatingParam: part.worstDeviatingParam && part.worstDeviatingParam !== "-" ? part.worstDeviatingParam : "—",
+        recipe_limits: part.worstParamLimits && part.worstParamLimits !== "-" ? part.worstParamLimits : "Quality Specification Standard",
+        anomalyScore: part.anomalyScore ? `${part.anomalyScore} σ` : "—",
       };
     });
 
@@ -2331,22 +2681,43 @@ export default function RejectionAnalysis() {
 
   // ── Zone-wise Rejection Breakdown ───────────────────────────────────────
   const zoneBreakdown = useMemo(() => {
+    const formatZoneLabel = (z) => {
+      const s = String(z || "").trim();
+      if (!s || s === "-" || s.toLowerCase().includes("unspecified")) return "Zone General";
+      if (s.toLowerCase().includes("leak") || s.toLowerCase().includes("150")) return "Leak Test";
+      return s;
+    };
+
     if (zoneParetoData && zoneParetoData.length > 0) {
-      return zoneParetoData
+      const mergedMap = {};
+      zoneParetoData
         .filter((z) => z.zone && !String(z.zone).toLowerCase().includes("unspecified"))
-        .map((z) => ({
-          ...z,
-          zone: (!z.zone || z.zone === "-") ? "Zone General" : z.zone,
-        }));
+        .forEach((z) => {
+          const lbl = formatZoneLabel(z.zone);
+          mergedMap[lbl] = (mergedMap[lbl] || 0) + (Number(z.count) || 0);
+        });
+
+      const sorted = Object.entries(mergedMap)
+        .map(([zone, count]) => ({ zone, count }))
+        .sort((a, b) => b.count - a.count);
+      const total = sorted.reduce((s, c) => s + c.count, 0) || 1;
+      let cum = 0;
+      return sorted.map((item) => {
+        cum += item.count;
+        return {
+          ...item,
+          percentage: Number(((item.count / total) * 100).toFixed(1)),
+          cumulativePercentage: Number(((cum / total) * 100).toFixed(1)),
+        };
+      });
     }
+
     const map = {};
     rejectedRows.forEach((r) => {
       const p = parseRowDefect(r);
       let zone = p.zone || r.rejectionZone || r.rejection_zone || "";
-      if (!zone || zone === "-" || zone.toLowerCase().includes("unspecified")) {
-        zone = "Zone General";
-      }
-      map[zone] = (map[zone] || 0) + 1;
+      const lbl = formatZoneLabel(zone);
+      map[lbl] = (map[lbl] || 0) + 1;
     });
     const sorted = Object.entries(map)
       .map(([zone, count]) => ({ zone, count }))
@@ -2850,10 +3221,10 @@ export default function RejectionAnalysis() {
     const ngPoints = [];
     const dataPool = rows.length > 0 ? rows : (recordsRows.length > 0 ? recordsRows : allRejectionRecords);
 
-    dataPool.slice(0, 800).forEach((r) => {
+    dataPool.slice(0, 1500).forEach((r) => {
       const xVal = Number(r[selectedScatterX]);
       const yVal = Number(r[selectedScatterY]);
-      if (Number.isFinite(xVal) && Number.isFinite(yVal)) {
+      if (Number.isFinite(xVal) && Number.isFinite(yVal) && xVal > 0 && yVal > 0) {
         const statusUpper = String(r.status || r.overall_status || "").trim().toUpperCase();
         const isNg = ["NG", "FAIL", "FAILED", "ENDED_NG", "COMPLETED_NG"].includes(statusUpper) ||
           Boolean(r.ngGate && r.ngGate !== "-");
@@ -2924,6 +3295,13 @@ export default function RejectionAnalysis() {
     const dataPool = rows.length > 0 ? rows : (recordsRows.length > 0 ? recordsRows : allRejectionRecords);
     if (!dataPool || !dataPool.length) return [];
 
+    // Filter strictly to genuine casted parts that have a valid Part ID (not Customer QR code)
+    const castedDataPool = dataPool.filter((r) => {
+      const rawPartId = String(r.partId || r.part_id || r.barcode || "").trim();
+      return Boolean(rawPartId && rawPartId !== "-" && !looksLikeCustomerQr(rawPartId));
+    });
+    if (!castedDataPool.length) return [];
+
     const getVal = (r, keys) => {
       for (const k of keys) {
         if (r[k] !== undefined && r[k] !== null && r[k] !== "") {
@@ -2935,15 +3313,22 @@ export default function RejectionAnalysis() {
     };
 
     // Sort chronologically
-    const sorted = [...dataPool].sort((a, b) => {
-      const ta = new Date(a.createdAt || a.first_scan_at || 0).getTime();
-      const tb = new Date(b.createdAt || b.first_scan_at || 0).getTime();
+    const sorted = [...castedDataPool].sort((a, b) => {
+      const aPart = String(a.partId || a.part_id || a.barcode || "");
+      const bPart = String(b.partId || b.part_id || b.barcode || "");
+      const aShotTime = extractShotDateTimeFromPartId(aPart);
+      const bShotTime = extractShotDateTimeFromPartId(bPart);
+      const ta = new Date(aShotTime || a.createdAt || a.first_scan_at || 0).getTime();
+      const tb = new Date(bShotTime || b.createdAt || b.first_scan_at || 0).getTime();
       return ta - tb;
     });
 
     const slice = sorted.slice(-180);
     return slice.map((r, idx) => {
-      const dt = new Date(r.createdAt || r.first_scan_at || Date.now());
+      const rawPartId = String(r.partId || r.part_id || r.barcode || "").trim();
+      const displayPartId = !looksLikeCustomerQr(rawPartId) && rawPartId !== "-" ? rawPartId : "";
+      const decodedShotDate = displayPartId ? extractShotDateTimeFromPartId(displayPartId) : null;
+      const dt = new Date(decodedShotDate || r.first_scan_at || r.createdAt || Date.now());
       const timeLabel = !isNaN(dt.getTime())
         ? dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
         : `#${idx + 1}`;
@@ -2951,8 +3336,8 @@ export default function RejectionAnalysis() {
         ? dt.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })
         : "";
       const shift = r.shiftCode || r.shift_code || "A";
-      const shot = r.shot_number || r.shotNumber || idx + 1;
-      const part = r.partId || r.part_id || "";
+      const rawShot = r.shot_number || r.shotNumber;
+      const shot = rawShot && rawShot !== "-" ? rawShot : (displayPartId ? extractShotFromPartId(displayPartId) : idx + 1);
       const isNg = r.status === "NG" || r.overall_status === "NG" || r.isOp150Ng;
 
       const pt = {
@@ -2961,7 +3346,7 @@ export default function RejectionAnalysis() {
         dateLabel,
         shift,
         shot,
-        part,
+        part: displayPartId,
         isNg,
       };
 
@@ -2984,6 +3369,12 @@ export default function RejectionAnalysis() {
 
     // Helper to safely extract telemetry parameter from row in any casing or alias
     const getVal = (r, paramKey) => {
+      if (paramKey.includes("cycle")) {
+        const m = String(r.machineName || r.machine_name || "").toLowerCase();
+        if (m.includes("inspection") || m.includes("pdi") || m.includes("guag")) return null;
+        const n = Number(r.plc_cycle_time ?? r.plcCycleTime ?? (m.includes("dcm") || m.includes("casting") || m.includes("dc") ? (r.cycleTime ?? r.cycle_time) : null));
+        if (Number.isFinite(n) && n > 0) return n;
+      }
       if (r[paramKey] !== undefined && r[paramKey] !== null && r[paramKey] !== "") {
         const n = Number(r[paramKey]);
         if (Number.isFinite(n) && n > 0) return n;
@@ -3010,10 +3401,6 @@ export default function RejectionAnalysis() {
         const n = Number(r.biscuitThickness ?? r.biscuit_thickness ?? r[paramKey]);
         if (Number.isFinite(n) && n > 0) return n;
       }
-      if (paramKey.includes("cycle")) {
-        const n = Number(r.cycleTime ?? r.cycle_time ?? r.plc_cycle_time ?? r[paramKey]);
-        if (Number.isFinite(n) && n > 0) return n;
-      }
       if (paramKey.includes("v1")) {
         const n = Number(r.v1Speed ?? r.v1_speed ?? r[paramKey]);
         if (Number.isFinite(n) && n > 0) return n;
@@ -3026,6 +3413,13 @@ export default function RejectionAnalysis() {
     };
 
     const validRows = dataPool
+      .filter((r) => {
+        const rawPartId = String(r.partId || r.part_id || "").trim();
+        const rawCustomerQr = String(r.customerQrCode || r.customer_qr || r.customerQr || "").trim();
+        const isQr = looksLikeCustomerQr(rawPartId) || rawPartId === rawCustomerQr;
+        // Strictly require genuine casted Part ID (DMC Serial) and not customer QR code
+        return Boolean(rawPartId && rawPartId !== "-" && !isQr);
+      })
       .map((r, idx) => {
         const val = getVal(r, selectedTelemetryParam);
         if (val === null) return null;
@@ -3040,8 +3434,10 @@ export default function RejectionAnalysis() {
       const bRawPart = String(b.r.partId || b.r.part_id || "");
       const aShot = Number(a.r.shot_number || a.r.shotNumber || extractShotFromPartId(aRawPart) || 0);
       const bShot = Number(b.r.shot_number || b.r.shotNumber || extractShotFromPartId(bRawPart) || 0);
-      if (aShot && bShot) return aShot - bShot;
-      return new Date(a.r.first_scan_at || a.r.createdAt || 0) - new Date(b.r.first_scan_at || b.r.createdAt || 0);
+      if (aShot && bShot && aShot !== bShot) return aShot - bShot;
+      const aTime = extractShotDateTimeFromPartId(aRawPart);
+      const bTime = extractShotDateTimeFromPartId(bRawPart);
+      return new Date(aTime || a.r.first_scan_at || a.r.createdAt || 0) - new Date(bTime || b.r.first_scan_at || b.r.createdAt || 0);
     });
 
     const hasSetLimits = Boolean(activeSpec.usl != null && activeSpec.lsl != null);
@@ -3052,9 +3448,16 @@ export default function RejectionAnalysis() {
     return validRows.map((item, index) => {
       const { r, val } = item;
       const isPartNg = ["NG", "FAILED", "FAIL", "ENDED_NG", "COMPLETED_NG"].includes(String(r.status || r.overall_status || "").trim().toUpperCase());
-      const rawPartId = String(r.partId || r.part_id || r.customerQrCode || r.customer_qr || `Part #${index + 1}`).trim();
-      const extractedShot = extractShotFromPartId(rawPartId);
-      const shotNum = (r.shot_number && r.shot_number !== "-") ? r.shot_number : ((r.shotNumber && r.shotNumber !== "-") ? r.shotNumber : (extractedShot || `${index + 1}`));
+      const rawPartId = String(r.partId || r.part_id || "").trim();
+      const rawCustomerQr = String(r.customerQrCode || r.customer_qr || r.customerQr || "").trim();
+      const isQrInPartId = looksLikeCustomerQr(rawPartId) || rawPartId === rawCustomerQr;
+      const displayPartId = !isQrInPartId && rawPartId !== "-" ? rawPartId : "—";
+      const displayCustomerQr = rawCustomerQr !== "-" && rawCustomerQr !== "" ? rawCustomerQr : (isQrInPartId ? rawPartId : "—");
+      const isCastedPart = Boolean(displayPartId && displayPartId !== "—" && !looksLikeCustomerQr(displayPartId));
+
+      const extractedShot = isCastedPart ? extractShotFromPartId(displayPartId) : "";
+      const rawShot = (r.shot_number && r.shot_number !== "-") ? r.shot_number : ((r.shotNumber && r.shotNumber !== "-") ? r.shotNumber : extractedShot);
+      const shotNum = isCastedPart && rawShot ? String(rawShot).trim() : "—";
 
       const numericVal = Number(val.toFixed(2));
       const delta = setPoint != null ? Number((numericVal - setPoint).toFixed(2)) : 0;
@@ -3079,10 +3482,11 @@ export default function RejectionAnalysis() {
 
       return {
         index: index + 1,
-        partId: rawPartId,
-        customerQr: String(r.customerQrCode || r.customer_qr || "-"),
+        partId: displayPartId,
+        customerQr: displayCustomerQr,
         shotNumber: shotNum,
-        machineName: r.machineName || r.machine_name || "-",
+        machineName: r.machineName || r.machine_name || "—",
+        dieName: r.dieName || r.die_name || "—",
         shiftCode: r.shiftCode || r.shift_code || "A",
         value: numericVal,
         actualValue: numericVal,
@@ -3271,6 +3675,10 @@ export default function RejectionAnalysis() {
     ];
 
     const extractParamVal = (r, pDef) => {
+      if (pDef.key.includes("cycle")) {
+        const m = String(r.machineName || r.machine_name || "").toLowerCase();
+        if (m.includes("inspection") || m.includes("pdi") || m.includes("guag")) return null;
+      }
       const keys = [
         pDef.key,
         pDef.key?.replace(/_([a-z])/g, (_, l) => l.toUpperCase()),
@@ -3347,7 +3755,8 @@ export default function RejectionAnalysis() {
       const isQrInPartId = looksLikeCustomerQr(rawPartId) || rawPartId === rawCustomerQr;
       const displayPartId = !isQrInPartId && rawPartId !== "-" ? rawPartId : "";
       const displayCustomerQr = rawCustomerQr !== "-" && rawCustomerQr !== "" ? rawCustomerQr : (isQrInPartId ? rawPartId : "");
-      const finalPartSerial = displayPartId || displayCustomerQr || `Part-${idx + 1}`;
+      const isCasted = Boolean(displayPartId && displayPartId !== "-" && !looksLikeCustomerQr(displayPartId));
+      const shotNum = isCasted ? (r.shotNumber || r.shot_number || extractShotFromPartId(displayPartId) || "-") : "-";
 
       const isNg = ["NG", "FAILED", "FAIL", "ENDED_NG", "COMPLETED_NG"].includes(
         String(r.status || r.overall_status || "").trim().toUpperCase()
@@ -3357,9 +3766,9 @@ export default function RejectionAnalysis() {
       let outCount = 0;
       const rowData = {
         idx: idx + 1,
-        partId: finalPartSerial,
+        partId: displayPartId || "-",
         customerQr: displayCustomerQr || "-",
-        shotNumber: r.shotNumber || r.shot_number || "-",
+        shotNumber: shotNum,
         machine: r.machineName || r.machine_name || "-",
         shift: r.shiftCode || r.shift_code || "A",
         quality: isNg ? "NG (Scrap)" : "OK (Passed)",
@@ -4584,11 +4993,19 @@ export default function RejectionAnalysis() {
     });
   }, [filteredContextParts, activeStudioData.title]);
 
+  // ── Effective Total OK (Reconciled with final OP160 gate) ─────────────────────
+  const effectiveTotalOK = useMemo(() => {
+    const finalOp160Gate = (qualityGates || []).find(
+      (g) => (g.code || "").toUpperCase().includes("OP160") || (g.label || "").toUpperCase().includes("OP160")
+    );
+    return Math.max(summary.totalOK || 0, finalOp160Gate?.okCount || 0);
+  }, [summary.totalOK, qualityGates]);
+
   // ── Total WIP (In-Progress parts across factory, properly deducting OK + NG) ──
   const totalWIP = useMemo(() => {
-    const factoryWip = Math.max(0, (summary.totalProduction || 0) - ((summary.totalOK || 0) + (summary.totalNG || 0)));
+    const factoryWip = Math.max(0, (summary.totalProduction || 0) - (effectiveTotalOK + (summary.totalNG || 0)));
     if (summary.inProgress && summary.inProgress > 0) {
-      return Math.max(summary.inProgress, factoryWip);
+      return Math.min(summary.inProgress, factoryWip > 0 ? factoryWip : summary.inProgress);
     }
     if (factoryWip > 0) return factoryWip;
     const isLeakStationCode = (c) => {
@@ -4650,8 +5067,11 @@ export default function RejectionAnalysis() {
   }, [qualityGates, summary.topHotspotStation]);
 
   const primaryDriver = useMemo(() => {
-    // 1. Check ML Insights features for highest statistical drift/importance
-    const topFeat = mlInsights?.features?.[0];
+    // 1. Check ML Insights features for genuine statistical drift ONLY when live telemetry exists
+    const validFeatures = (mlInsights?.features || []).filter(
+      (f) => (f.meanOk > 0 || f.meanNg > 0) && f.importanceScore > 0 && Math.abs(f.driftPct || 0) > 0.1
+    );
+    const topFeat = validFeatures[0];
     if (topFeat && topFeat.label) {
       const drift = Math.abs(topFeat.driftPct || 0);
       return {
@@ -4666,18 +5086,12 @@ export default function RejectionAnalysis() {
         sub: `${pareto[0].percentage || 0}% of all defects`,
       };
     }
-    // 3. Fallback based on summary or nominal
-    if (summary.totalNG === 0) {
-      return {
-        title: "Parameters In-Spec",
-        sub: "Zero anomaly drift",
-      };
-    }
+    // 3. Fallback when parameters are in-spec or unlogged
     return {
-      title: summary.topDriverParameter || "Process Parameters In-Spec",
-      sub: "Primary defect driver",
+      title: "Process Parameters In-Spec",
+      sub: "No telemetry excursion detected",
     };
-  }, [mlInsights.features, pareto, summary.totalNG, summary.topDriverParameter]);
+  }, [mlInsights.features, pareto]);
 
   // Drill-down handlers
   const handleGateBarClick = useCallback((data) => {
@@ -4859,22 +5273,6 @@ export default function RejectionAnalysis() {
             <option value="HPDC"> Casted Parts </option>
             <option value="OTHER"> Other Parts</option>
           </select>
-
-          {/* Die Name Filter */}
-          <select
-            id="filter-dieName"
-            name="dieName"
-            value={filters.dieName || ""}
-            onChange={(e) => setFilters((p) => ({ ...p, dieName: e.target.value }))}
-            className="rej-select"
-            aria-label="Filter by Die Name"
-            style={{ minWidth: 200, fontWeight: 700 }}
-          >
-            <option value=""> All Dies</option>
-            {filterOptions.dies && filterOptions.dies.map((die) => (
-              <option key={die} value={die}>{die}</option>
-            ))}
-          </select>
         </div>
       </div>
 
@@ -4890,11 +5288,22 @@ export default function RejectionAnalysis() {
         </button>
 
         <button
+          onClick={() => setActiveTab("die_analysis")}
+          className={`rej-tab-btn ${activeTab === "die_analysis" ? "active" : ""}`}
+        >
+          <Layers size={16} color="#059669" />
+          <span>Die Analysis</span>
+          <span className="rej-tab-count" style={{ background: "rgba(5, 150, 105, 0.15)", color: "#065f46" }}>
+            {enrichedDieStats.length} Dies
+          </span>
+        </button>
+
+        <button
           onClick={() => setActiveTab("ml_analysis")}
           className={`rej-tab-btn ${activeTab === "ml_analysis" ? "active" : ""}`}
         >
           <Sparkles size={16} color="#8b5cf6" />
-          <span>Root Cause ML</span>
+          <span>Root Cause </span>
           <span className="rej-tab-count">{mlInsights.features?.length || 0}</span>
         </button>
 
@@ -4984,10 +5393,10 @@ export default function RejectionAnalysis() {
               <div className="rej-kpi-info">
                 <span className="rej-kpi-label">Passed (OK)</span>
                 <span className="rej-kpi-value" style={{ color: "#22c55e" }}>
-                  {summary.totalOK?.toLocaleString() || 0}
+                  {effectiveTotalOK.toLocaleString()}
                 </span>
                 <span className="rej-kpi-sub">
-                  {summary.totalProduction > 0 ? ((summary.totalOK / summary.totalProduction) * 100).toFixed(1) : 0}% Pass Rate
+                  {summary.totalProduction > 0 ? ((effectiveTotalOK / summary.totalProduction) * 100).toFixed(1) : 0}% Pass Rate
                 </span>
               </div>
             </div>
@@ -5036,15 +5445,17 @@ export default function RejectionAnalysis() {
             </div>
 
             <div className="rej-kpi-card">
-              <div className="rej-kpi-icon-wrap" style={{ background: "rgba(139,92,246,0.1)", color: "#8b5cf6" }}>
-                <Cpu size={24} />
+              <div className="rej-kpi-icon-wrap" style={{ background: "rgba(16, 185, 129, 0.1)", color: "#10b981" }}>
+                <TrendingUp size={24} />
               </div>
               <div className="rej-kpi-info">
-                <span className="rej-kpi-label">#1 Root Cause Parameter</span>
-                <span className="rej-kpi-value" style={{ fontSize: 16, color: "#8b5cf6", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={primaryDriver.title}>
-                  {primaryDriver.title}
+                <span className="rej-kpi-label">Conforming Yield</span>
+                <span className="rej-kpi-value" style={{ color: "#10b981" }}>
+                  {(effectiveTotalOK + (summary.totalNG || 0)) > 0 ? ((effectiveTotalOK / (effectiveTotalOK + (summary.totalNG || 0))) * 100).toFixed(1) : 0}%
                 </span>
-                <span className="rej-kpi-sub">{primaryDriver.sub}</span>
+                <span className="rej-kpi-sub" style={{ color: "#047857" }}>
+                  Pass rate of inspected parts
+                </span>
               </div>
             </div>
           </div>
@@ -6797,50 +7208,75 @@ export default function RejectionAnalysis() {
                 </h3>
                 <p className="rej-card-subtitle">Multivariate statistical parameter divergence (σ) and anomaly correlation driving HPDC defect occurrence</p>
               </div>
-              <span className="rej-badge rej-badge-danger">
-                Top Driver: {mlInsights.features?.[0]?.label || "Leak Test"} ({mlInsights.features?.[0]?.driftPct || 0}% Drift)
+              <span className={`rej-badge ${primaryDriver.riskLevel === 'CRITICAL' ? 'rej-badge-danger' : primaryDriver.riskLevel === 'MODERATE' ? 'rej-badge-warning' : 'rej-badge-ok'}`}>
+                {primaryDriver.isTelemetry
+                  ? `Top Telemetry Driver: ${primaryDriver.label} (${primaryDriver.driftPct > 0 ? "+" : ""}${primaryDriver.driftPct}% Drift)`
+                  : `Top Defect Mode: ${primaryDriver.label} (${primaryDriver.driftPct}%)`}
               </span>
             </div>
 
             {/* Horizontal Bar Chart for Feature Importance */}
-            <div className="rej-feature-hbar">
-              {mlInsights.features?.filter((f) => mlCategoryFilter === "ALL" || f.category === mlCategoryFilter || (f.category && f.category.toLowerCase().includes(mlCategoryFilter.toLowerCase()))).map((feat, idx) => {
-                const isCritical = feat.riskLevel === "CRITICAL";
-                const isModerate = feat.riskLevel === "MODERATE";
-                const barColor = isCritical ? "#ef4444" : isModerate ? "#f59e0b" : "#22c55e";
-                const sigmaVal = feat.stdOk > 0 ? Math.abs((feat.meanNg - feat.meanOk) / feat.stdOk) : 0;
-                const hasLimits = feat.hasStaticLimits && feat.setLowerLimit !== null && feat.setUpperLimit !== null;
+            {(() => {
+              const activeFeats = (mlInsights.features || []).filter((f) => {
+                const matchesCat = mlCategoryFilter === "ALL" || f.category === mlCategoryFilter || (f.category && f.category.toLowerCase().includes(mlCategoryFilter.toLowerCase()));
+                const hasData = (Number(f.meanOk || 0) > 0 || Number(f.meanNg || 0) > 0);
+                return matchesCat && hasData;
+              });
+
+              if (activeFeats.length === 0) {
                 return (
-                  <div key={feat.key} className="rej-feature-hbar-item">
-                    <span className="rej-feature-hbar-label" title={`${feat.label} | LSL: ${hasLimits ? feat.setLowerLimit : '—'} | USL: ${hasLimits ? feat.setUpperLimit : '—'} | OK μ: ${feat.meanOk} | NG μ: ${feat.meanNg} ${feat.unit}`}>
-                      #{idx + 1} {feat.label}
-                      <span style={{ fontSize: 9, color: "#94a3b8", marginLeft: 4, fontWeight: 500 }}>
-                        {hasLimits ? `[${feat.setLowerLimit}–${feat.setUpperLimit}]` : `(μ±2σ)`} {feat.unit}
-                      </span>
-                    </span>
-                    <div className="rej-feature-hbar-track">
-                      <div
-                        className="rej-feature-hbar-fill"
-                        style={{
-                          width: `${Math.min(100, Math.max(8, feat.importanceScore))}%`,
-                          background: `linear-gradient(90deg, ${barColor}cc, ${barColor})`,
-                        }}
-                      >
-                        {feat.importanceScore > 12 && (
-                          <span>{sigmaVal.toFixed(1)}σ ({feat.importanceScore.toFixed(0)}%)</span>
-                        )}
-                      </div>
+                  <div style={{ padding: "32px 20px", textAlign: "center", color: "#64748b", background: "#f8fafc", borderRadius: 8, margin: "10px 0" }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: "#1e293b", marginBottom: 4 }}>
+                      Process Telemetry Sensitivity Standby
                     </div>
-                    <span className="rej-feature-hbar-risk" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                      <span style={{ fontSize: 9.5, color: "#64748b", fontWeight: 600, whiteSpace: "nowrap" }}>Δ{feat.driftPct > 0 ? "+" : ""}{feat.driftPct}%</span>
-                      <span className={`rej-badge ${isCritical ? "rej-badge-danger" : isModerate ? "rej-badge-warning" : "rej-badge-ok"}`}>
-                        {feat.riskLevel}
-                      </span>
-                    </span>
+                    <div style={{ fontSize: 12 }}>
+                      Machine sensor telemetry is streamed for casted parts with HPDC PLC link. For visual/leak quality gates, refer to the Pareto &amp; Quality Gate tabs.
+                    </div>
                   </div>
                 );
-              })}
-            </div>
+              }
+
+              return (
+                <div className="rej-feature-hbar">
+                  {activeFeats.map((feat, idx) => {
+                    const isCritical = feat.riskLevel === "CRITICAL";
+                    const isModerate = feat.riskLevel === "MODERATE";
+                    const barColor = isCritical ? "#ef4444" : isModerate ? "#f59e0b" : "#22c55e";
+                    const sigmaVal = feat.stdOk > 0 ? Math.abs((feat.meanNg - feat.meanOk) / feat.stdOk) : 0;
+                    const hasLimits = feat.hasStaticLimits && feat.setLowerLimit !== null && feat.setUpperLimit !== null;
+                    return (
+                      <div key={feat.key} className="rej-feature-hbar-item">
+                        <span className="rej-feature-hbar-label" title={`${feat.label} | LSL: ${hasLimits ? feat.setLowerLimit : '—'} | USL: ${hasLimits ? feat.setUpperLimit : '—'} | OK μ: ${feat.meanOk} | NG μ: ${feat.meanNg} ${feat.unit}`}>
+                          #{idx + 1} {feat.label}
+                          <span style={{ fontSize: 9, color: "#94a3b8", marginLeft: 4, fontWeight: 500 }}>
+                            {hasLimits ? `[${feat.setLowerLimit}–${feat.setUpperLimit}]` : `(μ±2σ)`} {feat.unit}
+                          </span>
+                        </span>
+                        <div className="rej-feature-hbar-track">
+                          <div
+                            className="rej-feature-hbar-fill"
+                            style={{
+                              width: `${Math.min(100, Math.max(8, feat.importanceScore))}%`,
+                              background: `linear-gradient(90deg, ${barColor}cc, ${barColor})`,
+                            }}
+                          >
+                            {feat.importanceScore > 12 && (
+                              <span>{sigmaVal.toFixed(1)}σ ({feat.importanceScore.toFixed(0)}%)</span>
+                            )}
+                          </div>
+                        </div>
+                        <span className="rej-feature-hbar-risk" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <span style={{ fontSize: 9.5, color: "#64748b", fontWeight: 600, whiteSpace: "nowrap" }}>Δ{feat.driftPct > 0 ? "+" : ""}{feat.driftPct}%</span>
+                          <span className={`rej-badge ${isCritical ? "rej-badge-danger" : isModerate ? "rej-badge-warning" : "rej-badge-ok"}`}>
+                            {feat.riskLevel}
+                          </span>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </div>
 
           {/* Radar Chart — OK vs NG Parameter Profile */}
@@ -6981,12 +7417,13 @@ export default function RejectionAnalysis() {
                 <tbody>
                   {mlInsights.features?.filter((f) => mlCategoryFilter === "ALL" || f.category === mlCategoryFilter || (f.category && f.category.toLowerCase().includes(mlCategoryFilter.toLowerCase()))).map((f) => {
                     const hasLimits = f.hasStaticLimits && f.setLowerLimit !== null && f.setUpperLimit !== null;
-                    const deltaVal = f.deltaSetNg !== null && f.deltaSetNg !== undefined
+                    const hasTelemetryData = (Number(f.meanOk || 0) > 0 || Number(f.meanNg || 0) > 0);
+                    const deltaVal = hasTelemetryData && f.deltaSetNg !== null && f.deltaSetNg !== undefined
                       ? f.deltaSetNg
-                      : (f.meanNg !== null && f.meanOk !== null ? Number((f.meanNg - f.meanOk).toFixed(2)) : null);
-                    const zScore = f.stdOk > 0 ? Math.abs((f.meanNg - f.meanOk) / f.stdOk) : 0;
+                      : (hasTelemetryData && f.meanNg !== null && f.meanOk !== null ? Number((f.meanNg - f.meanOk).toFixed(2)) : null);
+                    const zScore = hasTelemetryData && f.stdOk > 0 ? Math.abs((f.meanNg - f.meanOk) / f.stdOk) : 0;
                     // Check if NG mean is outside the spec limits
-                    const ngOutsideLimits = hasLimits && (f.meanNg > f.setUpperLimit || f.meanNg < f.setLowerLimit);
+                    const ngOutsideLimits = hasLimits && hasTelemetryData && (f.meanNg > f.setUpperLimit || f.meanNg < f.setLowerLimit);
                     return (
                       <tr key={f.key} style={{ background: ngOutsideLimits ? "rgba(239,68,68,0.04)" : "transparent" }}>
                         <td style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -7017,13 +7454,25 @@ export default function RejectionAnalysis() {
                             <span style={{ color: "#d4d4d8", fontSize: 11 }}>—</span>
                           )}
                         </td>
-                        <td style={{ textAlign: "center" }}><strong style={{ color: "#16a34a", fontSize: 11.5 }}>{f.meanOk}</strong></td>
-                        <td style={{ textAlign: "center" }}><strong style={{ color: ngOutsideLimits ? "#dc2626" : "#ef4444", fontSize: 11.5 }}>{f.meanNg}</strong></td>
                         <td style={{ textAlign: "center" }}>
-                          <span style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>{f.stdOk > 0 ? f.stdOk : "—"}</span>
+                          {hasTelemetryData ? (
+                            <strong style={{ color: "#16a34a", fontSize: 11.5 }}>{f.meanOk}</strong>
+                          ) : (
+                            <span style={{ color: "#94a3b8", fontSize: 11 }}>—</span>
+                          )}
                         </td>
                         <td style={{ textAlign: "center" }}>
-                          {deltaVal !== null ? (
+                          {hasTelemetryData ? (
+                            <strong style={{ color: ngOutsideLimits ? "#dc2626" : "#ef4444", fontSize: 11.5 }}>{f.meanNg}</strong>
+                          ) : (
+                            <span style={{ color: "#94a3b8", fontSize: 11 }}>—</span>
+                          )}
+                        </td>
+                        <td style={{ textAlign: "center" }}>
+                          <span style={{ fontSize: 11, color: "#64748b", fontWeight: 600 }}>{hasTelemetryData && f.stdOk > 0 ? f.stdOk : "—"}</span>
+                        </td>
+                        <td style={{ textAlign: "center" }}>
+                          {hasTelemetryData && deltaVal !== null ? (
                             <span style={{
                               display: "inline-flex", alignItems: "center", gap: 2,
                               fontWeight: 800, fontSize: 10.5,
@@ -7039,17 +7488,27 @@ export default function RejectionAnalysis() {
                           )}
                         </td>
                         <td style={{ textAlign: "center" }}>
-                          <span style={{
-                            fontWeight: 800, fontSize: 11,
-                            color: zScore >= 2 ? "#dc2626" : zScore >= 1 ? "#d97706" : "#16a34a",
-                          }}>
-                            {zScore.toFixed(1)}σ
-                          </span>
+                          {hasTelemetryData && zScore > 0 ? (
+                            <span style={{
+                              fontWeight: 800, fontSize: 11,
+                              color: zScore >= 2 ? "#dc2626" : zScore >= 1 ? "#d97706" : "#16a34a",
+                            }}>
+                              {zScore.toFixed(1)}σ
+                            </span>
+                          ) : (
+                            <span style={{ color: "#d4d4d8" }}>—</span>
+                          )}
                         </td>
                         <td>
-                          <span className={`rej-badge ${f.riskLevel === "CRITICAL" ? "rej-badge-danger" : f.riskLevel === "MODERATE" ? "rej-badge-warning" : "rej-badge-ok"}`}>
-                            {f.riskLevel}
-                          </span>
+                          {hasTelemetryData ? (
+                            <span className={`rej-badge ${f.riskLevel === "CRITICAL" ? "rej-badge-danger" : f.riskLevel === "MODERATE" ? "rej-badge-warning" : "rej-badge-ok"}`}>
+                              {f.riskLevel}
+                            </span>
+                          ) : (
+                            <span className="rej-badge" style={{ background: "#f8fafc", color: "#94a3b8", border: "1px solid #e2e8f0", fontSize: 9.5 }}>
+                              NO DATA
+                            </span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -7456,7 +7915,7 @@ export default function RejectionAnalysis() {
                                       <span className="rej-shift-badge">Shift {d.shift}</span>
                                     </div>
                                     <div className="rej-stacked-tooltip-time">{d.dateLabel} {d.timeLabel}</div>
-                                    {d.part && <div className="rej-stacked-tooltip-part">Part: {d.part}</div>}
+                                    {d.part && <div className="rej-stacked-tooltip-part">Part ID: {d.part}</div>}
                                     <div className="rej-stacked-tooltip-val">
                                       <span>Live Measured:</span>
                                       <strong style={{ color: isOut ? "#dc2626" : param.color, fontSize: 14 }}>
@@ -8239,6 +8698,10 @@ export default function RejectionAnalysis() {
               const allMasterParams = MASTER_RECIPE_SET_PARAMETERS;
 
               const getValForRow = (r, pDef) => {
+                if (pDef.key.includes("cycle")) {
+                  const m = String(r.machineName || r.machine_name || "").toLowerCase();
+                  if (m.includes("inspection") || m.includes("pdi") || m.includes("guag")) return null;
+                }
                 const keys = [
                   pDef.key,
                   pDef.key?.replace(/_([a-z])/g, (_, l) => l.toUpperCase()),
@@ -8280,6 +8743,9 @@ export default function RejectionAnalysis() {
                 if (!pid || seenIds.has(pid)) return;
                 seenIds.add(pid);
 
+                const isCasted = Boolean(displayPartId && displayPartId !== "-" && !looksLikeCustomerQr(displayPartId));
+                const shotNum = isCasted ? (partRow.shotNumber || partRow.shot_number || extractShotFromPartId(displayPartId) || null) : null;
+
                 const isNg = ["NG", "FAILED", "FAIL", "ENDED_NG", "COMPLETED_NG"].includes(
                   String(partRow.status || partRow.overall_status || "").trim().toUpperCase()
                 );
@@ -8317,11 +8783,11 @@ export default function RejectionAnalysis() {
                 const isAllOk = outCount === 0;
 
                 evaluatedParts.push({
-                  partId: displayPartId || pid,
+                  partId: displayPartId || "—",
                   customerQr: displayCustomerQr,
                   machine: partRow.machineName || partRow.machine_name || null,
                   shift: partRow.shiftCode || partRow.shift_code || null,
-                  shotNumber: partRow.shotNumber || partRow.shot_number || null,
+                  shotNumber: shotNum,
                   isNg,
                   isAllOk,
                   inRangeCount,
@@ -8724,6 +9190,442 @@ export default function RejectionAnalysis() {
               defaultPageSize={100}
               pageSizeOptions={[50, 100, 250, 500, 1000, 2500, 5000]}
             />
+          </div>
+        </div>
+      )}
+
+      {/* ── TAB: DIE WISE GRAPH & SCRAP ANALYSIS ─────────────────────── */}
+      {activeTab === "die_analysis" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          {/* Die KPIs Grid */}
+          <div className="rej-kpi-grid">
+            <div className="rej-kpi-card">
+              <div className="rej-kpi-icon-wrap" style={{ background: "rgba(5, 150, 105, 0.1)", color: "#059669" }}>
+                <Layers size={20} />
+              </div>
+              <div className="rej-kpi-info">
+                <span className="rej-kpi-label">Active Casting Dies</span>
+                <span className="rej-kpi-value">{dieKpiSummary.totalDies} Dies</span>
+                <span className="rej-kpi-sub" style={{ fontWeight: 700, color: "#059669" }}>
+                  {enrichedDieStats.map((d) => d.die_name).join(", ") || "No dies tracked"}
+                </span>
+              </div>
+            </div>
+
+            <div className="rej-kpi-card">
+              <div className="rej-kpi-icon-wrap" style={{ background: "rgba(34, 197, 94, 0.1)", color: "#16a34a" }}>
+                <CheckCircle2 size={20} />
+              </div>
+              <div className="rej-kpi-info">
+                <span className="rej-kpi-label">Benchmark Tooling</span>
+                <span className="rej-kpi-value" style={{ color: "#16a34a" }}>
+                  {dieKpiSummary.bestDie ? `Die ${dieKpiSummary.bestDie.die_name}` : "—"}
+                </span>
+                <span className="rej-kpi-sub" style={{ color: "#15803d", fontWeight: 700 }}>
+                  {dieKpiSummary.bestDie ? `${dieKpiSummary.bestDie.yieldRate}% Yield (${dieKpiSummary.bestDie.scrapRate}% Scrap)` : "—"}
+                </span>
+              </div>
+            </div>
+
+            <div className="rej-kpi-card">
+              <div className="rej-kpi-icon-wrap" style={{ background: "rgba(239, 68, 68, 0.1)", color: "#dc2626" }}>
+                <AlertTriangle size={20} />
+              </div>
+              <div className="rej-kpi-info">
+                <span className="rej-kpi-label">Critical Tooling</span>
+                <span className="rej-kpi-value" style={{ color: "#dc2626" }}>
+                  {dieKpiSummary.worstDie ? `Die ${dieKpiSummary.worstDie.die_name}` : "—"}
+                </span>
+                <span className="rej-kpi-sub" style={{ color: "#dc2626", fontWeight: 700 }}>
+                  {dieKpiSummary.worstDie ? `${dieKpiSummary.worstDie.scrapRate}% Scrap (${dieKpiSummary.worstDie.ng_count.toLocaleString()} NG)` : "—"}
+                </span>
+              </div>
+            </div>
+
+            <div className="rej-kpi-card">
+              <div className="rej-kpi-icon-wrap" style={{ background: "rgba(245, 158, 11, 0.12)", color: "#d97706" }}>
+                <Activity size={20} />
+              </div>
+              <div className="rej-kpi-info">
+                <span className="rej-kpi-label">Total Die Shots</span>
+                <span className="rej-kpi-value">
+                  {dieKpiSummary.totalOutput?.toLocaleString() || 0}
+                </span>
+                <span className="rej-kpi-sub">
+                  Gross shots logged across molds
+                </span>
+              </div>
+            </div>
+
+            <div className="rej-kpi-card">
+              <div className="rej-kpi-icon-wrap" style={{ background: "rgba(16, 185, 129, 0.1)", color: "#10b981" }}>
+                <CheckCircle2 size={20} />
+              </div>
+              <div className="rej-kpi-info">
+                <span className="rej-kpi-label">OK Parts</span>
+                <span className="rej-kpi-value" style={{ color: "#10b981" }}>
+                  {dieKpiSummary.totalOk?.toLocaleString() || 0}
+                </span>
+                <span className="rej-kpi-sub" style={{ color: "#047857" }}>
+                  {dieKpiSummary.yieldRate}% Yield of inspected parts
+                </span>
+              </div>
+            </div>
+
+            <div className="rej-kpi-card">
+              <div className="rej-kpi-icon-wrap" style={{ background: "rgba(244, 63, 94, 0.1)", color: "#e11d48" }}>
+                <XCircle size={20} />
+              </div>
+              <div className="rej-kpi-info">
+                <span className="rej-kpi-label">Total Tooling Scrap</span>
+                <span className="rej-kpi-value" style={{ color: "#e11d48" }}>
+                  {dieKpiSummary.totalNg?.toLocaleString() || 0} NG
+                </span>
+                <span className="rej-kpi-sub" style={{ color: "#be123c" }}>
+                  {dieKpiSummary.avgScrapRate}% Overall scrap rate
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Die Wise Graph Comparison Card */}
+          <div className="rej-card">
+            <div className="rej-card-header">
+              <div>
+                <h3 className="rej-card-title">
+                  <BarChart3 size={18} color="#059669" />
+                  <span>Die Wise Production &amp; Scrap Rate Performance Graph</span>
+                </h3>
+                <p className="rej-card-subtitle">
+                  Comparative analysis of OK vs NG shots and scrap percentage across all tooling dies
+                </p>
+              </div>
+
+              {/* Die Filter Pills & Export Button */}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ fontSize: 11, color: "#64748b", fontWeight: 700 }}>Focus Die:</span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDieFilter("ALL")}
+                  style={{
+                    padding: "4px 10px",
+                    borderRadius: 6,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    border: selectedDieFilter === "ALL" ? "1.5px solid #059669" : "1px solid #cbd5e1",
+                    background: selectedDieFilter === "ALL" ? "#059669" : "#ffffff",
+                    color: selectedDieFilter === "ALL" ? "#ffffff" : "#475569",
+                  }}
+                >
+                  All Dies ({enrichedDieStats.length})
+                </button>
+                {enrichedDieStats.map((d) => (
+                  <button
+                    key={d.die_name}
+                    type="button"
+                    onClick={() => setSelectedDieFilter(d.die_name)}
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 6,
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      border: selectedDieFilter === d.die_name ? "1.5px solid #059669" : "1px solid #cbd5e1",
+                      background: selectedDieFilter === d.die_name ? "#ecfdf5" : "#ffffff",
+                      color: selectedDieFilter === d.die_name ? "#065f46" : "#475569",
+                    }}
+                  >
+                    Die {d.die_name}
+                  </button>
+                ))}
+
+                <button
+                  type="button"
+                  onClick={handleExportDieExcel}
+                  className="rej-btn-export"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "5px 12px",
+                    borderRadius: 6,
+                    fontSize: 11,
+                    fontWeight: 800,
+                    background: "#059669",
+                    color: "#ffffff",
+                    border: "none",
+                    cursor: "pointer",
+                    boxShadow: "0 2px 6px rgba(5, 150, 105, 0.25)",
+                    transition: "all 0.15s ease",
+                    marginLeft: 6
+                  }}
+                  title="Download Die Performance, Defect Breakdown, and Scrap Log Excel Report"
+                >
+                  <FileSpreadsheet size={13} />
+                  <span>Download Die Report (Excel)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Dual Axis Chart */}
+            <div style={{ padding: "16px 20px" }}>
+              {enrichedDieStats.length > 0 ? (
+                <SafeChart height={340}>
+                  {({ width, height }) => (
+                    <ComposedChart
+                      width={width}
+                      height={height}
+                      data={enrichedDieStats}
+                      margin={{ top: 20, right: 30, left: 10, bottom: 20 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                      <XAxis
+                        dataKey="die_name"
+                        tick={{ fontSize: 12, fontWeight: 700, fill: "#1e293b" }}
+                      />
+                      <YAxis
+                        yAxisId="left"
+                        tick={{ fontSize: 11 }}
+                        label={{ value: "Volume (Parts)", angle: -90, position: "insideLeft", fontSize: 10, fill: "#64748b" }}
+                      />
+                      <YAxis
+                        yAxisId="right"
+                        orientation="right"
+                        domain={[0, (dataMax) => Math.max(15, Math.ceil(dataMax * 1.25))]}
+                        tickFormatter={(v) => `${v}%`}
+                        tick={{ fontSize: 11 }}
+                        label={{ value: "Scrap %", angle: 90, position: "insideRight", fontSize: 10, fill: "#dc2626" }}
+                      />
+                      <Tooltip
+                        formatter={(val, name) => [
+                          name === "scrapRate" ? `${val}%` : Number(val).toLocaleString(),
+                          name === "ok_count" ? "Passed (OK)" : name === "ng_count" ? "Scrapped (NG)" : "Scrap Rate %"
+                        ]}
+                        contentStyle={{ borderRadius: 10, fontSize: 12, border: "1px solid #cbd5e1", boxShadow: "0 4px 12px rgba(0,0,0,0.08)" }}
+                      />
+                      <Legend
+                        verticalAlign="top"
+                        height={36}
+                        formatter={(value) => (
+                          <span style={{ fontSize: 12, fontWeight: 600, color: "#334155" }}>
+                            {value === "ok_count" ? "OK Parts" : value === "ng_count" ? "NG Scrap Parts" : "Die Scrap Rate %"}
+                          </span>
+                        )}
+                      />
+                      <Bar yAxisId="left" dataKey="ok_count" name="ok_count" fill="#10b981" radius={[4, 4, 0, 0]} maxBarSize={45} />
+                      <Bar yAxisId="left" dataKey="ng_count" name="ng_count" fill="#ef4444" radius={[4, 4, 0, 0]} maxBarSize={45} />
+                      <Line
+                        yAxisId="right"
+                        type="monotone"
+                        dataKey="scrapRate"
+                        name="scrapRate"
+                        stroke="#dc2626"
+                        strokeWidth={3}
+                        dot={{ r: 5, fill: "#dc2626", strokeWidth: 2, stroke: "#ffffff" }}
+                      />
+                    </ComposedChart>
+                  )}
+                </SafeChart>
+              ) : (
+                <div style={{ height: 300, display: "grid", placeContent: "center", color: "#94a3b8" }}>
+                  No die statistics available for the selected filters.
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Die Detailed Breakdown Cards & Defect Pareto Grid */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
+            {/* Left: Interactive Die Cards */}
+            <div className="rej-card">
+              <div className="rej-card-header">
+                <div>
+                  <h3 className="rej-card-title">
+                    <Layers size={16} color="#059669" />
+                    <span>Die Tooling Health Matrix</span>
+                  </h3>
+                  <p className="rej-card-subtitle">Click any die card to filter defect breakdown</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleExportDieExcel}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    background: "rgba(5, 150, 105, 0.08)",
+                    color: "#059669",
+                    border: "1px solid rgba(5, 150, 105, 0.3)",
+                    padding: "4px 10px",
+                    borderRadius: 6,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    transition: "all 0.15s ease"
+                  }}
+                  title="Download Die Tooling Performance & Defect Breakdown Excel"
+                >
+                  <FileSpreadsheet size={13} />
+                  <span>Export Die Scrap</span>
+                </button>
+              </div>
+              <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                {enrichedDieStats.map((d) => {
+                  const isSelected = selectedDieFilter === d.die_name;
+                  const isHealthy = d.scrapRate <= 4;
+                  const isWarning = d.scrapRate > 4 && d.scrapRate <= 10;
+                  return (
+                    <div
+                      key={d.die_name}
+                      onClick={() => setSelectedDieFilter(isSelected ? "ALL" : d.die_name)}
+                      style={{
+                        border: isSelected ? "2px solid #059669" : "1px solid #e2e8f0",
+                        borderRadius: 10,
+                        padding: "12px 16px",
+                        background: isSelected ? "#f0fdf4" : "#ffffff",
+                        cursor: "pointer",
+                        transition: "all 0.15s ease",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        boxShadow: isSelected ? "0 4px 12px rgba(5, 150, 105, 0.12)" : "0 1px 3px rgba(0,0,0,0.02)"
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        <div style={{
+                          width: 40,
+                          height: 40,
+                          borderRadius: 8,
+                          background: isSelected ? "#059669" : "#f1f5f9",
+                          color: isSelected ? "#ffffff" : "#1e293b",
+                          fontWeight: 800,
+                          fontSize: 15,
+                          display: "grid",
+                          placeContent: "center"
+                        }}>
+                          {d.die_name}
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 800, color: "#1e293b" }}>
+                            Die Tool {d.die_name}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#64748b" }}>
+                            Total Shots: <strong>{d.total_shots.toLocaleString()}</strong> &bull; OK: <strong style={{ color: "#16a34a" }}>{d.ok_count.toLocaleString()}</strong>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{
+                          fontSize: 16,
+                          fontWeight: 800,
+                          color: isHealthy ? "#16a34a" : isWarning ? "#d97706" : "#dc2626"
+                        }}>
+                          {d.scrapRate}%
+                        </div>
+                        <span className={`rej-badge ${isHealthy ? "rej-badge-ok" : isWarning ? "rej-badge-warning" : "rej-badge-danger"}`} style={{ fontSize: 10 }}>
+                          {d.ng_count.toLocaleString()} NG
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Right: Die Top Defect Reasons */}
+            <div className="rej-card">
+              <div className="rej-card-header">
+                <div>
+                  <h3 className="rej-card-title">
+                    <BarChart3 size={16} color="#dc2626" />
+                    <span>Top Defect Reasons {selectedDieFilter !== "ALL" ? `for Die ${selectedDieFilter}` : "(All Dies)"}</span>
+                  </h3>
+                  <p className="rej-card-subtitle">
+                    Defect pareto distribution specific to {selectedDieFilter !== "ALL" ? `Die ${selectedDieFilter}` : "all active tooling"}
+                  </p>
+                </div>
+                {selectedDieFilter !== "ALL" && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedDieFilter("ALL")}
+                    style={{
+                      background: "transparent",
+                      border: "1px solid #cbd5e1",
+                      borderRadius: 6,
+                      padding: "2px 8px",
+                      fontSize: 11,
+                      cursor: "pointer",
+                      color: "#64748b"
+                    }}
+                  >
+                    Reset Filter
+                  </button>
+                )}
+              </div>
+
+              <div style={{ padding: "16px 20px" }}>
+                {dieDefectBreakdown.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    {dieDefectBreakdown.map((defect, idx) => {
+                      const maxCount = dieDefectBreakdown[0].count;
+                      const pctOfMax = maxCount > 0 ? (defect.count / maxCount) * 100 : 0;
+                      return (
+                        <div key={defect.reason}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, marginBottom: 4 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                              <span style={{ fontWeight: 700, color: idx === 0 ? "#dc2626" : "#334155" }}>
+                                #{idx + 1} {defect.reason}
+                              </span>
+                              {(defect.isLeakTest || defect.reason.toLowerCase().includes("leak") || defect.reason.toLowerCase().includes("op150")) && (
+                                <span
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 3,
+                                    background: "#eff6ff",
+                                    color: "#1d4ed8",
+                                    border: "1px solid #bfdbfe",
+                                    borderRadius: 4,
+                                    padding: "1px 6px",
+                                    fontSize: 10,
+                                    fontWeight: 700,
+                                    letterSpacing: "0.02em"
+                                  }}
+                                  title="OP150 Automated Differential Pressure Decay Leak Testing Station Result"
+                                >
+                                  <Droplets size={10} color="#2563eb" />
+                                  <span>Leak Test Result (OP150)</span>
+                                </span>
+                              )}
+                            </div>
+                            <span style={{ fontWeight: 800, color: idx === 0 ? "#dc2626" : "#0f172a" }}>
+                              {defect.count} units
+                            </span>
+                          </div>
+                          <div style={{ height: 8, background: "#f1f5f9", borderRadius: 4, overflow: "hidden" }}>
+                            <div
+                              style={{
+                                width: `${pctOfMax}%`,
+                                height: "100%",
+                                background: idx === 0 ? "linear-gradient(90deg, #ef4444, #dc2626)" : idx === 1 ? "linear-gradient(90deg, #f97316, #ea580c)" : "linear-gradient(90deg, #3b82f6, #2563eb)",
+                                borderRadius: 4,
+                                transition: "width 0.3s ease"
+                              }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ height: 220, display: "grid", placeContent: "center", color: "#94a3b8", fontSize: 12 }}>
+                    No specific defect reasons recorded for this selection.
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Flame, ImageOff, MapPin, BarChart3, ChevronDown, ChevronUp, X, AlertTriangle, Layers, Grid, Eye } from "lucide-react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip as RechartsTooltip, Cell } from "recharts";
+import { Flame, ImageOff, MapPin, BarChart3, ChevronDown, ChevronUp, X, AlertTriangle, Layers, Grid, Eye, TrendingUp, Sparkles, Filter, Info, ArrowLeft } from "lucide-react";
+import { BarChart, Bar, Line, ComposedChart, XAxis, YAxis, Tooltip as RechartsTooltip, Cell, CartesianGrid, ReferenceLine, ResponsiveContainer, Legend, LabelList } from "recharts";
 import { rejectionConfigApi } from "../../api/services";
 import SafeChart from "../../components/charts/SafeChart";
 
@@ -32,7 +32,7 @@ const extractRowDefectDetails = (row) => {
   const src = String(row.parts_interlock_reason || row.ng_reason || row.rejection_reason || row.ngReason || row.reason || "").trim();
   const category = row.rejection_category || row.category || parseField(src, "Category") || "CR";
   const reason = row.rejection_reason || row.reason || row.ngReason || parseField(src, "Reason") || "Defect";
-  const view = row.rejection_view || row.rejectionView || row.view || parseField(src, "View") || "";
+  let view = row.rejection_view || row.rejectionView || row.view || parseField(src, "View") || "";
 
   let zoneRaw = row.rejection_zone || row.rejectionZone || row.zone || parseField(src, "Zone") || "";
   let subZoneRaw = row.rejection_sub_zone || row.rejectionSubZone || row.subZone || parseField(src, "Sub Zone") || parseField(src, "SubZone") || "";
@@ -45,47 +45,26 @@ const extractRowDefectDetails = (row) => {
     }
   }
 
-  // Heuristic fallbacks matching RejectionAnalysis.jsx so all scrap parts map to views and zones
-  let v = view;
-  let z = zoneRaw;
-  let sz = subZoneRaw;
-
-  if (!v || !z) {
-    const rLower = (reason || src).toLowerCase();
-    const g = String(row.ngGate || row.ng_gate || row.operation_no || "").toUpperCase();
-    if (rLower.includes("leak") || g.includes("150") || g.includes("LEAK")) {
-      if (!v) v = "Top View";
-      if (!z) { z = "Zone A"; sz = sz || "SubZone 1"; }
-    } else if (rLower.includes("non-filling") || rLower.includes("non filling")) {
-      if (!v) v = "Bottom View";
-      if (!z) { z = "Zone B"; sz = sz || "SubZone 2"; }
-    } else if (rLower.includes("blow hole") || rLower.includes("porosity")) {
-      if (!v) v = "Top View";
-      if (!z) { z = "Zone A"; sz = sz || "SubZone 3"; }
-    } else if (rLower.includes("dent") || rLower.includes("handling")) {
-      if (!v) v = "Left Side";
-      if (!z) { z = "Zone C"; sz = sz || "SubZone 1"; }
-    } else if (rLower.includes("crack") || rLower.includes("broken")) {
-      if (!v) v = "Right Side";
-      if (!z) { z = "Zone D"; sz = sz || "SubZone 1"; }
-    } else if (rLower.includes("chip")) {
-      if (!v) v = "Front";
-      if (!z) { z = "Zone O"; sz = sz || "SubZone 1"; }
-    } else if (rLower.includes("shrinkage") || rLower.includes("biscuit")) {
-      if (!v) v = "Bottom View";
-      if (!z) { z = "Zone E"; sz = sz || "SubZone 3"; }
-    } else {
-      if (!v) v = "Top View";
-      if (!z) { z = "Zone A"; sz = sz || "SubZone 1"; }
-    }
+  // Extract from text if explicitly logged in reason or notes (no arbitrary fallbacks to prevent fake hotspots)
+  if (!zoneRaw) {
+    const zMatch = src.match(/\bZone\s*([A-Za-z0-9]+)\b/i);
+    if (zMatch) zoneRaw = `Zone ${zMatch[1].toUpperCase()}`;
+  }
+  if (!subZoneRaw) {
+    const szMatch = src.match(/\b(?:Sub\s*Zone|SubZone)\s*([A-Za-z0-9]+)\b/i);
+    if (szMatch) subZoneRaw = `SubZone ${szMatch[1]}`;
+  }
+  if (!view) {
+    const vMatch = src.match(/\b(Top\s*View|Bottom\s*View|Left\s*Side|Right\s*Side|Front\s*View|Rear\s*View)\b/i);
+    if (vMatch) view = vMatch[1];
   }
 
   return {
     category,
     reason,
-    view: v,
-    zone: z,
-    subZone: sz,
+    view: view || "",
+    zone: zoneRaw || "",
+    subZone: subZoneRaw || "",
   };
 };
 
@@ -98,6 +77,8 @@ export default function RejectionHeatMap({ rows = [] }) {
   const [viewId, setViewId] = useState(""); // specific view ID or "all"
   const [showSummary, setShowSummary] = useState(true);
   const [selectedLocation, setSelectedLocation] = useState(null); // { type: 'subZone' | 'zone', zone, subZone, view, count }
+  const [drillLevel, setDrillLevel] = useState("view"); // 'view' | 'zone' | 'subzone'
+  const [drillZone, setDrillZone] = useState(null); // active zone for sub-zone drilldown
 
   // Load configured parts list
   useEffect(() => {
@@ -329,6 +310,16 @@ export default function RejectionHeatMap({ rows = [] }) {
             }
           });
         });
+
+        // Also merge configured subZones if they have counts
+        (zone.subZones || []).forEach((sz) => {
+          const szName = sz.name || sz.code;
+          const szCnt = resolveSubZoneCount(zone, sz);
+          if (szCnt > 0 && !subMap[szName]) {
+            subMap[szName] = szCnt;
+          }
+        });
+
         const subZones = Object.entries(subMap)
           .map(([name, cnt]) => ({ name, count: cnt }))
           .sort((a, b) => b.count - a.count);
@@ -339,6 +330,7 @@ export default function RejectionHeatMap({ rows = [] }) {
           count,
           percentage: parsedRows.length > 0 ? Number(((count / parsedRows.length) * 100).toFixed(1)) : 0,
           subZones,
+          rawZone: zone,
         };
       })
       .filter((z) => z.count > 0)
@@ -408,6 +400,190 @@ export default function RejectionHeatMap({ rows = [] }) {
     };
   }, [selectedLocation, defectRowsByLocation, parsedRows]);
 
+  const [showParetoSection, setShowParetoSection] = useState(true);
+
+  // View-wise defect distribution
+  const viewParetoData = useMemo(() => {
+    return (config?.views || []).map((v) => {
+      const count = viewDefectCounts[v.id] || 0;
+      return {
+        id: String(v.id),
+        name: v.name,
+        count,
+      };
+    }).sort((a, b) => b.count - a.count);
+  }, [config?.views, viewDefectCounts]);
+
+  // Top rejection reasons Pareto breakdown (view-specific, zone-specific, or all)
+  const reasonParetoData = useMemo(() => {
+    let targetRows = parsedRows;
+    if (selectedLocation && drillDownDetails?.rows && drillDownDetails.rows.length > 0) {
+      targetRows = drillDownDetails.rows;
+    } else if (drillLevel === "subzone" && drillZone) {
+      const zKeys = getZoneAliases(drillZone.rawZone || drillZone);
+      targetRows = parsedRows.filter((r) => {
+        const zClean = cleanZoneCode(r._parsed?.zone);
+        const zNorm = normalize(r._parsed?.zone);
+        return zKeys.includes(zClean) || zKeys.includes(zNorm);
+      });
+    } else if (viewId !== "all" && currentView) {
+      targetRows = parsedRows.filter((r) => {
+        const rView = normalize(r._parsed?.view);
+        const rZoneClean = cleanZoneCode(r._parsed?.zone);
+        const vNorm = normalize(currentView.name || currentView.code);
+        if (rView && (vNorm.includes(rView) || rView.includes(vNorm))) return true;
+        if (rZoneClean && (currentView.zones || []).some((z) => cleanZoneCode(z.code || z.name) === rZoneClean)) return true;
+        return false;
+      });
+    }
+
+    const counts = {};
+    targetRows.forEach((r) => {
+      const reason = r._parsed?.reason || "Unspecified Defect";
+      counts[reason] = (counts[reason] || 0) + 1;
+    });
+
+    const sorted = Object.entries(counts)
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count);
+
+    const total = sorted.reduce((sum, item) => sum + item.count, 0);
+    let cumulative = 0;
+
+    return sorted.map((item, idx) => {
+      cumulative += item.count;
+      const cumPct = total > 0 ? Number(((cumulative / total) * 100).toFixed(1)) : 0;
+      const pct = total > 0 ? Number(((item.count / total) * 100).toFixed(1)) : 0;
+      return {
+        ...item,
+        percentage: pct,
+        cumulativePct: cumPct,
+        rank: idx + 1,
+        isTop: idx === 0,
+      };
+    });
+  }, [parsedRows, viewId, currentView, drillLevel, drillZone, selectedLocation, drillDownDetails]);
+
+  const topRejectionReason = useMemo(() => {
+    if (!reasonParetoData || reasonParetoData.length === 0) return null;
+    return reasonParetoData[0];
+  }, [reasonParetoData]);
+
+  const currentContextTitle = useMemo(() => {
+    if (selectedLocation?.subZone) {
+      return `Sub-Zone ${selectedLocation.subZone.name || selectedLocation.subZone.code}`;
+    }
+    if (drillLevel === "subzone" && drillZone) {
+      return `Zone ${drillZone.name || drillZone.code}`;
+    }
+    if (viewId !== "all" && currentView) {
+      return currentView.name;
+    }
+    return "All Views";
+  }, [selectedLocation, drillLevel, drillZone, viewId, currentView]);
+
+  // ── Hierarchical Drilldown Chart Data (View -> Zone -> Sub-Zone) ────────
+  const drillChartData = useMemo(() => {
+    if (drillLevel === "view" || viewId === "all" || !currentView) {
+      return {
+        level: "view",
+        title: "View-Wise Defect Distribution",
+        hint: "Click any view bar to drill down into its Zones",
+        items: viewParetoData.map((v) => ({
+          ...v,
+          displayName: v.name,
+          color: String(viewId) === String(v.id) ? "#ef4444" : "#0284c7",
+        })),
+      };
+    }
+
+    if (drillLevel === "zone") {
+      const items = zoneSummaryData.map((z, idx) => ({
+        id: z.code || z.name,
+        name: z.name ? `Zone ${z.name}` : `Zone ${z.code}`,
+        displayName: z.name || z.code,
+        count: z.count,
+        zoneObj: z,
+        color: idx === 0 ? "#dc2626" : idx === 1 ? "#ea580c" : idx === 2 ? "#d97706" : "#2563eb",
+      }));
+      return {
+        level: "zone",
+        title: `Zone Breakdown — ${currentView.name}`,
+        hint: items.length > 0 ? "Click any zone bar to drill into Sub-Zones" : "No zones with recorded defects",
+        items,
+      };
+    }
+
+    if (drillLevel === "subzone" && drillZone) {
+      const subZones = drillZone.subZones || [];
+      const items = subZones.map((sz, idx) => ({
+        id: sz.name,
+        name: `Sub-Zone ${sz.name}`,
+        displayName: sz.name,
+        count: sz.count,
+        color: SUBZONE_COLORS[idx % SUBZONE_COLORS.length] || "#8b5cf6",
+      }));
+      return {
+        level: "subzone",
+        title: `Sub-Zone Defects — Zone ${drillZone.name || drillZone.code}`,
+        hint: items.length > 0 ? "Click any sub-zone bar to highlight on blueprint" : "No sub-zones recorded",
+        items,
+      };
+    }
+
+    return {
+      level: "view",
+      title: "View-Wise Defect Distribution",
+      hint: "Click bar to focus view",
+      items: viewParetoData.map((v) => ({ ...v, displayName: v.name })),
+    };
+  }, [drillLevel, viewId, currentView, viewParetoData, zoneSummaryData, drillZone]);
+
+  const handleDrillBarClick = (raw) => {
+    const entry = raw?.payload || raw?.activePayload?.[0]?.payload || raw;
+    if (!entry) return;
+    if (drillChartData.level === "view") {
+      if (entry.id) {
+        setViewId(entry.id);
+        setDrillLevel("zone");
+        setDrillZone(null);
+        setSelectedLocation(null);
+      }
+    } else if (drillChartData.level === "zone") {
+      const zObj = entry.zoneObj;
+      const matchedZone = (currentView?.zones || []).find(
+        (z) => cleanZoneCode(z.code || z.name) === cleanZoneCode(entry.id)
+      ) || zObj?.rawZone;
+      if (matchedZone) {
+        setSelectedLocation({
+          type: "zone",
+          zone: matchedZone,
+          zoneKey: normalize(matchedZone.code || matchedZone.name),
+          count: entry.count,
+        });
+      }
+      if (zObj?.subZones && zObj.subZones.length > 0) {
+        setDrillLevel("subzone");
+        setDrillZone(zObj);
+      }
+    } else if (drillChartData.level === "subzone") {
+      const matchedZone = (currentView?.zones || []).find(
+        (z) => cleanZoneCode(z.code || z.name) === cleanZoneCode(drillZone?.code || drillZone?.name)
+      ) || drillZone?.rawZone;
+      const matchedSub = (matchedZone?.subZones || []).find(
+        (s) => cleanSubZoneCode(s.code || s.name) === cleanSubZoneCode(entry.id)
+      ) || { name: entry.id, code: entry.id };
+      setSelectedLocation({
+        type: "subZone",
+        zone: matchedZone || drillZone,
+        subZone: matchedSub,
+        zoneKey: normalize(matchedZone?.code || drillZone?.name),
+        subKey: normalize(entry.id),
+        count: entry.count,
+      });
+    }
+  };
+
   return (
     <div className="rej-card rejection-heat-map">
       <div className="rej-card-header">
@@ -433,7 +609,18 @@ export default function RejectionHeatMap({ rows = [] }) {
           <select
             className="rej-select"
             value={viewId}
-            onChange={(event) => { setViewId(event.target.value); setSelectedLocation(null); }}
+            onChange={(event) => {
+              const val = event.target.value;
+              setViewId(val);
+              setSelectedLocation(null);
+              if (val === "all") {
+                setDrillLevel("view");
+                setDrillZone(null);
+              } else {
+                setDrillLevel("zone");
+                setDrillZone(null);
+              }
+            }}
             disabled={!config?.views?.length}
           >
             <option value="all">🖼️ All Views Overview ({parsedRows.length})</option>
@@ -453,7 +640,12 @@ export default function RejectionHeatMap({ rows = [] }) {
       {config?.views?.length > 0 && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
           <button
-            onClick={() => { setViewId("all"); setSelectedLocation(null); }}
+            onClick={() => {
+              setViewId("all");
+              setSelectedLocation(null);
+              setDrillLevel("view");
+              setDrillZone(null);
+            }}
             className={`rej-view-tab-btn ${viewId === "all" ? "active" : ""}`}
             style={{
               padding: "5px 12px",
@@ -482,7 +674,12 @@ export default function RejectionHeatMap({ rows = [] }) {
             return (
               <button
                 key={v.id}
-                onClick={() => { setViewId(String(v.id)); setSelectedLocation(null); }}
+                onClick={() => {
+                  setViewId(String(v.id));
+                  setSelectedLocation(null);
+                  setDrillLevel("zone");
+                  setDrillZone(null);
+                }}
                 className={`rej-view-tab-btn ${isAct ? "active" : ""}`}
                 style={{
                   padding: "5px 12px",
@@ -515,6 +712,380 @@ export default function RejectionHeatMap({ rows = [] }) {
         </div>
       )}
 
+      {/* ── DEFECT HEATMAP PARETO & VIEW INTELLIGENCE ─────────────────────── */}
+      <div style={{
+        marginBottom: 16,
+        background: "linear-gradient(180deg, #f8fafc 0%, #ffffff 100%)",
+        border: "1px solid #e2e8f0",
+        borderRadius: 12,
+        padding: "12px 16px",
+        boxShadow: "0 2px 6px rgba(0,0,0,0.03)"
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: showParetoSection ? 12 : 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <TrendingUp size={18} color="#ef4444" />
+              <span style={{ fontSize: 13, fontWeight: 800, color: "#1a3263" }}>
+                Defect Heatmap &amp; Pareto Intelligence
+              </span>
+            </div>
+            {topRejectionReason && (
+              <span style={{
+                background: "#fee2e2",
+                color: "#991b1b",
+                border: "1px solid #fecaca",
+                padding: "2px 10px",
+                borderRadius: 20,
+                fontSize: 11,
+                fontWeight: 700,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5
+              }}>
+                <Flame size={12} color="#dc2626" />
+                #1 Defect Mode: <strong>{topRejectionReason.reason}</strong> ({topRejectionReason.count} pcs &bull; {topRejectionReason.percentage}%)
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowParetoSection(!showParetoSection)}
+            style={{
+              background: "transparent",
+              border: "1px solid #cbd5e1",
+              borderRadius: 6,
+              padding: "4px 8px",
+              cursor: "pointer",
+              fontSize: 11,
+              fontWeight: 600,
+              color: "#64748b",
+              display: "flex",
+              alignItems: "center",
+              gap: 4
+            }}
+          >
+            {showParetoSection ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            <span>{showParetoSection ? "Hide Charts" : "Show Charts"}</span>
+          </button>
+        </div>
+
+        {showParetoSection && (
+          <div>
+            {/* Top Rejection Highlight Card */}
+            {topRejectionReason && (
+              <div style={{
+                background: "linear-gradient(90deg, #fff1f2 0%, #fff7ed 100%)",
+                border: "1px solid #fecdd3",
+                borderRadius: 8,
+                padding: "10px 14px",
+                marginBottom: 14,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                flexWrap: "wrap",
+                gap: 10
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ background: "#e11d48", color: "#fff", width: 34, height: 34, borderRadius: 8, display: "grid", placeContent: "center", fontWeight: 900, fontSize: 14 }}>
+                    #1
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#be123c", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                      #1 Defect Root Cause ({currentContextTitle})
+                    </div>
+                    <div style={{ fontSize: 15, fontWeight: 800, color: "#881337" }}>
+                      {topRejectionReason.reason}
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 10, color: "#64748b", fontWeight: 600 }}>Scrapped Units</div>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: "#e11d48" }}>{topRejectionReason.count.toLocaleString()}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 10, color: "#64748b", fontWeight: 600 }}>Defect Contribution</div>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: "#ea580c" }}>{topRejectionReason.percentage}%</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 10, color: "#64748b", fontWeight: 600 }}>Cumulative 80/20</div>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: topRejectionReason.cumulativePct <= 80 ? "#059669" : "#64748b" }}>
+                      {topRejectionReason.cumulativePct}%
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 2-Column Pareto Charts */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 14 }}>
+              {/* Chart 1: Hierarchical Drilldown Defect Distribution */}
+              <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 10, padding: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 6 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: "#1e293b", display: "flex", alignItems: "center", gap: 6 }}>
+                      <Eye size={14} color="#0284c7" />
+                      {drillChartData.title}
+                    </span>
+                    
+                    {/* Breadcrumbs */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, background: "#f1f5f9", padding: "2px 8px", borderRadius: 6 }}>
+                      <span
+                        onClick={() => {
+                          setViewId("all");
+                          setDrillLevel("view");
+                          setDrillZone(null);
+                          setSelectedLocation(null);
+                        }}
+                        style={{
+                          cursor: "pointer",
+                          color: drillLevel === "view" ? "#0f172a" : "#0284c7",
+                          fontWeight: drillLevel === "view" ? 800 : 600,
+                          textDecoration: drillLevel !== "view" ? "underline" : "none"
+                        }}
+                        title="View All Views"
+                      >
+                        All Views
+                      </span>
+                      {drillLevel !== "view" && currentView && (
+                        <>
+                          <span style={{ color: "#94a3b8" }}>/</span>
+                          <span
+                            onClick={() => {
+                              setDrillLevel("zone");
+                              setDrillZone(null);
+                              setSelectedLocation(null);
+                            }}
+                            style={{
+                              cursor: drillLevel === "subzone" ? "pointer" : "default",
+                              color: drillLevel === "zone" ? "#0f172a" : "#0284c7",
+                              fontWeight: drillLevel === "zone" ? 800 : 600,
+                              textDecoration: drillLevel === "subzone" ? "underline" : "none"
+                            }}
+                            title="Drill to Zones"
+                          >
+                            {currentView.name}
+                          </span>
+                        </>
+                      )}
+                      {drillLevel === "subzone" && drillZone && (
+                        <>
+                          <span style={{ color: "#94a3b8" }}>/</span>
+                          <span style={{ color: "#ef4444", fontWeight: 800 }}>
+                            Zone {drillZone.name || drillZone.code}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    {drillLevel === "subzone" ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDrillLevel("zone");
+                          setDrillZone(null);
+                          setSelectedLocation(null);
+                        }}
+                        style={{
+                          padding: "2px 8px",
+                          borderRadius: 4,
+                          fontSize: 10,
+                          fontWeight: 700,
+                          background: "#f8fafc",
+                          border: "1px solid #cbd5e1",
+                          color: "#1e293b",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4
+                        }}
+                      >
+                        <ArrowLeft size={11} /> Back to Zones
+                      </button>
+                    ) : drillLevel === "zone" ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setViewId("all");
+                          setDrillLevel("view");
+                          setDrillZone(null);
+                          setSelectedLocation(null);
+                        }}
+                        style={{
+                          padding: "2px 8px",
+                          borderRadius: 4,
+                          fontSize: 10,
+                          fontWeight: 700,
+                          background: "#f8fafc",
+                          border: "1px solid #cbd5e1",
+                          color: "#1e293b",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4
+                        }}
+                      >
+                        <ArrowLeft size={11} /> Back to Views
+                      </button>
+                    ) : (
+                      <span style={{ fontSize: 10, color: "#64748b" }}>{drillChartData.hint}</span>
+                    )}
+                  </div>
+                </div>
+
+                {drillChartData.items.length > 0 ? (
+                  <SafeChart height={220}>
+                    {({ width, height }) => (
+                      <BarChart
+                        width={width}
+                        height={height}
+                        data={drillChartData.items}
+                        margin={{ top: 22, right: 15, left: -10, bottom: drillChartData.items.length > 5 ? 38 : 25 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                        <XAxis
+                          dataKey="displayName"
+                          tick={{ fontSize: 10, fontWeight: 700, fill: "#334155" }}
+                          interval={0}
+                          angle={drillChartData.items.length > 5 ? -18 : 0}
+                          textAnchor={drillChartData.items.length > 5 ? "end" : "middle"}
+                          height={drillChartData.items.length > 5 ? 38 : 25}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 10 }}
+                          domain={[0, (dataMax) => Math.max(5, Math.ceil(dataMax * 1.3))]}
+                          allowDecimals={false}
+                        />
+                        <RechartsTooltip
+                          formatter={(val) => [
+                            `${val} Defects`,
+                            drillChartData.level === "subzone" ? "Sub-Zone Defects" : drillChartData.level === "zone" ? "Zone Defects" : "View Defects"
+                          ]}
+                          contentStyle={{ borderRadius: 8, fontSize: 11, border: "1px solid #cbd5e1", fontWeight: 600 }}
+                        />
+                        <Bar
+                          dataKey="count"
+                          radius={[6, 6, 0, 0]}
+                          onClick={handleDrillBarClick}
+                          cursor="pointer"
+                        >
+                          <LabelList
+                            dataKey="count"
+                            position="top"
+                            style={{ fill: "#0f172a", fontWeight: "800", fontSize: 11 }}
+                          />
+                          {drillChartData.items.map((entry, idx) => (
+                            <Cell
+                              key={idx}
+                              fill={entry.color || "#0284c7"}
+                            />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    )}
+                  </SafeChart>
+                ) : (
+                  <div style={{ height: 220, display: "grid", placeContent: "center", color: "#94a3b8", fontSize: 12 }}>
+                    No items in this level
+                  </div>
+                )}
+              </div>
+
+              {/* Chart 2: Defect Reasons Pareto (80/20) */}
+              <div style={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 10, padding: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: "#1e293b", display: "flex", alignItems: "center", gap: 6 }}>
+                    <BarChart3 size={14} color="#ea580c" />
+                    Rejection Reasons Pareto (Sabse Jyada Defect)
+                  </span>
+                  <span style={{ fontSize: 10, color: "#64748b", fontWeight: 600, background: "#f1f5f9", padding: "1px 8px", borderRadius: 4 }}>
+                    {currentContextTitle}
+                  </span>
+                </div>
+                {reasonParetoData.length > 0 ? (
+                  <SafeChart height={220}>
+                    {({ width, height }) => (
+                      <ComposedChart
+                        width={width}
+                        height={height}
+                        data={reasonParetoData.slice(0, 8)}
+                        margin={{ top: 22, right: 25, left: -10, bottom: 35 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                        <XAxis
+                          dataKey="reason"
+                          tick={{ fontSize: 9, fontWeight: 600, fill: "#334155" }}
+                          interval={0}
+                          angle={-25}
+                          textAnchor="end"
+                          height={45}
+                        />
+                        <YAxis
+                          yAxisId="left"
+                          tick={{ fontSize: 10 }}
+                          domain={[0, (dataMax) => Math.max(5, Math.ceil(dataMax * 1.3))]}
+                          allowDecimals={false}
+                          label={{ value: "Units", angle: -90, position: "insideLeft", fontSize: 9, fill: "#94a3b8" }}
+                        />
+                        <YAxis
+                          yAxisId="right"
+                          orientation="right"
+                          domain={[0, 100]}
+                          tickFormatter={(v) => `${v}%`}
+                          tick={{ fontSize: 10 }}
+                        />
+                        <RechartsTooltip
+                          formatter={(val, name) => [
+                            name === "cumulativePct" ? `${val}%` : `${val} pcs`,
+                            name === "cumulativePct" ? "Cumulative %" : "Defect Count"
+                          ]}
+                          contentStyle={{ borderRadius: 8, fontSize: 11, border: "1px solid #cbd5e1", fontWeight: 600 }}
+                        />
+                        <ReferenceLine
+                          y={80}
+                          yAxisId="right"
+                          stroke="#ef4444"
+                          strokeDasharray="3 3"
+                          label={{ value: "80% Cutoff", fill: "#ef4444", fontSize: 9, position: "top" }}
+                        />
+                        <Bar yAxisId="left" dataKey="count" name="Defects" radius={[6, 6, 0, 0]}>
+                          <LabelList
+                            dataKey="count"
+                            position="top"
+                            style={{ fill: "#0f172a", fontWeight: "800", fontSize: 11 }}
+                          />
+                          {reasonParetoData.slice(0, 8).map((entry, idx) => (
+                            <Cell
+                              key={idx}
+                              fill={idx === 0 ? "#dc2626" : idx === 1 ? "#ea580c" : idx === 2 ? "#d97706" : "#3b82f6"}
+                            />
+                          ))}
+                        </Bar>
+                        <Line
+                          yAxisId="right"
+                          type="monotone"
+                          dataKey="cumulativePct"
+                          name="cumulativePct"
+                          stroke="#f59e0b"
+                          strokeWidth={2.5}
+                          dot={{ r: 3, fill: "#f59e0b" }}
+                        />
+                      </ComposedChart>
+                    )}
+                  </SafeChart>
+                ) : (
+                  <div style={{ height: 220, display: "grid", placeContent: "center", color: "#94a3b8", fontSize: 12 }}>
+                    No defect reasons recorded
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* ── ALL VIEWS GALLERY MODE ────────────────────────────────────────── */}
       {viewId === "all" && config?.views && (
         <div className="rej-pictorial-3col-grid" style={{ marginBottom: 16 }}>
@@ -534,7 +1105,12 @@ export default function RejectionHeatMap({ rows = [] }) {
                   display: "flex",
                   flexDirection: "column",
                 }}
-                onClick={() => setViewId(String(v.id))}
+                onClick={() => {
+                  setViewId(String(v.id));
+                  setDrillLevel("zone");
+                  setDrillZone(null);
+                  setSelectedLocation(null);
+                }}
                 title={`Click to focus on ${v.name}`}
               >
                 <div style={{
@@ -940,7 +1516,21 @@ export default function RejectionHeatMap({ rows = [] }) {
               </thead>
               <tbody>
                 {zoneSummaryData.map((z, idx) => (
-                  <tr key={z.code}>
+                  <tr
+                    key={z.code}
+                    onClick={() => {
+                      setDrillLevel("subzone");
+                      setDrillZone(z);
+                      setSelectedLocation({
+                        type: "zone",
+                        zone: z.rawZone || z,
+                        zoneKey: normalize(z.code || z.name),
+                        count: z.count,
+                      });
+                    }}
+                    style={{ cursor: "pointer" }}
+                    title={`Click to drill into Sub-Zones of Zone ${z.name}`}
+                  >
                     <td style={{ fontWeight: 800, color: "#94a3b8" }}>{idx + 1}</td>
                     <td><strong style={{ color: "#1a3263" }}>{z.name}</strong></td>
                     <td>
@@ -952,12 +1542,30 @@ export default function RejectionHeatMap({ rows = [] }) {
                       {z.subZones.length > 0 ? (
                         <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                           {z.subZones.map((sz) => (
-                            <span key={sz.name} style={{
-                              display: "inline-flex", alignItems: "center", gap: 3,
-                              padding: "2px 8px", borderRadius: 999, fontSize: 10, fontWeight: 700,
-                              background: "rgba(139,92,246,0.1)", color: "#8b5cf6",
-                              border: "1px solid rgba(139,92,246,0.2)",
-                            }}>
+                            <span
+                              key={sz.name}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDrillLevel("subzone");
+                                setDrillZone(z);
+                                setSelectedLocation({
+                                  type: "subZone",
+                                  zone: z.rawZone || z,
+                                  subZone: { name: sz.name, code: sz.name },
+                                  zoneKey: normalize(z.code || z.name),
+                                  subKey: normalize(sz.name),
+                                  count: sz.count,
+                                });
+                              }}
+                              style={{
+                                display: "inline-flex", alignItems: "center", gap: 3,
+                                padding: "2px 8px", borderRadius: 999, fontSize: 10, fontWeight: 700,
+                                background: "rgba(139,92,246,0.1)", color: "#8b5cf6",
+                                border: "1px solid rgba(139,92,246,0.2)",
+                                cursor: "pointer",
+                              }}
+                              title={`Click to inspect Sub-Zone ${sz.name}`}
+                            >
                               {sz.name} <strong>({sz.count})</strong>
                             </span>
                           ))}
