@@ -2,14 +2,26 @@ import React, { useState, useRef, useMemo } from "react";
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Search } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
+const STICKY_COLUMNS = {
+  shot_number: { left: 0, width: 85 },
+  shotNumber: { left: 0, width: 85 },
+  shot_datetime: { left: 85, width: 160 },
+  shotDateTime: { left: 85, width: 160 },
+  barcode: { left: 245, width: 185 },
+  partId: { left: 245, width: 185 },
+  customerCode: { left: 430, width: 240 },
+  customerQrCode: { left: 430, width: 240 },
+};
+const STICKY_LAST_KEYS = new Set(["customerCode", "customerQrCode"]);
+
 const StatusChip = ({ status }) => {
   const norm = String(status || "").trim().toUpperCase();
   if (!norm || norm === "-" || norm === "NULL" || norm === "UNDEFINED") return null;
 
-  const base = "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold border transition-all";
+  const base = "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10.5px] font-extrabold border transition-all shadow-sm";
   if (norm === "OK" || norm === "PASSED" || norm === "PASS" || norm === "GOOD") {
     return (
-      <span className={`${base} bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30`}>
+      <span className={`${base} bg-emerald-50 text-emerald-700 border-emerald-300`}>
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
         OK
       </span>
@@ -17,31 +29,31 @@ const StatusChip = ({ status }) => {
   }
   if (norm === "NG" || norm === "FAILED" || norm === "FAIL" || norm === "NOK") {
     return (
-      <span className={`${base} bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/30`}>
-        <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+      <span className={`${base} bg-rose-50 text-rose-700 border-rose-300`}>
+        <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
         NG
       </span>
     );
   }
   if (norm === "IN_PROGRESS" || norm === "WIP") {
     return (
-      <span className={`${base} bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30`}>
+      <span className={`${base} bg-amber-50 text-amber-700 border-amber-300`}>
         <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
         In Progress
       </span>
     );
   }
-  return <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">{norm}</span>;
+  return <span className="text-[11px] font-semibold text-slate-700">{norm}</span>;
 };
 
 const ShotStatusChip = ({ value }) => {
   const norm = String(value || "").trim().toUpperCase();
   if (!norm || norm === "-" || norm === "NULL" || norm === "UNDEFINED") return null;
 
-  const base = "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold border transition-all";
+  const base = "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10.5px] font-extrabold border transition-all shadow-sm";
   if (norm === "OK" || norm === "1" || norm === "PASS" || norm === "PASSED" || norm === "GOOD") {
     return (
-      <span className={`${base} bg-emerald-50 text-emerald-700 border-emerald-300 shadow-sm`}>
+      <span className={`${base} bg-emerald-50 text-emerald-700 border-emerald-300`}>
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
         OK
       </span>
@@ -49,7 +61,7 @@ const ShotStatusChip = ({ value }) => {
   }
   if (norm.includes("WARM") || norm === "3" || norm === "2") {
     return (
-      <span className={`${base} bg-amber-50 text-amber-700 border-amber-300 shadow-sm`}>
+      <span className={`${base} bg-amber-50 text-amber-700 border-amber-300`}>
         <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
         WARM UP
       </span>
@@ -57,7 +69,7 @@ const ShotStatusChip = ({ value }) => {
   }
   if (norm.includes("OFF") || norm === "5" || norm === "OFFSET" || norm === "NG" || norm === "FAILED" || norm === "FAIL") {
     return (
-      <span className={`${base} bg-rose-50 text-rose-700 border-rose-300 font-extrabold shadow-sm`}>
+      <span className={`${base} bg-rose-50 text-rose-700 border-rose-300`}>
         <span className="w-1.5 h-1.5 rounded-full bg-rose-600" />
         NG
       </span>
@@ -65,14 +77,6 @@ const ShotStatusChip = ({ value }) => {
   }
   return <span className="text-[11px] font-semibold text-slate-700">{norm}</span>;
 };
-
-const STICKY_COLUMNS = {
-  shot_number: { left: 0, width: 85 },
-  shot_datetime: { left: 85, width: 160 },
-  barcode: { left: 245, width: 175 },
-  customerCode: { left: 420, width: 230 },
-};
-const STICKY_LAST_KEY = "customerCode";
 
 const RejectionTable = ({
   rows = [],
@@ -138,7 +142,7 @@ const RejectionTable = ({
         : rowIndex % 2 === 0
           ? "#ffffff"
           : "#f8fafc",
-      boxShadow: key === STICKY_LAST_KEY ? "4px 0 10px -2px rgba(15, 23, 42, 0.08)" : undefined,
+      boxShadow: STICKY_LAST_KEYS.has(key) ? "4px 0 10px -2px rgba(15, 23, 42, 0.10)" : undefined,
     };
   };
 
@@ -269,15 +273,15 @@ const RejectionTable = ({
                         );
                       }
 
-                      // Shot datetime column
-                      if (column.key === "shot_datetime") {
+                      // Shot datetime & Gate NG timestamp columns
+                      if (column.key === "shot_datetime" || column.key === "ng_timestamp" || column.key === "ngRecordedAt") {
                         return (
                           <td
                             key={column.key}
                             className="px-3 py-2.5 text-center font-mono text-[11px] text-slate-600 whitespace-nowrap border-r border-slate-100"
                             style={cellStyle}
                           >
-                            {text}
+                            {text || "—"}
                           </td>
                         );
                       }
@@ -287,11 +291,15 @@ const RejectionTable = ({
                         return (
                           <td
                             key={column.key}
-                            className="px-3 py-2.5 text-left font-mono text-xs font-bold text-indigo-700 whitespace-nowrap select-all border-r border-slate-100"
+                            className="px-3.5 py-2.5 text-left whitespace-nowrap select-all border-r border-slate-100"
                             style={cellStyle}
                             title={text || undefined}
                           >
-                            {text}
+                            {text ? (
+                              <span className="inline-block px-2.5 py-0.5 rounded-md bg-blue-50/90 text-blue-700 font-mono text-[12px] font-bold border border-blue-200/80 shadow-xs hover:bg-blue-100/90 transition-colors">
+                                {text}
+                              </span>
+                            ) : "—"}
                           </td>
                         );
                       }
@@ -301,11 +309,15 @@ const RejectionTable = ({
                         return (
                           <td
                             key={column.key}
-                            className="px-3 py-2.5 text-left font-mono text-[11px] text-slate-600 whitespace-nowrap select-all border-r border-slate-200"
+                            className="px-3 py-2.5 text-left whitespace-nowrap select-all border-r border-slate-200"
                             style={cellStyle}
                             title={text || undefined}
                           >
-                            {text}
+                            {text ? (
+                              <span className="inline-block px-2 py-0.5 rounded bg-slate-50 text-slate-700 font-mono text-[11px] font-medium border border-slate-200/80 max-w-[220px] truncate align-middle">
+                                {text}
+                              </span>
+                            ) : "—"}
                           </td>
                         );
                       }

@@ -2,6 +2,7 @@ const { Op } = require("sequelize");
 const ProductionReport = require("../../models/ProductionReport");
 const reportController = require("../../controllers/reportController");
 const { normalizeResult } = require("./reportMetricsService");
+const { shiftCodeAt } = require("../../utils/productionDay");
 
 // Use exported private methods to ensure 100% logic parity with the live UI
 const { getLegacyReportBundle, formatCleanReportResponse, paginateReportRowsByPart } = reportController._private;
@@ -167,7 +168,9 @@ async function syncDateRange(dateFrom, dateTo) {
         part_name: String(first.partName || pData.partName || "").trim(),
         die_name: String(first.dieName || pData.dieName || "").trim(),
         machine_name: String(first.machineName || pData.machine_name || "").trim(),
-        shift_code: String(first.shiftCode || "").trim(),
+        // Shift of the part's FIRST scan, from the Shift Management timings. (The entries are not in time order, so
+        // first.shiftCode was often the shift of the latest scan: half the parts carried the wrong shift.)
+        shift_code: shiftCodeAt(firstScan, shifts) || String(first.shiftCode || "").trim(),
         overall_status: overallStatus,
         first_scan_at: firstScan ? new Date(firstScan) : null,
         final_scan_at: finalScan ? new Date(finalScan) : null,
@@ -294,6 +297,9 @@ async function syncDateRange(dateFrom, dateTo) {
             if (existing.first_scan_at && record.first_scan_at && record.first_scan_at > existing.first_scan_at) {
               record.first_scan_at = existing.first_scan_at;
             }
+            // Shift always follows the kept first scan. A re-sync only sees recent logs, so its own label is the
+            // shift of a LATER scan (a part first scanned in Shift C and finished at noon was relabelled Shift A).
+            record.shift_code = shiftCodeAt(record.first_scan_at, shifts) || existing.shift_code || record.shift_code;
 
             // 4. Merge station_keys
             if (existing.station_keys) {

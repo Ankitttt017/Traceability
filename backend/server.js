@@ -29,6 +29,7 @@ const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, ".env") });
 const express = require("express");
 const cors = require("cors");
+const compression = require("compression");
 const http = require("http");
 const { Server } = require("socket.io");
 const sequelize = require("./config/db");
@@ -136,6 +137,13 @@ app.use((req, res, next) => {
   }
   return next();
 });
+// gzip API responses (report JSON shrinks ~5–10×: a 30-day rejection load drops from ~11 MB to ~1–2 MB).
+// Small responses and already-compressed types (Excel/zip/images) are skipped; a client can opt out with
+// the "x-no-compression" header.
+app.use(compression({
+  threshold: 1024,
+  filter: (req, res) => (req.headers["x-no-compression"] ? false : compression.filter(req, res)),
+}));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
@@ -438,15 +446,32 @@ async function performGracefulShutdown(signal = "SIGTERM") {
 
 async function startServer() {
   let httpStarted = false;
-  try {
+  // Single-instance guard: start NOTHING else (PLC polling, TCP server, cron jobs) until the API port is bound.
+  // If the port is taken, another backend is already running — exit instead of lingering as a second process
+  // that keeps polling the PLCs and loading the database without serving the API (the global uncaughtException
+  // handler below would otherwise swallow EADDRINUSE and keep this instance alive).
+  await new Promise((resolve) => {
+    const onListenError = (err) => {
+      if (err && (err.code === "EADDRINUSE" || err.code === "EACCES")) {
+        console.error(`[Startup] Port ${PORT} is not available (${err.code}) — another backend instance is probably running. Exiting this instance.`);
+        process.exit(1);
+      }
+      console.error("[Startup] HTTP server error:", err?.message || err);
+      resolve(); // any other listen error: carry on as before (degraded handling below)
+    };
+    server.once("error", onListenError);
     server.listen(PORT, () => {
+      server.off("error", onListenError);
       console.log(`Server running on port ${PORT}`);
       startAlarmMonitor();
       scheduleStatusEmitter();
       require("./services/report/historicalCronService").startHistoricalCron();
       io.emit("db:offline", { timestamp: new Date().toISOString(), reason: "DB_RECONNECTING" });
+      resolve();
     });
-    httpStarted = true;
+  });
+  httpStarted = true;
+  try {
 
     let startupDbAvailable = false;
     lastDbCheckAt = new Date().toISOString();

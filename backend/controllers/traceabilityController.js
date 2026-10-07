@@ -6658,15 +6658,23 @@ exports.getDashboardSummary = async (req, res) => {
     const defaultWindow = getProductionDayWindow(shifts, now);
     const datePreset = String(req.query.datePreset || "").toLowerCase().trim();
     const isAllTime = datePreset === "all" || req.query.allTime === "1" || req.query.allTime === "true";
-    const requestedRange = (req.query.dateFrom || req.query.dateTo) ? getDateRangeFromQuery(req.query) : defaultWindow;
+    // Production days: D = D 06:00 → D+1 06:00 (end exclusive); range D1–D2 = D1 06:00 → (D2+1) 06:00
+    const requestedRange = (req.query.dateFrom || req.query.dateTo)
+      ? require("../utils/productionDay").productionWindow({ dateFrom: req.query.dateFrom, dateTo: req.query.dateTo, shifts, now })
+      : defaultWindow;
     const from = requestedRange.from;
     const to = requestedRange.to;
 
     const whereConditions = [];
     const replacements = {};
 
+    // scanner misreads (several IDs in one read, fragments) are not parts — see VALID_SCAN_SQL
+
+    whereConditions.push(require("../utils/productionDay").VALID_SCAN_SQL);
+
     if (!isAllTime) {
-      whereConditions.push(`(first_scan_at BETWEEN :from AND :to OR final_scan_at BETWEEN :from AND :to OR createdAt BETWEEN :from AND :to)`);
+      // a part belongs to the production day of its first scan (same rule as the Historical Report)
+      whereConditions.push(`first_scan_at >= :from AND first_scan_at < :to`);
       replacements.from = from;
       replacements.to = to;
     }
@@ -6713,9 +6721,10 @@ exports.getDashboardSummary = async (req, res) => {
       sequelize.query(`
         SELECT 
           COUNT(*) as totalParts,
-          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) as totalOK,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) as totalNG,
-          SUM(CASE WHEN overall_status IN ('IN_PROGRESS', 'WIP') THEN 1 ELSE 0 END) as totalInProgress,
+          -- part status: shared definitions (PART_NG_SQL / PART_OK_SQL) — same as the rejection page and the reports
+          SUM(CASE WHEN ${PART_NG_SQL} THEN 0 WHEN ${PART_OK_SQL} THEN 1 ELSE 0 END) as totalOK,
+          SUM(CASE WHEN ${PART_NG_SQL} THEN 1 ELSE 0 END) as totalNG,
+          SUM(CASE WHEN ${PART_NG_SQL} THEN 0 WHEN ${PART_OK_SQL} THEN 0 ELSE 1 END) as totalInProgress,
           SUM(CASE WHEN op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%DCM%' AND overall_status IN ('NG', 'FAILED')) THEN 1 ELSE 0 END) as op100_ng,
           SUM(CASE WHEN op100_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') OR (machine_name LIKE '%DCM%' AND overall_status IN ('OK', 'PASSED')) THEN 1 ELSE 0 END) as op100_ok,
           SUM(CASE WHEN op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op110_ng,
@@ -6804,25 +6813,14 @@ exports.getDashboardSummary = async (req, res) => {
           ) THEN 1 ELSE 0 END) as leak03_ok,
           SUM(CASE WHEN op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op160_ng,
           SUM(CASE WHEN op160_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op160_ok
-        FROM [RICO_IOT].[dbo].[ProductionReports]
+        FROM [RICO_IOT].[dbo].[ProductionReports] pr
         ${whereSql}
       `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
         console.warn("[DASHBOARD] aggregate query error:", err.message);
         return [{}];
       }),
 
-      sequelize.query(`
-        SELECT
-          COALESCE(NULLIF(shift_code, ''), 'A') as shift,
-          COUNT(*) as total,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) as ng,
-          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') AND NOT (JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) as ok,
-          ROUND(CASE WHEN COUNT(*) > 0 THEN (CAST(SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*)) * 100 ELSE 0 END, 2) as scrapRate
-        FROM [RICO_IOT].[dbo].[ProductionReports]
-        ${whereSql}
-        GROUP BY COALESCE(NULLIF(shift_code, ''), 'A')
-        ORDER BY shift ASC
-      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+      sequelize.query(shiftBreakdownSql({ whereSql, shifts }), { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
         console.warn("[DASHBOARD] shift query error:", err.message);
         return [];
       }),
@@ -6855,26 +6853,38 @@ exports.getDashboardSummary = async (req, res) => {
         return [];
       }),
 
+      // Rejection reasons of every NG part: the operator entry in Parts ("… | Reason: Dent"), else the stored reason,
+      // else the rejecting station's default — the same reasons Rejection Analysis shows. All reasons are returned so
+      // Pareto shares are of all NG parts.
       sequelize.query(`
-        SELECT TOP 10
-          COALESCE(NULLIF(rejection_reason, ''), NULLIF(ng_reason, ''), 'Visual Surface Defect') as reason,
-          COALESCE(NULLIF(rejection_category, ''), 'CR') as category,
-          COUNT(*) as count
-        FROM [RICO_IOT].[dbo].[ProductionReports]
-        ${whereSql ? whereSql + " AND" : "WHERE"} (
-          overall_status IN ('NG', 'FAILED')
-          OR op100_status IN ('NG', 'FAIL', 'FAILED')
-          OR op110_status IN ('NG', 'FAIL', 'FAILED')
-          OR op120_status IN ('NG', 'FAIL', 'FAILED')
-          OR op130_status IN ('NG', 'FAIL', 'FAILED')
-          OR op140_status IN ('NG', 'FAIL', 'FAILED')
-          OR op150_status IN ('NG', 'FAIL', 'FAILED')
-          OR op160_status IN ('NG', 'FAIL', 'FAILED')
-          OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
-        )
-        GROUP BY 
-          COALESCE(NULLIF(rejection_reason, ''), NULLIF(ng_reason, ''), 'Visual Surface Defect'),
-          COALESCE(NULLIF(rejection_category, ''), 'CR')
+        SELECT reason, MAX(category) AS category, COUNT(*) AS count
+        FROM (
+          SELECT
+            COALESCE(
+              NULLIF(LTRIM(RTRIM(CASE WHEN CHARINDEX('Reason:', p.interlock_reason) > 0 THEN
+                LEFT(SUBSTRING(p.interlock_reason, CHARINDEX('Reason:', p.interlock_reason) + 7, 200),
+                     CHARINDEX('|', SUBSTRING(p.interlock_reason, CHARINDEX('Reason:', p.interlock_reason) + 7, 200) + '|') - 1) END)), ''),
+              NULLIF(LTRIM(RTRIM(pr.rejection_reason)), ''),
+              CASE
+                WHEN pr.op130_status IN ${NG_STATUS_LIST} THEN 'Pre-Inspection Visual NG'
+                WHEN pr.op120_status IN ${NG_STATUS_LIST} THEN 'Casting Visual NG'
+                WHEN pr.op100_status IN ${NG_STATUS_LIST} THEN 'DCM Casting Defect'
+                WHEN pr.op150_status IN ${NG_STATUS_LIST} OR (CASE WHEN ISJSON(pr.leak_data) = 1 THEN JSON_VALUE(pr.leak_data, '$.result') END) IN ('NG', 'FAIL', 'FAILED') THEN 'Pressure Leakage Fail (OP150)'
+                WHEN pr.op140_status IN ${NG_STATUS_LIST} THEN 'Auto Gauging Dimension NG'
+                ELSE 'Not recorded' END
+            ) AS reason,
+            COALESCE(
+              NULLIF(LTRIM(RTRIM(CASE WHEN CHARINDEX('Category:', p.interlock_reason) > 0 THEN
+                LEFT(SUBSTRING(p.interlock_reason, CHARINDEX('Category:', p.interlock_reason) + 9, 50),
+                     CHARINDEX('|', SUBSTRING(p.interlock_reason, CHARINDEX('Category:', p.interlock_reason) + 9, 50) + '|') - 1) END)), ''),
+              NULLIF(LTRIM(RTRIM(pr.rejection_category)), ''),
+              CASE WHEN pr.op140_status IN ${NG_STATUS_LIST} THEN 'MR' WHEN pr.op120_status IN ${NG_STATUS_LIST} OR pr.op100_status IN ${NG_STATUS_LIST} THEN 'CR' ELSE 'CRAM' END
+            ) AS category
+          FROM [RICO_IOT].[dbo].[ProductionReports] pr
+          OUTER APPLY (SELECT TOP 1 px.interlock_reason FROM Parts px WHERE px.part_id = pr.part_id AND px.interlock_reason LIKE '%Reason:%') p
+          ${whereSql ? whereSql + " AND" : "WHERE"} ${PART_NG_SQL}
+        ) x
+        GROUP BY reason
         ORDER BY count DESC
       `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
         console.warn("[DASHBOARD] top defects query error:", err.message);
@@ -6913,7 +6923,7 @@ exports.getDashboardSummary = async (req, res) => {
 
     // Shift Production
     const shiftProduction = (shiftScrapRes || []).reduce((acc, row) => {
-      const sKey = String(row.shift || "").replace(/^SHIFT_/, "").trim() || "A";
+      const sKey = String(row.shift || "").replace(/^SHIFT_/, "").trim() || "UNASSIGNED";
       const stats = {
         shift: sKey,
         total: Number(row.total || 0),
@@ -7027,15 +7037,23 @@ exports.getDashboardTrends = async (req, res) => {
     const defaultWindow = getProductionDayWindow(shifts, now);
     const datePreset = String(req.query.datePreset || "").toLowerCase().trim();
     const isAllTime = datePreset === "all" || req.query.allTime === "1" || req.query.allTime === "true";
-    const requestedRange = (req.query.dateFrom || req.query.dateTo) ? getDateRangeFromQuery(req.query) : defaultWindow;
+    // Production days: D = D 06:00 → D+1 06:00 (end exclusive); range D1–D2 = D1 06:00 → (D2+1) 06:00
+    const requestedRange = (req.query.dateFrom || req.query.dateTo)
+      ? require("../utils/productionDay").productionWindow({ dateFrom: req.query.dateFrom, dateTo: req.query.dateTo, shifts, now })
+      : defaultWindow;
     const from = requestedRange.from;
     const to = requestedRange.to;
 
     const whereConditions = [];
     const replacements = {};
 
+    // scanner misreads (several IDs in one read, fragments) are not parts — see VALID_SCAN_SQL
+
+    whereConditions.push(require("../utils/productionDay").VALID_SCAN_SQL);
+
     if (!isAllTime) {
-      whereConditions.push(`(first_scan_at BETWEEN :from AND :to OR final_scan_at BETWEEN :from AND :to OR createdAt BETWEEN :from AND :to)`);
+      // a part belongs to the production day of its first scan (same rule as the Historical Report)
+    whereConditions.push(`first_scan_at >= :from AND first_scan_at < :to`);
       replacements.from = from;
       replacements.to = to;
     }
@@ -8236,6 +8254,136 @@ const normalizeShotStatusHelper = (rawShotStatus, overallStatus, op100Status, sh
   return "";
 };
 
+// ─── Shared part-status and shift SQL (one definition for every page) ─────────
+// NG = overall NG, any station NG, a leak-test NG, or a leak-named reject (same as the summary's totalNG)
+// OK = final pass (OP160 OK or overall OK) and not NG · in process = the rest
+const NG_STATUS_LIST = "('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')";
+const PART_NG_SQL = `(pr.overall_status IN ('NG', 'FAILED')
+      OR ${["100", "110", "120", "130", "140", "150", "160"].map((op) => `pr.op${op}_status IN ${NG_STATUS_LIST}`).join(" OR ")}
+      OR (pr.machine_name LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
+      OR (pr.rejection_reason LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
+      OR (pr.ng_reason LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
+      OR (CASE WHEN ISJSON(pr.leak_data) = 1 THEN JSON_VALUE(pr.leak_data, '$.result') END) IN ('NG', 'FAIL', 'FAILED'))`;
+const PART_OK_SQL = "(pr.op160_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') OR pr.overall_status IN ('OK', 'PASSED'))";
+
+/**
+ * The time that decides a part's day and shift: first scan; with a station filter, that station's latest scan
+ * (OUTER APPLY over OperationLogs); with a leak filter, the leak result time (stored as plant-local time + "Z").
+ */
+function decidingTimeSql({ isOpGate = false, isLeakGate = false } = {}) {
+  const PD = require("../utils/productionDay");
+  if (isOpGate) {
+    return {
+      timeCol: "g.gate_at",
+      apply: `OUTER APPLY (SELECT MAX(ol.createdAt) AS gate_at FROM OperationLogs ol
+           WHERE (ol.operation_no = :qualityGateOp OR ol.station_no = :qualityGateOp)
+             AND (ol.part_id = pr.part_id OR ol.part_id = pr.customer_qr)) g`,
+    };
+  }
+  if (isLeakGate) {
+    return { timeCol: `DATEADD(MINUTE, -${PD.PLANT_OFFSET_MIN}, TRY_CAST(CASE WHEN ISJSON(pr.leak_data) = 1 THEN JSON_VALUE(pr.leak_data, '$.cycleEndTime') END AS datetime2))`, apply: "" };
+  }
+  return { timeCol: "pr.first_scan_at", apply: "" };
+}
+
+/**
+ * Parts per shift for a filtered set. The shift comes from the Shift Management timings applied to the deciding
+ * time (not the label stored at sync), so it always agrees with the shift filter and A + B + C = total.
+ * Columns: shift, total, ok, ng, scrap (= ng), wip, scrapRate (= NG ÷ (OK + NG) × 100).
+ */
+function shiftBreakdownSql({ whereSql = "", shifts = [], isOpGate = false, isLeakGate = false } = {}) {
+  const PD = require("../utils/productionDay");
+  const { timeCol, apply } = decidingTimeSql({ isOpGate, isLeakGate });
+  const shiftExpr = shifts.length ? PD.shiftCaseSql(timeCol, shifts) : "COALESCE(NULLIF(pr.shift_code, ''), 'UNASSIGNED')";
+  return `
+    SELECT shift,
+           COUNT(*) AS total,
+           SUM(is_ok) AS ok,
+           SUM(is_ng) AS ng,
+           SUM(is_ng) AS scrap,
+           COUNT(*) - SUM(is_ok) - SUM(is_ng) AS wip,
+           ROUND(CASE WHEN SUM(is_ok) + SUM(is_ng) > 0 THEN CAST(SUM(is_ng) AS FLOAT) / (SUM(is_ok) + SUM(is_ng)) * 100 ELSE 0 END, 2) AS scrapRate
+    FROM (
+      SELECT ${shiftExpr} AS shift,
+             CASE WHEN ${PART_NG_SQL} THEN 1 ELSE 0 END AS is_ng,
+             CASE WHEN ${PART_NG_SQL} THEN 0 WHEN ${PART_OK_SQL} THEN 1 ELSE 0 END AS is_ok
+      FROM [RICO_IOT].[dbo].[ProductionReports] pr ${apply}
+      ${whereSql}
+    ) x
+    GROUP BY shift
+    ORDER BY shift ASC`;
+}
+
+/**
+ * Station results counted the way the station / operator sees them (same rule as the Historical Report with a
+ * station selected): a part counts at a station when that station's LATEST scan of it falls in the selected
+ * production-day window (and shift), with the station's own OK / NG result. Leak machines count by leak result time.
+ * Other filters (part, die, machine, part type) still apply; misread scans are excluded.
+ * Returns { OP100: {ok, ng}, …, "Leak-Test-01": {ok, ng}, … }.
+ */
+async function stationCountsByScan(query, ctx) {
+  const PD = require("../utils/productionDay");
+  const base = await buildRejectionFilterContext({
+    ...query, dateFrom: undefined, dateTo: undefined, datePreset: "all", allTime: "1",
+    shiftCode: undefined, qualityGate: undefined, status: undefined, category: undefined, reason: undefined, view: undefined, zone: undefined,
+  });
+  const repl = { ...base.replacements };
+  if (!ctx.isAllTime) { repl.scanFrom = ctx.from; repl.scanTo = ctx.to; }
+  if (ctx.shiftCodeFilter) repl.scanShift = ctx.shiftCodeFilter;
+  const timeCond = (col) => {
+    const parts = [];
+    if (!ctx.isAllTime) parts.push(`${col} >= :scanFrom AND ${col} < :scanTo`);
+    if (ctx.shiftCodeFilter && ctx.shifts.length) parts.push(`${PD.shiftCaseSql(col, ctx.shifts)} = :scanShift`);
+    return parts.join(" AND ");
+  };
+  const where = base.whereSql ? `${base.whereSql} AND` : "WHERE";
+  const OK_LIST = "('OK', 'PASS', 'PASSED', 'ENDED_OK', 'COMPLETED_OK')";
+  const out = {};
+
+  const ops = ["OP100", "OP110", "OP120", "OP130", "OP140", "OP160"];
+  const opRows = await Promise.all(ops.map((op) => {
+    const c = timeCond("MAX(createdAt)");
+    // only logs from the window start (index on createdAt): a latest scan inside the window is always >= its start
+    const since = ctx.isAllTime ? "" : " AND createdAt >= :scanFrom";
+    const sub = `SELECT part_id FROM OperationLogs WHERE (operation_no = '${op}' OR station_no = '${op}')${since} GROUP BY part_id${c ? ` HAVING ${c}` : ""}`;
+    const col = `pr.${op.toLowerCase()}_status`;
+    return sequelize.query(`
+      SELECT SUM(CASE WHEN ${col} IN ${OK_LIST} THEN 1 ELSE 0 END) AS ok,
+             SUM(CASE WHEN ${col} IN ${NG_STATUS_LIST} THEN 1 ELSE 0 END) AS ng
+      FROM [RICO_IOT].[dbo].[ProductionReports] pr
+      ${where} (pr.part_id IN (${sub}) OR pr.customer_qr IN (${sub}))${ctx.isAllTime ? "" : " AND pr.first_scan_at < :scanTo"}`, { replacements: repl, type: sequelize.QueryTypes.SELECT });
+  }));
+  ops.forEach((op, i) => { out[op] = { ok: Number(opRows[i]?.[0]?.ok || 0), ng: Number(opRows[i]?.[0]?.ng || 0) }; });
+
+  // leak machines: by the machine that tested the part and the leak result time (stored as plant time + "Z")
+  const leakJson = (path) => `(CASE WHEN ISJSON(pr.leak_data) = 1 THEN JSON_VALUE(pr.leak_data, '${path}') END)`;
+  const leakTime = `TODATETIMEOFFSET(DATEADD(MINUTE, -${PD.PLANT_OFFSET_MIN}, TRY_CAST(${leakJson("$.cycleEndTime")} AS datetime2)), 0)`;
+  const lc = timeCond(leakTime);
+  const [leakRows, leakMachines] = await Promise.all([
+    sequelize.query(`
+      SELECT ${leakJson("$.matchedMachineId")} AS mid, ${leakJson("$.matchedMachineName")} AS mname,
+             SUM(CASE WHEN UPPER(${leakJson("$.result")}) IN ${OK_LIST} THEN 1 ELSE 0 END) AS ok,
+             SUM(CASE WHEN UPPER(${leakJson("$.result")}) IN ${NG_STATUS_LIST} THEN 1 ELSE 0 END) AS ng
+      FROM [RICO_IOT].[dbo].[ProductionReports] pr
+      ${where} ${leakJson("$.result")} IS NOT NULL${lc ? ` AND ${lc}` : ""}${ctx.isAllTime ? "" : " AND pr.first_scan_at < :scanTo AND pr.first_scan_at >= DATEADD(DAY, -60, CAST(:scanFrom AS datetimeoffset))"}
+      GROUP BY ${leakJson("$.matchedMachineId")}, ${leakJson("$.matchedMachineName")}`, { replacements: repl, type: sequelize.QueryTypes.SELECT }),
+    Machine.findAll({ attributes: ["id", "machine_name", "operation_no"], raw: true }).catch(() => []),
+  ]);
+  const nameById = new Map((leakMachines || []).map((m) => [String(m.id), String(m.machine_name || "")]));
+  const leakCode = { 1: "Leak-Test-01", 2: "Leak-Test-02", 3: "Leak Test-03" };
+  ["Leak-Test-01", "Leak-Test-02", "Leak Test-03"].forEach((c) => { out[c] = { ok: 0, ng: 0 }; });
+  (leakRows || []).forEach((row) => {
+    const name = nameById.get(String(row.mid)) || row.mname || "";
+    const n = String(name).toUpperCase().match(/LEAK[\s_-]*TEST[\s_-]*0*(\d)/)?.[1];
+    const code = leakCode[n];
+    if (!code) return;
+    out[code].ok += Number(row.ok || 0);
+    out[code].ng += Number(row.ng || 0);
+  });
+  out.OP150 = ["Leak-Test-01", "Leak-Test-02", "Leak Test-03"].reduce((a, c) => ({ ok: a.ok + out[c].ok, ng: a.ng + out[c].ng }), { ok: 0, ng: 0 });
+  return out;
+}
+
 // ─── Shared Rejection Filter Helper ──────────────────────────────────────────
 async function buildRejectionFilterContext(query = {}) {
   const shifts = await getActiveShiftDefinitions();
@@ -8243,7 +8391,10 @@ async function buildRejectionFilterContext(query = {}) {
   const defaultWindow = getProductionDayWindow(shifts, now);
   const datePreset = String(query.datePreset || "").toLowerCase().trim();
   const isAllTime = datePreset === "all" || query.allTime === "1" || query.allTime === "true";
-  const requestedRange = (query.dateFrom || query.dateTo) ? getDateRangeFromQuery(query) : defaultWindow;
+  // Production days: a date D = D 06:00 → D+1 06:00 (end exclusive); a range D1–D2 = D1 06:00 → (D2+1) 06:00
+  const requestedRange = (query.dateFrom || query.dateTo)
+    ? require("../utils/productionDay").productionWindow({ dateFrom: query.dateFrom, dateTo: query.dateTo, shifts, now })
+    : defaultWindow;
   const from = requestedRange.from;
   const to = requestedRange.to;
   const dateFrom = from.toISOString();
@@ -8297,16 +8448,50 @@ async function buildRejectionFilterContext(query = {}) {
   const whereConditions = [];
   const replacements = {};
 
-  if (!isAllTime) {
-    whereConditions.push(`(first_scan_at BETWEEN :from AND :to OR final_scan_at BETWEEN :from AND :to OR createdAt BETWEEN :from AND :to)`);
-    replacements.from = from;
-    replacements.to = to;
-  }
+  // scanner misreads (several IDs in one read, fragments) are not parts — see VALID_SCAN_SQL
 
-  if (shiftCodeFilter) {
-    whereConditions.push(`shift_code = :shiftCode`);
-    replacements.shiftCode = shiftCodeFilter;
+  whereConditions.push(require("../utils/productionDay").VALID_SCAN_SQL);
+
+  // Day + shift — same rule as the Historical Report:
+  //  • no station selected → the part's FIRST scan (casting)
+  //  • station selected    → that station's LATEST scan of the part (its output in that day / shift)
+  //  • leak test           → the leak result time (leak_data.cycleEndTime is plant-local time written with "Z")
+  const PD = require("../utils/productionDay");
+  const gateCode = qualityGateFilter.trim().toUpperCase();
+  const isOpGate = /^OP(100|110|120|130|140|160)$/.test(gateCode);
+  const isLeakGate = gateCode === "OP150" || gateCode.startsWith("LEAK");
+  const useShiftTimes = Boolean(shiftCodeFilter) && shifts.length > 0;
+  if (shiftCodeFilter) replacements.shiftCode = shiftCodeFilter;
+  if (!isAllTime) { replacements.from = from; replacements.to = to; }
+  let gateTimeSql = null;
+  // Conditions with a sub-query on another table must not go through the pr. prefixing (it would rewrite the
+  // sub-query's own part_id): they are stored as {plain, pr} and inserted as {{RAW_n}} placeholders.
+  const rawConds = [];
+  const pushRaw = (plain, pr) => { rawConds.push({ plain, pr }); whereConditions.push(`{{RAW_${rawConds.length - 1}}}`); };
+  // NG parts' operator entry ("Category: CR | View: … | Zone: … | Reason: …") lives in Parts.interlock_reason
+  const partsEntryLike = (param) => ({
+    plain: `part_id IN (SELECT px.part_id FROM Parts px WHERE px.interlock_reason LIKE :${param})`,
+    pr: `pr.[part_id] IN (SELECT px.part_id FROM Parts px WHERE px.interlock_reason LIKE :${param})`,
+  });
+  if (isOpGate && (!isAllTime || useShiftTimes)) {
+    const having = [];
+    if (!isAllTime) having.push("MAX(createdAt) >= :from AND MAX(createdAt) < :to");
+    if (useShiftTimes) having.push(`${PD.shiftCaseSql("MAX(createdAt)", shifts)} = :shiftCode`);
+    replacements.qualityGateOp = gateCode;
+    const sub = `SELECT part_id FROM OperationLogs WHERE (operation_no = :qualityGateOp OR station_no = :qualityGateOp)${isAllTime ? "" : " AND createdAt >= :from"} GROUP BY part_id HAVING ${having.join(" AND ")}`;
+    // Kept out of the column prefixing below (it would rewrite the subquery's own part_id / createdAt): the
+    // {{GATE_TIME}} placeholder is expanded by expandGateTime() once the WHERE text is final.
+    gateTimeSql = { plain: `(part_id IN (${sub}) OR customer_qr IN (${sub}))`, pr: `(pr.[part_id] IN (${sub}) OR pr.[customer_qr] IN (${sub}))` };
+    whereConditions.push("{{GATE_TIME}}");
+  } else {
+    const timeCol = isLeakGate
+      // typed as UTC datetimeoffset so it compares correctly with the :from / :to parameters (sent with "+00:00")
+      ? `TODATETIMEOFFSET(DATEADD(MINUTE, -${PD.PLANT_OFFSET_MIN}, TRY_CAST(CASE WHEN ISJSON(leak_data) = 1 THEN JSON_VALUE(leak_data, '$.cycleEndTime') END AS datetime2)), 0)`
+      : "first_scan_at";
+    if (!isAllTime) whereConditions.push(`${timeCol} >= :from AND ${timeCol} < :to`);
+    if (useShiftTimes) whereConditions.push(`${PD.shiftCaseSql(timeCol, shifts)} = :shiftCode`);
   }
+  if (shiftCodeFilter && !useShiftTimes) whereConditions.push(`shift_code = :shiftCode`);
   if (machineNameFilter) {
     whereConditions.push(`machine_name = :machineName`);
     replacements.machineName = machineNameFilter;
@@ -8360,26 +8545,39 @@ async function buildRejectionFilterContext(query = {}) {
     whereConditions.push(`(part_id LIKE :partIdPattern OR customer_qr LIKE :partIdPattern)`);
     replacements.partIdPattern = `%${partId}%`;
   }
+  // Category / reason / view / zone: the stored columns, or the operator entry in Parts (ProductionReports has no
+  // view or zone column, and its category / reason are usually empty). "Category: CR |" so CR never matches CRAM.
+  const entryFilter = (param, pattern, ownCols) => {
+    replacements[param] = pattern;
+    const e = partsEntryLike(param);
+    const own = ownCols.map((c) => `${c} LIKE :${param}`).join(" OR ");
+    pushRaw(`(${own} OR ${e.plain})`, `(${ownCols.map((c) => `pr.[${c}] LIKE :${param}`).join(" OR ")} OR ${e.pr})`);
+  };
   if (categoryFilter) {
-    whereConditions.push(`(rejection_category = :categoryFilter OR ng_reason LIKE :catPattern)`);
     replacements.categoryFilter = categoryFilter;
-    replacements.catPattern = `%Category: ${categoryFilter}%`;
+    replacements.catPatternEntry = `%Category: ${categoryFilter} |%`;
+    replacements.anyEntry = "%Category:%";
+    // Sensor rejects have no operator entry: their category is the rejecting station's default, the same rule as the
+    // NG records (leak test only → CRAM, OP130 → CRAM, OP120 / OP100 → CR, OP140 → MR)
+    const defaultCat = (p) => {
+      const ng = (col) => `${p(col)} IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')`;
+      const leakNg = `(${ng("op150_status")} OR (CASE WHEN ISJSON(${p("leak_data")}) = 1 THEN JSON_VALUE(${p("leak_data")}, '$.result') END) IN ('NG', 'FAIL', 'FAILED'))`;
+      return `(CASE WHEN ${leakNg} AND NOT (${ng("op120_status")} OR ${ng("op130_status")} OR ${ng("op100_status")}) THEN 'CRAM'
+        WHEN ${ng("op130_status")} THEN 'CRAM' WHEN ${ng("op120_status")} THEN 'CR' WHEN ${ng("op140_status")} THEN 'MR'
+        WHEN ${ng("op100_status")} THEN 'CR' END)`;
+    };
+    const plainCol = (c) => c, prCol = (c) => `pr.[${c}]`;
+    const e = partsEntryLike("catPatternEntry"), any = partsEntryLike("anyEntry");
+    pushRaw(
+      `(rejection_category = :categoryFilter OR ${e.plain} OR (NULLIF(LTRIM(ISNULL(rejection_category, '')), '') IS NULL AND NOT (${any.plain}) AND ${defaultCat(plainCol)} = :categoryFilter))`,
+      `(pr.[rejection_category] = :categoryFilter OR ${e.pr} OR (NULLIF(LTRIM(ISNULL(pr.[rejection_category], '')), '') IS NULL AND NOT (${any.pr}) AND ${defaultCat(prCol)} = :categoryFilter))`,
+    );
   }
-  if (reasonFilter) {
-    whereConditions.push(`(rejection_reason = :reasonFilter OR ng_reason LIKE :reasonPattern)`);
-    replacements.reasonFilter = reasonFilter;
-    replacements.reasonPattern = `%Reason: ${reasonFilter}%`;
-  }
+  if (reasonFilter) entryFilter("reasonPattern", `%Reason: ${reasonFilter}%`, ["rejection_reason", "ng_reason"]);
   const viewFilter = String(query.view || "").trim();
-  if (viewFilter && viewFilter.toLowerCase() !== "all") {
-    whereConditions.push(`(ng_reason LIKE :viewPattern OR rejection_reason LIKE :viewPattern OR rejection_view LIKE :viewPattern)`);
-    replacements.viewPattern = `%${viewFilter}%`;
-  }
+  if (viewFilter && viewFilter.toLowerCase() !== "all") entryFilter("viewPattern", `%View: ${viewFilter}%`, ["ng_reason"]);
   const zoneFilter = String(query.zone || "").trim();
-  if (zoneFilter) {
-    whereConditions.push(`(ng_reason LIKE :zonePattern OR rejection_reason LIKE :zonePattern OR rejection_zone LIKE :zonePattern)`);
-    replacements.zonePattern = `%${zoneFilter}%`;
-  }
+  if (zoneFilter) entryFilter("zonePattern", `%${zoneFilter}%`, ["ng_reason"]);
   if (statusFilter === "NG" || statusFilter === "REJECT" || statusFilter === "FAILED") {
     whereConditions.push(`(
       overall_status IN ('NG', 'FAILED')
@@ -8407,10 +8605,16 @@ async function buildRejectionFilterContext(query = {}) {
     }
   }
 
-  const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
-  const prWhereSql = whereSql ? whereSql
+  const expandGateTime = (sql, prefixed) => {
+    let out = gateTimeSql ? sql.replace("{{GATE_TIME}}", () => (prefixed ? gateTimeSql.pr : gateTimeSql.plain)) : sql;
+    rawConds.forEach((c, i) => { out = out.replace(`{{RAW_${i}}}`, () => (prefixed ? c.pr : c.plain)); });
+    return out;
+  };
+  const rawWhereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
+  const whereSql = expandGateTime(rawWhereSql, false);
+  const prWhereSql = rawWhereSql ? expandGateTime(rawWhereSql
     .replace(/\[(\w+)\]/g, '$1')
-    .replace(/\b(part_id|customer_qr|createdAt|updatedAt|first_scan_at|final_scan_at|shift_code|machine_name|die_name|part_name|rejection_category|rejection_reason|ng_reason|overall_status|op100_status|op110_status|op120_status|op130_status|op140_status|op150_status|op160_status|leak_data)\b/g, 'pr.[$1]')
+    .replace(/\b(part_id|customer_qr|createdAt|updatedAt|first_scan_at|final_scan_at|shift_code|machine_name|die_name|part_name|rejection_category|rejection_reason|ng_reason|overall_status|op100_status|op110_status|op120_status|op130_status|op140_status|op150_status|op160_status|leak_data)\b/g, 'pr.[$1]'), true)
     : '';
 
   return {
@@ -8435,6 +8639,10 @@ async function buildRejectionFilterContext(query = {}) {
     replacements,
     whereSql,
     prWhereSql,
+    expandGateTime,
+    gateCode,
+    isOpGate: isOpGate && !isAllTime,
+    isLeakGate,
   };
 }
 
@@ -8444,6 +8652,11 @@ exports.getRejectionSummary = async (req, res) => {
     const ctx = await buildRejectionFilterContext(req.query);
     const { replacements, whereSql, stationLabelMap, shifts, dateFrom, dateTo, shiftCodeFilter, machineNameFilter, partNameFilter, dieNameFilter } = ctx;
 
+    // station figures (by station scan time) start now and run alongside the summary queries
+    const scanCountsPromise = stationCountsByScan(req.query, ctx).catch((err) => {
+      console.warn("[REJECTION] station scan counts error:", err.message);
+      return null;
+    });
     const [aggregatesRes, filterOptionsRes, dieStatsRes] = await Promise.all([
       sequelize.query(`
         SELECT 
@@ -8464,39 +8677,39 @@ exports.getRejectionSummary = async (req, res) => {
             OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
           ) THEN 1 ELSE 0 END) as totalNG,
           SUM(CASE WHEN overall_status IN ('IN_PROGRESS', 'WIP') THEN 1 ELSE 0 END) as totalInProgress,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND (op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%DCM%' AND overall_status IN ('NG', 'FAILED'))) THEN 1 ELSE 0 END) as op100_ng,
+          SUM(CASE WHEN op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%DCM%' AND (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG','FAIL'))) THEN 1 ELSE 0 END) as op100_ng,
           SUM(CASE WHEN op100_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') OR (machine_name LIKE '%DCM%' AND overall_status IN ('OK', 'PASSED')) THEN 1 ELSE 0 END) as op100_ok,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op110_ng,
+          SUM(CASE WHEN op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%Laser%' AND (overall_status IN ('NG', 'FAILED') OR op110_status IN ('NG','FAIL'))) THEN 1 ELSE 0 END) as op110_ng,
           SUM(CASE WHEN op110_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op110_ok,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND (op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%PDi%' AND overall_status IN ('NG', 'FAILED'))) THEN 1 ELSE 0 END) as op120_ng,
+          SUM(CASE WHEN op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%PDi%' AND (overall_status IN ('NG', 'FAILED') OR op120_status IN ('NG','FAIL'))) THEN 1 ELSE 0 END) as op120_ng,
           SUM(CASE WHEN op120_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op120_ok,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND (op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%Pre%' AND overall_status IN ('NG', 'FAILED'))) THEN 1 ELSE 0 END) as op130_ng,
+          SUM(CASE WHEN op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%Pre%' AND (overall_status IN ('NG', 'FAILED') OR op130_status IN ('NG','FAIL'))) THEN 1 ELSE 0 END) as op130_ng,
           SUM(CASE WHEN op130_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op130_ok,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND (op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%Guag%' AND overall_status IN ('NG', 'FAILED'))) THEN 1 ELSE 0 END) as op140_ng,
+          SUM(CASE WHEN op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%Guag%' AND (overall_status IN ('NG', 'FAILED') OR op140_status IN ('NG','FAIL'))) THEN 1 ELSE 0 END) as op140_ng,
           SUM(CASE WHEN op140_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op140_ok,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND (
+          SUM(CASE WHEN 
             op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
             OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
-            OR (machine_name LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
+            OR (machine_name LIKE '%Leak%' AND (overall_status IN ('NG', 'FAILED') OR op150_status IN ('NG','FAIL')))
             OR (rejection_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
             OR (ng_reason LIKE '%Leak%' AND overall_status IN ('NG', 'FAILED'))
             OR (rejection_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
             OR (ng_reason LIKE '%OP150%' AND overall_status IN ('NG', 'FAILED'))
-          ) THEN 1 ELSE 0 END) as op150_ng,
+          THEN 1 ELSE 0 END) as op150_ng,
           SUM(CASE WHEN (
             op150_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK')
             OR JSON_VALUE(leak_data, '$.result') IN ('OK', 'PASS', 'PASSED')
             OR (machine_name LIKE '%Leak%' AND overall_status IN ('OK', 'PASSED'))
           ) THEN 1 ELSE 0 END) as op150_ok,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND (
+          SUM(CASE WHEN (
             JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01'
             OR leak_data LIKE '%1773%'
             OR machine_name = 'Leak-Test-01'
             OR machine_name LIKE '%Leak%01%'
           ) AND (
             JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
-            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR leak_data LIKE '%1773%' OR machine_name LIKE '%01%'))
-            OR (machine_name = 'Leak-Test-01' AND overall_status IN ('NG','FAILED'))
+            OR op150_status IN ('NG','FAIL','FAILED')
+            OR (machine_name LIKE '%01%' AND (overall_status IN ('NG','FAILED') OR op150_status IN ('NG','FAIL')))
           ) THEN 1 ELSE 0 END) as leak01_ng,
           SUM(CASE WHEN (
             JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01'
@@ -8508,15 +8721,15 @@ exports.getRejectionSummary = async (req, res) => {
             OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR leak_data LIKE '%1773%' OR machine_name LIKE '%01%'))
             OR (machine_name = 'Leak-Test-01' AND overall_status IN ('OK','PASSED'))
           ) THEN 1 ELSE 0 END) as leak01_ok,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND (
+          SUM(CASE WHEN (
             JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02'
             OR leak_data LIKE '%1774%'
             OR machine_name = 'Leak-Test-02'
             OR machine_name LIKE '%Leak%02%'
           ) AND (
             JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
-            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR leak_data LIKE '%1774%' OR machine_name LIKE '%02%'))
-            OR (machine_name = 'Leak-Test-02' AND overall_status IN ('NG','FAILED'))
+            OR op150_status IN ('NG','FAIL','FAILED')
+            OR (machine_name LIKE '%02%' AND (overall_status IN ('NG','FAILED') OR op150_status IN ('NG','FAIL')))
           ) THEN 1 ELSE 0 END) as leak02_ng,
           SUM(CASE WHEN (
             JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02'
@@ -8528,7 +8741,7 @@ exports.getRejectionSummary = async (req, res) => {
             OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR leak_data LIKE '%1774%' OR machine_name LIKE '%02%'))
             OR (machine_name = 'Leak-Test-02' AND overall_status IN ('OK','PASSED'))
           ) THEN 1 ELSE 0 END) as leak02_ok,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND (
+          SUM(CASE WHEN (
             JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak Test-03'
             OR JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak-Test-03'
             OR leak_data LIKE '%1776%'
@@ -8536,8 +8749,8 @@ exports.getRejectionSummary = async (req, res) => {
             OR machine_name LIKE '%Leak%03%'
           ) AND (
             JSON_VALUE(leak_data, '$.result') IN ('NG','FAIL','FAILED')
-            OR (op150_status IN ('NG','FAIL','FAILED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') LIKE '%03%' OR leak_data LIKE '%1776%' OR machine_name LIKE '%03%'))
-            OR (machine_name LIKE '%Leak%03%' AND overall_status IN ('NG','FAILED'))
+            OR op150_status IN ('NG','FAIL','FAILED')
+            OR (machine_name LIKE '%03%' AND (overall_status IN ('NG','FAILED') OR op150_status IN ('NG','FAIL')))
           ) THEN 1 ELSE 0 END) as leak03_ng,
           SUM(CASE WHEN (
             JSON_VALUE(leak_data, '$.matchedMachineName') = 'Leak Test-03'
@@ -8550,8 +8763,8 @@ exports.getRejectionSummary = async (req, res) => {
             OR (op150_status IN ('OK','PASSED') AND (JSON_VALUE(leak_data, '$.matchedMachineName') LIKE '%03%' OR leak_data LIKE '%1776%' OR machine_name LIKE '%03%'))
             OR (machine_name LIKE '%Leak%03%' AND overall_status IN ('OK','PASSED'))
           ) THEN 1 ELSE 0 END) as leak03_ok,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op160_ng,
-          SUM(CASE WHEN op160_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op160_ok
+          SUM(CASE WHEN op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%Final%' AND (overall_status IN ('NG', 'FAILED') OR op160_status IN ('NG','FAIL'))) THEN 1 ELSE 0 END) as op160_ng,
+          SUM(CASE WHEN op160_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') OR (machine_name LIKE '%Final%' AND overall_status IN ('OK', 'PASSED')) THEN 1 ELSE 0 END) as op160_ok
         FROM [RICO_IOT].[dbo].[ProductionReports]
         ${whereSql}
       `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
@@ -8571,13 +8784,15 @@ exports.getRejectionSummary = async (req, res) => {
           COALESCE(NULLIF(die_name, ''), 'UNKNOWN') as die_name,
           COUNT(*) as totalParts,
           COUNT(*) as total_shots,
-          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) as totalOK,
-          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) as ok_count,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') THEN 1 ELSE 0 END) as totalNG,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') THEN 1 ELSE 0 END) as ng_count,
-          SUM(CASE WHEN overall_status IN ('IN_PROGRESS', 'WIP') THEN 1 ELSE 0 END) as totalWIP,
-          ROUND(CASE WHEN SUM(CASE WHEN overall_status IN ('OK', 'PASSED', 'NG', 'FAILED') THEN 1 ELSE 0 END) > 0 
-            THEN (CAST(SUM(CASE WHEN overall_status IN ('NG', 'FAILED') THEN 1 ELSE 0 END) AS FLOAT) / SUM(CASE WHEN overall_status IN ('OK', 'PASSED', 'NG', 'FAILED') THEN 1 ELSE 0 END)) * 100 
+          -- NG uses the same definition as the NG records (any station NG or a leak-test NG), so leak fails
+          -- whose overall_status is still IN_PROGRESS / PASSED are not counted as in-process or OK
+          SUM(CASE WHEN (overall_status IN ('OK', 'PASSED') AND (CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) = 0) THEN 1 ELSE 0 END) as totalOK,
+          SUM(CASE WHEN (overall_status IN ('OK', 'PASSED') AND (CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) = 0) THEN 1 ELSE 0 END) as ok_count,
+          SUM(CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) as totalNG,
+          SUM(CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) as ng_count,
+          COUNT(*) - SUM(CASE WHEN (overall_status IN ('OK', 'PASSED') AND (CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) = 0) THEN 1 ELSE 0 END) - SUM(CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) as totalWIP,
+          ROUND(CASE WHEN SUM(CASE WHEN (overall_status IN ('OK', 'PASSED') AND (CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) = 0) OR (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) > 0
+            THEN (CAST(SUM(CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) AS FLOAT) / SUM(CASE WHEN (overall_status IN ('OK', 'PASSED') AND (CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) = 0) OR (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END)) * 100
             ELSE 0 END, 2) as scrapRate
         FROM [RICO_IOT].[dbo].[ProductionReports]
         ${whereSql ? whereSql + " AND" : "WHERE"} die_name IS NOT NULL AND die_name <> '' AND die_name <> '-'
@@ -8614,6 +8829,16 @@ exports.getRejectionSummary = async (req, res) => {
     qualityGates.forEach((gate) => {
       if (stationLabelMap[gate.code]) gate.name = stationLabelMap[gate.code];
     });
+
+    // Station OK / NG as the station sees it (its own scan time in the window) — matches the Historical Report
+    // with that station selected and the operator view. The part totals above stay on the first-scan rule.
+    const scanCounts = await scanCountsPromise;
+    if (scanCounts) {
+      qualityGates.forEach((gate) => {
+        const c = scanCounts[gate.code];
+        if (c) { gate.okCount = c.ok; gate.ngCount = c.ng; }
+      });
+    }
 
     qualityGates = qualityGates.map((gate) => {
       const inspected = gate.okCount + gate.ngCount;
@@ -8743,13 +8968,15 @@ exports.getRejectionPareto = async (req, res) => {
     };
 
     const normalizeDefectCategory = (rawCat, gate, reason) => {
+      // Leak test rejects are casting porosity found after machining → CRAM, whatever category was stored
+      if (String(gate || '').toUpperCase().includes('LEAK') || String(gate || '').toUpperCase() === 'OP150' || String(reason || '').toLowerCase().includes('leak')) return 'CRAM';
       let c = String(rawCat || '').trim().toUpperCase();
       if (['CR', 'CASTING', 'CASTING REJECTION'].includes(c)) return 'CR';
       if (['CRAM', 'CR-AM', 'CASTING REJECTION AFTER MACHINING'].includes(c)) return 'CRAM';
       if (['MR', 'MACHINING', 'MACHINING REJECTION'].includes(c)) return 'MR';
       const r = String(reason || '').toLowerCase();
       if (r.includes('blow hole') || r.includes('porosity') || r.includes('face blow hole')) return 'CRAM';
-      if (r.includes('leak') || r.includes('gauge') || r.includes('machin') || gate?.includes('Leak') || gate === 'OP140') return 'MR';
+      if (r.includes('gauge') || r.includes('machin') || gate === 'OP140') return 'MR';
       return 'CR';
     };
 
@@ -8946,18 +9173,7 @@ exports.getRejectionShiftScrap = async (req, res) => {
     const ctx = await buildRejectionFilterContext(req.query);
     const { replacements, whereSql } = ctx;
 
-    const shiftScrapRes = await sequelize.query(`
-      SELECT
-        COALESCE(NULLIF(shift_code, ''), 'A') as shift,
-        COUNT(*) as total,
-        SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) as scrap,
-        SUM(CASE WHEN overall_status IN ('OK', 'PASSED') AND NOT (JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) as ok,
-        ROUND(CASE WHEN COUNT(*) > 0 THEN (CAST(SUM(CASE WHEN overall_status IN ('NG', 'FAILED') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED') OR op150_status IN ('NG', 'FAIL', 'FAILED') THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*)) * 100 ELSE 0 END, 2) as scrapRate
-      FROM [RICO_IOT].[dbo].[ProductionReports]
-      ${whereSql}
-      GROUP BY COALESCE(NULLIF(shift_code, ''), 'A')
-      ORDER BY shift ASC
-    `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+    const shiftScrapRes = await sequelize.query(shiftBreakdownSql(ctx), { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
       console.warn("[REJECTION] shift query error:", err.message);
       return [];
     });
@@ -8968,6 +9184,65 @@ exports.getRejectionShiftScrap = async (req, res) => {
     });
   } catch (error) {
     console.error("[REJECTION] getRejectionShiftScrap error:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ─── Daily output: final OK / NG / in process per PRODUCTION day ─────────────
+// Same filters and the same day rule as every other figure on the page:
+//  • production day D = D 06:00:00 → D+1 06:00:00 (Shift A start), so Shift C counts on the day it started
+//  • the time that decides the day = the part's first scan; with a station selected, that station's latest scan
+//    of the part; with a leak test selected, the leak result time
+//  • NG = any station NG or a leak-test NG (same expression as the summary's totalNG) · OK = final pass and not NG
+//    · in process = the rest
+// Also returns the production day of every NG part, so the client can split NG by station and category using the
+// NG records it already holds and land each one on exactly the same day as these totals.
+exports.getRejectionDaily = async (req, res) => {
+  try {
+    const ctx = await buildRejectionFilterContext(req.query);
+    const { replacements, whereSql, shifts, isOpGate, isLeakGate } = ctx;
+    const PD = require("../utils/productionDay");
+    const dayShiftMin = PD.PLANT_OFFSET_MIN - Math.round(PD.dayStartSeconds(shifts) / 60);
+    const { timeCol, apply: gateApply } = decidingTimeSql({ isOpGate, isLeakGate });
+    const ngExpr = PART_NG_SQL;
+    const okExpr = PART_OK_SQL;
+    const dayExpr = `CONVERT(char(10), CAST(DATEADD(MINUTE, ${dayShiftMin}, ${timeCol}) AS date), 23)`;
+    // shift from the Shift Management timings applied to the same deciding time
+    const shiftExpr = shifts.length ? PD.shiftCaseSql(timeCol, shifts) : "COALESCE(NULLIF(pr.shift_code, ''), 'UNASSIGNED')";
+    // ?granularity=hour → also split by plant-time hour (0–23) of the deciding time (drill-down into one day)
+    const hourly = String(req.query.granularity || "").toLowerCase() === "hour";
+    const hourExpr = `DATEPART(HOUR, DATEADD(MINUTE, ${PD.PLANT_OFFSET_MIN}, ${timeCol}))`;
+    const base = `
+      SELECT pr.id, pr.part_id, pr.customer_qr, ${dayExpr} AS day, ${shiftExpr} AS shift, ${hourExpr} AS hr,
+             CASE WHEN ${ngExpr} THEN 1 ELSE 0 END AS is_ng,
+             CASE WHEN ${okExpr} THEN 1 ELSE 0 END AS is_ok
+      FROM [RICO_IOT].[dbo].[ProductionReports] pr ${gateApply}
+      ${whereSql}`;
+
+    const [days, ngParts] = await Promise.all([
+      sequelize.query(`
+        SELECT day, shift, ${hourly ? "hr," : ""} COUNT(*) AS produced,
+               SUM(CASE WHEN is_ng = 0 AND is_ok = 1 THEN 1 ELSE 0 END) AS ok,
+               SUM(is_ng) AS ng,
+               SUM(CASE WHEN is_ng = 0 AND is_ok = 0 THEN 1 ELSE 0 END) AS wip
+        FROM (${base}) x WHERE day IS NOT NULL GROUP BY day, shift${hourly ? ", hr" : ""} ORDER BY day, shift`, { replacements, type: sequelize.QueryTypes.SELECT }),
+      sequelize.query(`SELECT id, part_id, customer_qr, day, shift, hr FROM (${base}) x WHERE is_ng = 1 AND day IS NOT NULL`, { replacements, type: sequelize.QueryTypes.SELECT }),
+    ]);
+
+    return res.json({
+      success: true,
+      dayRule: {
+        dayStart: PD.dayStartSeconds(shifts),
+        decidedBy: isOpGate ? "station scan" : isLeakGate ? "leak result" : "first scan",
+      },
+      // Shift Management timings in seconds of the plant day (end second inclusive) — drawn under the hourly chart
+      shiftDefs: (shifts || []).map((sh) => ({ code: sh.shift_code, name: sh.shift_name, start: PD.timeToSeconds(sh.start_time), end: PD.timeToSeconds(sh.end_time) })).filter((sh) => sh.start != null && sh.end != null),
+      // one row per production day × shift; the client sums shifts for the day totals
+      days: days.map((d) => ({ day: d.day, shift: d.shift, ...(hourly ? { hour: Number(d.hr) } : {}), produced: Number(d.produced) || 0, ok: Number(d.ok) || 0, ng: Number(d.ng) || 0, wip: Number(d.wip) || 0 })),
+      ngParts: ngParts.map((p) => [p.id, p.part_id, p.customer_qr, p.day, p.shift, p.hr]),
+    });
+  } catch (error) {
+    console.error("[REJECTION] getRejectionDaily error:", error);
     res.status(500).json({ error: error.message });
   }
 };
@@ -9312,7 +9587,7 @@ exports.getRejectionMlInsights = async (req, res) => {
         SELECT * FROM (
           SELECT TOP 400
             id, part_id as partId, customer_qr as customerQrCode, machine_name as machineName,
-            shift_code as shiftCode, overall_status as status,
+            die_name as dieName, shift_code as shiftCode, overall_status as status,
             rejection_category as category, rejection_reason as reason, ng_reason as ngReason,
             shot_number,
             -- 1. Machine Process Parameters (9)
@@ -9332,7 +9607,7 @@ exports.getRejectionMlInsights = async (req, res) => {
             leak_body_leak_value, leak_data, first_scan_at, createdAt
           FROM [RICO_IOT].[dbo].[ProductionReports] WITH (NOLOCK)
           ${whereSql ? whereSql + " AND" : "WHERE"} (overall_status IN ('OK', 'PASSED') OR (overall_status = 'IN_PROGRESS' AND op100_status = 'OK'))
-            AND part_id IS NOT NULL AND part_id <> '' AND part_id <> '-' AND NOT (part_id LIKE 'R%' AND LEN(part_id) > 20)
+            AND ((part_id IS NOT NULL AND part_id <> '' AND part_id <> '-') OR (customer_qr IS NOT NULL AND customer_qr <> '' AND customer_qr <> '-'))
             AND (
               (metal_pressure IS NOT NULL AND metal_pressure > 0)
               OR (furnace_metal_temp IS NOT NULL AND furnace_metal_temp > 0)
@@ -9358,7 +9633,7 @@ exports.getRejectionMlInsights = async (req, res) => {
         SELECT * FROM (
           SELECT TOP 300
             id, part_id as partId, customer_qr as customerQrCode, machine_name as machineName,
-            shift_code as shiftCode, overall_status as status,
+            die_name as dieName, shift_code as shiftCode, overall_status as status,
             rejection_category as category, rejection_reason as reason, ng_reason as ngReason,
             shot_number,
             -- 1. Machine Process Parameters (9)
@@ -9388,7 +9663,7 @@ exports.getRejectionMlInsights = async (req, res) => {
             OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
             OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
           )
-          AND part_id IS NOT NULL AND part_id <> '' AND part_id <> '-' AND NOT (part_id LIKE 'R%' AND LEN(part_id) > 20)
+          AND ((part_id IS NOT NULL AND part_id <> '' AND part_id <> '-') OR (customer_qr IS NOT NULL AND customer_qr <> '' AND customer_qr <> '-'))
           AND (
             (metal_pressure IS NOT NULL AND metal_pressure > 0)
             OR (furnace_metal_temp IS NOT NULL AND furnace_metal_temp > 0)
@@ -9418,10 +9693,10 @@ exports.getRejectionMlInsights = async (req, res) => {
       sequelize.query(`
         SELECT TOP 500
           id, part_id as partId, customer_qr as customerQrCode, machine_name as machineName,
+          die_name as dieName,
           shift_code as shiftCode, overall_status as status,
           rejection_category as category, rejection_reason as reason, ng_reason as ngReason,
-          rejection_view as rejectionView, rejection_zone as rejectionZone, rejection_sub_zone as rejectionSubZone,
-          parts_interlock_reason,
+          -- view / zone are not columns: they are parsed from the reject text (ng_reason) where needed
           shot_number,
           metal_pressure, furnace_metal_temp, biscuit_thickness, cycle_time,
           leak_body_leak_value, first_scan_at, createdAt
@@ -9429,7 +9704,7 @@ exports.getRejectionMlInsights = async (req, res) => {
         ${whereSql ? whereSql + " AND" : "WHERE"} overall_status IN ('NG', 'FAILED')
         ORDER BY id DESC
       `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
-        console.warn("[REJECTION] anomalyCandidates query error:", err.message);
+        console.warn("[Analytics] Unable to fetch anomaly candidates. Adjusting insights threshold.", err.message);
         return [];
       }),
     ]);
@@ -9498,9 +9773,10 @@ exports.getRejectionAnalysis = async (req, res) => {
       sequelize.query(`
         SELECT 
           COUNT(*) as totalParts,
-          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) as totalOK,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') THEN 1 ELSE 0 END) as totalNG,
-          SUM(CASE WHEN overall_status IN ('IN_PROGRESS', 'WIP') THEN 1 ELSE 0 END) as totalInProgress,
+          -- part status: shared definitions (PART_NG_SQL / PART_OK_SQL) — same as the summary and the reports
+          SUM(CASE WHEN ${PART_NG_SQL} THEN 0 WHEN ${PART_OK_SQL} THEN 1 ELSE 0 END) as totalOK,
+          SUM(CASE WHEN ${PART_NG_SQL} THEN 1 ELSE 0 END) as totalNG,
+          SUM(CASE WHEN ${PART_NG_SQL} THEN 0 WHEN ${PART_OK_SQL} THEN 0 ELSE 1 END) as totalInProgress,
           SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND (op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%DCM%' AND overall_status IN ('NG', 'FAILED'))) THEN 1 ELSE 0 END) as op100_ng,
           SUM(CASE WHEN op100_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') OR (machine_name LIKE '%DCM%' AND overall_status IN ('OK', 'PASSED')) THEN 1 ELSE 0 END) as op100_ok,
           SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op110_ng,
@@ -9589,27 +9865,14 @@ exports.getRejectionAnalysis = async (req, res) => {
           ) THEN 1 ELSE 0 END) as leak03_ok,
           SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') THEN 1 ELSE 0 END) as op160_ng,
           SUM(CASE WHEN op160_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') THEN 1 ELSE 0 END) as op160_ok
-        FROM [RICO_IOT].[dbo].[ProductionReports]
+        FROM [RICO_IOT].[dbo].[ProductionReports] pr
         ${whereSql}
       `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
         console.warn("[REJECTION] agg query error:", err.message);
         return [{}];
       }),
 
-      sequelize.query(`
-        SELECT
-          COALESCE(NULLIF(shift_code, ''), 'A') as shift,
-          COUNT(*) as total,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') THEN 1 ELSE 0 END) as scrap,
-          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) as ok,
-          ROUND(CASE WHEN SUM(CASE WHEN overall_status IN ('OK', 'PASSED', 'NG', 'FAILED') THEN 1 ELSE 0 END) > 0 
-            THEN (CAST(SUM(CASE WHEN overall_status IN ('NG', 'FAILED') THEN 1 ELSE 0 END) AS FLOAT) / SUM(CASE WHEN overall_status IN ('OK', 'PASSED', 'NG', 'FAILED') THEN 1 ELSE 0 END)) * 100 
-            ELSE 0 END, 2) as scrapRate
-        FROM [RICO_IOT].[dbo].[ProductionReports]
-        ${whereSql}
-        GROUP BY COALESCE(NULLIF(shift_code, ''), 'A')
-        ORDER BY shift ASC
-      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+      sequelize.query(shiftBreakdownSql(ctx), { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
         console.warn("[REJECTION] shift query error:", err.message);
         return [];
       }),
@@ -9676,13 +9939,15 @@ exports.getRejectionAnalysis = async (req, res) => {
           COALESCE(NULLIF(die_name, ''), 'UNKNOWN') as die_name,
           COUNT(*) as totalParts,
           COUNT(*) as total_shots,
-          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) as totalOK,
-          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) as ok_count,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') THEN 1 ELSE 0 END) as totalNG,
-          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') THEN 1 ELSE 0 END) as ng_count,
-          SUM(CASE WHEN overall_status IN ('IN_PROGRESS', 'WIP') THEN 1 ELSE 0 END) as totalWIP,
-          ROUND(CASE WHEN SUM(CASE WHEN overall_status IN ('OK', 'PASSED', 'NG', 'FAILED') THEN 1 ELSE 0 END) > 0 
-            THEN (CAST(SUM(CASE WHEN overall_status IN ('NG', 'FAILED') THEN 1 ELSE 0 END) AS FLOAT) / SUM(CASE WHEN overall_status IN ('OK', 'PASSED', 'NG', 'FAILED') THEN 1 ELSE 0 END)) * 100 
+          -- NG uses the same definition as the NG records (any station NG or a leak-test NG), so leak fails
+          -- whose overall_status is still IN_PROGRESS / PASSED are not counted as in-process or OK
+          SUM(CASE WHEN (overall_status IN ('OK', 'PASSED') AND (CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) = 0) THEN 1 ELSE 0 END) as totalOK,
+          SUM(CASE WHEN (overall_status IN ('OK', 'PASSED') AND (CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) = 0) THEN 1 ELSE 0 END) as ok_count,
+          SUM(CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) as totalNG,
+          SUM(CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) as ng_count,
+          COUNT(*) - SUM(CASE WHEN (overall_status IN ('OK', 'PASSED') AND (CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) = 0) THEN 1 ELSE 0 END) - SUM(CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) as totalWIP,
+          ROUND(CASE WHEN SUM(CASE WHEN (overall_status IN ('OK', 'PASSED') AND (CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) = 0) OR (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) > 0
+            THEN (CAST(SUM(CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) AS FLOAT) / SUM(CASE WHEN (overall_status IN ('OK', 'PASSED') AND (CASE WHEN (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END) = 0) OR (overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')) THEN 1 ELSE 0 END)) * 100
             ELSE 0 END, 2) as scrapRate
         FROM [RICO_IOT].[dbo].[ProductionReports]
         ${whereSql ? whereSql + " AND" : "WHERE"} die_name IS NOT NULL AND die_name <> '' AND die_name <> '-'
@@ -9733,13 +9998,15 @@ exports.getRejectionAnalysis = async (req, res) => {
     };
 
     const normalizeDefectCategory = (rawCat, gate, reason) => {
+      // Leak test rejects are casting porosity found after machining → CRAM, whatever category was stored
+      if (String(gate || '').toUpperCase().includes('LEAK') || String(gate || '').toUpperCase() === 'OP150' || String(reason || '').toLowerCase().includes('leak')) return 'CRAM';
       let c = String(rawCat || '').trim().toUpperCase();
       if (['CR', 'CASTING', 'CASTING REJECTION'].includes(c)) return 'CR';
       if (['CRAM', 'CR-AM', 'CASTING REJECTION AFTER MACHINING'].includes(c)) return 'CRAM';
       if (['MR', 'MACHINING', 'MACHINING REJECTION'].includes(c)) return 'MR';
       const r = String(reason || '').toLowerCase();
       if (r.includes('blow hole') || r.includes('porosity') || r.includes('face blow hole')) return 'CRAM';
-      if (r.includes('leak') || r.includes('gauge') || r.includes('machin') || gate?.includes('Leak') || gate === 'OP140') return 'MR';
+      if (r.includes('gauge') || r.includes('machin') || gate === 'OP140') return 'MR';
       return 'CR';
     };
 
@@ -9927,25 +10194,26 @@ exports.getRejectionRows = async (req, res) => {
       status: req.query.status || "NG",
     };
     const ctx = await buildRejectionFilterContext(queryWithNgDefault);
-    const { whereConditions, replacements } = ctx;
+    const { whereConditions, replacements, expandGateTime } = ctx;
 
     if (search && typeof search === 'string' && search.trim()) {
+      // plain column names: the prefixing below adds pr. (pre-written pr.[x] became the invalid pr.pr.[x])
       whereConditions.push(`(
-        pr.[part_id] LIKE :searchTerm
-        OR pr.[customer_qr] LIKE :searchTerm
-        OR pr.[ng_reason] LIKE :searchTerm
-        OR pr.[rejection_reason] LIKE :searchTerm
-        OR pr.[rejection_category] LIKE :searchTerm
-        OR pr.[machine_name] LIKE :searchTerm
-        OR pr.[die_name] LIKE :searchTerm
+        part_id LIKE :searchTerm
+        OR customer_qr LIKE :searchTerm
+        OR ng_reason LIKE :searchTerm
+        OR rejection_reason LIKE :searchTerm
+        OR rejection_category LIKE :searchTerm
+        OR machine_name LIKE :searchTerm
+        OR die_name LIKE :searchTerm
       )`);
       replacements.searchTerm = `%${search.trim()}%`;
     }
 
     const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
-    const prWhereSql = whereSql ? whereSql
+    const prWhereSql = whereSql ? expandGateTime(whereSql
       .replace(/\[(\w+)\]/g, '$1')
-      .replace(/\b(part_id|customer_qr|createdAt|updatedAt|first_scan_at|final_scan_at|shift_code|machine_name|die_name|part_name|rejection_category|rejection_reason|ng_reason|overall_status|op100_status|op110_status|op120_status|op130_status|op140_status|op150_status|op160_status|leak_data)\b/g, 'pr.[$1]')
+      .replace(/\b(part_id|customer_qr|createdAt|updatedAt|first_scan_at|final_scan_at|shift_code|machine_name|die_name|part_name|rejection_category|rejection_reason|ng_reason|overall_status|op100_status|op110_status|op120_status|op130_status|op140_status|op150_status|op160_status|leak_data)\b/g, 'pr.[$1]'), true)
       : '';
 
     const [countRes] = await sequelize.query(
@@ -9961,8 +10229,8 @@ exports.getRejectionRows = async (req, res) => {
         pr.[part_id],
         pr.[customer_qr], pr.[part_name], pr.[die_name], pr.[machine_name], pr.[shift_code],
         pr.[overall_status], pr.[first_scan_at], pr.[final_scan_at], pr.[ng_reason], pr.[rejection_category],
-        pr.[rejection_reason], 
-        pr.[cycle_time], 
+        pr.[rejection_reason],
+        pr.[cycle_time],
         pr.[createdAt], pr.[updatedAt],
         pr.[op100_status], pr.[op110_status], pr.[op120_status], pr.[op130_status], pr.[op140_status], pr.[op150_status], pr.[op160_status],
         pr.[shot_number], 
@@ -10042,7 +10310,8 @@ exports.getRejectionRows = async (req, res) => {
       if (keysToLookup.length > 0) {
         const castRows = await sequelize.query(`
           SELECT TOP 200
-            part_id, customer_qr, metal_pressure, furnace_metal_temp, biscuit_thickness,
+            part_id, customer_qr, die_name, machine_name, part_name,
+            metal_pressure, furnace_metal_temp, biscuit_thickness,
             shot_number, plc_cycle_time, cycle_time
           FROM [RICO_IOT].[dbo].[ProductionReports]
           WHERE (customer_qr IN (:keys) OR part_id IN (:keys))
@@ -10058,9 +10327,9 @@ exports.getRejectionRows = async (req, res) => {
           });
 
           rows.forEach((r) => {
-            if (r.metal_pressure == null) {
-              const matched = (r.customer_qr && castMap.get(r.customer_qr)) || (r.part_id && castMap.get(r.part_id));
-              if (matched) {
+            const matched = (r.customer_qr && castMap.get(r.customer_qr)) || (r.part_id && castMap.get(r.part_id));
+            if (matched) {
+              if (r.metal_pressure == null) {
                 r.metal_pressure = matched.metal_pressure;
                 r.furnace_metal_temp = r.furnace_metal_temp ?? matched.furnace_metal_temp;
                 r.biscuit_thickness = r.biscuit_thickness ?? matched.biscuit_thickness;
@@ -10068,6 +10337,9 @@ exports.getRejectionRows = async (req, res) => {
                 r.plc_cycle_time = r.plc_cycle_time ?? matched.plc_cycle_time;
                 r.cycle_time = r.cycle_time ?? matched.cycle_time;
               }
+              if (!r.die_name || r.die_name === '-') r.die_name = matched.die_name || '';
+              if (!r.machine_name || r.machine_name === '-') r.machine_name = matched.machine_name || '';
+              if (!r.part_name || r.part_name === '-') r.part_name = matched.part_name || '';
             }
           });
         }
@@ -10152,15 +10424,16 @@ exports.getRejectionRows = async (req, res) => {
         rejReason = `${ngGates.join(', ')} NG`;
       }
 
-      let rejView = parseTextField(partsInterlock, 'View') || parseTextField(srcText, 'View') || '';
-      const rawZone = parseTextField(partsInterlock, 'Zone') || parseTextField(srcText, 'Zone') || '';
+      let rejView = String(row.rejection_view || '').trim() || parseTextField(partsInterlock, 'View') || parseTextField(srcText, 'View') || '';
+      const rawZone = String(row.rejection_zone || '').trim() || parseTextField(partsInterlock, 'Zone') || parseTextField(srcText, 'Zone') || '';
       const zoneParts = splitRejectionZoneHelper(rawZone);
       let rejZone = zoneParts.zone || '';
-      let rejSubZone = zoneParts.subZone || (parseTextField(partsInterlock, 'Sub Zone') || parseTextField(partsInterlock, 'SubZone') || parseTextField(srcText, 'Sub Zone') || parseTextField(srcText, 'SubZone') || '');
+      let rejSubZone = String(row.rejection_sub_zone || '').trim() || zoneParts.subZone || (parseTextField(partsInterlock, 'Sub Zone') || parseTextField(partsInterlock, 'SubZone') || parseTextField(srcText, 'Sub Zone') || parseTextField(srcText, 'SubZone') || '');
 
       if (isConfirmedNg) {
         if (isOp150Ng && (!isOp120Ng && !isOp130Ng && !isOp100Ng)) {
-          if (!rejCategory) rejCategory = 'MR';
+          // leak test = casting porosity found after machining → CRAM (overrides a stored MR)
+          rejCategory = 'CRAM';
           if (!rejReason || rejReason.toLowerCase().includes('op150') || rejReason.toLowerCase().includes('quality gate') || rejReason.toLowerCase().includes('unspecified')) {
             rejReason = bodyLeak ? `Body Leak Fail (${bodyLeak} bar)` : 'Pressure Leakage Fail (OP150)';
           }
@@ -10241,8 +10514,8 @@ exports.getRejectionRows = async (req, res) => {
         die_name: row.die_name && row.die_name !== '-' ? row.die_name : '',
         partName: row.part_name || 'OIL PAN K-12',
         part_name: row.part_name || 'OIL PAN K-12',
-        shiftCode: row.shift_code || 'A',
-        shift_code: row.shift_code || 'A',
+        shiftCode: row.shift_code || 'UNASSIGNED',
+        shift_code: row.shift_code || 'UNASSIGNED',
         status: isConfirmedNg ? 'NG' : (row.overall_status || 'OK'),
         overall_status: isConfirmedNg ? 'NG' : (row.overall_status || 'OK'),
         op100_status: isOp100Ng ? 'NG' : (row.op100_status || ''),
@@ -10268,7 +10541,7 @@ exports.getRejectionRows = async (req, res) => {
         rejection_zone: rejZone !== '-' ? rejZone : '',
         rejectionSubZone: rejSubZone !== '-' ? rejSubZone : '',
         rejection_sub_zone: rejSubZone !== '-' ? rejSubZone : '',
-        rejection_sub_zone: rejSubZone !== '-' ? rejSubZone : '',
+        parts_interlock_reason: partsInterlock,
         createdAt: row.first_scan_at || row.createdAt,
         ngRecordedAt: row.final_scan_at || row.updatedAt || row.createdAt,
         // Process parameters in both snake_case and camelCase
@@ -10325,7 +10598,7 @@ exports.getRejectionRows = async (req, res) => {
         coolingWaterSta: row.cooling_water_sta != null ? Number(row.cooling_water_sta) : null,
         machine_name: row.machine_name && row.machine_name !== '-' ? row.machine_name : '',
         die_name: row.die_name && row.die_name !== '-' ? row.die_name : '',
-        shift_code: row.shift_code || 'A',
+        shift_code: row.shift_code || 'UNASSIGNED',
       };
     });
 

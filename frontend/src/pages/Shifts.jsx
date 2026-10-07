@@ -155,13 +155,21 @@ const Shifts = () => {
     }
   };
 
-  const formatDuration = (start, end) => {
-    if (!start || !end) return "-";
+  // End time is the shift's last second (06:00:00 – 14:29:59 = 8h 30m), so the span is end − start + 1 s.
+  // Shifts that cross midnight (23:00:00 – 05:59:59) wrap.
+  const shiftSeconds = (start, end) => {
     const startSecs = toSeconds(start);
     const endSecs = toSeconds(end);
-    if (startSecs === null || endSecs === null) return "-";
+    if (startSecs === null || endSecs === null) return null;
     let secs = endSecs - startSecs;
     if (secs < 0) secs += 86400;
+    return secs + 1;
+  };
+
+  const formatDuration = (start, end) => {
+    if (!start || !end) return "-";
+    const secs = shiftSeconds(start, end);
+    if (secs === null) return "-";
     const h = Math.floor(secs / 3600);
     const m = Math.floor((secs % 3600) / 60);
     const s = secs % 60;
@@ -171,14 +179,8 @@ const Shifts = () => {
   // Calculate stats
   const activeShifts = shifts.filter(s => s.isActive).length;
   const totalHours = shifts.reduce((total, shift) => {
-    const startSecs = toSeconds(shift.startTime);
-    const endSecs = toSeconds(shift.endTime);
-    if (startSecs !== null && endSecs !== null) {
-      let secs = endSecs - startSecs;
-      if (secs < 0) secs += 86400;
-      return total + secs / 60;
-    }
-    return total;
+    const secs = shiftSeconds(shift.startTime, shift.endTime);
+    return secs === null ? total : total + secs / 60;
   }, 0);
   const avgHoursPerShift = shifts.length > 0 ? (totalHours / shifts.length / 60).toFixed(1) : 0;
   const visibleShifts = shifts.filter((shift) => {
