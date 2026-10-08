@@ -131,7 +131,14 @@ const VALID_SCAN_SQL = `NOT ((
         AND NOT (ISNULL(part_id, '') LIKE '[A-Za-z]%' AND LEN(ISNULL(part_id, '')) BETWEEN 20 AND 32))
   ) AND ISNULL(overall_status, '') NOT IN ('NG', 'FAILED'))`;
 
+// One report row per part. Two syncs running at once used to insert a second row for the same part (one copy
+// stayed IN_PROGRESS), so parts were counted twice. Older copies are skipped; uncorrelated, so it works with or
+// without a table alias (pass the qualified id column when the query joins other tables).
+const notStaleRowSql = (idCol = "id") => `${idCol} NOT IN (SELECT d1.id FROM [RICO_IOT].[dbo].[ProductionReports] d1
+  WHERE EXISTS (SELECT 1 FROM [RICO_IOT].[dbo].[ProductionReports] d2 WHERE d2.part_id = d1.part_id AND d2.id > d1.id))`;
+
 module.exports = {
+  notStaleRowSql,
   PLANT_TZ, PLANT_OFFSET_MIN, timeToSeconds, plantSecondOfDay, dayStartSeconds,
   productionWindow, currentProductionDay, shiftCodeAt, shiftCaseSql, shiftDurationSeconds, VALID_SCAN_SQL,
 };

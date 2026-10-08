@@ -1,9 +1,9 @@
 name: Deploy Traceability
 
+# Manual only. The real deployment is deploy.yml (self-hosted runner inside the plant network).
+# This job runs on a GitHub cloud machine (ubuntu-latest), which cannot reach the private server
+# 192.168.100.136 — on every push to main it failed while deploy.yml succeeded, so it no longer runs on push.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 concurrency:

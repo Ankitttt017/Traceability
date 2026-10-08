@@ -5,7 +5,7 @@ import { loadReportConfig } from '../../utils/reportConfig';
 import ReportSummaryCards from './ReportSummaryCards';
 import ReportTable from './ReportTable';
 import PlantLineSelector from '../../components/PlantLineSelector';
-import { FileText, Download, RefreshCw, Filter, Calendar, Clock, ChevronDown, X, Zap, TrendingUp, AlertCircle, CheckCircle, Activity, BarChart3, Database, ChevronLeft, ChevronRight } from 'lucide-react';
+import { FileText, Download, RefreshCw, Filter, Calendar, Clock, ChevronDown, X, Zap, TrendingUp, AlertCircle, CheckCircle, Activity, BarChart3, Database, ChevronLeft, ChevronRight, ArrowUp, ArrowDown, ArrowUpDown, Shield, Percent } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useLanguage } from '../../context/LanguageContext';
 
@@ -151,17 +151,52 @@ const normalizeStationCellResult = (value) => {
   if (raw.includes("IN_PROGRESS") || raw.includes("IN PROGRESS")) return "IN_PROGRESS";
   return normResult(raw);
 };
+const getLeakReadingTimeRaw = (r = {}) =>
+  r?.cycleEndAt || r?.cycleEndTime || r?.Cycle_End_Time || r?.updatedAt || r?.createdAt || "";
+// Leak readings in test order (oldest first). Readings without a time keep their original order.
+const sortLeakReadings = (leakData) => {
+  const list = (Array.isArray(leakData) ? leakData : (leakData ? [leakData] : [])).filter((r) => r && typeof r === "object");
+  return list
+    .map((r, i) => ({ r, i, t: parseDateSafe(getLeakReadingTimeRaw(r)) }))
+    .sort((a, b) => ((Number.isFinite(a.t) && Number.isFinite(b.t)) ? a.t - b.t : 0) || a.i - b.i)
+    .map((x) => x.r);
+};
+// Every leak test of the part, in time order. The sync may attach `readings` (all tests) to the latest reading;
+// without it, the list of readings itself is the history.
+const getLeakHistory = (leakData) => {
+  const list = sortLeakReadings(leakData);
+  const nested = list.map((r) => r.readings).find((x) => Array.isArray(x) && x.length > 0);
+  return nested ? sortLeakReadings(nested) : list;
+};
+// The LAST leak test decides the part result (NG then OK on a retest = OK), matching the backend count.
 const getLeakTestStatus = (reading) => {
-  const readings = Array.isArray(reading) ? reading.filter(Boolean) : (reading ? [reading] : []);
+  const readings = getLeakHistory(reading);
   if (!readings.length) return "";
-  const results = readings.map((r) => normalizeLeakResult(getLeakResultToken(r))).filter(Boolean);
-  if (results.some((result) => result === "NG")) return "NG";
-  if (results.length === readings.length && results.every((result) => result === "OK")) return "OK";
-  const r = readings[readings.length - 1];
-  const result = normalizeLeakResult(getLeakResultToken(r));
-  if (result === "OK") return "OK";
-  if (result === "NG") return "NG";
+  for (let i = readings.length - 1; i >= 0; i -= 1) {
+    const result = normalizeLeakResult(getLeakResultToken(readings[i]));
+    if (result === "OK" || result === "NG") return result;
+  }
   return "IN_PROGRESS";
+};
+const getLeakMachineName = (r = {}) =>
+  String(r?.machine || r?.matchedMachineName || r?.Machine || r?.machineName || "").trim();
+// "NG → OK (retest)" when the part was tested more than once; "" for a single test.
+const formatLeakHistorySummary = (history = []) => {
+  if (history.length < 2) return "";
+  const results = history.map((r) => normalizeLeakResult(getLeakResultToken(r)) || "?");
+  return `${results.join(" → ")} (retest)`;
+};
+// Machine / time / value of every test, e.g. "LT-1 NG 08/10/2026, 10:02:11 (2.3 mbar) → LT-2 OK ...".
+const formatLeakHistoryDetail = (history = []) => {
+  if (history.length < 2) return "";
+  return history.map((r) => {
+    const result = normalizeLeakResult(getLeakResultToken(r)) || "?";
+    const rawTime = getLeakReadingTimeRaw(r);
+    const time = rawTime ? formatDateSafeStr(rawTime) : "";
+    const value = r?.bodyLeakValue ?? r?.Body_Leak_Value;
+    const valueText = value !== undefined && value !== null && value !== "" && value !== "-" ? `(${value} mbar)` : "";
+    return [getLeakMachineName(r), result, time, valueText].filter(Boolean).join(" ");
+  }).join(" → ");
 };
 const getLeakTestValue = (readings, key) => {
   if (!readings) return "-";
@@ -423,6 +458,62 @@ const sanitizeCustomerQrValue = (value) => {
 function looksLikeCustomerQrValue(value) {
   return /^R\d[A-Z0-9-]{10,}$/i.test(String(value || "").trim());
 }
+// ── Production-day date helpers ─────────────────────────────────────────
+// A plain "YYYY-MM-DD" is one production day (D 06:00 → D+1 06:00, Shift A+B+C); the historical report API
+// resolves it server side.
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const isDateOnly = (value) => DATE_ONLY_RE.test(String(value || "").trim());
+const toDateOnlyString = (date) => {
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+// Parses "YYYY-MM-DD" as a LOCAL date (new Date("YYYY-MM-DD") would be UTC midnight); anything else as usual.
+const parseFilterDate = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (isDateOnly(raw)) {
+    const [y, m, d] = raw.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  }
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+// Calendar days the picker should show for a filter range. A range ending at 06:00 (or earlier) belongs to the
+// previous production day, so "D 06:00 → D+1 06:00" shows as the single day D.
+const toPickerDays = (startValue, endValue) => {
+  const start = parseFilterDate(startValue);
+  const end = parseFilterDate(endValue);
+  const startDay = start ? new Date(start.getFullYear(), start.getMonth(), start.getDate()) : null;
+  if (startDay && start && !isDateOnly(startValue) && start.getHours() < 6) startDay.setDate(startDay.getDate() - 1);
+  let endDay = end ? new Date(end.getFullYear(), end.getMonth(), end.getDate()) : null;
+  if (endDay && end && !isDateOnly(endValue)) {
+    const minutes = end.getHours() * 60 + end.getMinutes();
+    if (minutes <= 6 * 60) endDay.setDate(endDay.getDate() - 1);
+  }
+  if (startDay && endDay && endDay < startDay) endDay = new Date(startDay);
+  return { start: startDay, end: endDay };
+};
+// For endpoints that expect explicit times: plain dates → D 06:00 / D+1 06:00 (end capped at now).
+const expandProductionDayFilters = (filters = {}) => {
+  if (!isDateOnly(filters.dateFrom) && !isDateOnly(filters.dateTo)) return filters;
+  const out = { ...filters };
+  if (isDateOnly(out.dateFrom)) {
+    const from = parseFilterDate(out.dateFrom);
+    from.setHours(6, 0, 0, 0);
+    out.dateFrom = toDatetimeLocal(from);
+  }
+  if (isDateOnly(out.dateTo)) {
+    const to = parseFilterDate(out.dateTo);
+    to.setDate(to.getDate() + 1);
+    to.setHours(6, 0, 0, 0);
+    const now = new Date();
+    out.dateTo = toDatetimeLocal(to > now ? now : to);
+  }
+  return out;
+};
+const HISTORICAL_REQUEST_TIMEOUT_MS = 180000;
+
 // Parts per page. Each part carries its full station log (~40 KB), so 1,000 parts took ~40 s; 100 loads in ~5 s.
 const REPORT_PREVIEW_ROWS_LIMIT = 100;
 
@@ -849,8 +940,8 @@ function injectReportStyles() {
 const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select Date Range" }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [currentMonth, setCurrentMonth] = useState(new Date());
-  const [selectedStart, setSelectedStart] = useState(startDate ? new Date(startDate) : null);
-  const [selectedEnd, setSelectedEnd] = useState(endDate ? new Date(endDate) : null);
+  const [selectedStart, setSelectedStart] = useState(() => toPickerDays(startDate, endDate).start);
+  const [selectedEnd, setSelectedEnd] = useState(() => toPickerDays(startDate, endDate).end);
   const [tempStart, setTempStart] = useState(selectedStart);
   const [tempEnd, setTempEnd] = useState(selectedEnd);
   const [isSelecting, setIsSelecting] = useState(false);
@@ -867,10 +958,11 @@ const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select
   }, []);
 
   useEffect(() => {
-    setSelectedStart(startDate ? new Date(startDate) : null);
-    setSelectedEnd(endDate ? new Date(endDate) : null);
-    setTempStart(startDate ? new Date(startDate) : null);
-    setTempEnd(endDate ? new Date(endDate) : null);
+    const days = toPickerDays(startDate, endDate);
+    setSelectedStart(days.start);
+    setSelectedEnd(days.end);
+    setTempStart(days.start);
+    setTempEnd(days.end);
   }, [startDate, endDate]);
 
   const formatDateDisplay = (date) => {
@@ -886,9 +978,28 @@ const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select
     return new Date(year, month, 1).getDay();
   };
 
+  // One production day (D 06:00 → D+1 06:00): applied straight away, sent as a plain date.
+  const commitSingleDay = (date) => {
+    const day = new Date(date);
+    day.setHours(0, 0, 0, 0);
+    setTempStart(day);
+    setTempEnd(day);
+    setSelectedStart(day);
+    setSelectedEnd(day);
+    setIsSelecting(false);
+    onApply(day, day, { singleDay: true });
+    setIsOpen(false);
+  };
+
   const handleDayClick = (day, month, year) => {
     const clickedDate = new Date(year, month, day);
     clickedDate.setHours(0, 0, 0, 0);
+
+    // Second click on the same day = that single production day
+    if (tempStart && !tempEnd && clickedDate.getTime() === tempStart.getTime()) {
+      commitSingleDay(clickedDate);
+      return;
+    }
 
     if (!tempStart || (tempStart && tempEnd)) {
       // Start new selection
@@ -910,6 +1021,10 @@ const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select
   const handleApply = () => {
     if (tempStart) {
       const end = tempEnd || tempStart;
+      if (end.getTime() === tempStart.getTime()) {
+        commitSingleDay(tempStart);
+        return;
+      }
       const formattedStart = new Date(tempStart);
       formattedStart.setHours(0, 0, 0, 0);
       const formattedEnd = new Date(end);
@@ -986,6 +1101,8 @@ const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select
           key={`day-${day}`}
           className={className}
           onClick={() => handleDayClick(day, month, year)}
+          onDoubleClick={() => commitSingleDay(new Date(year, month, day))}
+          title="Click twice for this production day (06:00 → next day 06:00)"
         >
           {day}
         </button>
@@ -995,7 +1112,7 @@ const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select
     return days;
   };
 
-  const dateRangeText = selectedStart && selectedEnd
+  const dateRangeText = selectedStart && selectedEnd && selectedStart.getTime() !== selectedEnd.getTime()
     ? `${formatDateDisplay(selectedStart)} - ${formatDateDisplay(selectedEnd)}`
     : selectedStart
     ? formatDateDisplay(selectedStart)
@@ -1055,6 +1172,101 @@ const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select
   );
 };
 
+// ── Station-wise summary (quality gate selected) ─────────────────────────
+// Same look as ReportSummaryCards, but a station has no "In progress": Total inspected = OK + NG.
+const STAT_COLORS = {
+  navy: { bg: 'rgba(26,50,99,0.08)', border: 'rgba(26,50,99,0.15)', text: 'rgb(26,50,99)' },
+  green: { bg: 'rgba(34,197,94,0.1)', border: 'rgba(34,197,94,0.2)', text: 'rgb(34,197,94)' },
+  red: { bg: 'rgba(239,68,68,0.1)', border: 'rgba(239,68,68,0.2)', text: 'rgb(239,68,68)' },
+  amber: { bg: 'rgba(250,185,91,0.12)', border: 'rgba(250,185,91,0.2)', text: 'rgb(250,185,91)' },
+};
+const StatCardSkeleton = () => (
+  <div className="relative min-h-[120px] overflow-hidden bg-[rgb(var(--pk-bg-card))] border border-[rgba(var(--pk-bdr),0.12)] rounded-xl p-4 shadow-sm">
+    <div className="h-11 w-11 rounded-xl bg-[rgba(var(--pk-steel),0.06)] mb-3" />
+    <div className="h-3 w-32 rounded-lg bg-[rgba(var(--pk-steel),0.06)] mb-2.5" />
+    <div className="h-7 w-20 rounded-lg bg-[rgba(var(--pk-steel),0.08)]" />
+  </div>
+);
+const StatCard = ({ label, value, icon, colorClass, subValue, subtitle }) => {
+  const Icon = icon;
+  const styles = STAT_COLORS[colorClass] || STAT_COLORS.navy;
+  return (
+    <div className="relative bg-[rgb(var(--pk-bg-card))] border border-[rgba(var(--pk-bdr),0.12)] rounded-xl p-4 shadow-sm shadow-[rgba(var(--pk-navy),0.04)] hover:shadow-md transition-all duration-300">
+      <div className="flex items-start justify-between mb-3">
+        <div className="p-2.5 rounded-xl" style={{ background: styles.bg, border: `1px solid ${styles.border}` }}>
+          <Icon size={17} style={{ color: styles.text }} strokeWidth={2.5} />
+        </div>
+        {subValue && (
+          <span className="text-[9px] font-extrabold text-[rgb(var(--pk-txt-muted))] bg-[rgba(var(--pk-bdr),0.06)] px-2.5 py-1 rounded-lg border border-[rgba(var(--pk-bdr),0.06)] uppercase tracking-wider">
+            {subValue}
+          </span>
+        )}
+      </div>
+      <p className="text-[10px] font-extrabold text-[rgb(var(--pk-txt-muted))] uppercase tracking-wider">{label}</p>
+      <div className="flex items-end gap-2 mt-1">
+        <h3 className="text-2xl font-black text-[rgb(var(--pk-txt-pri))] tracking-tight font-mono leading-none">
+          {typeof value === 'number' ? value.toLocaleString() : value}
+        </h3>
+        {subtitle && <span className="text-[10px] font-medium text-[rgb(var(--pk-txt-muted))] mb-0.5">{subtitle}</span>}
+      </div>
+    </div>
+  );
+};
+const StationSummaryCards = ({ metrics = {}, stationLabel = "", loading = false, shotSummaryLoading = false }) => {
+  const plc = metrics.plcShotSummary || {};
+  const ok = Number(metrics.totalOK || 0);
+  const ng = Number(metrics.totalNG || 0);
+  const total = ok + ng;
+  const station = stationLabel || "station";
+  const shotCards = [
+    { label: "Total Shots", value: plc.totalProduction ?? 0, icon: TrendingUp, colorClass: "navy", subValue: "HPDC Machine", subtitle: "shots" },
+    { label: "OK Shots", value: plc.okShot ?? 0, icon: CheckCircle, colorClass: "green", subValue: "Passed", subtitle: "shots" },
+    { label: "Warm Up Shots", value: plc.warmUpShot ?? 0, icon: Activity, colorClass: "amber", subValue: "NG Status", subtitle: "shots" },
+    { label: "NG Shots", value: plc.offShot ?? 0, icon: AlertCircle, colorClass: "red", subValue: "Rejected", subtitle: "shots" },
+  ];
+  const stationCards = [
+    { label: `Total inspected at ${station}`, value: total, icon: BarChart3, colorClass: "navy", subValue: "OK + NG", subtitle: "parts" },
+    { label: "OK", value: ok, icon: Shield, colorClass: "green", subValue: "Station OK", subtitle: "parts" },
+    { label: "NG", value: ng, icon: AlertCircle, colorClass: "red", subValue: "Station NG", subtitle: ng > 0 ? "Needs review" : "All good" },
+    { label: "Pass rate", value: total > 0 ? `${Number(metrics.passRate || 0).toFixed(2)}%` : "-", icon: Percent, colorClass: "amber", subValue: "OK / (OK + NG)" },
+  ];
+  if (loading) {
+    return (
+      <div className="space-y-4 mb-6">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">{shotCards.map((_, i) => <StatCardSkeleton key={`s-${i}`} />)}</div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">{stationCards.map((_, i) => <StatCardSkeleton key={`g-${i}`} />)}</div>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-4 mb-6">
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 px-1">
+          <div className="h-4 w-1 rounded-full bg-[rgb(var(--pk-steel))]" />
+          <span className="text-[11px] font-extrabold text-[rgb(var(--pk-steel))] uppercase tracking-wider">Machine Shot Statistics</span>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {shotSummaryLoading
+            ? shotCards.map((_, i) => <StatCardSkeleton key={`s-${i}`} />)
+            : shotCards.map((card, i) => <StatCard key={`s-${i}`} {...card} />)}
+        </div>
+      </div>
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 px-1">
+          <div className="h-4 w-1 rounded-full bg-[rgb(var(--pk-amber))]" />
+          <span className="text-[11px] font-extrabold text-[rgb(var(--pk-steel))] uppercase tracking-wider">Station-wise · {station}</span>
+          <span className="text-[11px] text-[rgb(var(--pk-txt-muted))] font-semibold">
+            each part counted once, by its latest OK/NG scan at this station
+          </span>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {stationCards.map((card, i) => <StatCard key={`g-${i}`} {...card} />)}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const HistoricalReportsPage = () => {
   injectReportStyles();
   const { t } = useLanguage();
@@ -1084,6 +1296,9 @@ const HistoricalReportsPage = () => {
     pagination: { page: 1, pageSize: REPORT_PREVIEW_ROWS_LIMIT, totalRows: 0, totalPages: 1 },
   });
   const [reportPage, setReportPage] = useState({ page: 1, pageSize: REPORT_PREVIEW_ROWS_LIMIT });
+  // Server-side order by the selected station's own scan time: "" (default: newest first scan) | "asc" | "desc"
+  const [gateSortDir, setGateSortDir] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [reportConfig, setReportConfig] = useState(() => loadReportConfig());
   const reportAbortRef = useRef(null);
   const shotSummarySeqRef = useRef(0);
@@ -1178,6 +1393,7 @@ const HistoricalReportsPage = () => {
     const controller = new AbortController();
     reportAbortRef.current = controller;
     const liveAppliedFilters = getFreshQuickRangeFilters(appliedFilters);
+    const hasGateForSort = Boolean(String(liveAppliedFilters.machineId || "").trim());
     const requestPayload = {
       ...liveAppliedFilters,
       fast: "0",
@@ -1188,6 +1404,8 @@ const HistoricalReportsPage = () => {
       _ts: refreshTick || Date.now(),
       page: reportPage.page,
       pageSize: reportPage.pageSize,
+      // Sorted in SQL by the station's scan time, so the order is right across all pages
+      ...(hasGateForSort && gateSortDir ? { sortBy: "gateScanAt", sortDir: gateSortDir } : {}),
     };
     const metricsPayload = {
       ...liveAppliedFilters,
@@ -1208,7 +1426,13 @@ const HistoricalReportsPage = () => {
       });
     }, 550);
     try {
-      const response = await reportApi.getHistoricalData(requestPayload, { signal: controller.signal, suppressGlobalError: true });
+      // A busy database can take 10–30 s; errors are shown on this page, not by the global toast
+      const response = await reportApi.getHistoricalData(requestPayload, {
+        signal: controller.signal,
+        suppressGlobalError: true,
+        timeout: HISTORICAL_REQUEST_TIMEOUT_MS,
+      });
+      setLoadError("");
       const summaryMetricsResponse = { metrics: response.metrics };
       setLoadProgress(100);
       const rowShotSummary = derivePlcShotSummaryFromRows(response.rows || []);
@@ -1250,12 +1474,18 @@ const HistoricalReportsPage = () => {
         },
         availableShifts: response.availableShifts || [],
         plcColumns: response.plcColumns || [],
-        pagination: response.pagination || { page: reportPage.page, pageSize: reportPage.pageSize, totalRows: response.rows?.length || 0, totalPages: 1 },
+        // Rows are log entries (several per part); the part count comes from the server pagination total
+        pagination: (response.pagination && Number.isFinite(Number(response.pagination.totalRows)))
+          ? response.pagination
+          : (() => {
+              const totalRows = Number(response.metrics?.totalProduction ?? 0);
+              return { page: reportPage.page, pageSize: reportPage.pageSize, totalRows, totalPages: Math.max(1, Math.ceil(totalRows / reportPage.pageSize)) };
+            })(),
       };
       setData(pageData);
       const summarySeq = shotSummarySeqRef.current + 1;
       shotSummarySeqRef.current = summarySeq;
-      const summaryFilters = { ...getShotSummaryFilters(liveAppliedFilters), fast: "1", noCache: "1", _ts: refreshTick || Date.now() };
+      const summaryFilters = { ...getShotSummaryFilters(expandProductionDayFilters(liveAppliedFilters)), fast: "1", noCache: "1", _ts: refreshTick || Date.now() };
       setShotSummaryLoading(true);
       reportApi.getShotSummary(summaryFilters, { suppressGlobalError: true })
         .then((summary) => {
@@ -1300,6 +1530,13 @@ const HistoricalReportsPage = () => {
     } catch (e) {
       if (e?.code === "ERR_CANCELED" || e?.name === "CanceledError") return;
       console.error(e);
+      const isTimeout = String(e?.code || "").toUpperCase() === "ECONNABORTED" || /timeout/i.test(String(e?.message || ""));
+      const serverMessage = String(e?.response?.data?.error || e?.response?.data?.message || "").trim();
+      setLoadError(
+        isTimeout
+          ? `The report did not load within ${Math.round(HISTORICAL_REQUEST_TIMEOUT_MS / 1000)} s. Try a shorter date range, a single shift or a quality gate, then retry.`
+          : serverMessage || (e?.response ? `The report could not be loaded (HTTP ${e.response.status}).` : "The report could not be loaded. Check the network / server and retry.")
+      );
       toast.error(t("reports.failedLoad", "Preview failed to load. You can still download the filtered Excel report."));
     } finally {
       window.clearInterval(progressTimer);
@@ -1312,11 +1549,18 @@ const HistoricalReportsPage = () => {
         reportAbortRef.current = null;
       }
     }
-  }, [appliedFilters, getFreshQuickRangeFilters, refreshTick, reportPage.page, reportPage.pageSize]);
+  }, [appliedFilters, getFreshQuickRangeFilters, refreshTick, reportPage.page, reportPage.pageSize, gateSortDir]);
+
+  // Station Scan Time header: default → ascending → descending → default. Reloads page 1 from the server.
+  const cycleGateSort = useCallback(() => {
+    setGateSortDir((prev) => (prev === "" ? "asc" : prev === "asc" ? "desc" : ""));
+    setReportPage((prev) => ({ ...prev, page: 1 }));
+  }, []);
 
   const refreshReportData = useCallback(() => {
     const nextFilters = getFreshQuickRangeFilters(filters);
     setReportPage((prev) => ({ ...prev, page: 1 }));
+    if (!String(nextFilters.machineId || "").trim()) setGateSortDir("");
     setFilters(nextFilters);
     setAppliedFilters(nextFilters);
     setRefreshTick(Date.now());
@@ -1325,6 +1569,7 @@ const HistoricalReportsPage = () => {
   const applyReportFilters = useCallback(() => {
     const nextFilters = getFreshQuickRangeFilters(filters);
     setReportPage((prev) => ({ ...prev, page: 1 }));
+    if (!String(nextFilters.machineId || "").trim()) setGateSortDir("");
     setFilters(nextFilters);
     setAppliedFilters(nextFilters);
     setRefreshTick(Date.now());
@@ -1434,9 +1679,10 @@ const HistoricalReportsPage = () => {
 
   const handleSync = async () => {
     try {
+      const syncRange = expandProductionDayFilters(appliedFilters);
       const payload = {
-        dateFrom: appliedFilters.dateFrom,
-        dateTo: appliedFilters.dateTo
+        dateFrom: syncRange.dateFrom,
+        dateTo: syncRange.dateTo
       };
       
       toast.promise(reportApi.syncHistoricalData(payload), {
@@ -1449,7 +1695,15 @@ const HistoricalReportsPage = () => {
     }
   };
 
-  const handleDateRangeApply = (start, end) => {
+  const handleDateRangeApply = (start, end, options = {}) => {
+    const singleDay = Boolean(options.singleDay) || (end && toDateOnlyString(start) === toDateOnlyString(end));
+    if (singleDay) {
+      // One production day: plain YYYY-MM-DD for both ends; the server applies D 06:00 → D+1 06:00
+      const day = toDateOnlyString(start);
+      setFilters((prev) => ({ ...prev, dateFrom: day, dateTo: day, quickRange: "custom" }));
+      setQuickRange("custom");
+      return;
+    }
     const normalizedStart = new Date(start);
     const normalizedEnd = new Date(end || start);
     normalizedStart.setHours(6, 0, 0, 0);
@@ -1483,6 +1737,7 @@ const HistoricalReportsPage = () => {
 
   const reportTable = useMemo(() => {
     const sourceRows = data.rows || [];
+    const hasAppliedGate = Boolean(String(appliedFilters.machineId || "").trim());
     const scopedMachine = filters.machineId ? (machines || []).find(m => String(m.id || m.machineId || m.machine_id || "") === String(filters.machineId)) : null;
     const scopedOperationKey = scopedMachine ? String(scopedMachine.operationNo || scopedMachine.operation_no || scopedMachine.stationNo || scopedMachine.station_no || "").trim().toUpperCase() : "";
     const machineStationPairs = (machines || [])
@@ -1563,7 +1818,27 @@ const HistoricalReportsPage = () => {
       { key: "customerCode", label: "Customer QR" },
       { key: "createdAt", label: "First Scan" },
       // With a station selected, the day and shift follow the time that station handled the part
-      ...(sourceRows.some((r) => r.__pr_gate_scan_at) ? [{ key: "gateScanAt", label: "Station Scan Time" }] : []),
+      // With a gate applied the header sorts by this time on the server (asc → desc → default order)
+      ...((hasAppliedGate || sourceRows.some((r) => r.__pr_gate_scan_at)) ? [{
+        key: "gateScanAt",
+        label: hasAppliedGate ? (
+          <button
+            type="button"
+            onClick={cycleGateSort}
+            className="inline-flex items-center gap-1 uppercase tracking-wider font-black text-white hover:opacity-80 cursor-pointer"
+            style={{ background: "transparent", border: "none", padding: 0, font: "inherit" }}
+            title={gateSortDir === "asc"
+              ? "Sorted oldest first. Click for newest first."
+              : gateSortDir === "desc"
+                ? "Sorted newest first. Click to return to the default order."
+                : "Click to sort by station scan time (oldest first)."}
+            aria-sort={gateSortDir === "asc" ? "ascending" : gateSortDir === "desc" ? "descending" : "none"}
+          >
+            Station Scan Time
+            {gateSortDir === "asc" ? <ArrowUp size={12} /> : gateSortDir === "desc" ? <ArrowDown size={12} /> : <ArrowUpDown size={12} style={{ opacity: 0.6 }} />}
+          </button>
+        ) : "Station Scan Time",
+      }] : []),
       { key: "finalResultAt", label: "Final Result Time" },
       ...stationPairs.map((s) => ({
         key: `station_${s.key}`,
@@ -1663,10 +1938,14 @@ const HistoricalReportsPage = () => {
         });
       });
       const hasLeakData = Boolean(leakData && (!Array.isArray(leakData) || leakData.length > 0));
+      // Leak tests in time order; the last one decides. leakHistory also covers the sync's `readings` list.
+      const leakReadingsSorted = sortLeakReadings(leakData);
+      const leakHistory = getLeakHistory(leakData);
+      const leakHistorySummary = formatLeakHistorySummary(leakHistory);
       if (hasLeakData) {
-        const actualLeakData = Array.isArray(leakData) ? leakData[leakData.length - 1] : leakData;
+        const actualLeakData = leakReadingsSorted[leakReadingsSorted.length - 1] || (Array.isArray(leakData) ? leakData[leakData.length - 1] : leakData);
         const leakStatus = getLeakTestStatus(leakData);
-        const leakMachineName = String(actualLeakData?.machine || actualLeakData?.matchedMachineName || actualLeakData?.Machine || actualLeakData?.machineName || "").trim();
+        const leakMachineName = getLeakMachineName(actualLeakData);
         leakResultTime = actualLeakData?.cycleEndAt || actualLeakData?.Cycle_End_Time || actualLeakData?.cycleEndTime || actualLeakData?.updatedAt || actualLeakData?.createdAt || null;
         stationResults[LEAK_TEST_SHARED_KEY] = pickPreferredResult(stationResults[LEAK_TEST_SHARED_KEY], leakStatus);
         stationDisplayValues[LEAK_TEST_SHARED_KEY] = leakMachineName
@@ -1845,15 +2124,17 @@ const HistoricalReportsPage = () => {
       };
       stationPairs.forEach((s) => {
         if (s.sharedLeakOperation) {
-          const leakArr = Array.isArray(leakData) ? leakData : (leakData ? [leakData] : []);
+          const leakArr = leakHistory.length ? leakHistory : leakReadingsSorted;
           const allMachineNames = [...new Set(
             leakArr
-              .map((r) => String(r?.machine || r?.matchedMachineName || r?.Machine || r?.machineName || "").trim())
+              .map((r) => getLeakMachineName(r))
               .filter(Boolean)
           )];
           const leakStatus = getLeakTestStatus(leakData);
+          const machineLabel = allMachineNames.join(" + ") || (leakHistorySummary ? "Leak Test" : "");
           shaped[`station_${s.key}`] = {
-            machineName: allMachineNames.join(" + ") || "",
+            // retested part: "LT-1 + LT-2 · NG → OK (retest)" next to the counted (last) result chip
+            machineName: leakHistorySummary ? `${machineLabel} · ${leakHistorySummary}` : machineLabel,
             status: String(leakStatus || "").trim().toUpperCase() || "-",
             text: stationDisplayValues[s.key] || "-",
           };
@@ -1908,10 +2189,21 @@ const HistoricalReportsPage = () => {
         }
       });
       LEAK_TEST_COLUMNS.forEach(({ key }) => {
-        shaped[`leak_${key}`] = getLeakTestValue(leakData, key);
+        shaped[`leak_${key}`] = getLeakTestValue(leakReadingsSorted.length ? leakReadingsSorted : leakData, key);
       });
+      // Every leak test (machine, time, value) when the part was tested more than once
+      shaped.leakHistory = formatLeakHistoryDetail(leakHistory) || "-";
       return shaped;
     });
+    // "Leak Test History" column, only when a part on this page was retested on the leak tester
+    if (dynamicRows.some((row) => row.leakHistory && row.leakHistory !== "-")) {
+      const statusIndex = dynamicColumns.findIndex((c) => c.key === "overallStatus");
+      dynamicColumns.splice(statusIndex >= 0 ? statusIndex : dynamicColumns.length, 0, {
+        key: "leakHistory",
+        label: "Leak Test History",
+        renderAsText: true,
+      });
+    }
 
     const filteredDynamicRows = dynamicRows.filter(row => {
       if (!appliedFilters.status) return true;
@@ -1933,7 +2225,7 @@ const HistoricalReportsPage = () => {
     }));
 
     return { columns: dynamicColumns, rows: visibleRows };
-  }, [data.rows, data.plcColumns, filters.machineId, machines, appliedFilters.dateFrom, appliedFilters.dateTo]);
+  }, [data.rows, data.plcColumns, filters.machineId, machines, appliedFilters.dateFrom, appliedFilters.dateTo, appliedFilters.machineId, gateSortDir, cycleGateSort]);
 
   const reportSummaryMetrics = useMemo(() => {
     const metrics = data.summary || data.metrics || {};
@@ -1984,18 +2276,42 @@ const HistoricalReportsPage = () => {
     const resolvedInProgress = (rawMetrics && typeof rawMetrics.inProgress !== "undefined") ? inProgress : visibleInProgressCount;
     const resolvedProductionBase = resolvedTotalOK + resolvedTotalNG;
     const resolvedPassRate = resolvedProductionBase > 0 ? Number(((resolvedTotalOK / resolvedProductionBase) * 100).toFixed(2)) : 0;
+    // A station has no "in progress": its total is the parts it inspected (OK + NG). Overall adds in-progress parts.
+    const stationInProgress = hasQualityGateFilter ? 0 : resolvedInProgress;
+    const resolvedTotal = resolvedProductionBase + stationInProgress;
+    if (traceabilityProduction && traceabilityProduction !== resolvedTotal) {
+      console.warn(`[HistoricalReports] server total ${traceabilityProduction} != OK ${resolvedTotalOK} + NG ${resolvedTotalNG}${hasQualityGateFilter ? "" : ` + in progress ${resolvedInProgress}`}`);
+    }
 
     return {
-      totalProduction: traceabilityProduction,
-      traceabilityProduction,
+      totalProduction: resolvedTotal,
+      traceabilityProduction: resolvedTotal,
+      serverTotalProduction: traceabilityProduction,
+      isStationScope: hasQualityGateFilter,
       totalOK: resolvedTotalOK,
       totalNG: resolvedTotalNG,
-      inProgress: resolvedInProgress,
+      inProgress: stationInProgress,
       validationRejects: Number(metrics.validationRejects ?? resolvedTotalNG),
       passRate: resolvedPassRate,
       plcShotSummary: metrics.plcShotSummary || {},
     };
   }, [data.metrics, data.rows, appliedFilters.machineId]);
+  // Display name of the applied quality gate (select values: operation no., a leak machine's name, or "OP150" = all leak testers)
+  const appliedGateLabel = useMemo(() => {
+    const value = String(appliedFilters.machineId || "").trim();
+    if (!value) return "";
+    const opOf = (m) => String(m.operation_no || m.operationNo || "").trim().toUpperCase();
+    const nameOf = (m) => String(m.machine_name || m.machineName || "").trim();
+    if (value.toUpperCase() === LEAK_TEST_OPERATION) return `Leak Test ${LEAK_TEST_OPERATION}`;
+    const leakMachine = (machines || []).find((m) => opOf(m) === LEAK_TEST_OPERATION && nameOf(m) === value);
+    if (leakMachine) return `${nameOf(leakMachine)} (${LEAK_TEST_OPERATION})`;
+    const machine = (machines || []).find((m) => opOf(m) === value.toUpperCase() || nameOf(m) === value);
+    if (machine) {
+      const op = opOf(machine);
+      return op && nameOf(machine) !== op ? `${nameOf(machine)} (${op})` : (nameOf(machine) || op);
+    }
+    return value;
+  }, [appliedFilters.machineId, machines]);
   const scopedMachines = useMemo(
     () => (machines || []).filter((machine) => !filters.plantId || String(machine.plantId || "") === String(filters.plantId)),
     [machines, filters.plantId]
@@ -2267,6 +2583,7 @@ const HistoricalReportsPage = () => {
                   operatorId: '', resultType: '', modelCode: '', operationNo: '', partCategory: '', quickRange: 'today'
                 };
                 setQuickRange("today");
+                setGateSortDir("");
                 setFilters(nextFilters);
                 setAppliedFilters(nextFilters);
                 setReportPage((prev) => ({ ...prev, page: 1 }));
@@ -2299,7 +2616,10 @@ const HistoricalReportsPage = () => {
           )}
           {filters.dateFrom && filters.dateTo && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full bg-[rgba(var(--pk-amber),0.06)] border border-[rgba(var(--pk-amber),0.1)] text-[rgb(var(--pk-amber))]">
-              <Calendar size={10} /> {new Date(filters.dateFrom).toLocaleDateString()} → {new Date(filters.dateTo).toLocaleDateString()}
+              <Calendar size={10} />{" "}
+              {isDateOnly(filters.dateFrom) && filters.dateFrom === filters.dateTo
+                ? parseFilterDate(filters.dateFrom)?.toLocaleDateString()
+                : `${parseFilterDate(filters.dateFrom)?.toLocaleDateString() || "-"} → ${parseFilterDate(filters.dateTo)?.toLocaleDateString() || "-"}`}
             </span>
           )}
         </div>
@@ -2327,8 +2647,36 @@ const HistoricalReportsPage = () => {
         </div>
       )}
 
-      {/* ── Summary Cards ── */}
-      <ReportSummaryCards metrics={reportSummaryMetrics} loading={loading} shotSummaryLoading={shotSummaryLoading} />
+      {/* ── Load error (this page's own error state; the global error toast is suppressed for this request) ── */}
+      {loadError && !loading && !refreshing && (
+        <div role="alert" className="flex items-start justify-between gap-3 rounded-xl border border-[rgba(var(--pk-ng),0.25)] bg-[rgba(var(--pk-ng),0.06)] px-4 py-3">
+          <div className="flex items-start gap-2 min-w-0">
+            <AlertCircle size={16} className="text-[rgb(var(--pk-ng))] flex-shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-[rgb(var(--pk-ng))]">Report could not be loaded</p>
+              <p className="text-xs text-[rgb(var(--pk-txt-sec))] mt-0.5">
+                {loadError}
+                {Array.isArray(data.rows) && data.rows.length > 0 ? " The figures below are from the previous load." : ""}
+              </p>
+            </div>
+          </div>
+          <button type="button" onClick={() => setRefreshTick(Date.now())} className="reports-btn-secondary flex-shrink-0">
+            <RefreshCw size={13} /> Retry
+          </button>
+        </div>
+      )}
+
+      {/* ── Summary Cards: station-wise when a quality gate is applied, overall otherwise ── */}
+      {reportSummaryMetrics.isStationScope ? (
+        <StationSummaryCards
+          metrics={reportSummaryMetrics}
+          stationLabel={appliedGateLabel}
+          loading={loading}
+          shotSummaryLoading={shotSummaryLoading}
+        />
+      ) : (
+        <ReportSummaryCards metrics={reportSummaryMetrics} loading={loading} shotSummaryLoading={shotSummaryLoading} />
+      )}
 
       {/* ── Table ── */}
       <ReportTable

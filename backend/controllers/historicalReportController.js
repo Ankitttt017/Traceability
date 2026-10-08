@@ -38,6 +38,11 @@ const leakTimeUtcOf = (leakData) => {
   return Number.isNaN(t) ? null : new Date(t - PLANT_OFFSET_MIN * 60000).toISOString();
 };
 const PART_STATUS = `(CASE WHEN ${PART_NG} THEN 'NG' WHEN overall_status IN (${sqlList(OK_VALUES)}) THEN 'OK' ELSE 'IN_PROGRESS' END)`;
+// One row per part. Two syncs running at the same moment used to create a second row for a new part (250 parts);
+// one copy stayed IN_PROGRESS while the other completed, so a part was counted twice — e.g. as OK and as "in
+// progress" at OP160 — and the stats did not match the table. The newest row is kept (the sync now always updates
+// the newest row); a simple id comparison keeps the query on the part_id index.
+const LATEST_ROW_SQL = require("../utils/productionDay").notStaleRowSql("[ProductionReport].[id]");
 
 async function resolveGateScope(rawValue) {
   const value = String(rawValue || "").trim();
@@ -62,6 +67,14 @@ async function resolveGateScope(rawValue) {
   return { stationScope: op || upper, leak: null };
 }
 
+function gateStatusSql(stationScope) {
+  const st = sequelize.escape(stationScope);
+  return `(SELECT TOP 1 UPPER(o.result) FROM OperationLogs o
+    WHERE o.part_id IN ([ProductionReport].[part_id], [ProductionReport].[customer_qr])
+      AND (o.operation_no = ${st} OR o.station_no = ${st}) AND UPPER(o.result) IN ('OK', 'NG')
+    ORDER BY o.createdAt DESC, o.id DESC)`;
+}
+
 async function buildHistoricalWhere(q = {}) {
   const { stationScope, leak } = await resolveGateScope(q.machineId || q.operationNo || q.stationNo || q.station);
   const esc = (v) => sequelize.escape(v);
@@ -72,6 +85,7 @@ async function buildHistoricalWhere(q = {}) {
   const wantNg = reqStatus === "NG" || reqStatus === "FAILED";
   const wantWip = reqStatus === "WIP" || reqStatus === "IN_PROGRESS";
   const isGate = Boolean(stationScope) && !leak;
+  let gateTimeUsed = false;
 
   // ── Date + shift ─────────────────────────────────────────────────────────────────────────────────────────────
   // Production day: a date D = D 06:00:00 → D+1 06:00:00 (end exclusive). Shift: Shift Management timings, end second
@@ -97,13 +111,19 @@ async function buildHistoricalWhere(q = {}) {
     // A part scanned more than once at the station (re-check / rework) counts once: its LATEST scan there decides
     // the day and shift — otherwise it appeared in two shifts and A + B + C exceeded the full day.
     const gateTime = timeFilter("MAX(createdAt)");
+    gateTimeUsed = Boolean(gateTime);
     // only logs from the window start (index on createdAt): a latest scan inside the window is always >= its start
     const since = win ? ` AND createdAt >= ${esc(win.from.toISOString())}` : "";
-    const sub = `SELECT part_id FROM OperationLogs WHERE (operation_no = ${esc(stationScope)} OR station_no = ${esc(stationScope)})${since} GROUP BY part_id${gateTime ? ` HAVING ${gateTime}` : ""}`;
-    const viaLogs = [
-      { part_id: { [Op.in]: sequelize.literal(`(${sub})`) } },
-      { customer_qr: { [Op.in]: sequelize.literal(`(${sub})`) } },
-    ];
+    // placeholder IDs ("-", fragments) are not parts: they matched every row whose customer QR was "-"
+    // Only OK / NG scans decide: a BLOCK (part re-scanned after it was already checked, refused by the interlock)
+    // does not change the part's result or move it to another shift.
+    const sub = `SELECT part_id FROM OperationLogs WHERE (operation_no = ${esc(stationScope)} OR station_no = ${esc(stationScope)}) AND LEN(part_id) >= 7 AND UPPER(result) IN ('OK', 'NG')${since} GROUP BY part_id${gateTime ? ` HAVING ${gateTime}` : ""}`;
+    // The newest report row of each part scanned at the station (matched by part ID or by its customer QR).
+    // Written as joins + one id list: "part_id IN (…) OR customer_qr IN (…)" made SQL Server pick plans that took
+    // up to 60 s.
+    const gateRows = `SELECT MAX(pr.id) FROM ProductionReports pr JOIN (${sub}) g ON g.part_id = pr.part_id GROUP BY pr.part_id
+      UNION SELECT MAX(pr.id) FROM ProductionReports pr JOIN (${sub}) g ON g.part_id = pr.customer_qr GROUP BY pr.part_id`;
+    const viaLogs = [{ id: { [Op.in]: sequelize.literal(`(${gateRows})`) } }];
     // with no date/shift, also accept parts whose station list shows the gate
     and.push({ [Op.or]: gateTime ? viaLogs : [...viaLogs, { station_keys: { [Op.like]: `%${stationScope}%` } }] });
   } else {
@@ -136,12 +156,12 @@ async function buildHistoricalWhere(q = {}) {
     else if (wantNg) and.push(sequelize.literal(`${LEAK_RESULT} IN (${sqlList(NG_VALUES)})`));
     else if (wantWip) and.push(sequelize.literal("1 = 0")); // a leak result is always final
   } else if (isGate) {
-    const col = `${stationScope.toLowerCase()}_status`;
-    statusExpr = col;
-    if (wantOk) where[col] = { [Op.in]: OK_VALUES };
-    else if (wantNg) where[col] = { [Op.in]: NG_VALUES };
-    else if (wantWip) where[col] = { [Op.or]: [{ [Op.is]: null }, { [Op.notIn]: [...OK_VALUES, ...NG_VALUES] }] };
-    else if (reqStatus) where[col] = reqStatus;
+    // Station result = the result of the part's latest OK / NG scan at that station (from the scan log itself, so
+    // stats and table always agree). Station total = OK + NG; a station has no "in progress".
+    statusExpr = gateStatusSql(stationScope);
+    if (wantOk) and.push(sequelize.literal(`${statusExpr} = 'OK'`));
+    else if (wantNg) and.push(sequelize.literal(`${statusExpr} = 'NG'`));
+    else if (wantWip) and.push(sequelize.literal("1 = 0"));
   } else {
     statusExpr = PART_STATUS;
     if (wantOk) and.push(sequelize.literal(`${PART_STATUS} = 'OK'`));
@@ -158,6 +178,7 @@ async function buildHistoricalWhere(q = {}) {
 
   // scanner misreads (several IDs in one read, fragments) are not parts — see VALID_SCAN_SQL
   and.push(sequelize.literal(require("../utils/productionDay").VALID_SCAN_SQL));
+  if (!isGate || !gateTimeUsed) and.push(sequelize.literal(LATEST_ROW_SQL)); // the gate id list is already one row per part
   if (and.length) where[Op.and] = and;
   return { where, statusExpr, stationScope, leak };
 }
@@ -308,6 +329,20 @@ function trimLogsToGate(rawLogs, stationScope, leak) {
   return kept;
 }
 
+// Row order. With a gate selected the table can be sorted by the station's own scan time (sortBy=gateScanAt,
+// sortDir=asc|desc) — done in SQL so it is correct across pages, not just inside the visible page.
+function historicalOrder(q, stationScope, leak) {
+  const dir = String(q.sortDir || "").toLowerCase() === "asc" ? "ASC" : "DESC";
+  if (String(q.sortBy || "") === "gateScanAt" && stationScope) {
+    const at = leak
+      ? LEAK_TIME_UTC
+      : `(SELECT MAX(o.createdAt) FROM OperationLogs o WHERE (o.part_id = [ProductionReport].[part_id] OR o.part_id = [ProductionReport].[customer_qr])
+          AND (o.operation_no = ${sequelize.escape(stationScope)} OR o.station_no = ${sequelize.escape(stationScope)}))`;
+    return [[sequelize.literal(at), dir], ["id", dir]];
+  }
+  return [["first_scan_at", "DESC"], ["id", "DESC"]];
+}
+
 exports.getHistoricalReportData = async (req, res) => {
   try {
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
@@ -318,25 +353,31 @@ exports.getHistoricalReportData = async (req, res) => {
     const { where, statusExpr, stationScope, leak } = await buildHistoricalWhere(req.query || {});
 
     // 1. Fetch Paginated Rows
+    const order = historicalOrder(req.query || {}, stationScope, leak);
     const { count, rows } = await ProductionReport.findAndCountAll({
       where,
       limit: pageSize,
       offset: offset,
-      order: [["first_scan_at", "DESC"]],
+      order,
       raw: true,
     });
 
     // 2. Metrics — grouped by the selected gate's status (station column, leak result) or the part status
     const statusLiteral = ProductionReport.sequelize.literal(statusExpr);
-    const metricsResult = await ProductionReport.findAll({
-      where,
-      attributes: [
-        [statusLiteral, 'overall_status'],
-        [ProductionReport.sequelize.fn('COUNT', ProductionReport.sequelize.col('id')), 'count']
-      ],
-      group: [statusLiteral],
-      raw: true,
-    });
+    const isStationGate = Boolean(stationScope) && !leak;
+    const metricsResult = isStationGate
+      ? Object.entries((await ProductionReport.findAll({ where, attributes: [[statusLiteral, "overall_status"]], raw: true }))
+        .reduce((acc, r) => { const k = r.overall_status || ""; acc[k] = (acc[k] || 0) + 1; return acc; }, {}))
+        .map(([overall_status, count]) => ({ overall_status, count }))
+      : await ProductionReport.findAll({
+        where,
+        attributes: [
+          [statusLiteral, 'overall_status'],
+          [ProductionReport.sequelize.fn('COUNT', ProductionReport.sequelize.col('id')), 'count']
+        ],
+        group: [statusLiteral],
+        raw: true,
+      });
 
     const { getPlcReadingColumns } = require("../services/report/reportExportService");
     const plcColumnSet = await getPlcReadingColumns();
@@ -356,19 +397,8 @@ exports.getHistoricalReportData = async (req, res) => {
     // Every part in the filtered set is counted once: produced = OK + NG + in process
     totalProduction = totalOK + totalNG + inProgress;
 
-    // Overall (no gate): Final OK = parts that passed the final station (OP160) in the period, by its scan time — the
-    // same "Final OK" as Rejection Analysis and the Report page. The part-status count above only holds parts CAST in
-    // the period that have already finished, so it lags (parts cast yesterday and passed today were missing).
-    if (!stationScope && !leak && !String(req.query.status || "").trim()) {
-      const { where: finalWhere } = await buildHistoricalWhere({ ...req.query, machineId: "OP160" });
-      const finalOk = await ProductionReport.count({
-        where: { [Op.and]: [finalWhere, sequelize.literal(`op160_status IN (${sqlList(OK_VALUES)})`)] },
-      });
-      if (finalOk > totalOK) {
-        totalOK = finalOk;
-        inProgress = Math.max(0, totalProduction - totalOK - totalNG);
-      }
-    }
+    // Overall (no gate): one set of parts — those first scanned in the period — so Total = OK + NG + In progress
+    // and the table rows match the cards. The final station's own output is the OP160 gate view.
 
     // Pass rate over completed parts only (OK + NG); parts still in process are excluded
     const passRate = (totalOK + totalNG) > 0 ? Number(((totalOK / (totalOK + totalNG)) * 100).toFixed(2)) : 0;

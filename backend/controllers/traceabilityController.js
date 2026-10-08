@@ -3788,7 +3788,10 @@ exports.getMachineStationStats = async (req, res) => {
         },
       },
       order: [["createdAt", "DESC"]],
-      limit: 800,
+      // The Pass / Fail counts and the hourly trend are computed from these rows, so they must cover the whole
+      // window. 800 (newest first) cut a busy station's day short: "All shifts" or an earlier shift showed e.g.
+      // OP120 Shift A = 12 pass instead of 459. A station logs up to ~2,000 scans a day; 5,000 covers it.
+      limit: 5000,
     });
 
     // Targeted PartCodeMapping lookup: only look up parts that actually need customer QR
@@ -6671,6 +6674,7 @@ exports.getDashboardSummary = async (req, res) => {
     // scanner misreads (several IDs in one read, fragments) are not parts — see VALID_SCAN_SQL
 
     whereConditions.push(require("../utils/productionDay").VALID_SCAN_SQL);
+    whereConditions.push(require("../utils/productionDay").notStaleRowSql("id"));
 
     if (!isAllTime) {
       // a part belongs to the production day of its first scan (same rule as the Historical Report)
@@ -7066,6 +7070,7 @@ exports.getDashboardTrends = async (req, res) => {
     // scanner misreads (several IDs in one read, fragments) are not parts — see VALID_SCAN_SQL
 
     whereConditions.push(require("../utils/productionDay").VALID_SCAN_SQL);
+    whereConditions.push(require("../utils/productionDay").notStaleRowSql("id"));
 
     if (!isAllTime) {
       // a part belongs to the production day of its first scan (same rule as the Historical Report)
@@ -8484,6 +8489,8 @@ async function buildRejectionFilterContext(query = {}) {
   // sub-query's own part_id): they are stored as {plain, pr} and inserted as {{RAW_n}} placeholders.
   const rawConds = [];
   const pushRaw = (plain, pr) => { rawConds.push({ plain, pr }); whereConditions.push(`{{RAW_${rawConds.length - 1}}}`); };
+  // one report row per part (older duplicate copies skipped)
+  pushRaw(require("../utils/productionDay").notStaleRowSql("id"), require("../utils/productionDay").notStaleRowSql("pr.[id]"));
   // NG parts' operator entry ("Category: CR | View: … | Zone: … | Reason: …") lives in Parts.interlock_reason
   const partsEntryLike = (param) => ({
     plain: `part_id IN (SELECT px.part_id FROM Parts px WHERE px.interlock_reason LIKE :${param})`,
