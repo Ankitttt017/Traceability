@@ -27,6 +27,9 @@
 const path = require("path");
 
 require("dotenv").config({ path: path.resolve(__dirname, ".env") });
+// SHOP_FLOOR_IO=off (local PC only): never connect to PLCs / scanners — installed before anything opens a socket
+const { shopFloorIoEnabled, installShopFloorIoGuard } = require("./utils/shopFloorIoGuard");
+installShopFloorIoGuard();
 const express = require("express");
 const cors = require("cors");
 const compression = require("compression");
@@ -167,6 +170,7 @@ const handleHealthCheck = (_req, res) => {
     ok: true,
     status: "healthy",
     dbAvailable,
+    shopFloorIo: shopFloorIoEnabled,
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
   });
@@ -463,9 +467,10 @@ async function startServer() {
     server.listen(PORT, () => {
       server.off("error", onListenError);
       console.log(`Server running on port ${PORT}`);
-      startAlarmMonitor();
+      if (shopFloorIoEnabled) startAlarmMonitor();
       scheduleStatusEmitter();
-      require("./services/report/historicalCronService").startHistoricalCron();
+      // report sync writes the shared report table — only the live server runs it
+      if (shopFloorIoEnabled) require("./services/report/historicalCronService").startHistoricalCron();
       io.emit("db:offline", { timestamp: new Date().toISOString(), reason: "DB_RECONNECTING" });
       resolve();
     });
@@ -489,8 +494,12 @@ async function startServer() {
       io.emit("db:offline", { timestamp: new Date().toISOString(), reason: "DB_STARTUP_UNAVAILABLE" });
     }
 
-    await initializeIndustrialServices({ dbAvailable: startupDbAvailable });
-    startTcpServer();
+    if (shopFloorIoEnabled) {
+      await initializeIndustrialServices({ dbAvailable: startupDbAvailable });
+      startTcpServer();
+    } else {
+      console.warn("[Startup] SHOP_FLOOR_IO=off: PLC polling, PLC recovery and the scanner TCP server are not started on this instance.");
+    }
     const startup = getStartupStatus();
     console.log(`[Startup] Industrial services initialized: ${startup.serviceCount}`);
     if (startupDbAvailable) {
@@ -517,14 +526,17 @@ async function startServer() {
       await runStartupDbTask("ensureDefaultOrganization", () => ensureDefaultOrganization());
       await runStartupDbTask("ensureLinePartAssignmentSchema", () => ensureLinePartAssignmentSchema());
       await runStartupDbTask("ensureMachineQrScannerUniqueness", () => ensureMachineQrScannerUniqueness());
-      await runStartupDbTask("resetAllMachineLocks", () => resetAllMachineLocks());
-      await runStartupDbTask("resetAllScannerConnectionStates", () => scannerService.resetAllScannerConnectionStates());
-      await runStartupDbTask("runStartupRecovery", () => runStartupRecovery());
+      // these change LIVE machine / scanner state in the shared database — never from a local instance
+      if (shopFloorIoEnabled) {
+        await runStartupDbTask("resetAllMachineLocks", () => resetAllMachineLocks());
+        await runStartupDbTask("resetAllScannerConnectionStates", () => scannerService.resetAllScannerConnectionStates());
+        await runStartupDbTask("runStartupRecovery", () => runStartupRecovery());
+      }
       await runStartupDbTask("ensureDefaultAdminUser", () => ensureDefaultAdminUser());
       await runStartupDbTask("ensureDefaultShifts", () => ensureDefaultShifts());
       await refreshIndustrialCaches();
       io.emit("db:connected", { timestamp: new Date().toISOString() });
-      require("./cron/syncProductionReport").initCronJobs();
+      if (shopFloorIoEnabled) require("./cron/syncProductionReport").initCronJobs();
       scheduleDbReconnectLoop(STABLE_RECONNECT_MS);
     } else {
       scheduleDbReconnectLoop(DEGRADED_RECONNECT_MS);
@@ -547,12 +559,12 @@ async function startServer() {
     if (!httpStarted) {
       server.listen(PORT, () => {
         console.log(`Server running on port ${PORT} (degraded mode, DB unavailable)`);
-        startAlarmMonitor();
+        if (shopFloorIoEnabled) startAlarmMonitor();
         scheduleStatusEmitter();
       });
     }
     try {
-      startTcpServer();
+      if (shopFloorIoEnabled) startTcpServer();
     } catch (_e) {
       // no-op; TCP may already be started
     }
