@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { rejectionConfigApi } from "../api/services";
 import ConfirmModal from "../components/ConfirmModal";
+import { useViewFrameStyle } from "../utils/viewImageFrame";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 const splitLines = (value) =>
@@ -388,6 +389,16 @@ const PartMasterTab = ({ partOptions, partName, onSelectPart, onAddPart, onEditP
 );
 
 // ─── VIEW SETUP TAB ──────────────────────────────────────────────────────────
+/* View Setup card preview in the image's own shape (a vertical image shows vertical). */
+const ViewThumb = ({ src, alt }) => {
+  const style = useViewFrameStyle(src, "220px");
+  return (
+    <div className="mb-3 aspect-video w-full overflow-hidden rounded border border-border bg-bg-elevated" style={style || undefined}>
+      <img src={src} alt={alt} className="h-full w-full object-contain" />
+    </div>
+  );
+};
+
 const ViewSetupTab = ({ views, partName, imageDrafts, setImageDrafts, onAddView, onSaveImage, onBrowseImage, onEditView, onDeleteView, saving }) => (
   <div className="industrial-card overflow-hidden p-0">
     <SectionHeader title={`View Setup — ${partName}`} onAdd={onAddView} addLabel="Add View" />
@@ -407,11 +418,7 @@ const ViewSetupTab = ({ views, partName, imageDrafts, setImageDrafts, onAddView,
                 </div>
               </div>
               {imageDrafts[view.id] ? (
-                <img
-                  src={imageDrafts[view.id]}
-                  alt={view.name}
-                  className="mb-3 aspect-video w-full rounded border border-border bg-bg-elevated object-contain"
-                />
+                <ViewThumb src={imageDrafts[view.id]} alt={view.name} />
               ) : (
                 <div className="mb-3 flex aspect-video w-full flex-col items-center justify-center gap-2 rounded border border-dashed border-border bg-bg-elevated text-xs font-black uppercase tracking-wider text-text-muted">
                   <Upload size={20} />
@@ -472,6 +479,7 @@ const ZoneDesignerTab = ({
   selectedView,
 }) => {
   const zones = selectedView?.zones || [];
+  const frameStyle = useViewFrameStyle(selectedView?.imageUrl, "70vh");
   const { columns, rows } = getZoneGridShape(zones.length);
   const [verticalDividers, setVerticalDividers] = useState([]);
   const [horizontalDividers, setHorizontalDividers] = useState([]);
@@ -628,7 +636,7 @@ const ZoneDesignerTab = ({
             </div>
 
             {/* Image with zone overlays */}
-            <div data-zone-canvas className="relative mb-4 aspect-[900/520] w-full overflow-hidden rounded-lg border border-border bg-bg-elevated">
+            <div data-zone-canvas className="relative mb-4 aspect-[900/520] w-full overflow-hidden rounded-lg border border-border bg-bg-elevated" style={frameStyle || undefined}>
               {selectedView.imageUrl ? (
                 <img src={selectedView.imageUrl} alt={selectedView.name} className="h-full w-full object-contain" />
               ) : (
@@ -755,6 +763,7 @@ const SubZoneDesignerTab = ({
   saving,
 }) => {
   const zones = selectedView?.zones || [];
+  const frameStyle = useViewFrameStyle(selectedView?.imageUrl, "70vh");
   const subZones = selectedZone?.subZones || [];
   const zoneBounds = {
     x: Number(selectedZone?.xPercent || 0),
@@ -866,7 +875,7 @@ const SubZoneDesignerTab = ({
                 </div>
               </div>
 
-              <div data-sub-zone-canvas className="relative mb-4 aspect-[900/520] w-full overflow-hidden rounded-lg border border-border bg-bg-elevated">
+              <div data-sub-zone-canvas className="relative mb-4 aspect-[900/520] w-full overflow-hidden rounded-lg border border-border bg-bg-elevated" style={frameStyle || undefined}>
                 {selectedView.imageUrl ? (
                   <img src={selectedView.imageUrl} alt={selectedView.name} className="h-full w-full object-contain" />
                 ) : (
@@ -1111,6 +1120,7 @@ const AssignmentTab = ({
   onAutoDivide,
   saving,
 }) => {
+  const frameStyle = useViewFrameStyle(selectedView?.imageUrl, "70vh");
   const assignmentZones = selectedView?.zones || [];
   const assignmentShape = getZoneGridShape(assignmentZones.length);
   const [assignmentVerticalBounds, setAssignmentVerticalBounds] = useState([]);
@@ -1234,7 +1244,7 @@ const AssignmentTab = ({
       </div>
 
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
-        <div data-assign-zone-canvas className="relative aspect-[900/520] w-full self-start overflow-hidden rounded-xl border border-border bg-bg-elevated">
+        <div data-assign-zone-canvas className="relative aspect-[900/520] w-full self-start overflow-hidden rounded-xl border border-border bg-bg-elevated" style={frameStyle || undefined}>
           {selectedView?.imageUrl ? (
             <img src={selectedView.imageUrl} alt={selectedView.name} className="absolute inset-0 h-full w-full object-contain" />
           ) : (

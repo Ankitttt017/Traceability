@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import ChartDownloadButton from "./ChartDownloadButton";
+import { useChartDownload, chartFileName, downloadSvgAsPng } from "./chartDownload";
 
 const SafeChart = ({ height = 220, children, style = {} }) => {
   const hostRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [size, setSize] = useState({ width: 0, height: 0 });
+  const downloadable = useChartDownload();
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -29,12 +32,13 @@ const SafeChart = ({ height = 220, children, style = {} }) => {
   }, []);
 
   return (
-    <div ref={hostRef} style={{ height, width: "100%", minWidth: 1, minHeight: 1, overflow: "hidden", ...style }}>
+    <div ref={hostRef} className={downloadable ? "chart-dl-host" : undefined} style={{ height, width: "100%", minWidth: 1, minHeight: 1, overflow: "hidden", ...(downloadable ? { position: "relative" } : null), ...style }}>
       {ready ? (
         <div style={{ width: size.width, height: size.height, minWidth: 1, minHeight: 1 }}>
           {typeof children === "function" ? children(size) : children}
         </div>
       ) : null}
+      {downloadable && ready && <ChartDownloadButton onDownload={(btn) => downloadSvgAsPng(hostRef.current, chartFileName(btn))} />}
     </div>
   );
 };

@@ -274,8 +274,8 @@ export const rejectionConfigApi = {
     const { data } = await apiClient.post(ENDPOINTS.rejectionConfig.deletePart, { ...payload, partName });
     return data;
   },
-  operatorConfig: async (params = {}) => {
-    const { data } = await apiClient.get(ENDPOINTS.rejectionConfig.operatorConfig, { params });
+  operatorConfig: async (params = {}, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.rejectionConfig.operatorConfig, { ...config, params });
     return data;
   },
   createCategory: async (payload = {}) => {
@@ -494,8 +494,8 @@ export const dashboardApi = {
     const { data } = await apiClient.get(ENDPOINTS.dashboard.summary, { ...config, params });
     return data;
   },
-  trends: async (params) => {
-    const { data } = await apiClient.get(ENDPOINTS.dashboard.trends, { params });
+  trends: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.trends, { ...config, params });
     return data;
   },
   report: async (params, config = {}) => {
@@ -516,6 +516,10 @@ export const dashboardApi = {
   },
   rejectionShiftScrap: async (params, config = {}) => {
     const { data } = await apiClient.get(ENDPOINTS.dashboard.rejectionShiftScrap, { ...config, params });
+    return data;
+  },
+  rejectionDaily: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.rejectionDaily, { ...config, params });
     return data;
   },
   rejectionMlInsights: async (params, config = {}) => {

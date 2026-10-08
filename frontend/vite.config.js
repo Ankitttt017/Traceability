@@ -7,6 +7,14 @@ import { VitePWA } from 'vite-plugin-pwa'
 export default defineConfig({
   build: {
     chunkSizeWarningLimit: 3500,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          echarts: ['echarts'],
+          excel: ['exceljs', 'xlsx'],
+        },
+      },
+    },
   },
   plugins: [
     react(),
@@ -15,7 +23,7 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['analysis.png', 'No-Internet.avif'],
       workbox: {
-        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024
+        maximumFileSizeToCacheInBytes: 12 * 1024 * 1024
       },
       manifest: {
         name: 'Traceability System',

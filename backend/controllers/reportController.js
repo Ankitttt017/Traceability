@@ -507,6 +507,7 @@ function formatCleanReportResponse(payload = {}) {
       __pr_overall_status: row.__pr_overall_status,
       __pr_final_scan_at: row.__pr_final_scan_at,
       __pr_first_scan_at: row.__pr_first_scan_at,
+      __pr_gate_scan_at: row.__pr_gate_scan_at,
       serialNo: cleanValue(row.srNo, index + 1),
       part: {
         id: cleanValue(row.partId || row.displayPartId || row.traceabilityPartId || row.part_id),

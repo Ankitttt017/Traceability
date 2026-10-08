@@ -15,6 +15,7 @@ import { getStationFeatures, getStationFeatureSettings } from "../utils/stationS
 import { rejectionConfigApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import { normalizeScanResponse } from "../utils/scanResponse";
 import { useLanguage } from "../context/LanguageContext";
+import { fitViewFrame } from "../utils/viewImageFrame";
 
 
 const StationIcon = React.memo(() => (
@@ -2352,7 +2353,7 @@ const GlobalPopup = ({
                   </div>
                   <div className="mx-auto w-full max-w-4xl">
                     <div className="relative mx-auto aspect-[900/520] max-h-[52dvh] w-full overflow-hidden rounded-xl border-2 border-border bg-bg-dark shadow-lg sm:max-h-[56dvh]">
-                      {manualRejectionView.imageUrl && <img src={manualRejectionView.imageUrl} alt={manualRejectionView.name} className="absolute inset-0 h-full w-full object-contain" />}
+                      {manualRejectionView.imageUrl && <img src={manualRejectionView.imageUrl} alt={manualRejectionView.name} onLoad={fitViewFrame("52dvh")} className="absolute inset-0 h-full w-full object-contain" />}
                       {popupVerticalDividers.map((position, index) => (
                         <span key={`wizard-v-${index}`} className="pointer-events-none absolute inset-y-0 z-20 border-l-[3px] border-dotted border-red-600 sm:border-l-4" style={{ left:`${position}%` }} />
                       ))}
@@ -2384,7 +2385,7 @@ const GlobalPopup = ({
                   </div>
                   <div className="mx-auto w-full max-w-4xl">
                     <div className="relative mx-auto aspect-[900/520] max-h-[52dvh] w-full overflow-hidden rounded-xl border-2 border-border bg-bg-dark shadow-lg sm:max-h-[56dvh]">
-                      {manualRejectionView.imageUrl && <img src={manualRejectionView.imageUrl} alt={manualRejectionView.name} className="absolute inset-0 h-full w-full object-contain" />}
+                      {manualRejectionView.imageUrl && <img src={manualRejectionView.imageUrl} alt={manualRejectionView.name} onLoad={fitViewFrame("52dvh")} className="absolute inset-0 h-full w-full object-contain" />}
                       <div className="absolute z-20 border-2 border-yellow-400 bg-yellow-300/10" style={{ left:`${Number(manualRejectionZone.xPercent ?? 0)}%`, top:`${Number(manualRejectionZone.yPercent ?? 0)}%`, width:`${Number(manualRejectionZone.widthPercent ?? 10)}%`, height:`${Number(manualRejectionZone.heightPercent ?? 10)}%` }} />
                       {popupSubZones.map((subZone, subZoneIndex) => {
                         const left = Number(manualRejectionZone.xPercent || 0) + (Number(manualRejectionZone.widthPercent || 10) * Number(subZone.xPercent || 0) / 100);

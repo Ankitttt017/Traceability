@@ -423,7 +423,8 @@ const sanitizeCustomerQrValue = (value) => {
 function looksLikeCustomerQrValue(value) {
   return /^R\d[A-Z0-9-]{10,}$/i.test(String(value || "").trim());
 }
-const REPORT_PREVIEW_ROWS_LIMIT = 1000;
+// Parts per page. Each part carries its full station log (~40 KB), so 1,000 parts took ~40 s; 100 loads in ~5 s.
+const REPORT_PREVIEW_ROWS_LIMIT = 100;
 
 // ── Professional Design System ────────────────────────────────────────────
 const DS = `
@@ -1497,11 +1498,13 @@ const HistoricalReportsPage = () => {
       })
       .filter(Boolean);
     const machineStationMap = new Map(machineStationPairs.map((x) => [x.key, x]));
+    // Placeholder values ("-", "N/A", "null") are not stations; they used to create a "- + -" column
+    const isPlaceholder = (v) => !v || /^[-–—\s]*$/.test(v) || ["N/A", "NA", "NULL", "UNDEFINED"].includes(v.toUpperCase());
     const rowStationPairs = sourceRows
       .map((r) => {
         const machineName = String(r.station?.name || r.machineName || "").trim();
         const op = String(r.station?.operation || r.operationNo || r.stationNo || "").trim();
-        if (!machineName || !op) return null;
+        if (isPlaceholder(machineName) || isPlaceholder(op)) return null;
         if (String(op).trim().toUpperCase() === LEAK_TEST_OPERATION) {
           return { key: LEAK_TEST_SHARED_KEY, machineName: "Leak Test", op, label: "Leak Test OP150", sharedLeakOperation: true };
         }
@@ -1559,6 +1562,8 @@ const HistoricalReportsPage = () => {
       { key: "barcode", label: "Part Serial", blankIfEmpty: true },
       { key: "customerCode", label: "Customer QR" },
       { key: "createdAt", label: "First Scan" },
+      // With a station selected, the day and shift follow the time that station handled the part
+      ...(sourceRows.some((r) => r.__pr_gate_scan_at) ? [{ key: "gateScanAt", label: "Station Scan Time" }] : []),
       { key: "finalResultAt", label: "Final Result Time" },
       ...stationPairs.map((s) => ({
         key: `station_${s.key}`,
@@ -1567,6 +1572,8 @@ const HistoricalReportsPage = () => {
         renderLeakOperation: Boolean(s.sharedLeakOperation),
       })),
       { key: "overallStatus", label: "Status" },
+      // for parts still in process: the last station with a result and the next one it is waiting for
+      { key: "progressAt", label: "Where is it", renderAsText: true },
       { key: "rejectionCategory", label: "Category" },
       { key: "rejectionReason", label: "Rejection" },
       { key: "rejectionView", label: "View" },
@@ -1703,6 +1710,8 @@ const HistoricalReportsPage = () => {
       const resolvedOverallStatus = resolveOverallStatus();
       // If the backend stamped this group with a ProductionReport overall_status, trust it directly
       const overallStatus = (() => {
+        // A station NG or a leak-test NG makes the part NG, even if the stored status still says passed / in progress
+        if (resolvedOverallStatus === 'NG') return 'NG';
         const prStatus = first.__pr_overall_status;
         if (prStatus === 'PASSED' || prStatus === 'OK') return 'PASSED';
         if (prStatus === 'NG' || prStatus === 'FAILED') return 'NG';
@@ -1772,6 +1781,19 @@ const HistoricalReportsPage = () => {
       // On the Historical page, trust the ProductionReport master table's pre-computed status.
       // Do NOT apply any hide-out-of-range override — the data is already finalized in the DB.
       const displayOverallStatus = overallStatus;
+      const progressAt = (() => {
+        if (normResult(displayOverallStatus) === "OK" || normResult(displayOverallStatus) === "NG") return "";
+        const LINE = ["OP100", "OP110", "OP120", "OP130", "OP140", "OP150", "OP160"];
+        const res = (op) => normResult(stationResults[op] || "");
+        const passed = (op) => res(op) === "OK" || (op === "OP150" && Boolean(leakData));
+        const started = LINE.find((op) => res(op) === "IN_PROGRESS");
+        if (started) return `Scan started at ${started} · no result yet`;
+        const done = LINE.filter(passed);
+        if (!done.length) return "Not scanned yet";
+        const last = done[done.length - 1];
+        const next = LINE[LINE.indexOf(last) + 1];
+        return next ? `Passed ${last} · awaiting ${next}` : `Passed ${last}`;
+      })();
       const displayFinalResultRaw = finalResultRaw;
       const bypassedStationKeys = entries.reduce((acc, row) => {
         const bypassStatus = Boolean(row?.bypassStatus || row?.is_bypassed || row?.isBypassed);
@@ -1798,11 +1820,13 @@ const HistoricalReportsPage = () => {
         barcode: displayPartId !== "" ? displayPartId : "",
         plc_machine_name: plcData.machine_name || first.machineName || "-",
         createdAt: firstScanAt ? formatDateSafeStr(firstScanAt) : "-",
+        gateScanAt: (() => { const g = entries.find((r) => r.__pr_gate_scan_at)?.__pr_gate_scan_at; return g ? formatDateSafeStr(g) : "-"; })(),
         finalResultAt: displayFinalResultRaw ? formatDateSafeStr(displayFinalResultRaw) : "-",
         partName: plcPartDie.partName || first.partName || first.modelName || first.componentName || "-",
         dieName: plcPartDie.dieName || first.dieName || "-",
         customerCode: mappedCustomerCode || (customerQrPending ? "Customer QR Pending" : ""),
         overallStatus: displayOverallStatus,
+        progressAt,
         ngReason: normResult(displayOverallStatus) === "OK" ? "" : (() => {
           const rawReason = first.reason || first.interlock_reason || "";
           const normalizedReason = String(rawReason || "").trim().toUpperCase();
@@ -2100,7 +2124,7 @@ const HistoricalReportsPage = () => {
             <Filter size={16} className="text-[rgb(var(--pk-txt-muted))]" />
             <span className="text-sm font-bold text-[rgb(var(--pk-txt-pri))]">{t("reports.filters", "Filters")}</span>
             <span className="text-xs text-[rgb(var(--pk-txt-muted))] bg-[rgba(var(--pk-bdr),0.06)] px-2 py-0.5 rounded-full border border-[rgba(var(--pk-bdr),0.06)]">
-              {Object.values(filters).filter(v => v && String(v).trim()).length} active
+              {Object.entries(filters).filter(([k, v]) => !["dateFrom", "dateTo", "quickRange"].includes(k) && v && String(v).trim()).length} active
             </span>
           </div>
          
@@ -2171,11 +2195,20 @@ const HistoricalReportsPage = () => {
             onChange={(e) => setFilters({ ...filters, machineId: e.target.value })}
           >
             <option value="">🏭 All Quality Gates</option>
-            {machines.map((m) => (
-              <option key={m.id || m.machine_name} value={m.operation_no || m.machine_name}>
-                {m.machine_name || m.machineName}
-              </option>
-            ))}
+            {machines.map((m) => {
+              const op = String(m.operation_no || m.operationNo || "").trim().toUpperCase();
+              const name = m.machine_name || m.machineName;
+              // The three leak testers share OP150, so each is selected by its own machine name
+              const isLeak = op === LEAK_TEST_OPERATION;
+              return (
+                <option key={m.id || name} value={isLeak ? name : (op || name)}>
+                  {isLeak ? `${name} (${LEAK_TEST_OPERATION})` : name}
+                </option>
+              );
+            })}
+            {machines.some((m) => String(m.operation_no || m.operationNo || "").trim().toUpperCase() === LEAK_TEST_OPERATION) && (
+              <option value={LEAK_TEST_OPERATION}>Leak Test {LEAK_TEST_OPERATION} — all {machines.filter((m) => String(m.operation_no || m.operationNo || "").trim().toUpperCase() === LEAK_TEST_OPERATION).length} machines</option>
+            )}
           </select>
 
           <select
@@ -2215,7 +2248,7 @@ const HistoricalReportsPage = () => {
             value={filters.shiftCode || ""}
             onChange={(e) => setFilters({ ...filters, shiftCode: e.target.value })}
           >
-            <option value="">🕐 All Shifts</option>
+            <option value="">🕐 Full Day (All Shifts)</option>
             {(availableShifts || []).map((shift) => (
               <option key={shift.shiftCode} value={shift.shiftCode}>
                 {shift.shiftName || shift.shiftCode}
@@ -2309,7 +2342,7 @@ const HistoricalReportsPage = () => {
         onPageSizeChange={(pageSize) => {
           setReportPage({ page: 1, pageSize });
         }}
-        defaultPageSize={5000}
+        defaultPageSize={REPORT_PREVIEW_ROWS_LIMIT}
         pageSizeOptions={[100, 250, 500, 1000, 2000, 5000, 10000]}
       />
     </div>

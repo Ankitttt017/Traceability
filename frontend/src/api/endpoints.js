@@ -105,6 +105,7 @@ export const ENDPOINTS = {
     rejectionSummary: "/rejection-summary",
     rejectionPareto: "/rejection-pareto",
     rejectionShiftScrap: "/rejection-shift-scrap",
+    rejectionDaily: "/rejection-daily",
     rejectionMlInsights: "/rejection-ml-insights",
     rejectionRows: "/rejection-rows",
     oee: "/dashboard/oee",

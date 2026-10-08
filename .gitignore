@@ -3,3 +3,10 @@ node_modules/
 .env
 dist/
 actions-runner/
+
+# local scratch / one-off scripts (never commit)
+scratch/
+frontend/scratch/
+frontend/scripts/
+backend/scratch_*
+backend/views.json
