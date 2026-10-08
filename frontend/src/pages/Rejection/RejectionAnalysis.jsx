@@ -186,8 +186,6 @@ export default function RejectionAnalysis() {
   const [recordsRows, setRecordsRows] = useState([]);
   // Every NG record in the filter window (gate, category, reason, view, zone, sub-zone + PLC readings)
   const [ngRecords, setNgRecords] = useState([]);
-  // Recent good parts with PLC readings — the OK side of root-cause comparisons
-  const [okRecords, setOkRecords] = useState([]);
   const [recordsTotal, setRecordsTotal] = useState(0);
   const [recordsPage, setRecordsPage] = useState(1);
   const [recordsPageSize, setRecordsPageSize] = useState(100);
@@ -235,7 +233,9 @@ export default function RejectionAnalysis() {
 
   /* ── Dynamic Machines & Dies Setup ────────────────────────────────────── */
   useEffect(() => {
-    machineApi.list()
+    // lookup lists with fallbacks: a slow answer must not raise the global "Server timeout" toast
+    const LOOKUP = { timeout: 60000, suppressGlobalError: true };
+    machineApi.list(LOOKUP)
       .then((res) => {
         const list = Array.isArray(res) ? res : (res?.data || []);
         if (list.length > 0) {
@@ -262,7 +262,7 @@ export default function RejectionAnalysis() {
       })
       .catch((err) => console.warn("[REJECTION UI] machineApi.list fallback:", err.message));
 
-    organizationApi.listParts()
+    organizationApi.listParts({}, LOOKUP)
       .then((res) => {
         const list = Array.isArray(res) ? res : (res?.data || []);
         if (list.length > 0) {
@@ -278,7 +278,7 @@ export default function RejectionAnalysis() {
 
   /* ── Load Rejection Config ────────────────────────────────────────────── */
   useEffect(() => {
-    rejectionConfigApi.operatorConfig({ partName: "OIL PAN K-12" })
+    rejectionConfigApi.operatorConfig({ partName: "OIL PAN K-12" }, { timeout: 60000, suppressGlobalError: true })
       .then((res) => {
         if (res && res.views) setRejectionConfig(res);
       })
@@ -286,8 +286,27 @@ export default function RejectionAnalysis() {
   }, []);
 
   /* ── Load Data from Modular APIs ──────────────────────────────────────── */
-  // Progressive loading: the fast summary / Pareto / shift queries render the page; the heavy ones (NG and OK part
-  // records, process ML insights) fill in afterwards without blocking. A newer request makes older answers stale.
+  // Progressive, tab-wise loading (one wave at a time, so the server never gets every heavy query at once):
+  //  1. summary / Pareto / shift (fast)          → the page renders
+  //  2. NG part records                          → drill-downs, die, location map, scrap records
+  //  3. process data + ML insights (≈3 MB)       → only when Root Cause or SPC is opened (see loadMlInsights)
+  // OK part records are not loaded: no tab uses them (they were ~6 MB for 30 days). A newer request makes older
+  // answers stale.
+  const buildQuery = useCallback(() => {
+    const query = { limit: 5000, noCache: "1", _ts: Date.now() };
+    if (filters.datePreset) query.datePreset = filters.datePreset;
+    if (filters.datePreset === "all") query.allTime = "1";
+    if (filters.dateFrom) query.dateFrom = filters.dateFrom;
+    if (filters.dateTo) query.dateTo = filters.dateTo;
+    if (filters.shiftCode) query.shiftCode = filters.shiftCode;
+    if (filters.machineName) query.machineName = filters.machineName;
+    if (filters.qualityGate) query.qualityGate = filters.qualityGate;
+    if (filters.partName) query.partName = filters.partName;
+    if (filters.partCategory) query.partCategory = filters.partCategory;
+    if (filters.dieName) query.dieName = filters.dieName;
+    if (filters.status && filters.status !== "ALL") query.status = filters.status;
+    return query;
+  }, [filters]);
   const loadSeqRef = useRef(0);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const loadData = useCallback(async () => {
@@ -296,33 +315,14 @@ export default function RejectionAnalysis() {
     setLoading(true);
     setDataErrors([]);
     try {
-      const query = { limit: 5000, noCache: "1", _ts: Date.now() };
-      if (filters.datePreset) query.datePreset = filters.datePreset;
-      if (filters.datePreset === "all") query.allTime = "1";
-      if (filters.dateFrom) query.dateFrom = filters.dateFrom;
-      if (filters.dateTo) query.dateTo = filters.dateTo;
-      if (filters.shiftCode) query.shiftCode = filters.shiftCode;
-      if (filters.machineName) query.machineName = filters.machineName;
-      if (filters.qualityGate) query.qualityGate = filters.qualityGate;
-      if (filters.partName) query.partName = filters.partName;
-      if (filters.partCategory) query.partCategory = filters.partCategory;
-      if (filters.dieName) query.dieName = filters.dieName;
-      if (filters.status && filters.status !== "ALL") query.status = filters.status;
+      const query = buildQuery();
 
       const errors = [];
 
-      // heavy requests start now, in parallel, but are awaited only after the page has rendered
-      const detailRequests = Promise.allSettled([
-        dashboardApi.rejectionMlInsights(query, { timeout: 45000, suppressGlobalError: true }),
-        dashboardApi.rejectionRows({ ...query, status: "NG", page: 1, pageSize: 10000 }, { timeout: 60000, suppressGlobalError: true }),
-        dashboardApi.rejectionRows({ ...query, status: "OK", page: 1, pageSize: 3000 }, { timeout: 60000, suppressGlobalError: true }),
-      ]);
-      setDetailsLoading(true);
-
       const [summaryResult, paretoResult, shiftResult] = await Promise.allSettled([
-        dashboardApi.rejectionSummary(query, { timeout: 25000, suppressGlobalError: true }),
-        dashboardApi.rejectionPareto(query, { timeout: 30000, suppressGlobalError: true }),
-        dashboardApi.rejectionShiftScrap(query, { timeout: 15000, suppressGlobalError: true }),
+        dashboardApi.rejectionSummary(query, { timeout: 60000, suppressGlobalError: true }),
+        dashboardApi.rejectionPareto(query, { timeout: 60000, suppressGlobalError: true }),
+        dashboardApi.rejectionShiftScrap(query, { timeout: 60000, suppressGlobalError: true }),
       ]);
       if (!isCurrent()) return;
 
@@ -380,18 +380,13 @@ export default function RejectionAnalysis() {
       setLastUpdated(new Date());
       setLoading(false); // the page renders here; details keep loading below
 
-      const [mlResult, ngResult, okResult] = await detailRequests;
+      // 2. NG part records, after the page has rendered
+      setDetailsLoading(true);
+      const [ngResult] = await Promise.allSettled([
+        dashboardApi.rejectionRows({ ...query, status: "NG", page: 1, pageSize: 10000 }, { timeout: 90000, suppressGlobalError: true }),
+      ]);
       if (!isCurrent()) return;
       const detailErrors = [];
-      if (mlResult.status === "fulfilled" && mlResult.value) {
-        const res = mlResult.value;
-        if (res.mlInsights) setMlInsights(res.mlInsights);
-        if (Array.isArray(res.telemetryRows) && res.telemetryRows.length > 0) setRows(res.telemetryRows);
-        else if (Array.isArray(res.rows) && res.rows.length > 0) setRows(res.rows);
-      } else {
-        detailErrors.push("Process ML Insights: " + (mlResult.reason?.message || "query failed"));
-      }
-      setOkRecords(okResult.status === "fulfilled" && Array.isArray(okResult.value?.rows) ? okResult.value.rows : []);
       if (ngResult.status === "fulfilled" && Array.isArray(ngResult.value?.rows)) {
         setNgRecords(ngResult.value.rows);
       } else {
@@ -405,12 +400,46 @@ export default function RejectionAnalysis() {
     } finally {
       if (isCurrent()) { setLoading(false); setDetailsLoading(false); }
     }
-  }, [filters]);
+  }, [buildQuery]);
 
   useEffect(() => {
     setRecordsPage(1);
     loadData();
   }, [loadData]);
+
+  /* ── 3. Process data + ML insights: loaded only for the tabs that use them ─ */
+  const mlLoadedForRef = useRef(null);
+  const [mlLoading, setMlLoading] = useState(false);
+  const loadMlInsights = useCallback(async () => {
+    const query = buildQuery();
+    const key = JSON.stringify({ ...query, _ts: 0 });
+    if (mlLoadedForRef.current === key) return;
+    mlLoadedForRef.current = key;
+    setMlLoading(true);
+    try {
+      const res = await dashboardApi.rejectionMlInsights(query, { timeout: 90000, suppressGlobalError: true });
+      if (mlLoadedForRef.current !== key) return;
+      if (res?.mlInsights) setMlInsights(res.mlInsights);
+      if (Array.isArray(res?.telemetryRows) && res.telemetryRows.length > 0) setRows(res.telemetryRows);
+      else if (Array.isArray(res?.rows)) setRows(res.rows);
+    } catch (err) {
+      if (mlLoadedForRef.current === key) {
+        mlLoadedForRef.current = null; // retry on the next visit to an ML tab
+        setDataErrors((prev) => [...prev, "Process ML Insights: " + (err.message || "query failed")]);
+      }
+    } finally {
+      setMlLoading(false);
+    }
+  }, [buildQuery]);
+  // new filters → previously loaded process data is stale; it reloads when an ML tab is shown
+  useEffect(() => {
+    mlLoadedForRef.current = null;
+    setRows([]);
+    setMlInsights({ features: [], topAnomalies: [] });
+  }, [buildQuery]);
+  useEffect(() => {
+    if (activeTab === "ml_analysis" || activeTab === "telemetry") loadMlInsights();
+  }, [activeTab, loadMlInsights]);
 
   /* ── Load Paginated Records ───────────────────────────────────────────── */
   const loadRejectionRows = useCallback(async (page = recordsPage, pageSize = recordsPageSize, search = "") => {
@@ -968,9 +997,9 @@ export default function RejectionAnalysis() {
         </div>
       </div>
 
-      {detailsLoading && !loading && (
+      {(detailsLoading || mlLoading) && !loading && (
         <div role="status" style={{ display: "flex", alignItems: "center", gap: 8, margin: "0 0 10px", padding: "7px 12px", borderRadius: 10, background: "#f8fafc", border: "1px solid #e2e8f0", fontSize: 12, color: "#475569" }}>
-          <RefreshCw size={13} className="rej-spin" /> Loading part records and process data… charts fill in as they arrive.
+          <RefreshCw size={13} className="rej-spin" /> {mlLoading ? "Loading process data for this tab…" : "Loading part records…"} charts fill in as they arrive.
         </div>
       )}
 
@@ -1025,7 +1054,6 @@ export default function RejectionAnalysis() {
             recordsRows={recordsRows}
             allRejectionRecords={allRejectionRecords}
             rejectedRows={rejectedRows}
-            okRecords={okRecords}
             filters={filters}
           />
         )}
@@ -1040,6 +1068,7 @@ export default function RejectionAnalysis() {
             allRejectionRecords={allRejectionRecords}
             rejectedRows={rejectedRows}
             filters={filters}
+            loading={mlLoading}
           />
         )}
 
@@ -1050,6 +1079,7 @@ export default function RejectionAnalysis() {
             allRejectionRecords={allRejectionRecords}
             mlInsights={mlInsights}
             onOpenRecipeModal={() => setShowSetParamsModal(true)}
+            loading={mlLoading}
           />
         )}
 

@@ -4,7 +4,7 @@
 // means the same thing (OK is always green, NG always red, Shift B always orange …).
 //
 // Colours come from a CVD-validated categorical palette (checked with the dataviz validator):
-//   OK #1baf7a vs NG #d03b3b      → deutan ΔE 9.9, normal-vision ΔE 31.9 (pass)
+//   OK #16a34a vs NG #dc2626      → standard green / red (always paired with an "OK" / "NG" label)
 //   CR / CRAM / MR, Shift A/B/C   → blue / orange / violet, all-pairs ΔE ≥ 13 (pass)
 //   8-slot categorical order      → worst adjacent CVD ΔE 9.1 (pass)
 // Rules: colour follows the entity, never its rank; a 9th+ series folds into "Other";
@@ -28,8 +28,8 @@ export const INK = {
 
 // Part outcome
 export const OUTCOME = {
-  ok: "#1baf7a",
-  ng: "#d03b3b",
+  ok: "#16a34a",   // standard green (OK / pass)
+  ng: "#dc2626",   // standard red (NG / reject)
   wip: "#94a3b8",   // in process — neutral on purpose
   total: "#475569",
 };
@@ -49,15 +49,15 @@ export const SHIFT = { A: "#2a78d6", B: "#eb6834", C: "#4a3aa7", Unassigned: "#a
 
 // Status (state only — always paired with a label or icon)
 export const STATUS = {
-  good: "#0ca30c",
+  good: "#16a34a",
   warning: "#fab219",
   serious: "#ec835a",
-  critical: "#d03b3b",
+  critical: "#dc2626",
   neutral: "#94a3b8",
 };
 
 // Diverging: lowers scrap ↔ raises scrap
-export const DIVERGING = { low: "#2a78d6", mid: "#f0efec", high: "#d03b3b" };
+export const DIVERGING = { low: "#2a78d6", mid: "#f0efec", high: "#dc2626" };
 
 // Sequential magnitude ramps (light → dark)
 export const SEQ_BLUE = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];

@@ -67,6 +67,7 @@ import OverviewCharts from "../components/dashboard/OverviewCharts";
 import { useDailyQualityCards } from "./Rejection/DailyQualityTrend";
 import { CHART_COLORS } from "../constants/chartTheme";
 import { useLanguage } from "../context/LanguageContext";
+import { fitViewFrame } from "../utils/viewImageFrame";
 
 // —— Design tokens —————————————————————————————————————————————————————————————
 const DS = `
@@ -1882,15 +1883,19 @@ const Dashboard = () => {
     if (matched) setHeatMapViewId(String(matched.id));
   }, [rejectionFilters.view, heatMapConfig]);
 
+  // Live "Today": the query covers the whole current production day (06:00 → next 06:00) and changes only when
+  // the production day changes. It used to end at "now", and every load set nowMs → new query → new loadData →
+  // the refresh effect re-ran → another load: an endless request loop ("Updating…" never stopped and the server
+  // was hammered every 1–5 s). Each request still asks up to the current moment (see liveRange in loadData).
+  const liveDayStart = isLiveProductionRange ? getCurrentDashboardProductionRange(new Date(nowMs)).start : "";
   const effectiveFilters = useMemo(() => {
-    if (!isLiveProductionRange) return filters;
-    const range = getCurrentDashboardProductionRange();
+    if (!isLiveProductionRange || !liveDayStart) return filters;
     return {
       ...filters,
-      dateFrom: range.start,
-      dateTo: range.end,
+      dateFrom: liveDayStart,
+      dateTo: new Date(new Date(liveDayStart).getTime() + 24 * 60 * 60 * 1000).toISOString(),
     };
-  }, [filters, isLiveProductionRange, nowMs]);
+  }, [filters, isLiveProductionRange, liveDayStart]);
 
   const query = useMemo(() => {
     const isAll = activePreset === "all";
@@ -4565,6 +4570,7 @@ const Dashboard = () => {
                         <img
                           src={heatMapView.imageUrl}
                           alt={heatMapView.name}
+                          onLoad={fitViewFrame("420px")}
                           style={{
                             position: "absolute",
                             inset: 0,

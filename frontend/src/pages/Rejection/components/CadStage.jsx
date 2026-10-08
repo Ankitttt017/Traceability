@@ -1,6 +1,7 @@
 import React from "react";
 import { ImageOff } from "lucide-react";
 import { getFullImageUrl } from "../rejectionConstants";
+import { useViewFrameStyle } from "../../../utils/viewImageFrame";
 
 /**
  * CAD image + zone overlay stage.
@@ -8,8 +9,9 @@ import { getFullImageUrl } from "../rejectionConstants";
  * so overlays are only correct when the stage reproduces exactly that geometry (no padding, same ratio).
  */
 export default function CadStage({ imageUrl, alt = "", dark = false, className = "", children }) {
+  const frameStyle = useViewFrameStyle(imageUrl ? getFullImageUrl(imageUrl) : "", "min(70vh, 640px)");
   return (
-    <div className={`cad-stage ${dark ? "dark" : ""} ${className}`}>
+    <div className={`cad-stage ${dark ? "dark" : ""} ${className}`} style={frameStyle || undefined}>
       <style>{`
         .cad-stage{position:relative;width:100%;aspect-ratio:900/520;padding:0;margin:0;overflow:hidden;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0}
         .cad-stage.dark{background:#0b1220;border-color:#1e293b}

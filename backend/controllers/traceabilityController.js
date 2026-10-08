@@ -6681,6 +6681,12 @@ exports.getDashboardSummary = async (req, res) => {
 
     const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
 
+    // Station OK / NG by each station's own scan time and Final OK = OP160 passes in the period — the same figures
+    // as Rejection Analysis and the Historical Report. Started now; runs alongside the summary queries.
+    const scanCountsPromise = buildRejectionFilterContext(req.query)
+      .then((ctx) => stationCountsByScan(req.query, ctx))
+      .catch((err) => { console.warn("[DASHBOARD] station scan counts error:", err.message); return null; });
+
     let dbMachines = [];
     try {
       dbMachines = await Machine.findAll({
@@ -6893,10 +6899,13 @@ exports.getDashboardSummary = async (req, res) => {
     ]);
 
     const agg = aggregatesRes?.[0] || {};
+    const scanCounts = await scanCountsPromise;
     const totalParts = Number(agg.totalParts || 0);
-    const totalOK = Number(agg.totalOK || 0);
+    // Final OK = parts that passed final inspection (OP160) in the period. The first-scan count only holds parts
+    // CAST in the period that already finished, so "Today" showed e.g. 2 OK while OP160 had passed hundreds.
+    const totalOK = Math.max(Number(agg.totalOK || 0), Number(scanCounts?.OP160?.ok || 0));
     const totalNG = Number(agg.totalNG || 0);
-    const totalInProgress = Number(agg.totalInProgress || 0);
+    const totalInProgress = Math.max(0, totalParts - totalOK - totalNG);
     const scrapRate = (totalOK + totalNG) > 0 ? Number(((totalNG / (totalOK + totalNG)) * 100).toFixed(2)) : (totalParts > 0 ? Number(((totalNG / totalParts) * 100).toFixed(2)) : 0);
     const okRate = (totalOK + totalNG) > 0 ? Number(((totalOK / (totalOK + totalNG)) * 100).toFixed(2)) : 100;
 
@@ -6913,6 +6922,13 @@ exports.getDashboardSummary = async (req, res) => {
       { code: "Leak Test-03", name: "Leak Test-03", okCount: Number(agg.leak03_ok || 0), ngCount: Number(agg.leak03_ng || 0) },
       { code: "OP160", name: stationLabelMap["OP160"] || "Final Inspection (OP160)", okCount: Number(agg.op160_ok || 0), ngCount: Number(agg.op160_ng || 0) },
     ];
+
+    if (scanCounts) {
+      qualityGates.forEach((gate) => {
+        const c = scanCounts[gate.code];
+        if (c) { gate.okCount = c.ok; gate.ngCount = c.ng; }
+      });
+    }
 
     qualityGates = qualityGates.map((gate) => {
       const inspected = gate.okCount + gate.ngCount;

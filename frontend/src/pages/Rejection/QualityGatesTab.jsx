@@ -17,11 +17,10 @@ import SafeChart from "../../components/charts/SafeChart";
 import StationSpeedometer from "./components/StationSpeedometer";
 import RejectionAnalysisSkeleton from "./components/RejectionAnalysisSkeleton";
 import {
-  formatResultTimestamp, looksLikeCustomerQr, fmtNum,
-  extractShotFromPartId, extractShotDateTimeFromPartId,
+  formatResultTimestamp, fmtNum,
   cleanZoneCode, cleanSubZoneCode, normalizeCode, canonicalizeReason,
-  normalizeDefectKey, isReasonMatch, normalizeDefectCategory,
-  parseRowDefect, isRecordMatchingStation, resolveDefectLocation, getFullImageUrl, boxStyle, buildViewLocations,
+  normalizeDefectKey, isReasonMatch,
+  parseRowDefect, isRecordMatchingStation, boxStyle, subBoxStyle, buildViewLocations,
 } from "./rejectionConstants";
 import CadStage from "./components/CadStage";
 import {
@@ -45,17 +44,28 @@ const pctOf = (part, whole) => (whole > 0 ? (part / whole) * 100 : null);
 /** Scrap rate of an inspection station = NG ÷ (OK + NG) inspected there. */
 const gateRate = (g) => pctOf(num(g?.ngCount), num(g?.okCount) + num(g?.ngCount)) ?? 0;
 /** Station state bands (same limits as the gauge): ≤2.5% pass · 2.5–5% watch · >5% alert. */
-const gateStatus = (rate) => (rate > 5
+const RATE_WATCH = 2.5;
+const RATE_ALERT = 5;
+const gateStatus = (rate) => (rate > RATE_ALERT
   ? { label: "ALERT", color: STATUS.critical }
-  : rate >= 2.5 ? { label: "WATCH", color: STATUS.warning } : { label: "PASS", color: STATUS.good });
+  : rate >= RATE_WATCH ? { label: "WATCH", color: STATUS.warning } : { label: "PASS", color: STATUS.good });
 const catLabel = (c) => DEFECT_CATEGORY_LABEL[String(c || "").toUpperCase()] || c;
 const truncate = (s, n) => (s && String(s).length > n ? `${String(s).slice(0, n - 1)}…` : s);
 const AXIS_LABEL_STYLE = { fill: INK.body, fontSize: 11, fontWeight: 600, fontFamily: FONT_FAMILY };
+/** Pareto bars outside the vital few: light red (never grey — they are still NG). */
+const PARETO_REST = "#f87171";
+/** CAD overlay for a zone inferred from the defect type (no zone entered): amber, dashed. */
+const INFERRED_ZONE = "#f59e0b";
 const NOT_RECORDED = "Not recorded";
 const NOT_RECORDED_KEY = "NOT RECORDED"; // upper-case form used by the gate drill-down category keys
 /** Record category matches the drill-down category; a blank category matches "NOT RECORDED". */
 const categoryMatches = (recordCat, wanted) =>
   (String(recordCat || "").toUpperCase() || NOT_RECORDED_KEY) === String(wanted || "").toUpperCase();
+/** Drill-down category key of an NG record (upper case; blank / placeholder → "NOT RECORDED"). */
+const recordCategoryKey = (r) => {
+  const c = String(parseRowDefect(r).category || r.rejection_category || r.category || "").trim().toUpperCase();
+  return !c || ["-", "GENERAL", "NULL", "UNDEFINED"].includes(c) ? NOT_RECORDED_KEY : c;
+};
 
 /* ── Station identity (colour follows the station code, never its rank) ─────────────────────────
    The three OP150 leak-test machines run in parallel, so they share one hue family (violet shades). */
@@ -190,6 +200,18 @@ function StatusBadge({ rate }) {
   );
 }
 
+/** Recharts LabelList content: count (bold) with its share (%) above a bar. Rows need { count, percentage }. */
+const countPctLabel = (data) => function CountPctLabel({ x, y, width: w, index }) {
+  const d = data[index];
+  if (!d || !(d.count > 0)) return null;
+  return (
+    <g style={{ fontVariantNumeric: "tabular-nums" }}>
+      <text x={x + w / 2} y={y - 18} textAnchor="middle" fontSize={11.5} fontWeight={700} fill={INK.primary}>{fmtInt(d.count)}</text>
+      <text x={x + w / 2} y={y - 5} textAnchor="middle" fontSize={10.5} fontWeight={600} fill={INK.muted}>{fmtPct(d.percentage)}</text>
+    </g>
+  );
+};
+
 function Empty({ children, height = 200 }) {
   return <div className="qg-empty" style={{ minHeight: height }}>{children}</div>;
 }
@@ -243,6 +265,11 @@ const QG_CSS = `
 .qg-step .r span:last-child{font-weight:600;color:${INK.secondary}}
 .qg-warn{display:flex;gap:8px;align-items:flex-start;margin:10px 4px 0;padding:8px 11px;border-radius:9px;font-size:11.5px;line-height:1.45;color:#7a4b00;background:${withAlpha(STATUS.warning, 0.12)};border:1px solid ${withAlpha(STATUS.warning, 0.4)}}
 .qg-scroll{overflow-x:auto;overflow-y:hidden}
+.qg-mini-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:0 4px 12px}
+.qg-mini{display:flex;flex-direction:column;gap:2px;min-width:0;padding:9px 12px;border:1px solid ${INK.border};border-left:3px solid var(--accent);border-radius:10px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 7%,#fff) 0%,#fff 70%)}
+.qg-mini .l{font-size:10.5px;font-weight:600;color:${INK.muted};text-transform:uppercase;letter-spacing:.06em}
+.qg-mini .v{font-size:19px;font-weight:700;color:${INK.primary};font-variant-numeric:tabular-nums;line-height:1.2}
+.qg-mini .s{font-size:11px;color:${INK.muted};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 `;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -649,7 +676,7 @@ export default function QualityGatesTab({
       avgBiscuit: countBiscuit > 0 ? (sumBiscuit / countBiscuit).toFixed(1) : null,
       avgCycle: countCycle > 0 ? (sumCycle / countCycle).toFixed(1) : null,
     };
-  }, [paretoMatchingRecords, allRejectionRecords, paretoPictorialViewData]);
+  }, [paretoMatchingRecords, allRejectionRecords, paretoPictorialViewData, activeParetoStats, summary?.totalNG]);
 
   const filteredParetoParts = useMemo(() => {
     let list = paretoMatchingRecords;
@@ -859,10 +886,18 @@ export default function QualityGatesTab({
       if (!cat || ["-", "GENERAL", "NULL", "UNDEFINED"].includes(cat)) cat = NOT_RECORDED_KEY;
       catMap[cat] = (catMap[cat] || 0) + 1;
     });
+    // Telemetry rows are only loaded with the Root Cause / SPC tab: fall back to the NG records of this station.
+    if (!Object.keys(catMap).length) {
+      (allRejectionRecords || []).forEach((r) => {
+        if (!isRecordMatchingStation(r, drillDownGate)) return;
+        const cat = recordCategoryKey(r);
+        catMap[cat] = (catMap[cat] || 0) + 1;
+      });
+    }
     const sorted = Object.entries(catMap).map(([category, count]) => ({ category, count: Math.max(0, count) })).sort((a, b) => b.count - a.count);
     const total = sorted.reduce((s, c) => s + c.count, 0) || 1;
     return sorted.map((it) => ({ ...it, percentage: Number(((it.count / total) * 100).toFixed(1)) }));
-  }, [drillDownGate, qualityGateDrillDown, rows]);
+  }, [drillDownGate, qualityGateDrillDown, rows, allRejectionRecords]);
 
   const drillDownReasonData = useMemo(() => {
     if (!drillDownGate || !drillDownCategory) return [];
@@ -908,10 +943,21 @@ export default function QualityGatesTab({
       const reason = canonicalizeReason(rawReason);
       const qty = Number(r.quantity || r.scrap_quantity || 1); reasonMap[reason] = (reasonMap[reason] || 0) + qty;
     });
+    // Same fallback as the categories: NG records of this station when no telemetry rows are loaded.
+    if (!Object.keys(reasonMap).length) {
+      (allRejectionRecords || []).forEach((r) => {
+        if (!isRecordMatchingStation(r, drillDownGate)) return;
+        if (recordCategoryKey(r) !== String(drillDownCategory).toUpperCase()) return;
+        const p = parseRowDefect(r);
+        const raw = String(p.reason || r.rejection_reason || r.ng_reason || "").trim();
+        const reason = raw && raw !== "-" ? canonicalizeReason(raw) : NOT_RECORDED;
+        reasonMap[reason] = (reasonMap[reason] || 0) + 1;
+      });
+    }
     const sorted = Object.entries(reasonMap).map(([reason, count]) => ({ reason, count: Math.max(0, count) })).sort((a, b) => b.count - a.count);
     const total = sorted.reduce((s, c) => s + c.count, 0) || 1;
     return sorted.map((it) => ({ ...it, percentage: Number(((it.count / total) * 100).toFixed(1)) }));
-  }, [drillDownGate, drillDownCategory, qualityGateDrillDown, rows]);
+  }, [drillDownGate, drillDownCategory, qualityGateDrillDown, rows, allRejectionRecords]);
 
   const activeGateReason = useMemo(() => {
     if (drillDownReason === "ALL") return null;
@@ -1162,8 +1208,8 @@ export default function QualityGatesTab({
         const heat = (c, inferredOnly) => {
           const t = Math.sqrt(c / maxC);
           return inferredOnly
-            ? { borderColor: "#f59e0b", borderStyle: "dashed", borderWidth: 2, background: `rgba(245,158,11,${0.12 + t * 0.25})` }
-            : { borderColor: "#ef4444", borderStyle: "solid", borderWidth: 2, background: `rgba(239,68,68,${0.14 + t * 0.36})`, boxShadow: "0 0 12px rgba(239,68,68,.45)" };
+            ? { borderColor: INFERRED_ZONE, borderStyle: "dashed", borderWidth: 2, background: withAlpha(INFERRED_ZONE, 0.12 + t * 0.25) }
+            : { borderColor: OUTCOME.ng, borderStyle: "solid", borderWidth: 2, background: withAlpha(OUTCOME.ng, 0.14 + t * 0.36), boxShadow: `0 0 12px ${withAlpha(OUTCOME.ng, 0.45)}` };
         };
         return zones.map((zone) => {
           const hot = zone.count > 0;
@@ -1182,7 +1228,7 @@ export default function QualityGatesTab({
                 const sInf = sHot && sz.inferredCount === sz.count;
                 return (
                   <div key={`station-sub-${sz.id || sz.code}`} className="cad-sub"
-                    style={{ ...boxStyle(sz, 5, 5), ...(sHot ? heat(sz.count, sInf) : {}) }}
+                    style={{ ...subBoxStyle(zone, sz), ...(sHot ? heat(sz.count, sInf) : {}) }}
                     title={`Zone ${zone.name || zone.code} › Sub-zone ${sz.name || sz.code}: ${sz.count} NG`}>
                     {sHot && <span className="cad-tag">{sz.code || sz.name}<span className={`cad-count ${sInf ? "inferred" : ""}`}>{sz.count}</span></span>}
                   </div>
@@ -1465,13 +1511,30 @@ export default function QualityGatesTab({
     return {
       ...d,
       fpy: d.inspected > 0 ? (d.OK / d.inspected) * 100 : null,
+      rateLine: d.inspected > 0 ? Number(d.scrapRate.toFixed(2)) : null,
       rolled: step && step.cumYield != null ? Number((step.cumYield * 100).toFixed(2)) : null,
     };
   }), [qualityGateChartData, flow]);
-  const rolledMin = useMemo(() => {
-    const v = gateChartRows.map((d) => d.rolled).filter((x) => x != null);
-    return v.length ? Math.max(0, Math.floor(Math.min(...v) - 2)) : 80;
+  // NG-rate axis (right): headroom so the rate line rides through the bars, clear of the labels above them,
+  // and always tall enough to show the 5% alert limit.
+  const rateAxisMax = useMemo(() => {
+    const peak = Math.max(0, ...gateChartRows.filter((d) => d.inspected > 0).map((d) => d.scrapRate));
+    return Math.max(RATE_ALERT * 1.6, Math.ceil(peak * 1.9));
   }, [gateChartRows]);
+  // Headline figures for the station card (stations with inspections only)
+  const stationKpis = useMemo(() => {
+    const active = gateChartRows.filter((d) => d.inspected > 0);
+    if (!active.length) return null;
+    const worst = active.reduce((w, d) => (d.scrapRate > w.scrapRate ? d : w), active[0]);
+    const ng = active.reduce((s, d) => s + d.NG, 0);
+    return {
+      stations: active.length,
+      alerts: active.filter((d) => d.scrapRate > RATE_ALERT).length,
+      ng,
+      worst,
+      rty: flow.rty != null ? flow.rty * 100 : null,
+    };
+  }, [gateChartRows, flow]);
   const stationOfRecord = useCallback((r) => recordStationKey(r, stationOrder), [stationOrder]);
   const dailyCards = useDailyQualityCards({ filters, ngRecs, stationOf: stationOfRecord, stationLabelOf, stationColor, stationOrder });
 
@@ -1546,7 +1609,7 @@ export default function QualityGatesTab({
       // Heatmap needs a visualMap: map the pre-computed colour bucket (dimension 3) to the cell colour.
       visualMap: {
         type: "piecewise", show: false, dimension: 3, seriesIndex: 0,
-        pieces: [...SEQ_SCRAP.map((c, i) => ({ value: i, color: c })), { value: 7, color: TOTAL_BG }, { value: 8, color: INK.border }, { value: 9, color: "#f8fafc" }],
+        pieces: [...SEQ_SCRAP.map((c, i) => ({ value: i, color: c })), { value: 7, color: TOTAL_BG }, { value: 8, color: INK.border }, { value: 9, color: INK.surfaceAlt }],
       },
       tooltip: {
         ...ECHART_TOOLTIP, trigger: "item",
@@ -1626,7 +1689,7 @@ export default function QualityGatesTab({
           <div style={{ minWidth: 0, flex: "1 1 260px", paddingLeft: 42, position: "relative" }}>
             <span className="ra-icon" aria-hidden="true" style={{ position: "absolute", left: 0, top: 0 }}><Gauge size={16} /></span>
             <h3 className="ra-card-title" style={{ display: "flex", alignItems: "center" }}>Scrap rate at each station<InfoTip info={INFO.pipeline} /></h3>
-            <p className="ra-card-sub">Stations in process order · gauge = NG ÷ parts inspected there · click a station for its defect map</p>
+            <p className="ra-card-sub">Process order · click a station for its defect map</p>
           </div>
           <div className="rej-header-actions">
             <div className="rej-carousel-controls">
@@ -1639,7 +1702,7 @@ export default function QualityGatesTab({
                 aria-label="Toggle auto scroll"
               >
                 {isCarouselPlaying ? (
-                  isCarouselHovered ? <Pause size={12} color="#d97706" /> : <Play size={12} color="#16a34a" />
+                  isCarouselHovered ? <Pause size={12} color="#d97706" /> : <Play size={12} color={OUTCOME.ok} />
                 ) : (
                   <Play size={12} color="#64748b" />
                 )}
@@ -1929,8 +1992,8 @@ export default function QualityGatesTab({
                       </CadStage>
                       {!isLeakStation && stationLocalization.records > 0 && (
                         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 8, fontSize: 11, color: "#94a3b8", fontWeight: 600 }}>
-                          <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: "rgba(239,68,68,.6)", border: "1.5px solid #ef4444", marginRight: 5, verticalAlign: -1 }} />Recorded zone</span>
-                          <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: "rgba(245,158,11,.35)", border: "1.5px dashed #f59e0b", marginRight: 5, verticalAlign: -1 }} />Inferred from defect type (zone not entered)</span>
+                          <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: withAlpha(OUTCOME.ng, 0.6), border: `1.5px solid ${OUTCOME.ng}`, marginRight: 5, verticalAlign: -1 }} />Recorded zone</span>
+                          <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: withAlpha(INFERRED_ZONE, 0.35), border: `1.5px dashed ${INFERRED_ZONE}`, marginRight: 5, verticalAlign: -1 }} />Inferred zone</span>
                           <span style={{ marginLeft: "auto" }}>
                             {fmtInt(stationLocalization.localized)} of {fmtInt(stationLocalization.records)} NG records placed on a zone
                             {stationLocalization.unlocalized > 0 && ` · ${fmtInt(stationLocalization.unlocalized)} without zone`}
@@ -2068,11 +2131,11 @@ export default function QualityGatesTab({
               {drillDownLevel === 2 && `${drillDownGate} › ${catLabel(drillDownCategory)} — rejects by reason`}
               <InfoTip info={INFO.stations} />
             </h3>
-            {/* <p className="ra-card-sub">
-              {drillDownLevel === 0 && "Stations in process order · bars = parts inspected (OK + NG) · dashed line = rolled yield · click a station for its defect categories"}
-              {drillDownLevel === 1 && "NG parts at this station by category · click a category to see its reasons"}
-              {drillDownLevel === 2 && "NG parts in this category by reason · click a bar to show it on the defect map"}
-            </p> */}
+            <p className="ra-card-sub">
+              {drillDownLevel === 0 && "Process order · click a station for its defect categories"}
+              {drillDownLevel === 1 && "Click a category to see its reasons"}
+              {drillDownLevel === 2 && "Click a reason to show it on the defect map"}
+            </p>
           </div>
           {drillDownLevel > 0 && (
             <div className="rej-header-actions">
@@ -2100,29 +2163,57 @@ export default function QualityGatesTab({
 
         {drillDownLevel === 0 && (
           <div className="ra-card-body">
+            {stationKpis && (
+              <div className="qg-mini-kpis">
+                <div className="qg-mini" style={accent(ACCENT.process)}>
+                  <span className="l">Stations</span>
+                  <span className="v">{stationKpis.stations}</span>
+                  <span className="s" style={{ color: stationKpis.alerts ? STATUS.critical : OUTCOME.ok }}>
+                    {stationKpis.alerts ? `${stationKpis.alerts} in alert` : "none in alert"}
+                  </span>
+                </div>
+                <div className="qg-mini" style={accent(OUTCOME.ng)}>
+                  <span className="l">NG at stations</span>
+                  <span className="v" style={{ color: OUTCOME.ng }}>{fmtInt(stationKpis.ng)}</span>
+                  <span className="s">sum of station rejects</span>
+                </div>
+                <div className="qg-mini" style={accent(gateStatus(stationKpis.worst.scrapRate).color)}>
+                  <span className="l">Highest NG rate</span>
+                  <span className="v" style={{ color: gateStatus(stationKpis.worst.scrapRate).color }}>{fmtPct(stationKpis.worst.scrapRate, 2)}</span>
+                  <span className="s" title={stationKpis.worst.fullName}>{stationKpis.worst.name}</span>
+                </div>
+                <div className="qg-mini" style={accent(OUTCOME.ok)}>
+                  <span className="l">Rolled yield</span>
+                  <span className="v" style={{ color: OUTCOME.ok }}>{stationKpis.rty == null ? "—" : fmtPct(stationKpis.rty, 2)}</span>
+                  <span className="s">FPY of all steps multiplied</span>
+                </div>
+              </div>
+            )}
             <div className="ra-legend" style={{ padding: "0 4px 6px" }}>
               <span><i style={{ background: OUTCOME.ok }} />OK</span>
               <span><i style={{ background: OUTCOME.ng }} />NG</span>
-              <span><i style={{ background: ACCENT.process, height: 3, borderRadius: 2 }} />Rolled yield</span>
+              <span><i style={{ background: INK.primary, height: 3, borderRadius: 2, verticalAlign: 3 }} />NG rate % (right axis)</span>
+              <span><i style={{ background: "transparent", borderTop: `2px dashed ${STATUS.critical}`, height: 0, verticalAlign: 3 }} />{RATE_ALERT}% alert limit</span>
               <span><i style={{ background: OUTCOME.wip }} />No result yet</span>
             </div>
             {qualityGateChartData.length === 0 ? (
               <Empty height={260}>No station results for the selected period.</Empty>
             ) : (
               <div className="rej-chart-scroll-wrapper">
-                <div style={{ height: 420, minWidth: qualityGateChartData.length > 8 ? qualityGateChartData.length * 110 : "100%" }}>
+                <div style={{ height: 420, minWidth: qualityGateChartData.length * 92 }}>
                   <SafeChart height={420}>
                     {({ width, height }) => (
                       <ComposedChart width={width} height={height} data={gateChartRows} barGap={4} barCategoryGap="22%"
-                        margin={{ top: 44, right: 8, left: 12, bottom: 28 }}>
+                        margin={{ top: 44, right: 4, left: 4, bottom: 28 }}>
                         <CartesianGrid {...RECHARTS_GRID} />
                         <XAxis dataKey="name" interval={0} {...RECHARTS_AXIS} height={40}
                           label={{ value: "Inspection station (process order)", position: "insideBottom", offset: -16, style: AXIS_LABEL_STYLE }} />
-                        <YAxis yAxisId="parts" {...RECHARTS_AXIS} axisLine={false} width={64} tickFormatter={(v) => fmtInt(v)}
+                        <YAxis yAxisId="parts" {...RECHARTS_AXIS} axisLine={false} width={60} tickFormatter={(v) => fmtInt(v)}
                           domain={[0, (max) => Math.ceil((max || 10) * 1.15)]}
-                          label={{ value: "Parts", angle: -90, position: "insideLeft", offset: 0, style: AXIS_LABEL_STYLE }} />
-                        <YAxis yAxisId="yield" orientation="right" {...RECHARTS_AXIS} axisLine={false} width={48} domain={[rolledMin, 100]}
-                          tickFormatter={(v) => `${v}%`} />
+                          label={{ value: "Parts", angle: -90, position: "insideLeft", offset: 4, style: AXIS_LABEL_STYLE }} />
+                        <YAxis yAxisId="rate" orientation="right" {...RECHARTS_AXIS} axisLine={false} width={44} domain={[0, rateAxisMax]}
+                          allowDecimals tickFormatter={(v) => `${Number(v.toFixed(1))}%`} />
+                        <ReferenceLine yAxisId="rate" y={RATE_ALERT} stroke={STATUS.critical} strokeOpacity={0.7} strokeDasharray="5 4" ifOverflow="extendDomain" />
                         <Tooltip
                           cursor={RECHARTS_TOOLTIP.cursor}
                           content={({ payload }) => {
@@ -2136,11 +2227,12 @@ export default function QualityGatesTab({
                                   { label: "Inspected (OK + NG)", value: fmtInt(d.inspected) },
                                   { label: "OK", value: `${fmtInt(d.OK)} · ${fmtPct(pctOf(d.OK, d.inspected))}`, color: OUTCOME.ok },
                                   { label: "NG", value: `${fmtInt(d.NG)} · ${fmtPct(pctOf(d.NG, d.inspected))}`, color: OUTCOME.ng },
+                                  d.inspected > 0 && { label: "NG rate", value: fmtPct(d.scrapRate, 2), color: INK.primary },
                                   { label: "First-pass yield here", value: fmtPct(d.fpy, 2) },
-                                  d.rolled != null && { label: "Rolled yield up to here", value: `${d.rolled.toFixed(2)}%`, color: ACCENT.process },
+                                  d.rolled != null && { label: "Rolled yield up to here", value: `${d.rolled.toFixed(2)}%` },
                                   { label: "Share of all station NG", value: fmtPct(pctOf(d.NG, totalGateNgSum)) },
                                   d.inProgress > 0 && { label: "No result yet at next station", value: fmtInt(d.inProgress), color: OUTCOME.wip },
-                                  { label: "Status", value: `${gateStatus(d.scrapRate).label} (limits 2.5% / 5%)`, strong: false },
+                                  d.inspected > 0 && { label: "Status", value: gateStatus(d.scrapRate).label, color: gateStatus(d.scrapRate).color },
                                 ]}
                               />
                             );
@@ -2173,8 +2265,11 @@ export default function QualityGatesTab({
                           <LabelList dataKey="inProgress" position="top" style={{ fontSize: 10.5, fontWeight: 600, fill: INK.secondary }}
                             formatter={(v) => (v > 0 ? fmtInt(v) : "")} />
                         </Bar>
-                        <Line yAxisId="yield" dataKey="rolled" name="Rolled yield %" type="monotone" stroke={ACCENT.process} strokeWidth={2}
-                          strokeDasharray="5 4" dot={{ r: 3.5, fill: ACCENT.process, strokeWidth: 0 }} isAnimationActive={false} connectNulls />
+                        <Line yAxisId="rate" dataKey="rateLine" name="NG rate %" type="linear" stroke={INK.primary} strokeWidth={2}
+                          isAnimationActive={false} connectNulls activeDot={false}
+                          dot={({ cx, cy, payload, index }) => (cx == null || cy == null || payload?.rateLine == null
+                            ? <g key={`rate-dot-${index}`} />
+                            : <circle key={`rate-dot-${index}`} cx={cx} cy={cy} r={4.5} fill={gateStatus(payload.rateLine).color} stroke="#ffffff" strokeWidth={2} />)} />
                       </ComposedChart>
                     )}
                   </SafeChart>
@@ -2190,10 +2285,10 @@ export default function QualityGatesTab({
               <Empty height={240}>No categorised rejects recorded for {drillDownGate} in the selected period.</Empty>
             ) : (
               <div className="rej-chart-scroll-wrapper">
-                <div style={{ height: 340, minWidth: drillDownCategoryData.length > 6 ? drillDownCategoryData.length * 130 : "100%" }}>
+                <div style={{ height: 340, minWidth: drillDownCategoryData.length * 96 }}>
                   <SafeChart height={340}>
                     {({ width, height }) => (
-                      <BarChart width={width} height={height} data={drillDownCategoryData} margin={{ top: 26, right: 16, left: 12, bottom: 28 }}>
+                      <BarChart width={width} height={height} data={drillDownCategoryData} margin={{ top: 34, right: 12, left: 4, bottom: 28 }}>
                         <CartesianGrid {...RECHARTS_GRID} />
                         <XAxis dataKey="category" interval={0} {...RECHARTS_AXIS} height={40}
                           label={{ value: "Defect category", position: "insideBottom", offset: -16, style: AXIS_LABEL_STYLE }} />
@@ -2221,8 +2316,7 @@ export default function QualityGatesTab({
                           {drillDownCategoryData.map((d) => (
                             <Cell key={d.category} fill={categoryColor(d.category)} />
                           ))}
-                          <LabelList dataKey="count" position="top" style={{ fontSize: 11, fontWeight: 600, fill: INK.secondary }}
-                            formatter={(v) => (v > 0 ? fmtInt(v) : "")} />
+                          <LabelList dataKey="count" content={countPctLabel(drillDownCategoryData)} />
                         </Bar>
                       </BarChart>
                     )}
@@ -2239,10 +2333,10 @@ export default function QualityGatesTab({
               <Empty height={240}>No defect reasons recorded for {drillDownGate} › {drillDownCategory}.</Empty>
             ) : (
               <div className="rej-chart-scroll-wrapper">
-                <div style={{ height: 360, minWidth: drillDownReasonData.length > 5 ? drillDownReasonData.length * 140 : "100%" }}>
+                <div style={{ height: 360, minWidth: drillDownReasonData.length * 104 }}>
                   <SafeChart height={360}>
                     {({ width, height }) => (
-                      <BarChart width={width} height={height} data={drillDownReasonData} margin={{ top: 26, right: 16, left: 12, bottom: 36 }}>
+                      <BarChart width={width} height={height} data={drillDownReasonData} margin={{ top: 34, right: 12, left: 4, bottom: 36 }}>
                         <CartesianGrid {...RECHARTS_GRID} />
                         <XAxis dataKey="reason" interval={0} {...RECHARTS_AXIS} height={44}
                           tickFormatter={(val) => truncate(val, 16)}
@@ -2272,8 +2366,7 @@ export default function QualityGatesTab({
                           {drillDownReasonData.map((d) => (
                             <Cell key={d.reason} fill={reasonColor(d.reason)} />
                           ))}
-                          <LabelList dataKey="count" position="top" style={{ fontSize: 11, fontWeight: 600, fill: INK.secondary }}
-                            formatter={(v) => (v > 0 ? fmtInt(v) : "")} />
+                          <LabelList dataKey="count" content={countPctLabel(drillDownReasonData)} />
                         </Bar>
                       </BarChart>
                     )}
@@ -2283,9 +2376,7 @@ export default function QualityGatesTab({
             )}
           </div>
         )}
-        <div className="ra-note">
-          Scrap rate = NG ÷ parts inspected at that station (OK + NG). Stations are rated Pass ≤ 2.5%, Watch 2.5–5%, Alert &gt; 5%.
-        </div>
+        <div className="ra-note">NG rate = NG ÷ (OK + NG) at the station · Pass ≤ {RATE_WATCH}% · Watch {RATE_WATCH}–{RATE_ALERT}% · Alert &gt; {RATE_ALERT}%</div>
       </div>
 
       {/* daily final OK vs NG with drill-down (month → day → OK by shift / NG detail) */}
@@ -2302,8 +2393,8 @@ export default function QualityGatesTab({
             <h3 className="ra-card-title" style={{ display: "flex", alignItems: "center" }}>Top rejection {paretoView === "reason" ? "reasons" : paretoView === "category" ? "categories" : "zones"} (Pareto)<InfoTip info={INFO.pareto} /></h3>
             <p className="ra-card-sub">
               {paretoChartMode === "pareto"
-                ? `Bars = share of all NG parts · line = cumulative share · dark red = first 80% of NG, light red = the rest · click a bar for its stations`
-                : `Share of all NG parts by ${paretoNoun} · click a slice or row to map it on the casting`}
+                ? "Dark red = vital few (first 80% of NG) · click a bar for its stations"
+                : "Click a slice or row to map it on the casting"}
             </p>
           </div>
           <div className="rej-header-actions">
@@ -2502,13 +2593,13 @@ export default function QualityGatesTab({
         ) : (
           <div className="ra-card-body">
             <div className="ra-legend" style={{ padding: "0 4px 6px" }}>
-              <span><i style={{ background: OUTCOME.ng }} />Share of NG — within first 80%</span>
-              <span><i style={{ background: "#f87171" }} />Share of NG — remaining</span>
+              <span><i style={{ background: OUTCOME.ng }} />Vital few (first 80%)</span>
+              <span><i style={{ background: PARETO_REST }} />Remaining NG</span>
               <span><i style={{ background: INK.primary, height: 2, verticalAlign: 3 }} />Cumulative share</span>
               <span><i style={{ background: "transparent", borderTop: `2px dashed ${INK.muted}`, height: 0, verticalAlign: 3 }} />80% line</span>
             </div>
             <div className="rej-chart-scroll-wrapper">
-              <div style={{ height: 370, minWidth: paretoChartData.length > 8 ? paretoChartData.length * 96 : "100%" }}>
+              <div style={{ height: 370, minWidth: paretoChartData.length * 72 }}>
                 <SafeChart height={370}>
                   {({ width, height }) => (
                     <ComposedChart
@@ -2538,7 +2629,7 @@ export default function QualityGatesTab({
                               title={paretoItemLabel(d[paretoKey])}
                               subtitle={d.vital ? "Within the first 80% of NG" : "Outside the first 80% of NG"}
                               rows={[
-                                { label: "NG parts", value: fmtInt(d.count), color: d.vital ? OUTCOME.ng : "#f87171" },
+                                { label: "NG parts", value: fmtInt(d.count), color: d.vital ? OUTCOME.ng : PARETO_REST },
                                 { label: "Share of all NG", value: fmtPct(d.pct) },
                                 { label: "Cumulative share", value: fmtPct(d.cum), color: INK.primary },
                                 { label: "All NG parts", value: fmtInt(paretoTotal), strong: false },
@@ -2557,7 +2648,7 @@ export default function QualityGatesTab({
                           return (
                             <Cell
                               key={entry[paretoKey]}
-                              fill={entry.vital ? OUTCOME.ng : "#f87171"}
+                              fill={entry.vital ? OUTCOME.ng : PARETO_REST}
                               stroke={isSelected ? INK.primary : "none"}
                               strokeWidth={isSelected ? 2 : 0}
                             />
@@ -2576,7 +2667,7 @@ export default function QualityGatesTab({
             </div>
             {paretoList.length > paretoChartData.length && (
               <div style={{ fontSize: 11.5, color: INK.muted, padding: "2px 6px" }}>
-                Showing the top {paretoChartData.length} of {paretoList.length}; shares are of all {fmtInt(paretoTotal)} NG parts · click a bar to see which stations rejected it.
+                Top {paretoChartData.length} of {paretoList.length} shown · shares are of all {fmtInt(paretoTotal)} NG parts
               </div>
             )}
           </div>
@@ -2754,7 +2845,7 @@ export default function QualityGatesTab({
                     {activeStudioData.title}
                   </div>
                   <div className="rej-hotspot-line">
-                    <MapPin size={13} color="#dc2626" style={{ flexShrink: 0 }} />
+                    <MapPin size={13} color={OUTCOME.ng} style={{ flexShrink: 0 }} />
                     <span>
                       Most NG on: <strong style={{ color: OUTCOME.ng }}>{activeStudioData.summary?.primaryViewName || "—"}</strong>
                       {" › "}<strong>{activeStudioData.summary?.topHotspotSubZone || "—"}</strong>
@@ -2903,7 +2994,7 @@ export default function QualityGatesTab({
                                           className="rej-copy-btn" title="Copy Part Serial"
                                         >
                                           {copiedId === `part-${partSerial}-${idx}`
-                                            ? <Check size={11} color="#16a34a" />
+                                            ? <Check size={11} color={OUTCOME.ok} />
                                             : <Copy size={11} />}
                                         </button>
                                       )}
@@ -2924,7 +3015,7 @@ export default function QualityGatesTab({
                                           className="rej-copy-btn" title="Copy Customer QR"
                                         >
                                           {copiedId === `qr-${custQr}-${idx}`
-                                            ? <Check size={11} color="#16a34a" />
+                                            ? <Check size={11} color={OUTCOME.ok} />
                                             : <Copy size={11} />}
                                         </button>
                                       )}
@@ -2933,7 +3024,7 @@ export default function QualityGatesTab({
                                   <td>
                                     <span className="qg-status" style={isNg
                                       ? { color: OUTCOME.ng, background: withAlpha(OUTCOME.ng, 0.1), borderColor: withAlpha(OUTCOME.ng, 0.4) }
-                                      : { color: "#12805a", background: withAlpha(OUTCOME.ok, 0.1), borderColor: withAlpha(OUTCOME.ok, 0.4) }}>
+                                      : { color: OUTCOME.ok, background: withAlpha(OUTCOME.ok, 0.1), borderColor: withAlpha(OUTCOME.ok, 0.4) }}>
                                       {isNg ? "NG" : "OK"}
                                     </span>
                                   </td>
@@ -3027,7 +3118,7 @@ export default function QualityGatesTab({
           icon={Grid3x3}
           title="Where each defect is caught: station × defect"
           info={INFO.matrix}
-          sub="NG parts by defect reason (top 10, rest folded) and the station that rejected them · darker = more · totals in grey"
+          sub="Top 10 reasons × rejecting station · darker = more NG"
         />
         <div className="ra-card-body">
           {!matrixOption ? (
@@ -3040,11 +3131,6 @@ export default function QualityGatesTab({
             </div>
           )}
         </div>
-        {/* <div className="ra-note">
-          Cell = NG parts with that reason rejected at that station (one record = one part) · row total = all stations for the reason ·
-          column total = all reasons at the station · colour: sequential scrap ramp, square-root scaled to the largest cell.
-          Reasons are normalised (e.g. spelling variants merged) the same way as the Pareto.
-        </div> */}
       </div>
 
       {/* ─── SHIFT-WISE OUTPUT ───────────────────────────────────────────── */}
@@ -3053,7 +3139,7 @@ export default function QualityGatesTab({
           icon={Users}
           title="Shift-wise output"
           info={INFO.shiftOutput}
-          sub="Parts produced per shift, split into final OK, NG and still in process · OK % and NG % are of completed parts (OK + NG)"
+          sub="OK % and NG % are of completed parts (OK + NG)"
         />
         <div className="ra-card-body">
           {shiftRows.length === 0 ? (
@@ -3156,9 +3242,6 @@ export default function QualityGatesTab({
             </>
           )}
         </div>
-        {/* <div className="ra-note">
-          OK % = OK ÷ (OK + NG) and NG % = NG ÷ (OK + NG) — first-pass yield of completed parts. &ldquo;Unassigned&rdquo; = parts with no shift recorded.
-        </div> */}
       </div>
 
     </div>

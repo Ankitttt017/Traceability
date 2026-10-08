@@ -520,13 +520,26 @@ export const isRecordMatchingStation = (r, stationCode) => {
   return false;
 };
 
-// CSS box for a zone/sub-zone authored in Rejection Configuration (percent of the 900×520 stage)
+// CSS box for a zone authored in Rejection Configuration (percent of the 900×520 stage)
 export const boxStyle = (o, defW = 10, defH = 10) => ({
   left: `${Number(o.xPercent || 0)}%`,
   top: `${Number(o.yPercent || 0)}%`,
   width: `${Number(o.widthPercent || defW)}%`,
   height: `${Number(o.heightPercent || defH)}%`,
 });
+
+// CSS box for a sub-zone. Rejection Configuration saves sub-zones as a percent of their PARENT ZONE box (not of
+// the stage), so place them inside the zone exactly as the editor and the operator NG picker do.
+export const subBoxStyle = (zone, sz) => {
+  const zx = Number(zone?.xPercent || 0), zy = Number(zone?.yPercent || 0);
+  const zw = Math.max(1, Number(zone?.widthPercent || 10)), zh = Math.max(1, Number(zone?.heightPercent || 10));
+  return {
+    left: `${zx + (zw * Number(sz.xPercent || 0)) / 100}%`,
+    top: `${zy + (zh * Number(sz.yPercent || 0)) / 100}%`,
+    width: `${(zw * Number(sz.widthPercent || 10)) / 100}%`,
+    height: `${(zh * Number(sz.heightPercent || 10)) / 100}%`,
+  };
+};
 
 /**
  * Exact defect counts per configured CAD view / zone / sub-zone for a set of records.

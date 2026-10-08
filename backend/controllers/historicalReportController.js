@@ -356,6 +356,20 @@ exports.getHistoricalReportData = async (req, res) => {
     // Every part in the filtered set is counted once: produced = OK + NG + in process
     totalProduction = totalOK + totalNG + inProgress;
 
+    // Overall (no gate): Final OK = parts that passed the final station (OP160) in the period, by its scan time — the
+    // same "Final OK" as Rejection Analysis and the Report page. The part-status count above only holds parts CAST in
+    // the period that have already finished, so it lags (parts cast yesterday and passed today were missing).
+    if (!stationScope && !leak && !String(req.query.status || "").trim()) {
+      const { where: finalWhere } = await buildHistoricalWhere({ ...req.query, machineId: "OP160" });
+      const finalOk = await ProductionReport.count({
+        where: { [Op.and]: [finalWhere, sequelize.literal(`op160_status IN (${sqlList(OK_VALUES)})`)] },
+      });
+      if (finalOk > totalOK) {
+        totalOK = finalOk;
+        inProgress = Math.max(0, totalProduction - totalOK - totalNG);
+      }
+    }
+
     // Pass rate over completed parts only (OK + NG); parts still in process are excluded
     const passRate = (totalOK + totalNG) > 0 ? Number(((totalOK / (totalOK + totalNG)) * 100).toFixed(2)) : 0;
 
