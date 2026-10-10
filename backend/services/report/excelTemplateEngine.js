@@ -271,115 +271,36 @@ function nowStamp() {
   return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
 }
 
-async function generateIndustrialExcel(res, {
-  rows = [],
-  stationPairs = [],
-  metrics = {},
-  filters = {},
-  reportConfig = {},
-  sheetName = "Production Report",
-  filePrefix = "PROD_REPORT"
-}) {
-  const workbook  = new ExcelJS.Workbook();
-  const worksheet = workbook.addWorksheet(sheetName);
-
-  const NAVY = "FF1A3A7C";
-  const RED = "FFC8191E";
-  const TEAL = "FF0D9488";
-  const GRAY = "FF4B5563";
-  const WHITE = "FFFFFFFF";
-  const LTGRAY = "FFF9FAFB";
-  const BORDER = "FFD1D5DB";
-
-  worksheet.getRow(1).height = 65;
-  worksheet.mergeCells("A1:H1");
-  const titleCell = worksheet.getCell("A1");
-  titleCell.value = (reportConfig.headerLine1 || reportConfig.companyName || "Industrial Traceability System").toUpperCase();
-  titleCell.font = { bold: true, size: 20, color: { argb: WHITE }, name: "Calibri" };
-  titleCell.alignment = { horizontal: "center", vertical: "middle" };
-  titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } };
-
-  if (reportConfig.logoUrl && reportConfig.showLogo) {
-    try {
-      let base64Data = reportConfig.logoUrl;
-      if (base64Data.includes(",")) base64Data = base64Data.split(",")[1];
-      if (base64Data && base64Data.length > 50) {
-        const imageId = workbook.addImage({ base64: base64Data, extension: "png" });
-        worksheet.addImage(imageId, { tl: { col: 0.1, row: 0.1 }, ext: { width: 90, height: 55 } });
-      }
-    } catch (e) {
-      console.warn("Logo addition failed:", e.message);
-    }
-  }
-
-  worksheet.getRow(2).height = 32;
-  worksheet.mergeCells("A2:H2");
-  const subTitleCell = worksheet.getCell("A2");
-  let subText = reportConfig.headerLine2 || "TRACEABILITY PRODUCTION REPORT";
-  if (filters.machineId) subText += ` - MACHINE: ${filters.machineId}`;
-  else if (filters.lineName) subText += ` - LINE: ${filters.lineName}`;
-  subTitleCell.value = subText.toUpperCase();
-  subTitleCell.font = { bold: true, size: 14, color: { argb: WHITE } };
-  subTitleCell.alignment = { horizontal: "center", vertical: "middle" };
-  subTitleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2D5BA3" } };
-
-  worksheet.getColumn(1).width = 18;
-  worksheet.getColumn(4).width = 18;
-
-  const metaRows = [
-    ["Report Type", sheetName, "Generated At", formatIndustrialTimestamp(new Date())],
-    ["Line", filters.lineName || "All Lines", "Date From", formatIndustrialTimestamp(filters.dateFrom)],
-    ["Machine", filters.machineId || "All Machines", "Date To", formatIndustrialTimestamp(filters.dateTo)],
-    ["Shift", filters.shiftCode || "All Shifts", "Plant", reportConfig.plantName || "-"],
-    ["Department", reportConfig.department || "-", "Prepared By", reportConfig.preparedBy || "-"],
-  ];
-
-  metaRows.forEach((r, i) => {
-    const rowNum = i + 4;
-    worksheet.getRow(rowNum).height = 20;
-    const set = (col, val, bold) => {
-      const c = worksheet.getCell(`${col}${rowNum}`);
-      c.value = val;
-      c.font = bold ? { bold: true, size: 10, color: { argb: NAVY } } : { size: 10 };
-      c.alignment = { vertical: "middle" };
-      c.border = {
-        top: { style: "thin", color: { argb: BORDER } },
-        bottom: { style: "thin", color: { argb: BORDER } },
-        left: { style: "thin", color: { argb: BORDER } },
-        right: { style: "thin", color: { argb: BORDER } },
-      };
-    };
-    set("A", r[0], true); set("B", r[1], false); set("D", r[2], true); set("E", r[3], false);
-    const emptyC = worksheet.getCell(`C${rowNum}`);
-    emptyC.border = { top:{style:"thin",color:{argb:BORDER}}, bottom:{style:"thin",color:{argb:BORDER}}, left:{style:"thin",color:{argb:BORDER}}, right:{style:"thin",color:{argb:BORDER}} };
-  });
-
-  const stationMap = new Map();
-  (stationPairs || []).forEach((s) => {
-    const station = buildStationPair(s.machineName, s.op);
-    if (!station) return;
-    stationMap.set(station.key, station);
-  });
-  rows.forEach((row) => {
-    const machineName = String(row.machineName || row.machine_name || row?.Machine?.machine_name || "").trim();
-    const op = String(row.operation_no || row.operationNo || row.stationNo || "").trim();
-    const station = buildStationPair(machineName, op);
-    if (station && !stationMap.has(station.key)) stationMap.set(station.key, station);
-  });
-  const stationPairsFinal = Array.from(stationMap.values()).sort((a, b) =>
-    a.op.localeCompare(b.op, undefined, { numeric: true, sensitivity: "base" }) || a.machineName.localeCompare(b.machineName)
-  );
-  const requiredOperations = Array.from(
-    new Set(
-      stationPairsFinal
-        .map((station) => String(station.op || "").trim().toUpperCase())
-        .filter(Boolean)
-    )
-  );
-
+/* ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   The report is one row per part. Building it is split in two steps so a large export does not need every log
+   in memory at once:
+   1. createIndustrialAccumulator().add(log) folds each log into its part's row (the logs themselves can be dropped
+      right after), and remembers the machine / operation pairs seen;
+   2. renderIndustrialSheet() writes the header block, the table and the footer — into an in-memory workbook
+      (generateIndustrialExcel, unchanged output) or a streaming workbook written straight to a file
+      (generateIndustrialExcelFile, used by the historical export).
+   ───────────────────────────────────────────────────────────────────────────────────────────────────────────── */
+function createIndustrialAccumulator() {
   const grouped = new Map();
-  rows.forEach((row, index) => {
-    const groupKey = getExcelGroupKey(row, `row_${index}`);
+  // distinct machine / operation pairs in order of first appearance (engine and station-pair-builder spellings)
+  const rowStations = new Map();
+  const builderRows = new Map();
+  let index = 0;
+
+  function add(row) {
+    const rowIndex = index++;
+    {
+      const machineName = String(row.machineName || row.machine_name || row?.Machine?.machine_name || "").trim();
+      const op = String(row.operation_no || row.operationNo || row.stationNo || "").trim();
+      const key = `${machineName}\u0000${op}`;
+      if (!rowStations.has(key)) rowStations.set(key, { machineName, op });
+      // stationPairBuilder spelling (operationNo first, also station_no)
+      const bOp = String(row.operationNo || row.operation_no || row.stationNo || row.station_no || "").trim();
+      const bKey = `${machineName}\u0000${bOp}`;
+      if (!builderRows.has(bKey)) builderRows.set(bKey, { machineName, operationNo: bOp });
+    }
+
+    const groupKey = getExcelGroupKey(row, `row_${rowIndex}`);
     const partSerial = getDisplayPartSerial(row, groupKey);
     const rejectionDetails = resolveRejectionDetails(row);
     if (!grouped.has(groupKey)) {
@@ -492,41 +413,235 @@ async function generateIndustrialExcel(res, {
       const leakDisplay = leakMachineName && leakStatus !== "-" ? `${leakMachineName} ${leakStatus}` : leakStatus;
       bucket.stationResults[LEAK_TEST_SHARED_KEY] = pickPreferredStationDisplay(bucket.stationResults[LEAK_TEST_SHARED_KEY], leakDisplay);
     }
-  });
+  }
 
-  const matrixRows = [...grouped.values()];
-  const missingCustomerQrPartIds = matrixRows
+  return {
+    add,
+    get logCount() { return index; },
+    get partCount() { return grouped.size; },
+    /** Distinct { machineName, operationNo } pairs — enough input for buildStationPairsFromRows(). */
+    stationPairRows: () => [...builderRows.values()],
+    // hands the part rows over (and drops its own references, so written rows can be released one by one)
+    finish: () => {
+      const out = { matrixRows: [...grouped.values()], rowStations: [...rowStations.values()] };
+      grouped.clear();
+      return out;
+    },
+  };
+}
+
+// Customer QR of parts whose logs carried none, from PartCodeMapping (one query per 2000 parts).
+async function fillMissingCustomerQr(matrixRows) {
+  const missingCustomerQrPartIds = [...new Set(matrixRows
     .filter((row) => !row.customerQrCode || row.customerQrCode === "-")
     .map((row) => String(row.partSerial || "").trim())
-    .filter(Boolean);
-  if (missingCustomerQrPartIds.length > 0) {
+    .filter(Boolean))];
+  if (!missingCustomerQrPartIds.length) return;
+  const qrByPart = {};
+  for (let i = 0; i < missingCustomerQrPartIds.length; i += 2000) {
+    const ids = missingCustomerQrPartIds.slice(i, i + 2000);
     const mappings = await PartCodeMapping.findAll({
       where: {
         [Op.or]: [
-          { old_part_id: { [Op.in]: [...new Set(missingCustomerQrPartIds)] } },
-          { customer_qr: { [Op.in]: [...new Set(missingCustomerQrPartIds)] } },
+          { old_part_id: { [Op.in]: ids } },
+          { customer_qr: { [Op.in]: ids } },
         ],
         is_active: true,
       },
       attributes: ["old_part_id", "customer_qr"],
       raw: true,
     });
-    const qrByPart = mappings.reduce((acc, row) => {
+    mappings.forEach((row) => {
       const partId = String(row.old_part_id || "").trim().toUpperCase();
       const customerQr = String(row.customer_qr || "").trim();
-      if (partId && customerQr && !acc[partId]) acc[partId] = customerQr;
-      if (customerQr && !acc[customerQr.toUpperCase()]) acc[customerQr.toUpperCase()] = customerQr;
-      return acc;
-    }, {});
-    matrixRows.forEach((row) => {
-      const mappedQr = qrByPart[String(row.partSerial || "").trim().toUpperCase()];
-      if (mappedQr && (!row.customerQrCode || row.customerQrCode === "-")) {
-        row.customerQrCode = mappedQr;
-      }
+      if (partId && customerQr && !qrByPart[partId]) qrByPart[partId] = customerQr;
+      if (customerQr && !qrByPart[customerQr.toUpperCase()]) qrByPart[customerQr.toUpperCase()] = customerQr;
     });
   }
+  matrixRows.forEach((row) => {
+    const mappedQr = qrByPart[String(row.partSerial || "").trim().toUpperCase()];
+    if (mappedQr && (!row.customerQrCode || row.customerQrCode === "-")) {
+      row.customerQrCode = mappedQr;
+    }
+  });
+}
 
-  const tableHeaderRow = 10;
+const NAVY = "FF1A3A7C";
+const RED = "FFC8191E";
+const TEAL = "FF0D9488";
+const GRAY = "FF4B5563";
+const WHITE = "FFFFFFFF";
+const LTGRAY = "FFF9FAFB";
+const BORDER = "FFD1D5DB";
+const TABLE_HEADER_ROW = 10;
+
+function resolveStationColumns(stationPairs, rowStations) {
+  const stationMap = new Map();
+  (stationPairs || []).forEach((s) => {
+    const station = buildStationPair(s.machineName, s.op);
+    if (!station) return;
+    stationMap.set(station.key, station);
+  });
+  (rowStations || []).forEach(({ machineName, op }) => {
+    const station = buildStationPair(machineName, op);
+    if (station && !stationMap.has(station.key)) stationMap.set(station.key, station);
+  });
+  return Array.from(stationMap.values()).sort((a, b) =>
+    a.op.localeCompare(b.op, undefined, { numeric: true, sensitivity: "base" }) || a.machineName.localeCompare(b.machineName)
+  );
+}
+
+function decodeLogo(reportConfig) {
+  if (!(reportConfig.logoUrl && reportConfig.showLogo)) return null;
+  let base64Data = reportConfig.logoUrl;
+  if (base64Data.includes(",")) base64Data = base64Data.split(",")[1];
+  return base64Data && base64Data.length > 50 ? base64Data : null;
+}
+
+/* Logo for the streaming writer. ExcelJS's WorkbookWriter has no worksheet.addImage, so the drawing part is added
+   the same way the in-memory writer does it: drawing XML + its rels, a sheet relationship, the <drawing> element
+   (after rowBreaks, before legacyDrawing) and a content-type override. The anchor is computed exactly as
+   worksheet.addImage() does at the same point of the in-memory build (row 1 = 65 pt, column A default width). */
+function attachStreamingLogo(workbook, worksheet, base64Data) {
+  const Anchor = require("exceljs/lib/doc/anchor");
+  const DrawingXform = require("exceljs/lib/xlsx/xform/drawing/drawing-xform");
+  const RelationshipsXform = require("exceljs/lib/xlsx/xform/core/relationships-xform");
+  const ContentTypesXform = require("exceljs/lib/xlsx/xform/core/content-types-xform");
+  // a Buffer, not base64: the streaming writer would store base64 text as the image bytes (corrupt picture)
+  const imageId = workbook.addImage({ buffer: Buffer.from(base64Data, "base64"), extension: "png" });
+  const bookImage = workbook.getImage(imageId);
+  const sizing = { getColumn: () => ({ isCustomWidth: false }), getRow: (n) => ({ height: n === 1 ? 65 : undefined }) };
+  const tl = new Anchor(sizing, { col: 0.1, row: 0.1 }, 0);
+  const drawing = {
+    rId: null,
+    name: "drawing1",
+    anchors: [{ picture: { rId: "rId1" }, range: { tl: tl.model, br: undefined, ext: { width: 90, height: 55 }, editAs: undefined } }],
+    rels: [{ Id: "rId1", Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", Target: `../media/${bookImage.name}` }],
+  };
+  const origLegacy = worksheet._writeLegacyData;
+  worksheet._writeLegacyData = function writeDrawingThenLegacy() {
+    const rId = this._sheetRelsWriter.addRelationship({
+      Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing",
+      Target: `../drawings/${drawing.name}.xml`,
+    });
+    this.stream.write(`<drawing r:id="${rId}"/>`);
+    const drawingXform = new DrawingXform();
+    drawingXform.prepare(drawing, {});
+    workbook.zip.append(drawingXform.toXml(drawing), { name: `xl/drawings/${drawing.name}.xml` });
+    workbook.zip.append(new RelationshipsXform().toXml(drawing.rels), { name: `xl/drawings/_rels/${drawing.name}.xml.rels` });
+    return origLegacy.call(this);
+  };
+  workbook.addContentTypes = function addContentTypesWithDrawing() {
+    return new Promise((resolve) => {
+      const xml = new ContentTypesXform().toXml({
+        worksheets: this._worksheets.filter(Boolean),
+        sharedStrings: this.sharedStrings,
+        commentRefs: this.commentRefs,
+        media: this.media,
+        drawings: [drawing],
+      });
+      this.zip.append(xml, { name: "[Content_Types].xml" });
+      resolve();
+    });
+  };
+}
+
+const yieldToLoop = () => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * Writes the report sheet. `streaming` = ExcelJS WorkbookWriter (rows are committed as they are written, so the
+ * table never sits in memory); otherwise a regular in-memory workbook. Same cells, styles and layout either way.
+ */
+async function renderIndustrialSheet({
+  workbook,
+  streaming = false,
+  matrixRows = [],
+  stationPairs = [],
+  rowStations = [],
+  filters = {},
+  reportConfig = {},
+  sheetName = "Production Report",
+  onProgress,
+}) {
+  const tableHeaderRow = TABLE_HEADER_ROW;
+  const worksheet = streaming
+    ? workbook.addWorksheet(sheetName, { views: [{ state: "frozen", ySplit: tableHeaderRow }] })
+    : workbook.addWorksheet(sheetName);
+  const commit = (rowNumber) => { if (streaming) worksheet.getRow(rowNumber).commit(); };
+
+  worksheet.getRow(1).height = 65;
+  worksheet.mergeCells("A1:H1");
+  const titleCell = worksheet.getCell("A1");
+  titleCell.value = (reportConfig.headerLine1 || reportConfig.companyName || "Industrial Traceability System").toUpperCase();
+  titleCell.font = { bold: true, size: 20, color: { argb: WHITE }, name: "Calibri" };
+  titleCell.alignment = { horizontal: "center", vertical: "middle" };
+  titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } };
+
+  try {
+    const base64Data = decodeLogo(reportConfig);
+    if (base64Data) {
+      if (streaming) {
+        attachStreamingLogo(workbook, worksheet, base64Data);
+      } else {
+        const imageId = workbook.addImage({ base64: base64Data, extension: "png" });
+        worksheet.addImage(imageId, { tl: { col: 0.1, row: 0.1 }, ext: { width: 90, height: 55 } });
+      }
+    }
+  } catch (e) {
+    console.warn("Logo addition failed:", e.message);
+  }
+
+  worksheet.getRow(2).height = 32;
+  worksheet.mergeCells("A2:H2");
+  const subTitleCell = worksheet.getCell("A2");
+  let subText = reportConfig.headerLine2 || "TRACEABILITY PRODUCTION REPORT";
+  if (filters.machineId) subText += ` - MACHINE: ${filters.machineId}`;
+  else if (filters.lineName) subText += ` - LINE: ${filters.lineName}`;
+  subTitleCell.value = subText.toUpperCase();
+  subTitleCell.font = { bold: true, size: 14, color: { argb: WHITE } };
+  subTitleCell.alignment = { horizontal: "center", vertical: "middle" };
+  subTitleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2D5BA3" } };
+
+  worksheet.getColumn(1).width = 18;
+  worksheet.getColumn(4).width = 18;
+
+  const metaRows = [
+    ["Report Type", sheetName, "Generated At", formatIndustrialTimestamp(new Date())],
+    ["Line", filters.lineName || "All Lines", "Date From", formatIndustrialTimestamp(filters.dateFrom)],
+    ["Machine", filters.machineId || "All Machines", "Date To", formatIndustrialTimestamp(filters.dateTo)],
+    ["Shift", filters.shiftCode || "All Shifts", "Plant", reportConfig.plantName || "-"],
+    ["Department", reportConfig.department || "-", "Prepared By", reportConfig.preparedBy || "-"],
+  ];
+
+  metaRows.forEach((r, i) => {
+    const rowNum = i + 4;
+    worksheet.getRow(rowNum).height = 20;
+    const set = (col, val, bold) => {
+      const c = worksheet.getCell(`${col}${rowNum}`);
+      c.value = val;
+      c.font = bold ? { bold: true, size: 10, color: { argb: NAVY } } : { size: 10 };
+      c.alignment = { vertical: "middle" };
+      c.border = {
+        top: { style: "thin", color: { argb: BORDER } },
+        bottom: { style: "thin", color: { argb: BORDER } },
+        left: { style: "thin", color: { argb: BORDER } },
+        right: { style: "thin", color: { argb: BORDER } },
+      };
+    };
+    set("A", r[0], true); set("B", r[1], false); set("D", r[2], true); set("E", r[3], false);
+    const emptyC = worksheet.getCell(`C${rowNum}`);
+    emptyC.border = { top:{style:"thin",color:{argb:BORDER}}, bottom:{style:"thin",color:{argb:BORDER}}, left:{style:"thin",color:{argb:BORDER}}, right:{style:"thin",color:{argb:BORDER}} };
+  });
+
+  const stationPairsFinal = resolveStationColumns(stationPairs, rowStations);
+  const requiredOperations = Array.from(
+    new Set(
+      stationPairsFinal
+        .map((station) => String(station.op || "").trim().toUpperCase())
+        .filter(Boolean)
+    )
+  );
+
   const baseColumns = [
     { header: "SR NO", width: 8 },
     { header: "Shot Number", width: 14 },
@@ -589,8 +704,41 @@ async function generateIndustrialExcel(res, {
     cell.alignment = { horizontal: "center", vertical: "middle" };
     cell.border = { bottom: { style: "medium", color: { argb: TEAL } } };
   });
+  // streaming: column widths are final now — rows 1–10 can go out
+  commit(tableHeaderRow);
 
-  matrixRows.forEach((row, i) => {
+  const shotStatusColIndex = columns.findIndex((c) => String(c.key || "") === "shot_status");
+  const total = matrixRows.length;
+  const sharedStyles = new Map();
+  // Streaming: every data cell gets the SAME border / alignment / font objects (same content as before), so the
+  // style key below is a few cached lookups instead of a JSON.stringify of the whole style for each of ~1.8 M cells.
+  const newDataBorder = () => ({
+    top: { style: "thin", color: { argb: BORDER } },
+    bottom: { style: "thin", color: { argb: BORDER } },
+    left: { style: "thin", color: { argb: BORDER } },
+    right: { style: "thin", color: { argb: BORDER } },
+  });
+  const newDataAlignment = () => ({ vertical: "middle", horizontal: "left", indent: 1 });
+  const newDataFont = () => ({ size: 9 });
+  const sharedBorder = streaming ? newDataBorder() : null;
+  const sharedAlignment = streaming ? newDataAlignment() : null;
+  const sharedFont = streaming ? newDataFont() : null;
+  const partKeys = new WeakMap();
+  const partKey = (v) => {
+    if (v === null || typeof v !== "object") return JSON.stringify(v);
+    let k = partKeys.get(v);
+    if (k === undefined) { k = JSON.stringify(v); partKeys.set(v, k); }
+    return k;
+  };
+  // equal keys ⇒ equal JSON.stringify(cell.style) (same property names, order and values)
+  const styleKey = (cell) => {
+    const st = cell.style || {};
+    let k = `${cell.type}|`;
+    for (const name in st) k += `${name}:${partKey(st[name])};`;
+    return k;
+  };
+  for (let i = 0; i < total; i += 1) {
+    const row = matrixRows[i];
     const stationResults = stationPairsFinal.map((s) => row.stationResults[s.key] || "-");
     const operationResults = requiredOperations.map((operation) => {
       const operationStationResults = stationPairsFinal
@@ -697,36 +845,31 @@ async function generateIndustrialExcel(res, {
     ];
 
     const rowIndex = tableHeaderRow + 1 + i;
-    worksheet.getRow(rowIndex).values = values;
-    if (i % 2 !== 0) worksheet.getRow(rowIndex).fill = { type: "pattern", pattern: "solid", fgColor: { argb: LTGRAY } };
+    const sheetRow = worksheet.getRow(rowIndex);
+    sheetRow.values = values;
+    if (i % 2 !== 0) sheetRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: LTGRAY } };
 
     values.forEach((_, ci) => {
-      const cell = worksheet.getCell(rowIndex, ci + 1);
-      cell.border = {
-        top: { style: "thin", color: { argb: BORDER } },
-        bottom: { style: "thin", color: { argb: BORDER } },
-        left: { style: "thin", color: { argb: BORDER } },
-        right: { style: "thin", color: { argb: BORDER } },
-      };
-      cell.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
-      if (!cell.font || !cell.font.bold) cell.font = { size: 9 };
+      const cell = sheetRow.getCell(ci + 1);
+      cell.border = sharedBorder || newDataBorder();
+      cell.alignment = sharedAlignment || newDataAlignment();
+      if (!cell.font || !cell.font.bold) cell.font = sharedFont || newDataFont();
     });
 
-    const overallCell = worksheet.getCell(rowIndex, baseColumns.length + stationColumns.length + 1);
+    const overallCell = sheetRow.getCell(baseColumns.length + stationColumns.length + 1);
     if (overall === "OK" || overall === "PASSED") overallCell.font = { bold: true, size: 9, color: { argb: "FF059669" } };
     if (overall === "NG") overallCell.font = { bold: true, size: 9, color: { argb: RED } };
     if (overall === "IN_PROGRESS") overallCell.font = { bold: true, size: 9, color: { argb: "FFD97706" } };
 
     stationPairsFinal.forEach((_, sIdx) => {
-      const stationCell = worksheet.getCell(rowIndex, baseColumns.length + sIdx + 1);
+      const stationCell = sheetRow.getCell(baseColumns.length + sIdx + 1);
       const v = getStationResultStatus(stationCell.value);
       if (v === "OK") stationCell.font = { bold: true, size: 9, color: { argb: "FF059669" } };
       if (v === "NG") stationCell.font = { bold: true, size: 9, color: { argb: RED } };
     });
 
-    const shotStatusColIndex = columns.findIndex((c) => String(c.key || "") === "shot_status");
     if (shotStatusColIndex >= 0) {
-      const shotStatusCell = worksheet.getCell(rowIndex, shotStatusColIndex + 1);
+      const shotStatusCell = sheetRow.getCell(shotStatusColIndex + 1);
       const shotStatusText = String(shotStatusCell.value || "").toUpperCase();
       if (shotStatusText === "OK") {
         shotStatusCell.font = { bold: true, size: 9, color: { argb: "FF059669" } };
@@ -739,17 +882,60 @@ async function generateIndustrialExcel(res, {
         shotStatusCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFEECEC" } };
       }
     }
-  });
 
-  worksheet.views = [{ state: "frozen", ySplit: tableHeaderRow }];
+    if (streaming) {
+      // Identical styles share one object: the style writer caches the style id per object, so ~1.8 M cells of a
+      // 30-day export no longer each go through the full style serialisation (the slowest part of writing).
+      sheetRow.eachCell({ includeEmpty: true }, (cell) => {
+        const key = styleKey(cell);
+        let shared = sharedStyles.get(key);
+        if (!shared) { shared = cell.style; sharedStyles.set(key, shared); }
+        cell.style = shared;
+      });
+      sheetRow.commit();
+      matrixRows[i] = null; // written — let it go
+      // let the zip stream drain and keep the event loop responsive
+      if (i % 50 === 49) {
+        if (onProgress && i % 250 === 249) onProgress(i + 1, total);
+        await yieldToLoop();
+      }
+    }
+  }
+
+  if (!streaming) worksheet.views = [{ state: "frozen", ySplit: tableHeaderRow }];
   worksheet.autoFilter = { from: { row: tableHeaderRow, column: 1 }, to: { row: tableHeaderRow, column: columns.length } };
 
-  const footerRow = tableHeaderRow + matrixRows.length + 2;
+  const footerRow = tableHeaderRow + total + 2;
   worksheet.mergeCells(footerRow, 1, footerRow, columns.length);
   const footer = worksheet.getCell(footerRow, 1);
-  footer.value = `${reportConfig.footerText || "Industrial Document - Controlled Copy"}  ·  Records: ${matrixRows.length}  ·  Exported: ${formatIndustrialTimestamp(new Date())}`;
+  footer.value = `${reportConfig.footerText || "Industrial Document - Controlled Copy"}  ·  Records: ${total}  ·  Exported: ${formatIndustrialTimestamp(new Date())}`;
   footer.font = { italic: true, size: 8, color: { argb: GRAY } };
   footer.alignment = { horizontal: "center" };
+  if (streaming) {
+    commit(footerRow);
+    worksheet.commit();
+  }
+  if (onProgress) onProgress(total, total);
+  return worksheet;
+}
+
+async function generateIndustrialExcel(res, {
+  rows = [],
+  stationPairs = [],
+  metrics = {},
+  filters = {},
+  reportConfig = {},
+  sheetName = "Production Report",
+  filePrefix = "PROD_REPORT"
+}) {
+  void metrics;
+  const acc = createIndustrialAccumulator();
+  rows.forEach((row) => acc.add(row));
+  const { matrixRows, rowStations } = acc.finish();
+  await fillMissingCustomerQr(matrixRows);
+
+  const workbook = new ExcelJS.Workbook();
+  await renderIndustrialSheet({ workbook, matrixRows, stationPairs, rowStations, filters, reportConfig, sheetName });
 
   const filename = `${filePrefix}_${nowStamp()}.xlsx`;
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -758,4 +944,37 @@ async function generateIndustrialExcel(res, {
   res.end();
 }
 
-module.exports = { generateIndustrialExcel };
+/**
+ * Streams the report straight into an .xlsx file (ExcelJS WorkbookWriter): only the per-part summary rows are in
+ * memory, each table row is written out and released as soon as it is built.
+ * `accumulator` = a createIndustrialAccumulator() that has already seen every log.
+ */
+async function generateIndustrialExcelFile(filePath, {
+  accumulator,
+  stationPairs = [],
+  filters = {},
+  reportConfig = {},
+  sheetName = "Production Report",
+  onProgress,
+}) {
+  const { matrixRows, rowStations } = accumulator.finish();
+  await fillMissingCustomerQr(matrixRows);
+  const records = matrixRows.length;
+  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({ filename: filePath, useStyles: true, useSharedStrings: false });
+  try {
+    await renderIndustrialSheet({ workbook, streaming: true, matrixRows, stationPairs, rowStations, filters, reportConfig, sheetName, onProgress });
+    await workbook.commit();
+  } catch (err) {
+    // cancelled / failed half way: close the file so it can be deleted (Windows keeps open files locked)
+    try { workbook.stream?.destroy?.(); } catch (e) { void e; }
+    throw err;
+  }
+  return { records };
+}
+
+module.exports = {
+  generateIndustrialExcel,
+  generateIndustrialExcelFile,
+  createIndustrialAccumulator,
+  nowStamp,
+};

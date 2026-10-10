@@ -1,5 +1,6 @@
 import React from 'react';
 import { CheckCircle2, Activity, Clock3, Gauge, CircleSlash, TrendingUp, AlertCircle, Shield } from 'lucide-react';
+import NgCategorySplit from './NgCategorySplit';
 
 const SummaryCardSkeleton = () => (
   <div className="relative min-h-[120px] overflow-hidden bg-[rgb(var(--pk-bg-card))] border border-[rgba(var(--pk-bdr),0.12)] rounded-xl p-4 shadow-sm shadow-[rgba(var(--pk-navy),0.04)]">
@@ -15,7 +16,8 @@ const SummaryCardSkeleton = () => (
   </div>
 );
 
-const SummaryCard = ({ label, value, icon: Icon, colorClass, subValue, subtitle }) => {
+const SummaryCard = ({ label, value, icon, colorClass, subValue, subtitle, split }) => {
+  const Icon = icon;
   const colorMap = {
     navy: { bg: 'rgba(26,50,99,0.08)', border: 'rgba(26,50,99,0.15)', text: 'rgb(26,50,99)', light: 'rgba(26,50,99,0.04)' },
     green: { bg: 'rgba(34,197,94,0.1)', border: 'rgba(34,197,94,0.2)', text: 'rgb(34,197,94)', light: 'rgba(34,197,94,0.04)' },
@@ -60,6 +62,7 @@ const SummaryCard = ({ label, value, icon: Icon, colorClass, subValue, subtitle 
               </span>
             )}
           </div>
+          {split && <NgCategorySplit split={split} />}
         </div>
       </div>
     </div>
@@ -118,7 +121,7 @@ const ReportSummaryCards = ({ metrics = {}, loading = false, shotSummaryLoading 
       subtitle: "parts",
     },
     {
-      label: "Passed",
+      label: "OK",
       value: totalOK,
       icon: Shield,
       colorClass: "green",
@@ -126,19 +129,20 @@ const ReportSummaryCards = ({ metrics = {}, loading = false, shotSummaryLoading 
       subtitle: "parts",
     },
     {
-      label: "Failed",
+      label: "NG",
       value: totalNG,
       icon: AlertCircle,
       colorClass: "red",
       subValue: "Quality NG",
       subtitle: totalNG > 0 ? "Needs review" : "All good",
+      split: metrics.ngCategories || null,
     },
     {
       label: "In Progress",
       value: inProgress,
       icon: Clock3,
       colorClass: "orange",
-      subValue: "Active",
+      subValue: "In process",
       subtitle: "parts",
     },
   ];

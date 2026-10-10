@@ -12,7 +12,16 @@ const { getLegacyReportBundle, formatCleanReportResponse, paginateReportRowsByPa
  * @param {Date} dateFrom - Start of range
  * @param {Date} dateTo - End of range
  */
-async function syncDateRange(dateFrom, dateTo) {
+// The 5-minute live sync and the hourly sync share one queue: run concurrently, both inserted a row for the same
+// new part (250 duplicate rows), and the reports counted those parts twice.
+let syncQueue = Promise.resolve();
+function syncDateRange(dateFrom, dateTo) {
+  const run = syncQueue.then(() => syncDateRangeNow(dateFrom, dateTo));
+  syncQueue = run.catch(() => {});
+  return run;
+}
+
+async function syncDateRangeNow(dateFrom, dateTo) {
   // console.log(`[HistoricalSync] Starting sync for range: ${dateFrom.toISOString()} to ${dateTo.toISOString()}`);
   
   const filters = {
@@ -104,7 +113,9 @@ async function syncDateRange(dateFrom, dateTo) {
         }
         
         const op = String(row.operationNo || row.stationNo || row.operation_no || row.station_no || "").trim().toUpperCase();
-        if (rowStatus === "OK" && (op === "OP160" || op === "OP150" || row.isFinalInspection === true)) {
+        // final pass = Final Inspection (OP160) OK only; a leak test OK (OP150) is not the end of the line — it made
+        // ~3,000 parts PASSED without a final inspection
+        if (rowStatus === "OK" && (op === "OP160" || row.isFinalInspection === true)) {
           hasFinalOk = true;
         }
       }
@@ -160,7 +171,38 @@ async function syncDateRange(dateFrom, dateTo) {
       }
 
       const pData = plcData || {};
-      const lData = leakData && Array.isArray(leakData) && leakData.length > 0 ? leakData[0] : (leakData || {});
+      // Leak test rule (plant decision, same as the Report page, Component Journey and the OP160 interlock):
+      // the LATEST leak test decides — NG on one leak machine then OK on a retest (same or another machine) = OK,
+      // like the latest OK / NG scan at every station. The decisive reading (top level of leak_data: result,
+      // matchedMachineId, cycleEndTime — what every report / count reads) is the latest test; every attempt is
+      // kept in "readings" so all results stay visible ("NG → OK (retest)").
+      // (leakData[0] used to be the first machine by IP order, not a deliberate choice.)
+      const leakList = (Array.isArray(leakData) ? leakData : (leakData ? [leakData] : [])).filter((r) => r && typeof r === "object");
+      const leakTime = (r) => new Date(r.cycleEndTime || r.Cycle_End_Time || 0).getTime() || 0;
+      const leakSorted = [...leakList].sort((a, b) => leakTime(a) - leakTime(b));
+      const latestLeak = leakSorted[leakSorted.length - 1];
+      const lData = latestLeak
+        ? {
+          ...latestLeak,
+          ...(leakSorted.length > 1 ? {
+            readings: leakSorted.map((r) => ({
+              result: r.result || r.Result, cycleEndTime: r.cycleEndTime || r.Cycle_End_Time,
+              machine: r.matchedMachineName || r.machineName || r.Machine, bodyLeakValue: r.bodyLeakValue ?? r.Body_Leak_Value,
+            })),
+          } : {}),
+        }
+        : {};
+
+      // The part's OP150 result in the report table: the latest leak test's result (counted once). A leak NG
+      // followed by a passing retest is OK; a retest that fails makes it NG. An earlier leak NG attempt does not
+      // keep the part NG when no other station is NG.
+      const decisiveLeakResult = String(latestLeak?.result || latestLeak?.Result || "").trim().toUpperCase();
+      if (decisiveLeakResult === "OK" || decisiveLeakResult === "NG") {
+        opStatuses.op150_status = decisiveLeakResult;
+        const otherStationNg = Object.entries(opStatuses).some(([k, v]) => k !== "op150_status" && v === "NG");
+        if (decisiveLeakResult === "NG") overallStatus = "NG";
+        else if (overallStatus === "NG" && !otherStationNg) overallStatus = hasFinalOk ? "PASSED" : "IN_PROGRESS";
+      }
 
       return {
         part_id: partKey,
@@ -259,6 +301,8 @@ async function syncDateRange(dateFrom, dateTo) {
         try {
           existingList = await ProductionReport.findAll({
             where: { part_id: { [Op.in]: chunkPartIds } },
+            // oldest first, so the map below keeps the NEWEST row of a part — the row the reports read
+            order: [["id", "ASC"]],
           });
         } catch (findErr) {
           console.error(`[HistoricalSync] Batch lookup error:`, findErr.message);
@@ -287,7 +331,7 @@ async function syncDateRange(dateFrom, dateTo) {
             let hasFinalOk = false;
             fieldsToMerge.forEach(field => {
               if (record[field] === 'NG') hasNg = true;
-              if (record[field] === 'OK' && (field === 'op160_status' || field === 'op150_status')) hasFinalOk = true;
+              if (record[field] === 'OK' && field === 'op160_status') hasFinalOk = true; // final pass = OP160 OK only
             });
             if (hasNg) record.overall_status = 'NG';
             else if (hasFinalOk) record.overall_status = 'PASSED';

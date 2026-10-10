@@ -408,10 +408,6 @@ function LineHeader({ lineName, stats }) {
             <div style={{ fontSize: 10, opacity: 0.7 }}>Active</div>
             <div style={{ fontSize: 20, fontWeight: 800, color: "#16a34a" }}>{stats.activeMachines}</div>
           </div>
-          <div style={{ textAlign: "center", padding: "4px 8px", borderRadius: 8, background: "rgba(139,92,246,0.1)" }}>
-            <div style={{ fontSize: 10, opacity: 0.7 }}>Today's Output</div>
-            <div style={{ fontSize: 20, fontWeight: 800, color: "#8b5cf6" }}>{stats.completedToday}</div>
-          </div>
         </div>
       )}
     </div>

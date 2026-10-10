@@ -27,6 +27,22 @@
 const path = require("path");
 
 require("dotenv").config({ path: path.resolve(__dirname, ".env") });
+// Plant time zone for the whole process. Shift / production-day helpers that use getHours / setHours (traceability
+// operator page, OEE resolveShift, legacy report ranges) are only correct when the process runs in plant time, and
+// the server's own zone is not guaranteed (Linux hosts often run UTC). Set before anything else creates Dates;
+// Node applies a TZ change made at runtime. PLANT_TZ (or an explicit TZ) in .env / the pm2 env overrides it.
+process.env.TZ = process.env.PLANT_TZ || process.env.TZ || "Asia/Kolkata";
+{
+  const offsetMin = -new Date().getTimezoneOffset();
+  const expected = Number(process.env.PLANT_UTC_OFFSET_MINUTES || 330);
+  console.log(`[TimeZone] TZ=${process.env.TZ} → UTC${offsetMin >= 0 ? "+" : "-"}${String(Math.floor(Math.abs(offsetMin) / 60)).padStart(2, "0")}:${String(Math.abs(offsetMin) % 60).padStart(2, "0")} (getTimezoneOffset ${new Date().getTimezoneOffset()})`);
+  if (offsetMin !== expected) {
+    console.warn(`[TimeZone] WARNING: process offset ${offsetMin} min differs from the plant offset ${expected} min — shift and production-day windows will be wrong. Set PLANT_TZ=Asia/Kolkata.`);
+  }
+}
+// SHOP_FLOOR_IO=off (local PC only): never connect to PLCs / scanners — installed before anything opens a socket
+const { shopFloorIoEnabled, installShopFloorIoGuard } = require("./utils/shopFloorIoGuard");
+installShopFloorIoGuard();
 const express = require("express");
 const cors = require("cors");
 const compression = require("compression");
@@ -167,6 +183,7 @@ const handleHealthCheck = (_req, res) => {
     ok: true,
     status: "healthy",
     dbAvailable,
+    shopFloorIo: shopFloorIoEnabled,
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
   });
@@ -463,9 +480,10 @@ async function startServer() {
     server.listen(PORT, () => {
       server.off("error", onListenError);
       console.log(`Server running on port ${PORT}`);
-      startAlarmMonitor();
+      if (shopFloorIoEnabled) startAlarmMonitor();
       scheduleStatusEmitter();
-      require("./services/report/historicalCronService").startHistoricalCron();
+      // report sync writes the shared report table — only the live server runs it
+      if (shopFloorIoEnabled) require("./services/report/historicalCronService").startHistoricalCron();
       io.emit("db:offline", { timestamp: new Date().toISOString(), reason: "DB_RECONNECTING" });
       resolve();
     });
@@ -489,8 +507,12 @@ async function startServer() {
       io.emit("db:offline", { timestamp: new Date().toISOString(), reason: "DB_STARTUP_UNAVAILABLE" });
     }
 
-    await initializeIndustrialServices({ dbAvailable: startupDbAvailable });
-    startTcpServer();
+    if (shopFloorIoEnabled) {
+      await initializeIndustrialServices({ dbAvailable: startupDbAvailable });
+      startTcpServer();
+    } else {
+      console.warn("[Startup] SHOP_FLOOR_IO=off: PLC polling, PLC recovery and the scanner TCP server are not started on this instance.");
+    }
     const startup = getStartupStatus();
     console.log(`[Startup] Industrial services initialized: ${startup.serviceCount}`);
     if (startupDbAvailable) {
@@ -517,14 +539,24 @@ async function startServer() {
       await runStartupDbTask("ensureDefaultOrganization", () => ensureDefaultOrganization());
       await runStartupDbTask("ensureLinePartAssignmentSchema", () => ensureLinePartAssignmentSchema());
       await runStartupDbTask("ensureMachineQrScannerUniqueness", () => ensureMachineQrScannerUniqueness());
-      await runStartupDbTask("resetAllMachineLocks", () => resetAllMachineLocks());
-      await runStartupDbTask("resetAllScannerConnectionStates", () => scannerService.resetAllScannerConnectionStates());
-      await runStartupDbTask("runStartupRecovery", () => runStartupRecovery());
+      // these change LIVE machine / scanner state in the shared database — never from a local instance
+      if (shopFloorIoEnabled) {
+        await runStartupDbTask("resetAllMachineLocks", () => resetAllMachineLocks());
+        await runStartupDbTask("resetAllScannerConnectionStates", () => scannerService.resetAllScannerConnectionStates());
+        await runStartupDbTask("runStartupRecovery", () => runStartupRecovery());
+        // SCANNER-FIX: structured scanner event log + persisted laser
+        // Customer-QR waits. Only on the shop-floor instance (the models are
+        // required lazily, so a SHOP_FLOOR_IO=off instance never creates them).
+        const scannerEventService = require("./services/scannerEventService");
+        // never let the scanner-log tables block startup (scanning works without them)
+        await scannerEventService.ensureScannerEventsTable().catch((e) => console.warn("[Startup] ensureScannerEventsTable failed:", e?.message || e));
+        await scannerEventService.ensureLaserWorkflowStatesTable().catch((e) => console.warn("[Startup] ensureLaserWorkflowStatesTable failed:", e?.message || e));
+      }
       await runStartupDbTask("ensureDefaultAdminUser", () => ensureDefaultAdminUser());
       await runStartupDbTask("ensureDefaultShifts", () => ensureDefaultShifts());
       await refreshIndustrialCaches();
       io.emit("db:connected", { timestamp: new Date().toISOString() });
-      require("./cron/syncProductionReport").initCronJobs();
+      if (shopFloorIoEnabled) require("./cron/syncProductionReport").initCronJobs();
       scheduleDbReconnectLoop(STABLE_RECONNECT_MS);
     } else {
       scheduleDbReconnectLoop(DEGRADED_RECONNECT_MS);
@@ -547,12 +579,12 @@ async function startServer() {
     if (!httpStarted) {
       server.listen(PORT, () => {
         console.log(`Server running on port ${PORT} (degraded mode, DB unavailable)`);
-        startAlarmMonitor();
+        if (shopFloorIoEnabled) startAlarmMonitor();
         scheduleStatusEmitter();
       });
     }
     try {
-      startTcpServer();
+      if (shopFloorIoEnabled) startTcpServer();
     } catch (_e) {
       // no-op; TCP may already be started
     }

@@ -128,14 +128,6 @@ const Header = ({ onMenuClick }) => {
         icon: "🎮",
       },
       {
-        name: t("pages.reportConfig", "Report Config"),
-        path: APP_ROUTES.masterReports,
-        moduleKey: "report_config",
-        description: "Master report configuration",
-        keywords: ["report", "config"],
-        icon: "📋",
-      },
-      {
         name: t("pages.machineManager", "Machine Manager"),
         path: APP_ROUTES.machines,
         moduleKey: "machines",
@@ -268,9 +260,12 @@ const Header = ({ onMenuClick }) => {
       .slice(0, 7);
   }, [searchValue, visiblePages]);
 
-  useEffect(() => {
+  // new search text → first suggestion highlighted (adjusted while rendering, not in an effect)
+  const [indexedSearchValue, setIndexedSearchValue] = useState(searchValue);
+  if (indexedSearchValue !== searchValue) {
+    setIndexedSearchValue(searchValue);
     setActiveSuggestionIndex(0);
-  }, [searchValue]);
+  }
 
   useEffect(() => {
     if (!mobileSearchOpen) return undefined;
@@ -278,13 +273,16 @@ const Header = ({ onMenuClick }) => {
     return () => clearTimeout(timer);
   }, [mobileSearchOpen]);
 
-  useEffect(() => {
+  // route change → close the open menus (adjusted while rendering, not in an effect)
+  const [menusPath, setMenusPath] = useState(location.pathname);
+  if (menusPath !== location.pathname) {
+    setMenusPath(location.pathname);
     setMobileSearchOpen(false);
     setSearchOpen(false);
     setShowLanguageMenu(false);
     setShowProfile(false);
     setShowNotifications(false);
-  }, [location.pathname]);
+  }
 
   useEffect(() => {
     const onClickOutside = (event) => {

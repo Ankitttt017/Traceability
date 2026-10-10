@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Zap, Download, Search, Waves, Gauge, GitBranch, Layers, ShieldAlert, Loader2 } from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Zap, Download, Search, Waves, Gauge, GitBranch, Layers, ShieldAlert, Loader2, HelpCircle, Database } from "lucide-react";
 import ExcelJS from "exceljs";
 import { saveAs } from "file-saver";
 import EChart from "../../components/charts/EChart";
+import useInView from "../../components/mgmt/useInView";
 import RejectionTable from "./RejectionTable";
 import {
   formatResultTimestamp, extractShotFromPartId, ALL_45_PARAMETERS, parseRowDefect,
@@ -10,7 +11,7 @@ import {
 import {
   OUTCOME, CATEGORICAL, OTHER, DIVERGING, DEFECT_CATEGORY, STATUS, INK, FONT_FAMILY,
   ECHART_TOOLTIP, LEGEND, SEQ_SCRAP, ACCENT, CARD_CSS, accent, withAlpha,
-  baseOption, valueAxis, categoryAxis, axisName, axisLabel, tooltipHtml,
+  baseOption, valueAxis, categoryAxis, axisLabel, tooltipHtml,
 } from "./chartTheme";
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -25,15 +26,12 @@ const MAX_DRIVERS = 12;
 const HIGHER = CATEGORICAL[1];
 const LOWER = DIVERGING.low;
 const LIMIT_C = STATUS.warning;
-const STATION_NAME = { OP100: "DCM + DPM", OP110: "Laser marking", OP120: "Casting PDi", OP130: "Pre-inspection", OP140: "Auto gauging", OP150: "Leak test", OP160: "Final inspection" };
-// OK-green and NG-red are reserved for outcome, so stations use the remaining slots
-const STATION_COLOR = { OP120: CATEGORICAL[0], OP130: CATEGORICAL[1], OP150: CATEGORICAL[6], OP160: CATEGORICAL[3], OP140: CATEGORICAL[4] };
-const stationColor = (st) => STATION_COLOR[st] || OTHER;
-const BANDS = ["0–20", "20–40", "40–60", "60–80", "80–100"];
 
 /* ═══════════════════════════════════════════════════════════════════════════
    STATS HELPERS
    ═══════════════════════════════════════════════════════════════════════════ */
+/** true when the part has DCM shot data: its PlcCycleReadings record (shot cycle time) is on the row. */
+const hasShotData = (r) => Number(r?.plc_cycle_time ?? r?.plcCycleTime) > 0;
 const idOf = (r) => String(r?.partId || r?.part_id || r?.customerQrCode || r?.customer_qr || r?.id || "");
 
 // PlcCycleReadings value for a parameter, trying its column aliases; null when not recorded
@@ -160,7 +158,199 @@ const Loading = ({ children = "Loading process data…" }) => (
 );
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   MAIN
+   PARAMETER GRID — every PLC parameter side by side (no dropdown): OK vs NG distribution per parameter,
+   with the set limits, the NG shift and an association label. Parameters without enough readings are shown
+   with the reason instead of being dropped.
+   ═══════════════════════════════════════════════════════════════════════════ */
+const MIN_TILE_PER_CLASS = 5;
+const realSpread = (sd, m) => Number.isFinite(sd) && sd > 1e-9 * Math.max(1, Math.abs(m || 0));
+const ASSOC = {
+  strong: { label: "Associated with NG", color: OUTCOME.ng },
+  weak: { label: "Weak association", color: STATUS.warning },
+  none: { label: "No clear association", color: INK.muted },
+  insufficient: { label: "Insufficient data", color: INK.faint },
+  constant: { label: "No variation", color: INK.faint },
+  empty: { label: "No readings", color: INK.faint },
+};
+
+/** One entry per catalogue parameter (all 45), from the labelled pool. */
+const buildParamGrid = (pool, limitMap) => ALL_45_PARAMETERS.map((p) => {
+  const ok = [], ng = [];
+  let invalid = 0;
+  pool.forEach(({ r, ng: isNg }) => {
+    const v = readParam(r, p);
+    if (v === null) {
+      // a value was sent but is not a usable number (text / NaN) — counted, not plotted
+      const raw = [p.key, ...(p.altKeys || [])].map((k) => r?.[k]).find((x) => x !== null && x !== undefined && x !== "" && x !== "-");
+      if (raw !== undefined) invalid += 1;
+      return;
+    }
+    if (v <= 0) { invalid += 1; return; } // 0 / negative = no reading from the PLC
+    (isNg ? ng : ok).push(v);
+  });
+  const base = { key: p.key, label: p.label, unit: p.unit || "", group: p.category || "", ok, ng, invalid, lim: limitMap[p.key] || null };
+  if (!ok.length && !ng.length) return { ...base, status: "empty" };
+  if (ok.length < MIN_TILE_PER_CLASS || ng.length < MIN_TILE_PER_CLASS) return { ...base, status: "insufficient" };
+  const okMean = mean(ok), ngMean = mean(ng), okStd = std(ok), ngStd = std(ng);
+  // float noise (σ ≈ 1e-12 on a constant reading) is no variation, not an infinite shift
+  if (!realSpread(okStd, okMean) && !realSpread(ngStd, ngMean)) return { ...base, status: "constant", okMean, ngMean };
+  const pooled = std([...ok, ...ng]);
+  const sd = realSpread(okStd, okMean) ? okStd : realSpread(pooled, okMean) ? pooled : null;
+  if (!sd) return { ...base, status: "constant", okMean, ngMean };
+  const shift = (ngMean - okMean) / sd;
+  const se = Math.sqrt(okStd ** 2 / ok.length + ngStd ** 2 / ng.length);
+  const pval = se > 0 ? 2 * (1 - normCdf(Math.abs((ngMean - okMean) / se))) : NaN;
+  const sig = Number.isFinite(pval) && pval < 0.05;
+  const status = sig && Math.abs(shift) >= 0.5 ? "strong" : sig ? "weak" : "none";
+  return { ...base, status, okMean, ngMean, okStd, shift, pval };
+});
+
+const ORDER = { strong: 0, weak: 1, none: 2, constant: 3, insufficient: 4, empty: 5 };
+const sortGrid = (list) => [...list].sort((a, b) => ORDER[a.status] - ORDER[b.status]
+  || Math.abs(b.shift || 0) - Math.abs(a.shift || 0)
+  || (b.ok.length + b.ng.length) - (a.ok.length + a.ng.length));
+
+/** Mini OK-vs-NG density chart of one parameter (rendered once the tile scrolls into view). */
+function ParamTile({ item, focused, tileRef }) {
+  const [ref, seen] = useInView();
+  const option = useMemo(() => {
+    if (!seen || !["strong", "weak", "none", "constant"].includes(item.status)) return null;
+    const okV = sampleEvenly(item.ok, 1500), ngV = sampleEvenly(item.ng, 1500);
+    const sorted = [...okV, ...ngV].sort((a, b) => a - b);
+    let lo = quantile(sorted, 0.01), hi = quantile(sorted, 0.99);
+    if (!(hi > lo)) { lo = sorted[0] * 0.95; hi = sorted[sorted.length - 1] * 1.05 || lo + 1; }
+    if (!(hi > lo)) return null;
+    const grid = Array.from({ length: 60 }, (_, i) => lo + ((hi - lo) * i) / 59);
+    const dOk = kde(okV, grid), dNg = kde(ngV, grid);
+    const span = hi - lo;
+    const lims = item.lim ? [["LSL", item.lim.lsl], ["USL", item.lim.usl]].filter(([, x]) => x != null && x >= lo - span * 0.25 && x <= hi + span * 0.25) : [];
+    const xMin = Math.min(lo, ...lims.map(([, x]) => x)), xMax = Math.max(hi, ...lims.map(([, x]) => x));
+    const unit = item.unit ? ` ${item.unit}` : "";
+    return {
+      ...baseOption(),
+      animation: false,
+      grid: { left: 6, right: 10, top: 8, bottom: 4, containLabel: true },
+      tooltip: {
+        ...ECHART_TOOLTIP, trigger: "axis",
+        formatter: (ps) => {
+          const i = ps?.[0]?.dataIndex;
+          if (i === undefined) return "";
+          const tot = dOk[i] + dNg[i];
+          return tooltipHtml({
+            title: `${item.label}: ${r2(grid[i])}${unit}`,
+            rows: [
+              { label: `OK parts (n=${item.ok.length.toLocaleString()})`, value: `${(tot ? (dOk[i] / tot) * 100 : 0).toFixed(0)}% of density`, color: OUTCOME.ok },
+              { label: `NG parts (n=${item.ng.length.toLocaleString()})`, value: `${(tot ? (dNg[i] / tot) * 100 : 0).toFixed(0)}% of density`, color: OUTCOME.ng },
+              { label: "OK mean / NG mean", value: `${r2(item.okMean)} / ${r2(item.ngMean)}${unit}`, strong: false },
+              item.lim ? { label: "Set limits (LSL – USL)", value: `${item.lim.text}${unit}`, strong: false } : null,
+            ],
+            note: "Curves = share of OK and of NG parts at each reading (each curve sums to 1).",
+          });
+        },
+      },
+      xAxis: valueAxis({
+        min: r2(xMin), max: r2(xMax), splitLine: { show: false }, axisLine: { show: true, lineStyle: { color: INK.axis } },
+        axisLabel: axisLabel({ fontSize: 9.5, hideOverlap: true, formatter: (v) => String(Number(Number(v).toFixed(Math.abs(v) < 10 ? 2 : 0))) }),
+      }),
+      yAxis: valueAxis({ show: false }),
+      series: [
+        {
+          name: "OK", type: "line", smooth: true, showSymbol: false, data: grid.map((g, i) => [g, dOk[i]]),
+          lineStyle: { color: OUTCOME.ok, width: 1.6 }, areaStyle: { color: withAlpha(OUTCOME.ok, 0.14) }, color: OUTCOME.ok,
+          markLine: lims.length ? { silent: true, symbol: "none", lineStyle: { color: LIMIT_C, type: "dashed", width: 1.2 }, label: { color: INK.secondary, fontSize: 9, fontWeight: 600, formatter: (p) => p.name }, data: lims.map(([n, x]) => ({ name: n, xAxis: x })) } : undefined,
+        },
+        {
+          name: "NG", type: "line", smooth: true, showSymbol: false, data: grid.map((g, i) => [g, dNg[i]]),
+          lineStyle: { color: OUTCOME.ng, width: 1.6 }, areaStyle: { color: withAlpha(OUTCOME.ng, 0.12) }, color: OUTCOME.ng,
+        },
+      ],
+    };
+  }, [seen, item]);
+  const a = ASSOC[item.status];
+  const unit = item.unit ? ` ${item.unit}` : "";
+  const setRefs = (el) => { ref.current = el; if (tileRef) tileRef(el); };
+  return (
+    <article ref={setRefs} className={`rc-tile ${focused ? "focus" : ""}`} style={{ "--tile-c": a.color }} aria-label={`${item.label}: ${a.label}`}>
+      <header>
+        <div style={{ minWidth: 0 }}>
+          <h4 title={`${item.label}${unit}`}>{item.label}{item.unit ? <span> ({item.unit})</span> : null}</h4>
+          <span className="rc-tile-tag">{a.label}</span>
+        </div>
+        {Number.isFinite(item.shift) && (
+          <div className="rc-tile-shift" title="NG mean minus OK mean, in standard deviations of the OK parts">
+            <b style={{ color: item.shift >= 0 ? HIGHER : LOWER }}>{signed(item.shift, 1)}σ</b>
+            <span>p {fmtP(item.pval)}</span>
+          </div>
+        )}
+      </header>
+      <div className="rc-tile-body">
+        {option ? <EChart option={option} style={{ height: 120, minHeight: 0 }} />
+          : item.status === "empty" ? <div className="rc-tile-msg">No readings in this period{item.invalid ? ` (${item.invalid} zero / invalid values ignored)` : ""}</div>
+            : item.status === "insufficient" ? <div className="rc-tile-msg">Insufficient data (n &lt; {MIN_TILE_PER_CLASS} per class)<br />OK n={item.ok.length} · NG n={item.ng.length}</div>
+              : <div className="rc-tile-msg rc-skel" aria-hidden="true" />}
+      </div>
+      <footer>
+        <span><i style={{ background: OUTCOME.ok }} />OK {item.okMean != null ? r2(item.okMean) : "—"} <em>n={item.ok.length.toLocaleString()}</em></span>
+        <span><i style={{ background: OUTCOME.ng }} />NG {item.ngMean != null ? r2(item.ngMean) : "—"} <em>n={item.ng.length.toLocaleString()}</em></span>
+        {item.lim ? <span className="lim">Limits {item.lim.text}</span> : <span className="lim muted">No set limits</span>}
+        {item.invalid > 0 && <span className="lim muted" title="Zero, negative or non-numeric readings are treated as 'no reading'">{item.invalid} invalid</span>}
+      </footer>
+    </article>
+  );
+}
+
+const GRID_FILTERS = [
+  { id: "all", label: "All parameters" },
+  { id: "assoc", label: "Associated with NG" },
+  { id: "data", label: "With enough data" },
+  { id: "gaps", label: "Insufficient / no data" },
+];
+
+function ParamGrid({ items, focusKey, waiting }) {
+  const [show, setShow] = useState("assoc");
+  const tiles = useRef({});
+  useEffect(() => {
+    if (focusKey && tiles.current[focusKey]) tiles.current[focusKey].scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focusKey]);
+  const counts = useMemo(() => ({
+    all: items.length,
+    assoc: items.filter((x) => x.status === "strong" || x.status === "weak").length,
+    data: items.filter((x) => ["strong", "weak", "none", "constant"].includes(x.status)).length,
+    gaps: items.filter((x) => x.status === "insufficient" || x.status === "empty").length,
+  }), [items]);
+  const list = items.filter((x) => (show === "assoc" ? x.status === "strong" || x.status === "weak"
+    : show === "data" ? ["strong", "weak", "none", "constant"].includes(x.status)
+      : show === "gaps" ? x.status === "insufficient" || x.status === "empty" : true));
+  // the focused parameter stays visible whatever the filter
+  const shown = focusKey && !list.some((x) => x.key === focusKey) ? [items.find((x) => x.key === focusKey), ...list].filter(Boolean) : list;
+  if (waiting) return <Loading />;
+  return (
+    <>
+      <div className="rc-grid-bar">
+        <div className="rc-seg" role="group" aria-label="Show parameters">
+          {GRID_FILTERS.map((f) => (
+            <button key={f.id} type="button" aria-pressed={show === f.id} className={show === f.id ? "on" : ""} onClick={() => setShow(f.id)}>
+              {f.label} <span>{counts[f.id]}</span>
+            </button>
+          ))}
+        </div>
+        <div className="ra-legend rc-legend" style={{ padding: 0 }}>
+          <span><i style={{ background: OUTCOME.ok }} />OK parts</span>
+          <span><i style={{ background: OUTCOME.ng }} />NG parts</span>
+          <span><i style={{ background: "transparent", borderTop: `2px dashed ${LIMIT_C}`, height: 0, borderRadius: 0 }} />Set limits</span>
+        </div>
+      </div>
+      {!shown.length ? <Empty>No parameters in this group.</Empty> : (
+        <div className="rc-grid">
+          {shown.map((it) => <ParamTile key={it.key} item={it} focused={focusKey === it.key} tileRef={(el) => { tiles.current[it.key] = el; }} />)}
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MAIN — wording: the statistics show ASSOCIATION with NG (correlation), not a confirmed cause
    ═══════════════════════════════════════════════════════════════════════════ */
 export default function RootCauseTab({
   mlInsights = { features: [], topAnomalies: [] },
@@ -170,9 +360,10 @@ export default function RootCauseTab({
   rejectedRows = [],
   okRecords = [],
   summary = {},
+  analysis = null,
   loading = false,
 }) {
-  const [param, setParam] = useState("");
+  const [focusRaw, setFocusKey] = useState(""); // a parameter key, or "label:<name>" from a click on the chart axis
   const [outlierSearch, setOutlierSearch] = useState("");
   const narrow = useNarrow();
 
@@ -181,20 +372,27 @@ export default function RootCauseTab({
   const waiting = !mlFeatures.length && !(rows || []).length;
 
   /* ── 1. Labelled sample pool (one entry per part, outcome known) ─────── */
-  const pool = useMemo(() => {
+  // ONLY parts with DCM shot data are analysed (process parameters + shot cycle time come from the part's shot);
+  // parts without a shot record are counted as excluded
+  const { pool, excludedNg, excludedOk } = useMemo(() => {
     const ngIds = new Set();
     [allRejectionRecords, rejectedRows].forEach((l) => (l || []).forEach((r) => { const id = idOf(r); if (id) ngIds.add(id); }));
     const seen = new Set();
+    const shotById = new Map();
+    [rows, allRejectionRecords, rejectedRows, okRecords, recordsRows].forEach((l) => (l || []).forEach((r) => { const id = idOf(r); if (id && hasShotData(r) && !shotById.has(id)) shotById.set(id, r); }));
     const out = [];
+    let exNg = 0, exOk = 0;
     [allRejectionRecords, rejectedRows, okRecords, rows, recordsRows].forEach((list) => (list || []).forEach((r) => {
       const id = idOf(r);
       if (id) { if (seen.has(id)) return; seen.add(id); }
       const st = String(r.status || r.overall_status || "").trim().toUpperCase();
       const ng = (id && ngIds.has(id)) || NG_STATUS.has(st) || (r.ngGate && r.ngGate !== "-");
       if (!ng && !OK_STATUS.has(st)) return; // unknown outcome → excluded
-      out.push({ r, id: id || `row-${out.length}`, ng: !!ng });
+      const shotRow = hasShotData(r) ? r : (id ? shotById.get(id) : null);
+      if (!shotRow) { if (ng) exNg += 1; else exOk += 1; return; }
+      out.push({ r: shotRow === r ? r : { ...shotRow, ...r, ...Object.fromEntries(Object.entries(shotRow).filter(([, v]) => v != null && v !== "")) }, id: id || `row-${out.length}`, ng: !!ng });
     }));
-    return out;
+    return { pool: out, excludedNg: exNg, excludedOk: exOk };
   }, [rows, recordsRows, allRejectionRecords, rejectedRows, okRecords]);
 
   const counts = useMemo(() => {
@@ -227,7 +425,7 @@ export default function RootCauseTab({
       if (ok.length < MIN_PER_CLASS || ng.length < MIN_PER_CLASS) return;
       const okVals = ok.map((x) => x.v), ngVals = ng.map((x) => x.v);
       const okStd = std(okVals);
-      if (!(okStd > 0)) return;
+      if (!realSpread(okStd, mean(okVals))) return;
       const auc = aucScore(sampleEvenly(okVals, 4000), sampleEvenly(ngVals, 4000));
       list.push({
         key: p.key, def: p, label: p.label, unit: p.unit || "", ok, ng,
@@ -305,112 +503,57 @@ export default function RootCauseTab({
     }).sort((a, b) => Math.abs(b.shift) - Math.abs(a.shift)).slice(0, MAX_DRIVERS);
   }, [stats, influence]);
 
-  const activeParam = param || drivers[0]?.key || ALL_45_PARAMETERS[0]?.key;
+
+  const focusKey = focusRaw.startsWith("label:") ? (drivers.find((d) => d.label === focusRaw.slice(6))?.key || "") : focusRaw;
 
   /* ── 5. Set limits from the analysis service (9999 = not set) ────────── */
   const limitMap = useMemo(() => {
     const m = {};
     mlFeatures.forEach((f) => {
-      const lsl = Number(f.setLowerLimit), usl = Number(f.setUpperLimit);
-      if (f.setLowerLimit != null && f.setUpperLimit != null && Number.isFinite(lsl) && Number.isFinite(usl) && usl > lsl && usl < 9999 && lsl > -9999) m[f.key] = { lsl, usl };
+      // a side is "not set" when missing, 0 or a placeholder (999.9 / 9999 …); one-sided limits are kept (same rule as SPC)
+      const side = (x) => { if (x === "" || x == null) return null; const n = Number(x); return Number.isFinite(n) && n !== 0 && Math.abs(n) < 9999 && !/^9{3,}(\.9+)?$/.test(String(Math.abs(n))) ? n : null; };
+      const lsl = side(f.setLowerLimit ?? f.lsl), usl = side(f.setUpperLimit ?? f.usl);
+      if ((lsl != null || usl != null) && !(lsl != null && usl != null && usl <= lsl)) m[f.key] = { lsl, usl, text: lsl != null && usl != null ? `${lsl} – ${usl}` : lsl != null ? `≥ ${lsl}` : `≤ ${usl}` };
     });
     return m;
   }, [mlFeatures]);
 
-  /* ── 6. Selected parameter (OK vs NG distribution) ───────────────────── */
-  const sel = useMemo(() => {
-    const def = ALL_45_PARAMETERS.find((p) => p.key === activeParam) || ALL_45_PARAMETERS[0];
-    const ok = [], ng = [];
-    pool.forEach(({ r, ng: isNg }) => {
-      const v = readParam(r, def);
-      if (v === null || v <= 0) return;
-      (isNg ? ng : ok).push(v);
-    });
-    return { def, ok, ng, okMean: mean(ok), ngMean: mean(ng), okStd: std(ok) };
-  }, [pool, activeParam]);
+  /* ── 6. Every parameter for the comparison grid (no selection needed) ─── */
+  const gridItems = useMemo(() => sortGrid(buildParamGrid(pool, limitMap)), [pool, limitMap]);
 
-  /* ── 7. Rejection causes: station × defect from every NG record ──────── */
-  const causes = useMemo(() => {
-    const recs = allRejectionRecords || [];
-    if (!recs.length) return null;
-    const flat = {};
-    let total = 0;
-    recs.forEach((rec) => {
-      const q = Number(rec.quantity) || 1;
-      const st = String(rec.ngGate || rec.ng_gate || "").toUpperCase().split(/[,;\s]+/).filter(Boolean)[0] || "—";
-      const pd = parseRowDefect(rec);
-      const cat = pd.category || "—";
-      const def = pd.reason && pd.reason !== "Defect" ? pd.reason : "Unspecified";
-      total += q;
-      const k = `${st}|${cat}|${def}`;
-      flat[k] = (flat[k] || 0) + q;
-    });
-    const top = [];
-    let cum = 0;
-    for (const [k, n] of Object.entries(flat).sort((a, b) => b[1] - a[1])) {
-      const [st, cat, def] = k.split("|");
-      cum += n;
-      top.push({ st, cat, def, n, share: (n / total) * 100, cum: (cum / total) * 100 });
-    }
-    const vital = top.findIndex((t) => t.cum >= 80) + 1 || top.length;
-    return { total, top, vital };
-  }, [allRejectionRecords]);
-
-  /* ── 8. Defect reason ↔ parameter: NG parts of each defect vs good parts (σ) ── */
-  const defectLink = useMemo(() => {
-    if (!drivers.length) return null;
+  /* ── 8b. "Why are parts rejected?" — every top reason with the process parameters its NG parts ran off ── */
+  const whyRows = useMemo(() => {
     const reasonById = new Map();
+    const allByReason = {};
     [allRejectionRecords, rejectedRows].forEach((l) => (l || []).forEach((r) => {
       const id = idOf(r);
-      if (!id || reasonById.has(id)) return;
       const pd = parseRowDefect(r);
-      if (pd.reason && pd.reason !== "Defect") reasonById.set(id, pd.reason);
+      if (!pd.reason || pd.reason === "Defect") return;
+      if (id && !reasonById.has(id)) { reasonById.set(id, pd.reason); allByReason[pd.reason] = (allByReason[pd.reason] || 0) + 1; }
     }));
     if (!reasonById.size) return null;
-    const feats = drivers.slice(0, 8);
     const cnt = {};
-    pool.forEach((p) => { if (p.ng) { const rs = reasonById.get(p.id); if (rs) cnt[rs] = (cnt[rs] || 0) + 1; } });
-    const reasons = Object.entries(cnt).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([name, n]) => ({ name, n }));
-    if (!reasons.length) return null;
-    const cells = [];
-    feats.forEach((f, row) => reasons.forEach((rs, col) => {
-      const vals = f.ng.filter((x) => reasonById.get(x.id) === rs.name).map((x) => x.v);
-      const mu = vals.length ? mean(vals) : null;
-      cells.push({ row, col, n: vals.length, mu, z: vals.length >= 3 ? (mu - f.okMean) / f.okStd : null });
-    }));
-    if (!cells.some((c) => c.z !== null)) return null;
-    return { feats, reasons, cells };
-  }, [drivers, allRejectionRecords, rejectedRows, pool]);
-
-  /* ── 9. Plant-calibrated NG rate per fifth of the good-part range ─────── */
-  const riskMap = useMemo(() => {
-    const feats = drivers.slice(0, 8);
-    if (!feats.length) return null;
-    const cells = [];
-    let max = 0;
-    feats.forEach((st, row) => {
-      const ok = st.ok.map((x) => x.v).sort((a, b) => a - b);
-      const cutsAt = [0.2, 0.4, 0.6, 0.8].map((q) => quantile(ok, q));
-      const bandOf = (v) => { let b = 0; while (b < 4 && v >= cutsAt[b]) b++; return b; };
-      const agg = BANDS.map(() => ({ n: 0, ng: 0, wNg: 0, wOk: 0, lo: Infinity, hi: -Infinity }));
-      const add = (v, isNg) => {
-        const a = agg[bandOf(v)];
-        a.n++; a.lo = Math.min(a.lo, v); a.hi = Math.max(a.hi, v);
-        if (isNg) { a.ng++; a.wNg += classW.ng; } else a.wOk += classW.ok;
-      };
-      st.ok.forEach((x) => add(x.v, false));
-      st.ng.forEach((x) => add(x.v, true));
-      agg.forEach((a, col) => {
-        const rate = a.wNg + a.wOk > 0 ? (a.wNg / (a.wNg + a.wOk)) * 100 : null;
-        if (rate !== null && a.n >= 10) max = Math.max(max, rate);
-        cells.push({ col, row, rate, ...a, st });
-      });
+    pool.forEach((pp) => { if (pp.ng) { const rs = reasonById.get(pp.id); if (rs) cnt[rs] = (cnt[rs] || 0) + 1; } });
+    const totalNg = Object.values(allByReason).reduce((a, v) => a + v, 0) || 1;
+    return Object.entries(allByReason).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([reason, all]) => {
+      const n = cnt[reason] || 0;
+      const links = stats.map((st) => {
+        const vals = st.ng.filter((x) => reasonById.get(x.id) === reason).map((x) => x.v);
+        if (vals.length < 3) return null;
+        const mu = mean(vals);
+        const z = (mu - st.okMean) / st.okStd;
+        const se = st.okStd / Math.sqrt(vals.length);
+        const pv = se > 0 ? 2 * (1 - normCdf(Math.abs((mu - st.okMean) / se))) : NaN;
+        return { key: st.key, label: st.label, unit: st.unit, z, mu, okMean: st.okMean, n: vals.length, pv, sig: Number.isFinite(pv) && pv < 0.05 };
+      }).filter((x) => x && Math.abs(x.z) >= 0.5 && x.sig).sort((a, b) => Math.abs(b.z) - Math.abs(a.z)).slice(0, 3);
+      const top = links[0] ? Math.abs(links[0].z) : 0;
+      const verdict = n < 3 ? "few" : top >= 1 ? "strong" : top >= 0.5 ? "possible" : "none";
+      const cat = parseRowDefect({ ngReason: reason }).category || "";
+      return { reason, all, share: (all / totalNg) * 100, n, links, verdict, cat };
     });
-    return { feats, cells, max: Math.max(max, (popRate || 0) * 100 * 2, 1) };
-  }, [drivers, classW, popRate]);
+  }, [allRejectionRecords, rejectedRows, pool, stats]);
 
   /* ═════════ CHART OPTIONS ═════════ */
-  const labelW = narrow ? 92 : 180;
 
   const driverOption = useMemo(() => {
     if (!drivers.length) return null;
@@ -425,7 +568,7 @@ export default function RootCauseTab({
           const lim2 = limitMap[d.key];
           return tooltipHtml({
             title: `${d.label}${d.unit ? ` (${d.unit})` : ""}`,
-            subtitle: d.shift >= 0 ? "NG parts run higher than OK parts" : "NG parts run lower than OK parts",
+            subtitle: d.shift >= 0 ? "NG parts ran higher than OK parts (association, not proof of cause)" : "NG parts ran lower than OK parts (association, not proof of cause)",
             rows: [
               { label: "OK mean", value: `${r2(d.okMean)} ${d.unit}`, color: OUTCOME.ok },
               { label: "NG mean", value: `${r2(d.ngMean)} ${d.unit}`, color: OUTCOME.ng },
@@ -433,181 +576,46 @@ export default function RootCauseTab({
               { label: "Separation (AUC)", value: d.sep.toFixed(2) },
               { label: "p-value", value: fmtP(d.pval) },
               d.share !== null ? { label: "Share of explained scrap", value: `${d.share.toFixed(1)}%` } : null,
-              lim2 ? { label: "Set limits", value: `${lim2.lsl} – ${lim2.usl}` } : null,
+              lim2 ? { label: "Set limits", value: lim2.text } : null,
               { label: "Readings OK / NG", value: `${d.ok.length.toLocaleString()} / ${d.ng.length.toLocaleString()}`, strong: false },
             ],
-            note: "Click to open the OK vs NG distribution.",
+            note: "Click to find this parameter in the comparison grid.",
           });
         },
       },
-      grid: { left: 4, right: 52, top: 6, bottom: 34, containLabel: true },
-      xAxis: valueAxis({
+      grid: { left: 64, right: 16, top: 26, bottom: 8, containLabel: true },
+      yAxis: valueAxis({
         min: -lim, max: lim,
-        ...axisName("NG shift vs OK mean (σ)", 24),
+        name: "NG shift vs OK mean (σ)", nameTextStyle: { color: INK.muted, fontSize: 11, align: "left" },
         axisLabel: axisLabel({ formatter: (v) => (v > 0 ? `+${v}` : `${v}`) }),
       }),
-      yAxis: categoryAxis(drivers.map((d) => d.label), {
-        inverse: true, axisLine: { show: false },
-        axisLabel: axisLabel({ fontSize: 11, color: INK.secondary, width: labelW, overflow: "truncate" }),
+      xAxis: categoryAxis(drivers.map((d) => d.label), {
+        axisLine: { show: false }, axisTick: { show: false }, triggerEvent: true,
+        axisLabel: axisLabel({ fontSize: 11, color: INK.secondary, width: narrow ? 70 : 110, overflow: "truncate", interval: 0, rotate: 35 }),
       }),
       series: [{
-        type: "bar", barWidth: 13, cursor: "pointer",
+        type: "bar", barMaxWidth: 34, cursor: "pointer",
         data: drivers.map((d) => ({
           value: r2(d.shift), key: d.key,
           itemStyle: {
             color: d.shift >= 0 ? HIGHER : LOWER, opacity: d.sig ? 1 : 0.35,
-            borderRadius: d.shift >= 0 ? [0, 3, 3, 0] : [3, 0, 0, 3],
-            borderColor: d.key === activeParam ? INK.primary : "transparent", borderWidth: d.key === activeParam ? 1.5 : 0,
+            borderRadius: d.shift >= 0 ? [3, 3, 0, 0] : [0, 0, 3, 3],
+            borderColor: d.key === focusKey ? INK.primary : "transparent", borderWidth: d.key === focusKey ? 1.5 : 0,
           },
-          label: { position: d.shift >= 0 ? "right" : "left" },
+          label: { position: d.shift >= 0 ? "top" : "bottom" },
         })),
         label: { show: true, fontSize: 10.5, color: INK.body, fontFamily: FONT_FAMILY, formatter: (p) => `${signed(p.value, 1)}σ` },
-        markLine: { silent: true, symbol: "none", label: { show: false }, lineStyle: { color: INK.faint, width: 1 }, data: [{ xAxis: 0 }] },
+        markLine: { silent: true, symbol: "none", label: { show: false }, lineStyle: { color: INK.faint, width: 1 }, data: [{ yAxis: 0 }] },
       }],
     };
-  }, [drivers, limitMap, activeParam, labelW]);
+  }, [drivers, limitMap, focusKey, narrow]);
 
-  const driverEvents = useMemo(() => ({ click: (p) => { if (p?.data?.key) setParam(p.data.key); } }), []);
-
-  // Density (KDE) OK vs NG for the selected parameter, with set limits when known
-  const densityOption = useMemo(() => {
-    if (sel.ok.length < 3 && sel.ng.length < 3) return null;
-    const okV = sampleEvenly(sel.ok, 2000), ngV = sampleEvenly(sel.ng, 2000);
-    const sorted = [...okV, ...ngV].sort((a, b) => a - b);
-    const lo = sorted.length > 5 ? quantile(sorted, 0.01) : sorted[0] * 0.9;
-    const hi = sorted.length > 5 ? quantile(sorted, 0.99) : sorted[sorted.length - 1] * 1.1;
-    if (!(hi > lo)) return null;
-    const grid = Array.from({ length: 90 }, (_, i) => lo + ((hi - lo) * i) / 89);
-    const dOk = kde(okV, grid), dNg = kde(ngV, grid);
-    const lim = limitMap[sel.def.key];
-    const unit = sel.def.unit || "";
-    const limLines = lim ? [
-      { xAxis: lim.lsl, label: { formatter: "LSL" } },
-      { xAxis: lim.usl, label: { formatter: "USL" } },
-    ].filter((l) => l.xAxis >= lo && l.xAxis <= hi) : [];
-    return {
-      ...baseOption(),
-      tooltip: {
-        ...ECHART_TOOLTIP, trigger: "axis",
-        formatter: (ps) => {
-          const i = ps?.[0]?.dataIndex;
-          if (i === undefined) return "";
-          return tooltipHtml({
-            title: `${r2(grid[i])} ${unit}`,
-            subtitle: sel.def.label,
-            rows: [
-              { label: "OK density", value: dOk[i].toPrecision(3), color: OUTCOME.ok },
-              { label: "NG density", value: dNg[i].toPrecision(3), color: OUTCOME.ng },
-            ],
-          });
-        },
-      },
-      legend: { ...LEGEND, data: [`OK (n=${sel.ok.length.toLocaleString()})`, `NG (n=${sel.ng.length.toLocaleString()})`] },
-      grid: { left: 12, right: 18, top: 30, bottom: 36, containLabel: true },
-      xAxis: valueAxis({ min: r2(lo), max: r2(hi), ...axisName(`${sel.def.label}${unit ? ` (${unit})` : ""}`, 24), splitLine: { show: false }, axisLine: { show: true, lineStyle: { color: INK.axis } } }),
-      yAxis: valueAxis({ axisLabel: { show: false } }),
-      series: [
-        {
-          name: `OK (n=${sel.ok.length.toLocaleString()})`, type: "line", smooth: true, showSymbol: false,
-          data: grid.map((g, i) => [g, dOk[i]]), color: OUTCOME.ok,
-          lineStyle: { color: OUTCOME.ok, width: 2 }, areaStyle: { color: withAlpha(OUTCOME.ok, 0.14) },
-          markLine: limLines.length ? { silent: true, symbol: "none", lineStyle: { color: LIMIT_C, type: "dashed", width: 1.5 }, label: { color: INK.secondary, fontSize: 10, fontWeight: 600 }, data: limLines } : undefined,
-        },
-        {
-          name: `NG (n=${sel.ng.length.toLocaleString()})`, type: "line", smooth: true, showSymbol: false,
-          data: grid.map((g, i) => [g, dNg[i]]), color: OUTCOME.ng,
-          lineStyle: { color: OUTCOME.ng, width: 2 }, areaStyle: { color: withAlpha(OUTCOME.ng, 0.12) },
-        },
-      ],
-    };
-  }, [sel, limitMap]);
-
-  const riskOption = useMemo(() => {
-    if (!riskMap) return null;
-    const { feats, cells, max } = riskMap;
-    return {
-      ...baseOption(),
-      tooltip: {
-        ...ECHART_TOOLTIP,
-        formatter: (p) => {
-          const c = cells[p.dataIndex];
-          if (!c || !c.n) return tooltipHtml({ title: "No readings" });
-          return tooltipHtml({
-            title: c.st.label,
-            subtitle: `${BANDS[c.col]}% of good-part range`,
-            rows: [
-              { label: "Range", value: `${r2(c.lo)} – ${r2(c.hi)} ${c.st.unit}` },
-              { label: "Estimated NG rate", value: c.rate === null ? "—" : `${c.rate.toFixed(1)}%`, color: OUTCOME.ng },
-              popRate ? { label: "Plant average", value: pct(popRate), strong: false } : null,
-              { label: "Parts / NG", value: `${c.n.toLocaleString()} / ${c.ng.toLocaleString()}`, strong: false },
-            ],
-            note: c.n < 10 ? "Fewer than 10 parts — low confidence." : undefined,
-          });
-        },
-      },
-      grid: { left: 4, right: 8, top: 4, bottom: 62, containLabel: true },
-      xAxis: categoryAxis(BANDS, { axisLine: { show: false }, ...axisName("Percentile of good-part range", 24) }),
-      yAxis: categoryAxis(feats.map((st) => st.label), { inverse: true, axisLine: { show: false }, axisLabel: axisLabel({ fontSize: 11, color: INK.secondary, width: labelW, overflow: "truncate" }) }),
-      visualMap: {
-        min: 0, max: Number(max.toFixed(1)), calculable: false, orient: "horizontal", left: "center", bottom: 0, itemHeight: 120, itemWidth: 9,
-        text: [`${max.toFixed(0)}% NG`, "0%"], textStyle: { fontSize: 10.5, color: INK.muted, fontFamily: FONT_FAMILY },
-        inRange: { color: ["#fbfaf9", ...SEQ_SCRAP.slice(1)] }, dimension: 2,
-      },
-      series: [{
-        type: "heatmap",
-        data: cells.map((c) => [c.col, c.row, c.rate === null ? "-" : Number(c.rate.toFixed(2))]),
-        label: {
-          show: true, fontSize: 10.5, fontFamily: FONT_FAMILY,
-          formatter: (p) => { const c = cells[p.dataIndex]; return c.rate === null ? "" : `${c.rate.toFixed(1)}${c.n < 10 ? "*" : ""}`; },
-          color: INK.primary,
-        },
-        itemStyle: { borderColor: "#fff", borderWidth: 2, borderRadius: 4 },
-        emphasis: { itemStyle: { borderColor: INK.primary, borderWidth: 1 } },
-      }],
-    };
-  }, [riskMap, popRate, labelW]);
-
-  const linkOption = useMemo(() => {
-    if (!defectLink) return null;
-    const { feats, reasons, cells } = defectLink;
-    return {
-      ...baseOption(),
-      tooltip: {
-        ...ECHART_TOOLTIP,
-        formatter: (p) => {
-          const c = cells[p.dataIndex];
-          if (!c) return "";
-          const f = feats[c.row];
-          return tooltipHtml({
-            title: reasons[c.col].name,
-            subtitle: f.label,
-            rows: [
-              { label: "OK mean", value: `${r2(f.okMean)} ${f.unit}`, color: OUTCOME.ok },
-              { label: "NG mean (this defect)", value: c.mu === null ? "—" : `${r2(c.mu)} ${f.unit}`, color: OUTCOME.ng },
-              { label: "Shift (σ of OK)", value: c.z === null ? "—" : `${signed(c.z)}σ` },
-              { label: "NG parts with reading", value: c.n.toLocaleString(), strong: false },
-            ],
-            note: c.z === null ? "Fewer than 3 readings — not shown." : undefined,
-          });
-        },
-      },
-      grid: { left: 4, right: 8, top: 4, bottom: 52, containLabel: true },
-      xAxis: categoryAxis(reasons.map((r) => r.name), { axisLine: { show: false }, axisLabel: axisLabel({ interval: 0, rotate: 30, width: 96, overflow: "truncate" }) }),
-      yAxis: categoryAxis(feats.map((f) => f.label), { inverse: true, axisLine: { show: false }, axisLabel: axisLabel({ fontSize: 11, color: INK.secondary, width: labelW, overflow: "truncate" }) }),
-      visualMap: {
-        min: -2, max: 2, calculable: false, orient: "horizontal", left: "center", bottom: 0, itemHeight: 120, itemWidth: 9,
-        text: ["Higher in NG", "Lower"], textStyle: { fontSize: 10.5, color: INK.muted, fontFamily: FONT_FAMILY },
-        inRange: { color: [LOWER, DIVERGING.mid, HIGHER] }, dimension: 2,
-      },
-      series: [{
-        type: "heatmap",
-        data: cells.map((c) => [c.col, c.row, c.z === null ? "-" : r2(Math.max(-3, Math.min(3, c.z)))]),
-        label: { show: true, fontSize: 10.5, fontFamily: FONT_FAMILY, color: INK.primary, formatter: (p) => { const c = cells[p.dataIndex]; return c?.z === null ? "" : signed(c.z, 1); } },
-        itemStyle: { borderColor: "#fff", borderWidth: 2, borderRadius: 4 },
-        emphasis: { itemStyle: { borderColor: INK.primary, borderWidth: 1 } },
-      }],
-    };
-  }, [defectLink, labelW]);
+  const driverEvents = useMemo(() => ({
+    click: (p) => {
+      if (p?.data?.key) setFocusKey(p.data.key);
+      else if (p?.componentType === "xAxis") setFocusKey(`label:${p.value}`);
+    },
+  }), []);
 
   /* ── Anomalies (from the analysis service, else worst-deviating NG parts) ── */
   const outlierRows = useMemo(() => {
@@ -629,7 +637,7 @@ export default function RootCauseTab({
             if (dev > worstDev) {
               worstDev = dev;
               worstParam = `${s.label} (${val} ${s.unit}, ${dev.toFixed(1)}σ)`;
-              worstLimits = limitMap[s.key] ? `${limitMap[s.key].lsl} – ${limitMap[s.key].usl}` : "Not set";
+              worstLimits = limitMap[s.key] ? limitMap[s.key].text : "Not set";
             }
           }
         });
@@ -696,12 +704,6 @@ export default function RootCauseTab({
 
   const topDriver = drivers[0];
   const nSig = drivers.filter((d) => d.sig).length;
-  const selDriver = stats.find((s) => s.key === sel.def.key);
-  const selLim = limitMap[sel.def.key];
-  const paramChoices = useMemo(() => {
-    const seen = new Set(drivers.map((d) => d.key));
-    return [...drivers, ...stats.filter((s) => !seen.has(s.key))];
-  }, [drivers, stats]);
   const chart = (opt, h, events) => <EChart option={opt} onEvents={events} style={{ height: h, minHeight: 0, width: "100%" }} />;
   const noParamData = waiting ? <Loading /> : <Empty>Not enough PLC readings for both OK and NG parts in this selection.</Empty>;
 
@@ -737,7 +739,68 @@ export default function RootCauseTab({
         .rc-cat{display:inline-block;padding:0 7px;border:1px solid;border-radius:999px;font-size:10.5px;font-weight:600;margin-right:6px}
         .rc-bar{display:inline-block;width:44px;height:6px;border-radius:3px;background:${INK.grid};margin-right:8px;vertical-align:1px;overflow:hidden}
         .rc-bar i{display:block;height:100%;border-radius:3px;background:${OUTCOME.ng}}
-        .rc-causes{max-height:380px;overflow:auto}
+        .rc-causes{max-height:420px;overflow:auto}
+        .rc-cov{display:grid;grid-template-columns:minmax(0,1.3fr) repeat(3,minmax(0,1fr));gap:0;border:1px solid ${INK.border};border-radius:14px;background:#fff;overflow:hidden}
+        .rc-cov>div{padding:12px 16px;min-width:0}
+        .rc-cov>div+div{border-left:1px solid ${INK.grid}}
+        .rc-cov h4{margin:0 0 4px;display:flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:${INK.primary}}
+        .rc-cov p{margin:0;font-size:12px;color:${INK.muted};line-height:1.45}
+        .rc-cov small{display:block;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:${INK.muted}}
+        .rc-cov b{display:block;font-size:22px;font-weight:750;font-variant-numeric:tabular-nums;line-height:1.2}
+        .rc-cov span{font-size:11.5px;color:${INK.muted};font-variant-numeric:tabular-nums}
+        @media(max-width:900px){.rc-cov{grid-template-columns:repeat(2,minmax(0,1fr))}.rc-cov>div:nth-child(3){border-left:none}.rc-cov>div:nth-child(n+3){border-top:1px solid ${INK.grid}}}
+        .rc-why td{vertical-align:top}
+        .rc-why-info{display:flex;align-items:center;gap:8px;margin:0 2px 10px;padding:8px 12px;border-radius:10px;background:#eef3f9;border:1px solid #c9d6e6;font-size:12.5px;color:#1e3a5f}
+        .rc-why2{display:flex;flex-direction:column;gap:8px}
+        .rc-why-row{display:grid;grid-template-columns:minmax(220px,300px) minmax(0,1fr) auto;gap:10px 16px;align-items:center;padding:10px 12px;border:1px solid ${INK.border};border-left:4px solid var(--v);border-radius:12px;background:#fff}
+        .rc-why-row:hover{box-shadow:0 6px 16px -12px rgba(15,23,42,.4)}
+        @media(max-width:1000px){.rc-why-row{grid-template-columns:1fr}}
+        .rc-why-main{display:flex;flex-direction:column;gap:5px;min-width:0}
+        .rc-why-name{display:flex;align-items:center;gap:4px;min-width:0}
+        .rc-why-name b{font-size:13.5px;color:${INK.primary};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .rc-why-count{display:flex;align-items:center;gap:8px;font-variant-numeric:tabular-nums}
+        .rc-why-count b{font-size:14px;color:${INK.primary}}
+        .rc-why-count em{font-style:normal;font-size:11.5px;color:${INK.muted}}
+        .rc-why-bar{flex:1;height:6px;border-radius:3px;background:${INK.grid};overflow:hidden;max-width:150px}
+        .rc-why-bar i{display:block;height:100%;border-radius:3px}
+        .rc-why-shot{font-size:11px;color:${INK.faint}}
+        .rc-why-params{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+        .rc-pchip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px 4px 6px;border-radius:999px;border:1px solid color-mix(in srgb,var(--c) 40%,#fff);background:color-mix(in srgb,var(--c) 7%,#fff);font:inherit;font-size:12px;cursor:pointer;color:${INK.primary}}
+        .rc-pchip:hover{border-color:var(--c)}
+        .rc-pchip .dir{display:grid;place-items:center;width:18px;height:18px;border-radius:50%;background:var(--c);color:#fff;font-weight:800;font-size:11px}
+        .rc-pchip .nm{font-weight:600}
+        .rc-pchip b{color:var(--c);font-variant-numeric:tabular-nums}
+        .rc-pchip .sig{color:${OUTCOME.ng};font-weight:800;letter-spacing:-1px}
+        .rc-pchip .vals{color:${INK.muted};font-size:11px;font-variant-numeric:tabular-nums}
+        .rc-why-none{font-size:12px;color:${INK.faint}}
+        .rc-verdict{border:1px solid}
+        .rc-why-legend{font-size:11px;color:${INK.muted};padding:2px 4px}
+        .rc-link{display:inline-flex;align-items:center;gap:5px;margin:0 6px 4px 0;padding:2px 8px;border-radius:999px;border:1px solid;font-size:11.5px;font-weight:600;white-space:nowrap;cursor:pointer;background:#fff}
+        .rc-verdict{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;white-space:nowrap}
+        .rc-grid-bar{display:flex;justify-content:space-between;align-items:center;gap:8px 16px;flex-wrap:wrap;padding:0 4px 10px}
+        .rc-seg{display:inline-flex;flex-wrap:wrap;gap:3px;padding:3px;border-radius:10px;background:${INK.grid}}
+        .rc-seg button{border:none;background:transparent;border-radius:7px;padding:5px 10px;font:inherit;font-size:12px;font-weight:600;color:${INK.body};cursor:pointer;white-space:nowrap}
+        .rc-seg button span{opacity:.65;font-weight:700;margin-left:2px}
+        .rc-seg button.on{background:#0f2a4a;color:#fff}
+        .rc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+        .rc-tile{display:flex;flex-direction:column;gap:4px;border:1px solid ${INK.border};border-top:3px solid var(--tile-c);border-radius:12px;background:#fff;padding:9px 10px 8px;min-width:0;scroll-margin:120px}
+        .rc-tile.focus{box-shadow:0 0 0 2px #0f2a4a}
+        .rc-tile header{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+        .rc-tile h4{margin:0;font-size:12.5px;font-weight:700;color:${INK.primary};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .rc-tile h4 span{font-weight:500;color:${INK.muted}}
+        .rc-tile-tag{display:inline-block;margin-top:2px;font-size:10.5px;font-weight:700;color:var(--tile-c);text-transform:uppercase;letter-spacing:.04em}
+        .rc-tile-shift{display:flex;flex-direction:column;align-items:flex-end;line-height:1.15;flex-shrink:0}
+        .rc-tile-shift b{font-size:14px;font-variant-numeric:tabular-nums}
+        .rc-tile-shift span{font-size:10.5px;color:${INK.muted};white-space:nowrap}
+        .rc-tile-body{height:120px}
+        .rc-tile-msg{height:100%;display:grid;place-items:center;text-align:center;font-size:12px;color:${INK.muted};background:${INK.surfaceAlt};border-radius:8px;padding:8px;line-height:1.5}
+        .rc-skel{background:linear-gradient(90deg,${INK.grid} 25%,${INK.surfaceAlt} 50%,${INK.grid} 75%);background-size:200% 100%;animation:rc-shimmer 1.4s ease-in-out infinite}
+        @keyframes rc-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+        .rc-tile footer{display:flex;flex-wrap:wrap;gap:2px 10px;font-size:11px;color:${INK.body};font-variant-numeric:tabular-nums}
+        .rc-tile footer i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px}
+        .rc-tile footer em{font-style:normal;color:${INK.faint}}
+        .rc-tile footer .lim{color:${INK.secondary}}
+        .rc-tile footer .muted{color:${INK.faint}}
         @media(max-width:640px){
           .rc-kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
           .rc-kpi-value{font-size:17px}
@@ -748,19 +811,84 @@ export default function RootCauseTab({
         }
       `}</style>
 
-      {/* ── KPI strip ── */}
-      <div className="rc-kpis">
-        <Kpi label="Parts analysed" value={waiting || !counts.total ? "—" : counts.total.toLocaleString()} color={ACCENT.neutral} />
-        <Kpi label="OK parts" value={waiting || !counts.total ? "—" : counts.ok.toLocaleString()} color={ACCENT.ok} />
-        <Kpi label="NG parts" value={waiting || !counts.total ? "—" : counts.ng.toLocaleString()} color={ACCENT.ng} />
-        <Kpi label="Plant NG rate" value={!waiting && popRate ? pct(popRate, 2) : "—"} color={ACCENT.ng} />
-        <Kpi label="Explained by process" value={influence ? pct(influence.explained, 0) : "—"} color={ACCENT.process} />
-        <Kpi label="Top driver" value={topDriver ? topDriver.label : "—"} color={ACCENT.model} />
-      </div>
+      {/* ── Analysed parts (DCM shot data only) ── */}
+      <section className="rc-cov" aria-label="Parts analysed">
+        <div>
+          <h4><Database size={15} color={ACCENT.process} />Analysis uses parts with DCM shot data only</h4>
+          <p>Process parameters and the cycle time come from the part's own shot record (PlcCycleReadings — cycle time of that shot, not the laser-marking log). Parts without shot details are excluded.</p>
+        </div>
+        <div>
+          <small>Analysed — OK parts</small>
+          <b style={{ color: OUTCOME.ok }}>{waiting ? "—" : counts.ok.toLocaleString()}</b>
+          <span>{analysis?.population ? `sample of ${analysis.population.okWithShot.toLocaleString()} OK with shot data` : "with shot data"}</span>
+        </div>
+        <div>
+          <small>Analysed — NG parts</small>
+          <b style={{ color: OUTCOME.ng }}>{waiting ? "—" : counts.ng.toLocaleString()}</b>
+          <span>{analysis?.population ? `rejected at a station (incl. still on the line) · ${analysis.population.ngWithShot.toLocaleString()} finished NG have shot data` : "with shot data"}</span>
+        </div>
+        <div>
+          <small>Excluded — no shot data</small>
+          <b style={{ color: ACCENT.warning }}>{analysis?.population ? (analysis.population.okExcluded + analysis.population.ngExcluded).toLocaleString() : (excludedNg + excludedOk).toLocaleString()}</b>
+          <span>{analysis?.population ? `${analysis.population.okExcluded.toLocaleString()} OK · ${analysis.population.ngExcluded.toLocaleString()} NG of ${(analysis.population.okTotal + analysis.population.ngTotal).toLocaleString()} finished parts` : `${excludedNg.toLocaleString()} NG records without a shot record`}</span>
+        </div>
+      </section>
+
+      {/* ── What is the reason of rejection? reason ↔ process parameters ── */}
+      <Card color={ACCENT.ng} icon={<HelpCircle size={16} />} title="Why are parts rejected? — reason ↔ process parameters"
+        sub="Top rejection reasons with the process parameters their NG parts ran off (vs OK parts, in σ of OK parts; only significant shifts, p < 0.05). Association, not proof of cause — confirm with a trial. Click a parameter to see it below.">
+        <div className="rc-why-info">
+          <Database size={14} aria-hidden="true" />
+          <span>Analysis uses parts with DCM shot data only — <b style={{ color: OUTCOME.ok }}>{counts.ok.toLocaleString()} OK</b> / <b style={{ color: OUTCOME.ng }}>{counts.ng.toLocaleString()} NG</b> analysed,
+            {" "}<b>{(analysis?.population ? analysis.population.okExcluded + analysis.population.ngExcluded : excludedNg + excludedOk).toLocaleString()}</b> excluded (no shot record)</span>
+        </div>
+        {!whyRows ? (waiting ? <Loading /> : <Empty>No rejection reasons in this selection.</Empty>) : (
+          <div className="rc-why2">
+            {whyRows.map((w) => {
+              const V = { strong: ["Process-related", OUTCOME.ng], possible: ["Possibly process-related", STATUS.warning], none: ["Not process-related", INK.muted], few: ["Too few shot records", INK.faint] }[w.verdict];
+              const maxShare = whyRows[0]?.share || 1;
+              return (
+                <div key={w.reason} className="rc-why-row" style={{ "--v": V[1] }}>
+                  <div className="rc-why-main">
+                    <div className="rc-why-name">
+                      {w.cat && <span className="rc-cat" style={{ color: DEFECT_CATEGORY[w.cat] || INK.body, borderColor: DEFECT_CATEGORY[w.cat] || INK.border }}>{w.cat}</span>}
+                      <b title={w.reason}>{w.reason}</b>
+                    </div>
+                    <div className="rc-why-count">
+                      <span className="rc-why-bar"><i style={{ width: `${(w.share / maxShare) * 100}%`, background: DEFECT_CATEGORY[w.cat] || OUTCOME.ng }} /></span>
+                      <b>{w.all.toLocaleString()}</b><em>{w.share.toFixed(1)}%</em>
+                    </div>
+                    <span className="rc-why-shot" title="NG parts of this reason that have DCM shot data (analysed)">{w.n.toLocaleString()} with shot data</span>
+                  </div>
+                  <div className="rc-why-params">
+                    {w.links.length ? w.links.map((l) => {
+                      const up = l.z >= 0;
+                      const col = up ? HIGHER : LOWER;
+                      const stars = Number.isFinite(l.pv) ? (l.pv < 0.001 ? "***" : l.pv < 0.01 ? "**" : "*") : "";
+                      return (
+                        <button type="button" key={l.key} className="rc-pchip" style={{ "--c": col }} onClick={() => setFocusKey(l.key)}
+                          title={`${l.label}: NG parts with ${w.reason} ${r2(l.mu)} vs OK ${r2(l.okMean)} ${l.unit} (n=${l.n}, p ${fmtP(l.pv)})`}>
+                          <span className="dir">{up ? "↑" : "↓"}</span>
+                          <span className="nm">{l.label}</span>
+                          <b>{signed(l.z, 1)}σ</b>
+                          <span className="sig" title="Significance: * p<0.05 · ** p<0.01 · *** p<0.001">{stars}</span>
+                          <span className="vals">{r2(l.mu)} vs {r2(l.okMean)}{l.unit ? ` ${l.unit}` : ""}</span>
+                        </button>
+                      );
+                    }) : <span className="rc-why-none">No process parameter clearly different from OK parts</span>}
+                  </div>
+                  <span className="rc-verdict" style={{ color: V[1], background: withAlpha(V[1], 0.1), borderColor: withAlpha(V[1], 0.35) }}>{V[0]}</span>
+                </div>
+              );
+            })}
+            <div className="rc-why-legend">↑ / ↓ = NG parts ran higher / lower than OK parts · σ = shift in standard deviations of OK parts · * p &lt; 0.05 · ** p &lt; 0.01 · *** p &lt; 0.001 · association, not proof of cause</div>
+          </div>
+        )}
+      </Card>
 
       {/* ── 1. Ranked process drivers ── */}
-      <Card color={ACCENT.process} icon={<Zap size={16} />} title="Process parameters driving NG"
-        sub={drivers.length ? `How far NG parts ran from OK parts · ${nSig} of ${drivers.length} significant (p < 0.05) · click a bar to inspect` : "NG mean vs OK mean, in σ of good parts"}>
+      <Card color={ACCENT.process} icon={<Zap size={16} />} title="Top process drivers of NG"
+        sub={drivers.length ? `NG mean vs OK mean in σ of OK parts · ${nSig} of ${drivers.length} significant (p < 0.05)${influence ? ` · process parameters explain about ${pct(influence.explained, 0)} of the NG variation` : ""}${topDriver ? ` · strongest: ${topDriver.label}` : ""} · association, not proof — verify with a trial · click a bar to see its distribution below` : "NG mean vs OK mean, in σ of good parts"}>
         {!driverOption ? noParamData : (
           <>
             <div className="ra-legend rc-legend">
@@ -768,80 +896,19 @@ export default function RootCauseTab({
               <span><i style={{ background: LOWER }} />Lower in NG</span>
               <span><i style={{ background: withAlpha(INK.muted, 0.35) }} />Faded = not significant</span>
             </div>
-            {chart(driverOption, drivers.length * 30 + 56, driverEvents)}
+            {chart(driverOption, 380, driverEvents)}
           </>
         )}
       </Card>
 
-      {/* ── 2. Selected parameter + NG rate by operating range ── */}
-      <div className="ra-grid2">
-        <Card color={ACCENT.process} icon={<Waves size={16} />} title="OK vs NG distribution"
-          sub={selLim ? "Dashed lines = set limits (LSL / USL)" : "Share of parts at each reading"}
-          actions={paramChoices.length > 0 && (
-            <select className="rc-select" aria-label="Parameter" value={sel.def.key} onChange={(e) => setParam(e.target.value)}>
-              {paramChoices.map((p) => <option key={p.key} value={p.key}>{p.label}{p.unit ? ` (${p.unit})` : ""}</option>)}
-            </select>
-          )}>
-          {!paramChoices.length ? noParamData : !densityOption ? <Empty>Not enough readings for {sel.def.label}.</Empty> : (
-            <>
-              <div className="rc-stats">
-                <span>OK mean <b style={{ color: OUTCOME.ok }}>{r2(sel.okMean)}</b></span>
-                <span>NG mean <b style={{ color: OUTCOME.ng }}>{sel.ng.length ? r2(sel.ngMean) : "—"}</b></span>
-                {selDriver && <span>Shift <b>{signed(selDriver.shift, 1)}σ</b></span>}
-                {selLim && <span className="rc-hide-sm">Limits <b>{selLim.lsl} – {selLim.usl}</b></span>}
-              </div>
-              {chart(densityOption, 300)}
-            </>
-          )}
-        </Card>
-
-        <Card color={ACCENT.ng} icon={<Gauge size={16} />} title="NG rate by operating range"
-          sub={popRate ? `Plant-weighted NG % per fifth of the good-part range · plant avg ${pct(popRate)}` : "NG % per fifth of the good-part range"}>
-          {!riskOption ? noParamData : (
-            <div className="rc-scroll"><div>{chart(riskOption, Math.max(280, riskMap.feats.length * 34 + 90))}</div></div>
-          )}
-        </Card>
-      </div>
-
-      {/* ── 3. Defect ↔ parameter + top causes ── */}
-      <div className="ra-grid2">
-        <Card color={ACCENT.location} icon={<GitBranch size={16} />} title="Defect ↔ parameter link"
-          sub="Shift of each defect's NG parts from the OK mean (σ) · blank = under 3 readings">
-          {!linkOption ? (waiting && !drivers.length ? <Loading /> : <Empty>No defect reasons matched to PLC readings.</Empty>) : (
-            <div className="rc-scroll"><div>{chart(linkOption, Math.max(300, defectLink.feats.length * 34 + 110))}</div></div>
-          )}
-        </Card>
-
-        <Card color={ACCENT.ng} icon={<Layers size={16} />} title="Top rejection causes"
-          sub={causes ? `${causes.vital} of ${causes.top.length} station–defect combinations make up 80% of ${causes.total.toLocaleString()} rejects` : "Station and defect of every rejected part"}>
-          {!causes ? <Empty>No rejected parts in this selection.</Empty> : (
-            <div className="rc-causes">
-              <table className="rc-table">
-                <thead><tr><th>Station</th><th>Defect</th><th className="num">Parts</th><th className="num">Share</th></tr></thead>
-                <tbody>
-                  {causes.top.slice(0, 12).map((t) => (
-                    <tr key={`${t.st}-${t.cat}-${t.def}`} className={t.cum - t.share >= 80 ? "tail" : undefined}>
-                      <td style={{ whiteSpace: "nowrap" }}>
-                        <span className="rc-dot" style={{ background: stationColor(t.st) }} />{t.st}
-                        {STATION_NAME[t.st] && <span className="rc-hide-sm" style={{ color: INK.faint, marginLeft: 6, fontSize: 11 }}>{STATION_NAME[t.st]}</span>}
-                      </td>
-                      <td>
-                        <span className="rc-cat" style={{ color: DEFECT_CATEGORY[t.cat] || INK.body, borderColor: DEFECT_CATEGORY[t.cat] || INK.border }}>{t.cat}</span>
-                        <span style={{ color: INK.primary, fontWeight: 500 }}>{t.def}</span>
-                      </td>
-                      <td className="num">{t.n.toLocaleString()}</td>
-                      <td className="num"><span className="rc-bar rc-hide-sm"><i style={{ width: `${Math.min(100, (t.n / causes.top[0].n) * 100)}%` }} /></span>{t.share.toFixed(1)}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-      </div>
+      {/* ── 2. Every parameter side by side ── */}
+      <Card color={ACCENT.process} icon={<Waves size={16} />} title="OK vs NG distribution of the drivers"
+        sub={`Parameters associated with NG (switch to see all ${ALL_45_PARAMETERS.length}) · green = OK parts, red = NG parts · dashed = set limits · ${counts.ok.toLocaleString()} OK and ${counts.ng.toLocaleString()} NG parts`}>
+        <ParamGrid items={gridItems} focusKey={focusKey} waiting={waiting && loading} />
+      </Card>
 
       {/* ── 4. Anomalies ── */}
-      <Card color={ACCENT.ng} icon={<ShieldAlert size={16} />} title="Process anomalies"
+      <Card color={ACCENT.ng} icon={<ShieldAlert size={16} />} title="NG parts with the largest process excursion"
         sub={`${outlierRows.length.toLocaleString()} NG parts with their largest parameter excursion`}
         actions={<>
           <div className="rc-search"><Search size={14} color={INK.faint} /><input aria-label="Search anomalies" placeholder="Search…" value={outlierSearch} onChange={(e) => setOutlierSearch(e.target.value)} /></div>

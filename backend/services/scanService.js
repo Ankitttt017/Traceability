@@ -1554,6 +1554,56 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       };
     }
 
+    // SCANNER-FIX (OP110 "missing part id"): at the Customer-QR (laser) station
+    // a DPM rescan of a part that already has a successful start here but NO
+    // active customer-QR mapping, and has not been processed at any later
+    // station, is not a real duplicate — its Customer-QR wait was lost. Allow
+    // it so the TCP layer restarts the wait for the same part (the existing
+    // OK log is reused; nothing new is written here). Only passed by the TCP
+    // scanner path (tcpServer.processNormalPartScan); HTTP callers unaffected.
+    if (
+      options?.allowCustomerQrWaitRestart === true &&
+      hasExistingTerminal &&
+      hasExistingSuccess &&
+      !part.is_rework
+    ) {
+      const [activeMapping, laterStationLog] = await Promise.all([
+        PartCodeMapping.findOne({
+          where: {
+            is_active: true,
+            [Op.or]: [{ old_part_id: normalizedPartId }, { customer_qr: normalizedPartId }],
+          },
+          attributes: ["id"],
+        }),
+        OperationLog.findOne({
+          where: {
+            part_id: normalizedPartId,
+            station_no: { [Op.ne]: station },
+            result: "OK",
+          },
+          attributes: ["id"],
+        }),
+      ]);
+      const successLog = stationLogs.find((row) => isSuccessfulOperationLog(row)) || latestStationLog;
+      if (!activeMapping && !laterStationLog && successLog) {
+        return {
+          decision: "ALLOW",
+          reason: "CUSTOMER_QR_WAIT_RESTARTED",
+          qrStatus: "PASSED",
+          operationStatus: "WAITING_CUSTOMER_QR",
+          plcStatus: "WAITING_PLC",
+          status: "WAITING",
+          message: `${station}: Part ID accepted again. Waiting for Customer QR.`,
+          currentStatus: part.status,
+          expectedStation: station,
+          lastCompletedStation,
+          operationLogId: successLog.id,
+          stationNo: station,
+          resultSource,
+        };
+      }
+    }
+
     if (hasExistingTerminal && !part.is_rework) {
       const blockedLog = await OperationLog.create({
         part_id: normalizedPartId,

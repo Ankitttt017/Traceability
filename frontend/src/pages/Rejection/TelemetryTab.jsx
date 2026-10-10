@@ -1,9 +1,8 @@
 import { useState, useMemo, useCallback } from "react";
-import { Activity, Download, Search, Sigma, ListChecks, Layers, Sliders } from "lucide-react";
+import { Activity, Download, Search, Sigma, ListChecks, Layers, Sliders, LayoutGrid, AlertTriangle, Table2 } from "lucide-react";
 import ExcelJS from "exceljs";
 import { saveAs } from "file-saver";
 import EChart from "../../components/charts/EChart";
-import FacetedBoxPlot from "./FacetedBoxPlot";
 import {
   ALL_TELEMETRY_CATEGORIES, ALL_45_PARAMETERS, MACHINE_PROCESS_PARAMETERS,
   formatResultTimestamp, looksLikeCustomerQr,
@@ -41,21 +40,31 @@ const SPC_WINDOW = 1000;         // last N readings per parameter used by every 
 const isNum = (v) => typeof v === "number" && Number.isFinite(v);
 const camel = (k) => String(k || "").replace(/_([a-z0-9])/g, (_, l) => l.toUpperCase());
 
-/** Spec limits are "not set" when missing, zero, a 9999-style placeholder, or inverted. */
+/**
+ * Spec limits. A side is "not set" when missing, zero, or a placeholder (999 / 999.9 / 9999 …); a one-sided
+ * limit (only LSL or only USL) is kept. Both sides inverted → not set.
+ */
+const MIN_SPC_N = 20;            // readings needed before control limits / capability are shown
+const isPlaceholderLimit = (n) => Math.abs(n) >= 9999 || /^9{3,}(\.9+)?$/.test(String(Math.abs(n)));
 const sanitizeLimits = (lslRaw, uslRaw) => {
-  const lsl = lslRaw === "" || lslRaw == null ? null : Number(lslRaw);
-  const usl = uslRaw === "" || uslRaw == null ? null : Number(uslRaw);
-  const has = isNum(lsl) && isNum(usl) && lsl !== 0 && usl !== 0 && usl < 9999 && usl > lsl;
-  return has ? { lsl, usl, has: true } : { lsl: null, usl: null, has: false };
+  const clean = (x) => {
+    if (x === "" || x == null) return null;
+    const n = Number(x);
+    return isNum(n) && n !== 0 && !isPlaceholderLimit(n) ? n : null;
+  };
+  let lsl = clean(lslRaw);
+  let usl = clean(uslRaw);
+  if (lsl != null && usl != null && usl <= lsl) { lsl = null; usl = null; }
+  return { lsl, usl, has: lsl != null || usl != null, both: lsl != null && usl != null };
 };
+const isOos = (v, spec) => (spec.lsl != null && v < spec.lsl) || (spec.usl != null && v > spec.usl);
+const fmtLim = (spec) => (!spec.hasLimits ? "Not set" : `${spec.lsl ?? "—"} / ${spec.usl ?? "—"}`);
 
 /** Read a parameter value from a production row. Zero / non-numeric readings are treated as "not recorded". */
 const getParamValue = (r, spec) => {
   if (spec.key === "plc_cycle_time") {
-    const m = String(r.machineName || r.machine_name || "").toLowerCase();
-    if (m.includes("inspection") || m.includes("pdi") || m.includes("guag")) return null;
-    const isCasting = m.includes("dcm") || m.includes("casting") || m.includes("dc");
-    const n = Number(r.plc_cycle_time ?? r.plcCycleTime ?? (isCasting ? (r.cycleTime ?? r.cycle_time) : null));
+    // cycle time of the part's DCM shot (PlcCycleReadings.cycle_time) — never the laser-marking log cycle time
+    const n = Number(r.plc_cycle_time ?? r.plcCycleTime);
     return Number.isFinite(n) && n > 0 ? n : null;
   }
   const keys = [spec.key, camel(spec.key), ...(spec.altKeys || [])];
@@ -86,7 +95,7 @@ const seriesStats = (vals) => {
 /** Individuals-chart limits from moving-range σ: centre and ±3σ control limits. */
 const controlLimits = (st) => {
   const s = st.sigmaWithin;
-  if (!isNum(st.mean) || !isNum(s) || s <= 0) return { mean: st.mean, sigma: null, ucl: null, lcl: null };
+  if (!isNum(st.mean) || !isNum(s) || s <= 0 || st.n < MIN_SPC_N) return { mean: st.mean, sigma: null, ucl: null, lcl: null };
   return { mean: st.mean, sigma: s, ucl: st.mean + 3 * s, lcl: st.mean - 3 * s };
 };
 
@@ -97,20 +106,22 @@ const controlLimits = (st) => {
  */
 const capability = (vals, spec) => {
   const st = seriesStats(vals);
-  const ok = spec.hasLimits && st.n > 1;
+  // capability needs the limits and at least MIN_SPC_N readings (fewer readings → no index, never a misleading one)
+  const ok = spec.hasLimits && st.n >= MIN_SPC_N;
   const sw = st.sigmaWithin;
   const so = st.std;
-  const tol = ok ? spec.usl - spec.lsl : null;
-  const nearest = ok ? Math.min(spec.usl - st.mean, st.mean - spec.lsl) : null;
+  const tol = ok && spec.both ? spec.usl - spec.lsl : null;
+  const sides = ok ? [spec.usl != null ? spec.usl - st.mean : null, spec.lsl != null ? st.mean - spec.lsl : null].filter(isNum) : [];
+  const nearest = sides.length ? Math.min(...sides) : null; // one-sided limit → Cpu or Cpl
   const usable = (s) => ok && isNum(s) && s > 0;
-  const oos = spec.hasLimits ? vals.filter((v) => v < spec.lsl || v > spec.usl).length : null;
+  const oos = spec.hasLimits ? vals.filter((v) => isOos(v, spec)).length : null;
   return {
     ...st,
     sigmaOverall: so,
-    cp: usable(sw) ? tol / (6 * sw) : null,
-    cpk: usable(sw) ? nearest / (3 * sw) : null,
-    pp: usable(so) ? tol / (6 * so) : null,
-    ppk: usable(so) ? nearest / (3 * so) : null,
+    cp: usable(sw) && isNum(tol) ? tol / (6 * sw) : null,
+    cpk: usable(sw) && isNum(nearest) ? nearest / (3 * sw) : null,
+    pp: usable(so) && isNum(tol) ? tol / (6 * so) : null,
+    ppk: usable(so) && isNum(nearest) ? nearest / (3 * so) : null,
     oos,
     oosPct: oos != null && st.n > 0 ? (oos / st.n) * 100 : null,
   };
@@ -210,7 +221,7 @@ const resolveSpec = (key, features = []) => {
   const fromCat = sanitizeLimits(cat?.defaultLower, cat?.defaultUpper);
   const lim = fromFeat.has ? fromFeat : fromCat;
   let setPoint = null;
-  if (lim.has) {
+  if (lim.both) {
     const sp = Number(fromFeat.has ? feat?.setPoint : cat?.setPoint);
     setPoint = isNum(sp) && sp >= lim.lsl && sp <= lim.usl ? sp : Number(((lim.lsl + lim.usl) / 2).toFixed(4));
   }
@@ -219,7 +230,8 @@ const resolveSpec = (key, features = []) => {
     label: base.label || feat?.label || key,
     unit: cleanUnit(base.unit || feat?.unit || ""),
     altKeys: [...(cat?.altKeys || []), ...(feat?.altKeys || [])],
-    lsl: lim.lsl, usl: lim.usl, hasLimits: lim.has, setPoint,
+    lsl: lim.lsl, usl: lim.usl, hasLimits: lim.has, both: lim.both, setPoint,
+    limitSource: fromFeat.has ? "recipe" : fromCat.has ? "catalogue" : null,
   };
 };
 
@@ -262,6 +274,18 @@ const readingsFor = (parts, spec) => {
   });
   return out.slice(-SPC_WINDOW);
 };
+/** Parts that sent a value for the parameter that is not a usable reading (0, negative, text). */
+const excludedFor = (parts, spec) => {
+  const keys = [spec.key, camel(spec.key), ...(spec.altKeys || [])];
+  let n = 0;
+  parts.forEach(({ r }) => {
+    if (getParamValue(r, spec) != null) return;
+    // a value was sent but is not a reading: 0, negative or not a number (rows of other machines are not counted)
+    if (keys.some((k) => { const x = r[k]; if (x === undefined || x === null || x === "" || x === "-") return false; const v = Number(x); return !Number.isFinite(v) || v <= 0; })) n += 1;
+  });
+  return n;
+};
+const CAP_TONE = (cpk, n, hasLimits) => (n < MIN_SPC_N ? INK.faint : !hasLimits || !isNum(cpk) ? INK.muted : cpk >= 1.33 ? STATUS.good : cpk >= 1 ? ACCENT.warning : STATUS.critical);
 
 /* ═════════════════════════════════════════════════════════════════════════════
    SMALL PRESENTATIONAL PIECES
@@ -285,6 +309,32 @@ const CardHead = ({ icon, title, sub, color = ACCENT.process, children }) => (
     {children && <div className="tm-toolbar">{children}</div>}
   </div>
 );
+
+/** Mini individuals chart (inline SVG): readings, centre line, UCL / LCL (red dashed), LSL / USL (amber), OOC points red. */
+function MiniControl({ r }) {
+  const W = 220, H = 64, PADY = 6;
+  const vals = r.spark || [];
+  if (vals.length < 2) return <div className="tm-gl-none">{r.n ? "1 reading" : "No readings"}</div>;
+  const marks = [r.ucl, r.lcl, r.lsl, r.usl, r.mean].filter(isNum);
+  let lo = Math.min(...vals, ...marks), hi = Math.max(...vals, ...marks);
+  if (!(hi > lo)) { hi = lo + 1; lo -= 1; }
+  const pad = (hi - lo) * 0.06; lo -= pad; hi += pad;
+  const x = (i) => (i / (vals.length - 1)) * (W - 4) + 2;
+  const y = (v) => H - PADY - ((v - lo) / (hi - lo)) * (H - 2 * PADY);
+  const path = vals.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  const ooc = (v) => isNum(r.ucl) && (v > r.ucl || v < r.lcl);
+  const hl = (v, c, dash) => (isNum(v) ? <line x1="0" x2={W} y1={y(v)} y2={y(v)} stroke={c} strokeWidth="1" strokeDasharray={dash} vectorEffect="non-scaling-stroke" /> : null);
+  return (
+    <svg className="tm-gl-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`${r.label} last ${vals.length} readings`}>
+      {isNum(r.lsl) && isNum(r.usl) && <rect x="0" width={W} y={y(r.usl)} height={Math.max(0, y(r.lsl) - y(r.usl))} fill="rgba(22,163,74,.06)" />}
+      {hl(r.usl, C_SPEC, "2 3")}{hl(r.lsl, C_SPEC, "2 3")}
+      {hl(r.ucl, C_CONTROL, "4 3")}{hl(r.lcl, C_CONTROL, "4 3")}
+      {hl(r.mean, C_CENTER)}
+      <path d={path} fill="none" stroke="#3b5b82" strokeWidth="1.4" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+      {vals.map((v, i) => (ooc(v) ? <circle key={i} cx={x(i)} cy={y(v)} r="2.4" fill={C_NG} /> : null))}
+    </svg>
+  );
+}
 
 const ChartSkeleton = ({ height }) => <div className="tm-skel" style={{ height }} />;
 
@@ -318,21 +368,19 @@ export default function TelemetryTab({
   recordsRows = [],
   allRejectionRecords = [],
   mlInsights = { features: [] },
+  analysis = null,
   onOpenRecipeModal,
   loading = true,
 }) {
-  const [categoryId, setCategoryId] = useState("machine_process");
-  const [paramKey, setParamKey] = useState("plc_cycle_time");
+  // null until the user picks one: then the first parameter with enough readings for SPC is shown
+  const [pickedCat, setCategoryId] = useState(null);
+  const [pickedKey, setParamKey] = useState(null);
   const [tableFilter, setTableFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+  const [glanceView, setGlanceView] = useState("cards");
   const features = mlInsights?.features;
-
-  const activeParams = useMemo(() => {
-    const cat = ALL_TELEMETRY_CATEGORIES.find((c) => c.id === categoryId);
-    return cat?.params?.length ? cat.params : MACHINE_PROCESS_PARAMETERS;
-  }, [categoryId]);
 
   /* ── Casted parts in production order (oldest → newest) ─────────────────── */
   const orderedParts = useMemo(() => {
@@ -349,6 +397,18 @@ export default function TelemetryTab({
       });
   }, [rows, recordsRows, allRejectionRecords]);
 
+  const autoPick = useMemo(() => {
+    const list = ALL_TELEMETRY_CATEGORIES.flatMap((c) => (c.params || []).map((p) => ({ cat: c.id, key: p.key })));
+    const n = (x) => readingsFor(orderedParts, resolveSpec(x.key, features)).length;
+    return list.find((x) => n(x) >= MIN_SPC_N) || list.find((x) => n(x) > 0) || { cat: "machine_process", key: "plc_cycle_time" };
+  }, [orderedParts, features]);
+  const categoryId = pickedCat || (pickedKey ? "machine_process" : autoPick.cat);
+  const paramKey = pickedKey || autoPick.key;
+  const activeParams = useMemo(() => {
+    const cat = ALL_TELEMETRY_CATEGORIES.find((c) => c.id === categoryId);
+    return cat?.params?.length ? cat.params : MACHINE_PROCESS_PARAMETERS;
+  }, [categoryId]);
+
   const spec = useMemo(() => resolveSpec(paramKey, features), [paramKey, features]);
   const u = spec.unit ? ` ${spec.unit}` : "";
 
@@ -363,7 +423,7 @@ export default function TelemetryTab({
     const points = list.map(({ r, info, v }, i) => {
       const machine = r.machineName || r.machine_name || "";
       const die = r.dieName || r.die_name || "";
-      const specStatus = !spec.hasLimits ? "NO_LIMITS" : v > spec.usl ? "HIGH" : v < spec.lsl ? "LOW" : "IN_SPEC";
+      const specStatus = !spec.hasLimits ? "NO_LIMITS" : spec.usl != null && v > spec.usl ? "HIGH" : spec.lsl != null && v < spec.lsl ? "LOW" : "IN_SPEC";
       return {
         index: i + 1,
         value: v,
@@ -399,24 +459,28 @@ export default function TelemetryTab({
   }, [orderedParts, spec]);
 
   /* ── Overview of every parameter in the active category (worst first) ───── */
-  const overviewRows = useMemo(() => activeParams.map((p) => {
+  const allRows = useMemo(() => ALL_TELEMETRY_CATEGORIES.flatMap((c) => (c.params || []).map((p) => {
     const s = resolveSpec(p.key, features);
     const vals = readingsFor(orderedParts, s).map((x) => x.v);
     const cap = capability(vals, s);
     const ctl = controlLimits(cap);
     const ooc = isNum(ctl.ucl) ? vals.filter((v) => v > ctl.ucl || v < ctl.lcl).length : null;
     return {
-      key: p.key, label: s.label, unit: s.unit, n: cap.n, mean: cap.mean, cpk: cap.cpk,
+      key: p.key, label: s.label, unit: s.unit, n: cap.n, mean: cap.mean, cpk: cap.cpk, ooc, oos: cap.oos,
       oocPct: ooc != null && cap.n ? (ooc / cap.n) * 100 : null,
-      oosPct: cap.oosPct, hasLimits: s.hasLimits,
+      oosPct: cap.oosPct, hasLimits: s.hasLimits, catId: c.id, catLabel: c.shortLabel || c.label,
+      spark: vals.slice(-60), excluded: excludedFor(orderedParts, s),
+      ucl: ctl.ucl, lcl: ctl.lcl, ctlMean: ctl.mean, lsl: s.lsl, usl: s.usl, std: cap.std,
     };
-  }).sort((a, b) => {
+  })), [orderedParts, features]);
+  const overviewRows = useMemo(() => allRows.filter((r) => activeParams.some((p) => p.key === r.key)).sort((a, b) => {
     if (!a.n !== !b.n) return a.n ? -1 : 1;                         // parameters without readings last
     const ca = isNum(a.cpk) ? a.cpk : Infinity;
     const cb = isNum(b.cpk) ? b.cpk : Infinity;
     if (ca !== cb) return ca - cb;                                  // lowest Cpk first
     return (b.oocPct ?? -1) - (a.oocPct ?? -1);                     // then most out of control
-  }), [activeParams, orderedParts, features]);
+  }), [allRows, activeParams]);
+  const excludedNow = useMemo(() => excludedFor(orderedParts, spec), [orderedParts, spec]);
 
   /* ── Individuals control chart (ECharts, canvas, large-mode scatter) ────── */
   const controlOption = useMemo(() => {
@@ -641,9 +705,16 @@ export default function TelemetryTab({
 
   const selectParam = useCallback((key) => {
     setParamKey(key);
+    // keep the group the parameter belongs to (the automatic pick may sit in another group than the default)
+    setCategoryId((c) => c || ALL_TELEMETRY_CATEGORIES.find((cat) => (cat.params || []).some((p) => p.key === key))?.id || "machine_process");
     setPage(1);
     setTableFilter("all");
   }, []);
+  const selectFromOverview = useCallback((row) => {
+    setCategoryId(row.catId);
+    selectParam(row.key);
+    if (typeof document !== "undefined") document.getElementById("tm-control")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [selectParam]);
   const selectCategory = useCallback((cat) => {
     setCategoryId(cat.id);
     if (cat.params?.length) selectParam(cat.params[0].key);
@@ -683,7 +754,7 @@ export default function TelemetryTab({
       const vals = readings.map((x) => x.v);
       const st = seriesStats(vals);
       const sig = st.sigmaWithin;
-      const out = s.hasLimits ? vals.filter((v) => v < s.lsl || v > s.usl).length : null;
+      const out = s.hasLimits ? vals.filter((v) => isOos(v, s)).length : null;
       const capx = capability(vals, s);
       const idx2 = (v) => (isNum(v) ? Number(v.toFixed(2)) : "-");
       const row = ws.addRow({
@@ -758,7 +829,8 @@ export default function TelemetryTab({
   const safePage = Math.min(page, pageCount);
   const pageRows = filteredRows.slice((safePage - 1) * pageSize, safePage * pageSize);
   const cpkRating = RATING[capRating(cap.cpk)];
-  const capReason = !spec.hasLimits ? "Spec limits not set" : n < 2 ? "Too few readings" : "No variation";
+  const capReason = n < MIN_SPC_N ? `Insufficient data (n < ${MIN_SPC_N})` : !spec.hasLimits ? "Spec limits not set" : "No variation";
+  const smallSample = n > 0 && n < MIN_SPC_N;
 
   const filters = [
     { key: "all", label: `All ${n.toLocaleString()}` },
@@ -791,6 +863,49 @@ export default function TelemetryTab({
         .tm-btn { display: inline-flex; align-items: center; gap: 5px; padding: 6px 11px; border-radius: 8px; border: 1px solid #cbd5e1; background: #fff; font-size: 12px; font-weight: 600; color: ${INK.secondary}; cursor: pointer; font-family: inherit; white-space: nowrap; }
         .tm-btn:hover:not(:disabled) { border-color: ${INK.faint}; color: ${INK.primary}; }
         .tm-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+        /* At a glance (selected group) */
+        .tm-scope { font-size: 11.5px; color: ${INK.muted}; }
+        .tm-gl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; padding: 12px 16px 16px; }
+        .tm-gl-card { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 10px 12px; border: 1px solid ${INK.border}; border-top: 3px solid var(--tone); border-radius: 12px; background: #fff; cursor: pointer; text-align: left; font-family: inherit; transition: box-shadow .15s, border-color .15s; }
+        .tm-gl-card:hover { box-shadow: 0 8px 20px -14px rgba(15,23,42,.45); border-color: ${INK.faint}; border-top-color: var(--tone); }
+        .tm-gl-card.sel { box-shadow: 0 0 0 2px #0f2a4a; }
+        .tm-gl-card:focus-visible { outline: 2px solid #3b5b82; outline-offset: 2px; }
+        .tm-gl-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 6px; min-width: 0; }
+        .tm-gl-head h5 { margin: 0; font-size: 12.5px; font-weight: 700; color: ${INK.primary}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+        .tm-gl-head h5 em { font-style: normal; font-weight: 500; color: ${INK.muted}; font-size: 11px; }
+        .tm-gl-cpk { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 800; white-space: nowrap; font-variant-numeric: tabular-nums; }
+        .tm-gl-svg { display: block; width: 100%; height: 64px; background: ${INK.surfaceAlt}; border-radius: 6px; }
+        .tm-gl-table .tm-gl-svg { height: 34px; }
+        .tm-gl-none { display: grid; place-items: center; height: 64px; font-size: 11px; color: ${INK.faint}; background: ${INK.surfaceAlt}; border-radius: 6px; }
+        .tm-gl-nums { display: grid; grid-template-columns: repeat(4, auto); justify-content: space-between; gap: 4px; font-size: 10.5px; color: ${INK.muted}; font-variant-numeric: tabular-nums; }
+        .tm-gl-nums b { color: ${INK.primary}; font-weight: 700; }
+        .tm-view .tm-seg-btn { display: inline-flex; align-items: center; gap: 5px; }
+        /* All-parameter overview */
+        .tm-key { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: ${INK.body}; }
+        .tm-key span { display: inline-flex; align-items: center; gap: 5px; }
+        .tm-key i { width: 9px; height: 9px; border-radius: 2px; }
+        .tm-ov-groups { display: flex; flex-direction: column; gap: 12px; padding: 12px 16px 16px; }
+        .tm-ov-title { margin: 0 0 6px; font-size: 11px; font-weight: 700; color: ${INK.muted}; text-transform: uppercase; letter-spacing: .06em; }
+        .tm-ov-title span { margin-left: 4px; color: ${INK.faint}; }
+        .tm-ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 8px; }
+        .tm-ov-groups .tm-ov-grid { padding: 0; }
+        .tm-clip > .tm-ov-grid { padding: 12px 16px 16px; }
+        .tm-ov { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 7px 9px; border: 1px solid ${INK.border}; border-left: 3px solid var(--tone); border-radius: 9px; background: #fff; cursor: pointer; text-align: left; font-family: inherit; }
+        .tm-ov:hover { border-color: ${INK.faint}; border-left-color: var(--tone); background: ${INK.surfaceAlt}; }
+        .tm-ov.sel { box-shadow: 0 0 0 2px #0f2a4a; }
+        .tm-ov:focus-visible { outline: 2px solid #3b5b82; outline-offset: 2px; }
+        .tm-ov-head { display: flex; align-items: baseline; gap: 4px; min-width: 0; }
+        .tm-ov-head b { font-size: 11.5px; font-weight: 700; color: ${INK.primary}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .tm-ov-head em { font-style: normal; font-size: 10.5px; color: ${INK.muted}; white-space: nowrap; }
+        .tm-ov-spark { height: 26px; display: block; }
+        .tm-ov-none { display: grid; place-items: center; height: 26px; font-size: 10.5px; color: ${INK.faint}; background: ${INK.surfaceAlt}; border-radius: 5px; }
+        .tm-ov-nums { display: flex; justify-content: space-between; gap: 4px; font-size: 10.5px; color: ${INK.muted}; font-variant-numeric: tabular-nums; }
+        .tm-ov-nums b { color: ${INK.primary}; font-weight: 700; }
+        .tm-insufficient { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: ${INK.body}; }
+        .tm-insufficient svg { color: ${ACCENT.warning}; }
+        .tm-insufficient b { font-size: 14px; color: ${INK.primary}; }
+        .tm-insufficient span { max-width: 460px; }
 
         /* Capability summary */
         .tm-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; padding: 12px 16px; border-bottom: 1px solid ${INK.grid}; }
@@ -837,7 +952,7 @@ export default function TelemetryTab({
         }
       `}</style>
 
-      {/* ═══ PARAMETER SELECTOR ═══ */}
+      {/* ═══ PARAMETER GROUPS + SELECTOR (above the overview) ═══ */}
       <div className="ra-card">
         <div className="tm-selector">
           <div className="tm-pills" role="tablist" aria-label="Parameter group">
@@ -857,24 +972,105 @@ export default function TelemetryTab({
                 <option key={p.key} value={p.key}>{p.label}{cleanUnit(p.unit) ? ` (${cleanUnit(p.unit)})` : ""}</option>
               ))}
             </select>
-            {!spec.hasLimits && typeof onOpenRecipeModal === "function" && (
-              <button type="button" className="tm-btn" onClick={onOpenRecipeModal}><Sliders size={13} /> Set limits</button>
+            {typeof onOpenRecipeModal === "function" && (
+              <button type="button" className="tm-btn" onClick={onOpenRecipeModal}><Sliders size={13} /> Recipe &amp; limits</button>
             )}
             <button type="button" className="tm-btn" onClick={exportSummary} disabled={!hasData}>
               <Download size={13} /> Summary
             </button>
           </div>
+          {analysis?.population && (
+            <div className="tm-scope">Readings of parts with DCM shot data only · cycle time = the shot's cycle time (PlcCycleReadings) · {analysis.population.partsWithShot.toLocaleString()} of {analysis.population.partsTotal.toLocaleString()} tracked parts have shot data</div>
+          )}
         </div>
       </div>
+
+      {/* ═══ AT A GLANCE — the selected group ═══ */}
+      {(hasData || loading) && (
+        <div className="ra-card tm-clip tm-glance" data-accent style={accent(ACCENT.quality)}>
+          <CardHead icon={<LayoutGrid size={16} />} color={ACCENT.quality} title={`At a glance · ${ALL_TELEMETRY_CATEGORIES.find((c) => c.id === categoryId)?.label || "Parameters"}`}
+            sub={`${overviewRows.length} parameters · last 60 readings with control limits · Cpk needs set limits and n ≥ ${MIN_SPC_N} · worst first · click to chart it`}>
+            <div className="tm-key">
+              <span><i style={{ background: STATUS.good }} />Cpk ≥ 1.33</span>
+              <span><i style={{ background: ACCENT.warning }} />1.00–1.33</span>
+              <span><i style={{ background: STATUS.critical }} />&lt; 1.00</span>
+              <span><i style={{ background: INK.faint }} />No limits / n &lt; {MIN_SPC_N}</span>
+            </div>
+            <div className="tm-seg tm-view" role="group" aria-label="View">
+              <button type="button" className={`tm-seg-btn ${glanceView === "cards" ? "active" : ""}`} aria-pressed={glanceView === "cards"} onClick={() => setGlanceView("cards")}><LayoutGrid size={12} /> Cards</button>
+              <button type="button" className={`tm-seg-btn ${glanceView === "table" ? "active" : ""}`} aria-pressed={glanceView === "table"} onClick={() => setGlanceView("table")}><Table2 size={12} /> Table</button>
+            </div>
+          </CardHead>
+          {!hasData ? <div className="tm-gl-grid">{Array.from({ length: 8 }, (_, i) => <div key={i} className="tm-skel" style={{ height: 150 }} />)}</div>
+            : glanceView === "cards" ? (
+              <div className="tm-gl-grid">
+                {overviewRows.map((r) => {
+                  const tone = CAP_TONE(r.cpk, r.n, r.hasLimits);
+                  const sel = r.key === paramKey;
+                  const cpkText = r.n > 0 && r.n < MIN_SPC_N ? `n<${MIN_SPC_N}` : isNum(r.cpk) ? r.cpk.toFixed(2) : r.n ? (r.hasLimits ? "—" : "No limits") : "—";
+                  return (
+                    <button key={r.key} type="button" className={`tm-gl-card ${sel ? "sel" : ""}`} style={{ "--tone": tone }} onClick={() => selectFromOverview(r)}
+                      title={`${r.label}${r.unit ? ` (${r.unit})` : ""} · n=${r.n}${r.excluded ? ` · ${r.excluded} excluded (0 / invalid)` : ""} · click to chart`}>
+                      <span className="tm-gl-head">
+                        <h5>{r.label}{r.unit && <em> {r.unit}</em>}</h5>
+                        <span className="tm-gl-cpk" style={{ color: tone, background: withAlpha(tone, 0.12) }}>Cpk {cpkText}</span>
+                      </span>
+                      <MiniControl r={r} />
+                      <span className="tm-gl-nums">
+                        <span>Mean <b>{isNum(r.mean) ? fmtKpi(r.mean) : "—"}</b></span>
+                        <span title="Points beyond UCL / LCL">OOC <b style={{ color: r.ooc > 0 ? C_NG : undefined }}>{r.ooc ?? "—"}</b></span>
+                        <span title="Points beyond LSL / USL">OOS <b style={{ color: r.oos > 0 ? C_NG : undefined }}>{r.hasLimits ? r.oos ?? "—" : "—"}</b></span>
+                        <span>n <b>{r.n.toLocaleString()}</b></span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="tm-scroll">
+                <table className="tm-table tm-gl-table">
+                  <thead>
+                    <tr>
+                      <th>Parameter</th><th className="num">n</th><th className="num">Mean</th><th className="num">σ</th>
+                      <th className="num">LCL / UCL</th><th className="num">LSL / USL</th><th className="num">Cpk</th>
+                      <th className="num">Out of ctrl</th><th className="num">Out of spec</th><th>Last 60</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {overviewRows.map((r) => {
+                      const tone = CAP_TONE(r.cpk, r.n, r.hasLimits);
+                      const heat = (v) => (isNum(v) && v > 0 ? withAlpha(C_NG, Math.min(0.55, 0.08 + v / 25)) : undefined);
+                      return (
+                        <tr key={r.key} className={`click ${r.key === paramKey ? "sel" : ""}`} onClick={() => selectFromOverview(r)} tabIndex={0}
+                          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectFromOverview(r); } }}>
+                          <td style={{ fontWeight: 600, whiteSpace: "normal", minWidth: 150 }}>{r.label}{r.unit && <span style={{ color: INK.muted, fontWeight: 400 }}> ({r.unit})</span>}</td>
+                          <td className="num">{r.n ? r.n.toLocaleString() : "—"}</td>
+                          <td className="num">{isNum(r.mean) ? fmtKpi(r.mean) : "—"}</td>
+                          <td className="num">{isNum(r.std) ? fmtSmall(r.std) : "—"}</td>
+                          <td className="num" style={{ color: INK.body }}>{isNum(r.ucl) ? `${fmtKpi(r.lcl)} / ${fmtKpi(r.ucl)}` : "—"}</td>
+                          <td className="num" style={{ color: r.hasLimits ? INK.body : INK.faint }}>{r.hasLimits ? `${r.lsl ?? "—"} / ${r.usl ?? "—"}` : "Not set"}</td>
+                          <td className="num"><span className="tm-gl-cpk" style={{ color: tone, background: withAlpha(tone, 0.12) }}>{isNum(r.cpk) ? r.cpk.toFixed(2) : r.n > 0 && r.n < MIN_SPC_N ? `n<${MIN_SPC_N}` : "—"}</span></td>
+                          <td className="num" style={{ background: heat(r.oocPct), color: r.oocPct > 0 ? "#7f1d1d" : INK.faint }}>{r.oocPct == null ? "—" : `${fmtVal(r.oocPct, 1)}%`}</td>
+                          <td className="num" style={{ background: heat(r.oosPct), color: r.oosPct > 0 ? "#7f1d1d" : INK.faint }}>{r.oosPct == null ? "—" : `${fmtVal(r.oosPct, 1)}%`}</td>
+                          <td style={{ width: 150 }}><div style={{ height: 34 }}><MiniControl r={r} /></div></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+        </div>
+      )}
 
       {!hasData ? <WaitingState loading={loading} /> : (
         <>
           {/* ═══ CONTROL CHART + CAPABILITY ═══ */}
-          <div className="ra-card tm-clip" data-accent style={accent(ACCENT.process)}>
+          <div className="ra-card tm-clip" id="tm-control" data-accent style={accent(ACCENT.process)}>
             <CardHead
               icon={<Activity size={16} />}
               title={`Individuals control chart · ${spec.label}${spec.unit ? ` (${spec.unit})` : ""}`}
-              sub={`Last ${n.toLocaleString()} parts · limits = mean ± 3σ (moving range)`}
+              sub={`Last ${n.toLocaleString()} parts · UCL / LCL = mean ± 3σ (moving range) · LSL / USL = set limits when known`}
             >
               {cpkRating
                 ? <span className="ra-chip" style={accent(cpkRating.color)}>Cpk {cap.cpk.toFixed(2)} · {cpkRating.label}</span>
@@ -887,72 +1083,44 @@ export default function TelemetryTab({
                 <Stat label="Mean" value={`${fmtKpi(cap.mean)}${u}`} />
                 <Stat label="σ within" value={fmtSmall(cap.sigmaWithin)} hint="Moving range σ = MR̄ / 1.128" />
                 <Stat label="UCL / LCL" value={hasCtl ? `${fmtKpi(ctl.ucl)} / ${fmtKpi(ctl.lcl)}` : "—"} />
-                <Stat label="LSL / USL" value={spec.hasLimits ? `${spec.lsl} / ${spec.usl}` : "Not set"} color={spec.hasLimits ? undefined : INK.faint} />
+                <Stat label="LSL / USL" value={fmtLim(spec)} color={spec.hasLimits ? undefined : INK.faint} hint={spec.hasLimits ? `From the ${spec.limitSource} limits${spec.both ? "" : " (one-sided)"}` : "No recipe or catalogue limits"} />
                 <Stat label="Cp" value={isNum(cap.cp) ? cap.cp.toFixed(2) : "—"} color={isNum(cap.cp) ? ratingColor(cap.cp) : INK.faint} />
                 <Stat label="Cpk" value={isNum(cap.cpk) ? cap.cpk.toFixed(2) : "—"} color={isNum(cap.cpk) ? ratingColor(cap.cpk) : INK.faint} hint="≥ 1.33 capable · 1.00–1.33 marginal · < 1.00 not capable" />
                 <Stat label="Ppk" value={isNum(cap.ppk) ? cap.ppk.toFixed(2) : "—"} color={isNum(cap.ppk) ? ratingColor(cap.ppk) : INK.faint} hint="Long-term, uses overall σ" />
                 <Stat label="Out of control" value={hasCtl ? `${fmtVal(spc.oocPct, 1)}%` : "—"} color={spc.oocCount > 0 ? C_NG : undefined} hint={`${spc.oocCount} points beyond UCL / LCL`} />
                 <Stat label="Out of spec" value={spec.hasLimits ? `${fmtVal(cap.oosPct, 1)}%` : "—"} color={(cap.oos ?? 0) > 0 ? C_NG : undefined} hint={spec.hasLimits ? `${cap.oos} parts beyond LSL / USL` : "Spec limits not set"} />
+                <Stat label="Excluded" value={excludedNow.toLocaleString()} color={excludedNow ? ACCENT.warning : INK.faint} hint="Zero, negative or non-numeric values — treated as 'no reading' and left out of every statistic" />
               </div>
             )}
 
             <div className="tm-chart">
-              {controlOption
+              {smallSample ? (
+                <div className="tm-empty tm-insufficient" role="status">
+                  <AlertTriangle size={20} />
+                  <b>Insufficient data (n = {n} &lt; {MIN_SPC_N})</b>
+                  <span>Control limits and capability need at least {MIN_SPC_N} readings of {spec.label} — widen the period or pick another parameter.</span>
+                </div>
+              ) : controlOption
                 ? <EChart option={controlOption} style={{ height: 380, minHeight: 300 }} />
                 : <div className="tm-empty">No {spec.label} readings in this period. Pick another parameter above.</div>}
             </div>
           </div>
 
-          {/* ═══ DISTRIBUTION + PARAMETER OVERVIEW ═══ */}
-          <div className="ra-grid2">
+          {/* ═══ DISTRIBUTION vs LIMITS ═══ */}
+          <div>
             <div className="ra-card tm-clip" data-accent style={accent(ACCENT.process)}>
-              <CardHead icon={<Sigma size={16} />} title="Distribution vs limits" sub="OK and NG parts stacked, with normal fit">
+              <CardHead icon={<Sigma size={16} />} title={`Distribution vs limits · ${spec.label}`} sub="Readings of OK and NG parts stacked, with the normal fit, control limits (UCL / LCL) and set limits (LSL / USL)">
                 {spc.ok.n > 0 && <span className="ra-chip" style={accent(C_OK)}>OK mean {fmtKpi(spc.ok.mean)}</span>}
                 {spc.ng.n > 0 && <span className="ra-chip" style={accent(C_NG)}>NG mean {fmtKpi(spc.ng.mean)}</span>}
               </CardHead>
               <div className="tm-chart">
-                {histOption
-                  ? <EChart option={histOption} style={{ height: 320, minHeight: 280 }} />
-                  : <div className="tm-empty">No readings to plot.</div>}
+                {smallSample ? <div className="tm-empty">Insufficient data (n = {n} &lt; {MIN_SPC_N}) — no distribution shown.</div>
+                  : histOption
+                    ? <EChart option={histOption} style={{ height: 320, minHeight: 280 }} />
+                    : <div className="tm-empty">No readings to plot.</div>}
               </div>
             </div>
 
-            <div className="ra-card tm-clip" data-accent style={accent(ACCENT.quality)}>
-              <CardHead icon={<ListChecks size={16} />} color={ACCENT.quality} title="Parameter health" sub="Worst Cpk first · click a row to chart it" />
-              <div className="tm-overview">
-                <table className="tm-table">
-                  <thead>
-                    <tr>
-                      <th>Parameter</th>
-                      <th className="num">n</th>
-                      <th className="num">Cpk</th>
-                      <th className="num">Out of ctrl</th>
-                      <th className="num">Out of spec</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {overviewRows.map((r) => (
-                      <tr key={r.key} className={`click ${r.key === paramKey ? "sel" : ""}`} onClick={() => selectParam(r.key)}
-                        tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectParam(r.key); } }}>
-                        <td style={{ whiteSpace: "normal", minWidth: 140, fontWeight: r.key === paramKey ? 700 : 500 }}>
-                          {r.label}{r.unit && <span style={{ color: INK.muted, fontWeight: 400 }}> ({r.unit})</span>}
-                        </td>
-                        <td className="num" style={{ color: r.n ? undefined : INK.faint }}>{r.n ? r.n.toLocaleString() : "—"}</td>
-                        <td className="num" style={{ fontWeight: 700, color: isNum(r.cpk) ? ratingColor(r.cpk) : INK.faint }}>
-                          {isNum(r.cpk) ? r.cpk.toFixed(2) : r.n && !r.hasLimits ? "No limits" : "—"}
-                        </td>
-                        <td className="num" style={{ color: r.oocPct > 0 ? C_NG : r.oocPct == null ? INK.faint : undefined }}>
-                          {r.oocPct == null ? "—" : `${fmtVal(r.oocPct, 1)}%`}
-                        </td>
-                        <td className="num" style={{ color: r.oosPct > 0 ? C_NG : r.oosPct == null ? INK.faint : undefined }}>
-                          {r.oosPct == null ? "—" : `${fmtVal(r.oosPct, 1)}%`}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
           </div>
 
           {/* ═══ PER-PART READINGS ═══ */}
@@ -1046,7 +1214,6 @@ export default function TelemetryTab({
             )}
           </div>
 
-          <FacetedBoxPlot rows={rows} allRejectionRecords={allRejectionRecords} />
         </>
       )}
     </div>

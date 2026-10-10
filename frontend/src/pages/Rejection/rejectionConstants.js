@@ -19,7 +19,7 @@ export const formatResultTimestamp = (value) => {
 
 // 1. Machine Process Parameter — 9
 export const MACHINE_PROCESS_PARAMETERS = [
-  { id: 1, sNo: 1, key: "plc_cycle_time", altKeys: ["cycleTime", "cycle_time"], label: "Cycle Time", unit: "sec", color: "#16a34a", defaultLower: null, defaultUpper: null, setPoint: null, category: "Machine Process Parameter", categoryId: "machine_process", icon: "clock", hasStaticLimits: false },
+  { id: 1, sNo: 1, key: "plc_cycle_time", altKeys: ["plcCycleTime"], label: "Cycle Time", unit: "sec", color: "#16a34a", defaultLower: null, defaultUpper: null, setPoint: null, category: "Machine Process Parameter", categoryId: "machine_process", icon: "clock", hasStaticLimits: false },
   { id: 2, sNo: 2, key: "die_open_core_out_time", altKeys: ["dieOpenTime", "die_open_time", "die_open_core_out_time"], label: "Die Open Core Out Time", unit: "sec", color: "#10b981", defaultLower: null, defaultUpper: null, setPoint: null, category: "Machine Process Parameter", categoryId: "machine_process", icon: "clock", hasStaticLimits: false },
   { id: 3, sNo: 3, key: "die_close_core_in_time", altKeys: ["dieCloseTime", "die_close_time", "die_close_core_in_time"], label: "Die-Close Core In Time", unit: "sec", color: "#06b6d4", defaultLower: null, defaultUpper: null, setPoint: null, category: "Machine Process Parameter", categoryId: "machine_process", icon: "clock", hasStaticLimits: false },
   { id: 4, sNo: 4, key: "ejector_time", altKeys: ["ejectorTime", "ejector_time"], label: "Ejector Time", unit: "sec", color: "#d946ef", defaultLower: null, defaultUpper: null, setPoint: null, category: "Machine Process Parameter", categoryId: "machine_process", icon: "clock", hasStaticLimits: false },
@@ -195,9 +195,9 @@ export const splitZoneString = (val) => {
   let z = "";
   let sz = "";
   parts.forEach((p) => {
-    const sm = p.match(/^(?:sub\s*zone|subzone)\s*[:\-]?\s*(.+)$/i);
+    const sm = p.match(/^(?:sub\s*zone|subzone)\s*[:-]?\s*(.+)$/i);
     if (sm) { sz = sm[1].trim(); return; }
-    const zm = p.match(/^zone\s*[:\-]?\s*(.+)$/i);
+    const zm = p.match(/^zone\s*[:-]?\s*(.+)$/i);
     if (zm) { z = zm[1].trim(); return; }
     if (!z) z = p;
   });
@@ -485,7 +485,7 @@ export const isRecordMatchingStation = (r, stationCode) => {
         if ((sUpper.includes("01") || sUpper.includes("-1") || sUpper.endsWith("1")) && (ldMach.includes("01") || ldMach.includes("1") || ldMach.includes("1773") || mId === "1773")) leakMatched = true;
         else if ((sUpper.includes("02") || sUpper.includes("-2") || sUpper.endsWith("2")) && (ldMach.includes("02") || ldMach.includes("2") || ldMach.includes("1774") || mId === "1774")) leakMatched = true;
         else if ((sUpper.includes("03") || sUpper.includes("-3") || sUpper.endsWith("3")) && (ldMach.includes("03") || ldMach.includes("3") || ldMach.includes("1776") || mId === "1776")) leakMatched = true;
-      } catch (e) {}
+      } catch { /* malformed leak data */ }
     }
     const isLeakMachineName = (mName.includes("leak") || mName.includes("op150") || mId === "1773" || mId === "1774" || mId === "1776") && (
       ((sUpper.includes("01") || sUpper.includes("-1") || sUpper.endsWith("1")) && (mName.includes("01") || mName.includes("1") || mId === "1773")) ||

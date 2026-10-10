@@ -18,7 +18,6 @@ import {
   Clock3,
   Regex,
   Users,
-  FileText,
   Route,
   Zap,
   BarChart3,
@@ -208,12 +207,6 @@ const Sidebar = ({ onClose }) => {
         path: APP_ROUTES.rejectionConfiguration,
         icon: AlertTriangle,
         moduleKey: "rejection_config",
-      },
-      {
-        name: t("pages.reportConfig", "Report Config"),
-        path: APP_ROUTES.masterReports,
-        icon: FileText,
-        moduleKey: "report_config",
       },
       {
         name: t("pages.shiftManager", "Shift Manager"),

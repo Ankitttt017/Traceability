@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { machineApi, traceabilityApi } from "../api/services";
+import { API_BASE_URL } from "../api/client";
 import { getUserRole } from "../utils/authStorage";
 import ConfirmModal from "../components/ConfirmModal";
 
@@ -670,6 +671,16 @@ const IoMonitor = () => {
   const canControl = useMemo(()=>["admin","engineer"].includes(normalizeRole(userRole)),[userRole]);
 
   const [machines,          setMachines]          = useState([]);
+  // false when this backend runs with SHOP_FLOOR_IO=off (local / development) — it never talks to PLCs or scanners
+  const [shopFloorIo, setShopFloorIo] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    fetch(`${String(API_BASE_URL).replace(/\/+$/, "")}/health`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((h) => { if (alive && h && h.shopFloorIo === false) setShopFloorIo(false); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
   const [loadingMachines,   setLoadingMachines]   = useState(true);
   const [selectedPlcIp,     setSelectedPlcIp]     = useState("");
   const [selectedMachineId, setSelectedMachineId] = useState("");
@@ -1096,6 +1107,12 @@ const IoMonitor = () => {
   // ═════════════════════════════════════════════════════════════════════
   return (
     <div style={{display:"flex",flexDirection:"column",gap:18,paddingBottom:32,animation:"ioFadeIn .3s ease"}}>
+
+      {!shopFloorIo && (
+        <div role="status" style={{padding:"10px 14px",borderRadius:10,border:"1px solid #f59e0b",background:"#fffbeb",color:"#92400e",fontSize:13,fontWeight:600}}>
+          PLC / scanner I/O is switched off on this server (SHOP_FLOOR_IO=off — local / development mode). PLCs show offline here and no PLC reads or writes are sent; the live server keeps control of the line.
+        </div>
+      )}
 
       {/* PLC Test Modal */}
       {testPlcItem&&<PlcTestModal plc={testPlcItem} onClose={()=>setTestPlcItem(null)}/>}

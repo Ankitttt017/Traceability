@@ -1,18 +1,20 @@
 import React, { useMemo, useState } from "react";
 import {
-  FileSpreadsheet, BarChart3, PieChart, Table, LineChart as LineChartIcon, Clock, ListOrdered,
+  FileSpreadsheet, BarChart3, PieChart, Table, LineChart as LineChartIcon, Clock, ListOrdered, Percent,
 } from "lucide-react";
 import ExcelJS from "exceljs";
 import { saveAs } from "file-saver";
 import EChart from "../../components/charts/EChart";
+import InfoTip from "./components/InfoTip";
+import { DieCategoryCard, DieShiftCard, DieTrendCard } from "./mgmt/DieTrends";
 import {
   canonicalizeReason, formatResultTimestamp, looksLikeCustomerQr, parseRowDefect,
   extractShotFromPartId, extractShotDateTimeFromPartId,
 } from "./rejectionConstants";
 import {
   INK, OUTCOME, OTHER, DEFECT_CATEGORY, DEFECT_CATEGORY_LABEL, SHIFT,
-  makeColorMap, withAlpha, fmtInt, fmtPct, shiftKey, CARD_CSS, FONT_FAMILY, ACCENT, accent,
-  ECHART_TOOLTIP, tooltipHtml, axisLabel, axisName, valueAxis, categoryAxis, LEGEND, baseOption,
+  withAlpha, fmtInt, fmtPct, shiftKey, CARD_CSS, FONT_FAMILY, ACCENT, accent,
+  ECHART_TOOLTIP, tooltipHtml, axisLabel, valueAxis, categoryAxis, LEGEND, baseOption,
 } from "./chartTheme";
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -32,7 +34,7 @@ const AVG_LINE = INK.primary;        // K-12 average reference line
 /* Scope: this tab shows Oil Pan K-12 (part OPK12) dies only. */
 const K12_PART = "OPK12";
 /* Fallback list — used only for a die whose loaded records carry no part_name at all. */
-const KNOWN_K12_DIES = ["S14", "S16", "S17", "S18"];
+const KNOWN_K12_DIES = ["S13", "S14", "S16", "S17", "S18", "S19"];
 const isK12Part = (raw) => {
   const s = String(raw || "").toUpperCase().replace(/[\s_-]/g, "");
   return s === "OPK12" || s === "OILPANK12" || s.includes("K12");
@@ -83,10 +85,6 @@ const rowDay = (r) => {
   if (Number.isNaN(d.getTime())) return null;
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
-const dayLabel = (key) => {
-  const [y, m, d] = key.split("-").map(Number);
-  return new Date(y, m - 1, d).toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
-};
 const dayRange = (keys) => {
   if (!keys.length) return [];
   const sorted = [...keys].sort();
@@ -98,10 +96,8 @@ const dayRange = (keys) => {
   }
   return out;
 };
-const categoryFill = (k) => DEFECT_CATEGORY[k] || OTHER;
 const sum = (arr) => arr.reduce((a, b) => a + b, 0);
 const pctOf = (a, b) => (b > 0 ? (a / b) * 100 : null);
-const shiftLabel = (k) => (k === "Unassigned" ? k : `Shift ${k}`);
 
 const dieText = (name) => `${name} · ${K12_PART}`;
 /* Rate-vs-average signal: red = significantly above, green = significantly below, grey otherwise. */
@@ -179,6 +175,9 @@ export default function DieWiseTab({
   recordsRows = [],
   rows = [],
   summary = null,
+  dieDaily = [],
+  filterText = "",
+  loading = false,
 }) {
   const defectPool = useMemo(
     () => (filteredTableRows && filteredTableRows.length > 0)
@@ -208,8 +207,8 @@ export default function DieWiseTab({
   }, [partsByDie]);
 
   /* ── Normalised die stats (SQL, K-12 dies only) ─────────────────────── */
-  const { dies, excludedDies, namedDieShots } = useMemo(() => {
-    if (!Array.isArray(dieStats) || dieStats.length === 0) return { dies: [], excludedDies: [], namedDieShots: 0 };
+  const { dies, namedDieShots } = useMemo(() => {
+    if (!Array.isArray(dieStats) || dieStats.length === 0) return { dies: [], namedDieShots: 0 };
     const mapped = dieStats.map((d) => {
       const rawName = String(d.die_name || d.dieName || d.die || "").trim().toUpperCase();
       const ok = Number(d.ok_count ?? d.totalOK ?? d.ok ?? 0) || 0;
@@ -228,17 +227,9 @@ export default function DieWiseTab({
     }).filter((d) => d.die_name);
     return {
       dies: mapped.filter((d) => isK12Die(d.die_name)),
-      excludedDies: mapped.filter((d) => !isK12Die(d.die_name)),
       namedDieShots: sum(mapped.map((d) => d.total_shots)),
     };
   }, [dieStats, isK12Die]);
-
-  /* One stable die → colour map (known K-12 dies first, then any other by name). Used for the trend lines. */
-  const dieColor = useMemo(() => {
-    const extra = dies.map((d) => d.die_name).filter((n) => !KNOWN_K12_DIES.includes(n))
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-    return makeColorMap([...KNOWN_K12_DIES, ...extra]);
-  }, [dies]);
 
   /* ── K-12 totals (pooled over K-12 dies) ────────────────────────────── */
   const plant = useMemo(() => {
@@ -322,22 +313,46 @@ export default function DieWiseTab({
     return e.length ? { key: e[0][0], count: e[0][1] } : null;
   };
 
+  /* die → category (+ the die's OK / NG parts) and die × shift → category, from the station rejections */
+  const { byDie, byDieShift } = useMemo(() => {
+    const bd = {};
+    const bs = {};
+    ordered.forEach((d) => { bd[d.die_name] = { CR: 0, MR: 0, CRAM: 0, ok: d.ok_count, ng: d.ng_count }; });
+    defects.k12Records.forEach((r) => {
+      const die = rowDie(r);
+      if (!bd[die]) return;
+      const cat = rowCategory(r, rowReason(r));
+      if (!CATEGORY_KEYS.includes(cat)) return;
+      bd[die][cat] += 1;
+      const sh = shiftKey(r.shift_code || r.shiftCode);
+      if (!["A", "B", "C"].includes(sh)) return;
+      const k = `${die}|${sh}`;
+      const b = bs[k] || (bs[k] = { CR: 0, MR: 0, CRAM: 0 });
+      b[cat] += 1;
+    });
+    return { byDie: bd, byDieShift: bs };
+  }, [ordered, defects]);
+  const dieNames = useMemo(() => ordered.map((d) => d.die_name), [ordered]);
+
   /* Dies that have NG records (record-based charts). */
   const recDies = useMemo(() => ordered.filter((d) => defects.perDie[d.die_name]?.records > 0), [ordered, defects]);
   const hasPending = ordered.some((d) => d.pending > 0);
 
   /* ═══ ECharts options ═══════════════════════════════════════════════════ */
-  /* (1a) Output by die — stacked OK / NG / in process */
+  /* (1) Production Output by Die — stacked OK / NG / in process, total + NG as the data label */
   const outputOption = useMemo(() => {
     if (!ordered.length) return null;
     const names = ordered.map((d) => d.die_name);
+    const maxTotal = Math.max(1, ...ordered.map((d) => d.total_shots));
     const stack = [
-      { key: "ok_count", name: "OK", color: OUTCOME.ok },
-      { key: "ng_count", name: "NG", color: OUTCOME.ng },
-      ...(hasPending ? [{ key: "pending", name: "In process", color: OUTCOME.wip }] : []),
+      { key: "ok_count", name: "OK", color: OUTCOME.ok, ink: "#fff" },
+      { key: "ng_count", name: "NG", color: OUTCOME.ng, ink: "#fff" },
+      ...(hasPending ? [{ key: "pending", name: "In process", color: OUTCOME.wip, ink: INK.primary }] : []),
     ];
+    const totals = ordered.map((d) => d.total_shots);
     return baseOption({
-      grid: { left: 8, right: 56, top: 8, bottom: 36, containLabel: true },
+      grid: { left: 8, right: 16, top: 50, bottom: names.length > 14 ? 40 : 8, containLabel: true },
+      legend: { ...LEGEND, top: 0, left: 0, data: stack.map((s) => s.name) },
       tooltip: {
         ...ECHART_TOOLTIP, trigger: "axis", axisPointer: SHADOW_POINTER,
         formatter: (ps) => {
@@ -345,143 +360,126 @@ export default function DieWiseTab({
           return d ? tooltipHtml({ title: dieText(d.die_name), rows: dieRows(d) }) : "";
         },
       },
-      xAxis: valueAxis({ axisLabel: axisLabel({ formatter: (v) => Number(v).toLocaleString() }), ...axisName("Parts", 26) }),
-      yAxis: categoryAxis(names, { inverse: true, axisLabel: dieAxisLabel(byName), axisLine: { show: false } }),
-      series: stack.map((s, i) => ({
-        type: "bar", name: s.name, stack: "parts", barMaxWidth: 26,
-        data: ordered.map((d) => d[s.key]),
-        itemStyle: { color: s.color },
-        emphasis: { focus: "series" },
-        label: i === stack.length - 1 ? {
-          show: true, position: "right", color: INK.secondary, fontSize: 10.5, fontWeight: 600,
-          formatter: (p) => fmtInt(ordered[p.dataIndex].total_shots),
-        } : undefined,
-      })),
+      xAxis: categoryAxis(names, { axisLabel: { ...dieAxisLabel(byName), interval: 0 }, axisTick: { show: false } }),
+      yAxis: valueAxis({ axisLabel: axisLabel({ formatter: (v) => Number(v).toLocaleString() }), max: (v) => Math.ceil(v.max * 1.15) }),
+      dataZoom: names.length > 14 ? [{ type: "slider", xAxisIndex: 0, bottom: 4, height: 14, startValue: 0, endValue: 13, showDetail: false, brushSelect: false }, { type: "inside", xAxisIndex: 0 }] : undefined,
+      series: [
+        ...stack.map((s) => ({
+          type: "bar", name: s.name, stack: "parts", barMaxWidth: 64,
+          data: ordered.map((d) => d[s.key]),
+          itemStyle: { color: s.color },
+          emphasis: { focus: "series" },
+          label: {
+            show: true, position: "inside", color: s.ink, fontSize: 10.5, fontWeight: 700, fontFamily: FONT_FAMILY,
+            // only where the segment is wide enough to hold the number
+            formatter: (p) => (Number(p.value) / maxTotal >= 0.1 ? fmtInt(p.value) : ""),
+          },
+        })),
+        {
+          // invisible series that carries the total label at the end of each stacked bar
+          type: "bar", name: "Total", stack: "parts", data: totals.map(() => 0), silent: true, tooltip: { show: false },
+          itemStyle: { color: "transparent" },
+          label: {
+            show: true, position: "top", color: INK.secondary, fontSize: 11, fontWeight: 700, fontFamily: FONT_FAMILY, lineHeight: 14,
+            formatter: (p) => { const d = ordered[p.dataIndex]; return `${fmtInt(d.total_shots)} parts\nNG ${fmtInt(d.ng_count)}`; },
+          },
+        },
+      ],
     });
   }, [ordered, hasPending, byName]);
 
-  /* (1b) Rejection rate with 95 % Wilson CI */
+  /* (2) Rejection Rate by Die — rate = NG ÷ (OK + NG) per die, bars + 95 % CI whiskers + K-12 average */
   const ciDies = useMemo(() => ordered.filter((d) => d.ci), [ordered]);
-  const ciOption = useMemo(() => {
+  const rateOption = useMemo(() => {
     if (!ciDies.length) return null;
     // Scale to the ranked dies so one low-volume die (very wide interval) does not squash the rest;
     // anything beyond the axis is clipped and marked with an arrow.
     const scaleSet = ciDies.some((d) => !d.lowVolume) ? ciDies.filter((d) => !d.lowVolume) : ciDies;
-    const xMax = Math.min(100, Math.ceil(Math.max(1, ...scaleSet.map((d) => d.ci.hi), plant.rate ?? 0) * 1.15));
+    const xMax = Math.min(100, Math.ceil(Math.max(1, ...scaleSet.map((d) => Math.max(d.ci.hi, d.rate)), plant.rate ?? 0) * 1.15));
     const clip = (v) => Math.min(v, xMax);
     const names = ciDies.map((d) => d.die_name);
+    const filtRate = (d) => (filterText ? pctOf(defects.perDie[d.die_name]?.records || 0, d.inspected) : null);
     return baseOption({
-      grid: { left: 8, right: 28, top: 24, bottom: 36, containLabel: true },
+      grid: { left: 8, right: 70, top: filterText ? 44 : 30, bottom: names.length > 14 ? 40 : 8, containLabel: true },
+      legend: filterText ? { ...LEGEND, top: 0, left: 0, data: ["All NG", `NG matching ${filterText}`] } : undefined,
       tooltip: {
-        ...ECHART_TOOLTIP, trigger: "item",
-        formatter: (p) => {
-          const d = ciDies[p.dataIndex];
+        ...ECHART_TOOLTIP, trigger: "axis", axisPointer: SHADOW_POINTER,
+        formatter: (ps) => {
+          const d = ciDies[(Array.isArray(ps) ? ps[0] : ps)?.dataIndex ?? 0];
           if (!d) return "";
           return tooltipHtml({
             title: dieText(d.die_name),
             subtitle: d.lowVolume ? `Low volume (< ${MIN_INSPECTED_FOR_RANK} inspected) — not ranked` : signalText(d),
             rows: [
-              { label: "Inspected (OK + NG)", value: fmtInt(d.inspected) },
-              { label: "NG", value: fmtInt(d.ng_count), color: OUTCOME.ng },
-              { label: "Rejection rate", value: fmtPct(d.rate, 2) },
+              { label: "Rejection rate", value: fmtPct(d.rate, 2), color: signalColor(d) },
+              { label: "NG ÷ (OK + NG)", value: `${fmtInt(d.ng_count)} ÷ ${fmtInt(d.inspected)}` },
               { label: "95% CI (Wilson)", value: `${fmtPct(d.ci.lo, 2)} – ${fmtPct(d.ci.hi, 2)}` },
               { label: "K-12 average", value: fmtPct(plant.rate, 2), color: AVG_LINE },
               { label: "vs K-12 average", value: fmtPP(d.vsPlant) },
+              filterText ? { label: `Matching ${filterText}`, value: `${fmtPct(filtRate(d), 2)} (${fmtInt(defects.perDie[d.die_name]?.records || 0)} NG)` } : null,
+              d.pending > 0 ? { label: "In process (not in the rate)", value: fmtInt(d.pending), strong: false } : null,
             ],
           });
         },
       },
-      xAxis: valueAxis({ min: 0, max: xMax, axisLabel: axisLabel({ formatter: (v) => `${v}%` }), ...axisName("Rejection rate (%)", 26) }),
-      yAxis: categoryAxis(names, { inverse: true, axisLabel: dieAxisLabel(byName), axisLine: { show: false } }),
+      xAxis: categoryAxis(names, { axisLabel: { ...dieAxisLabel(byName), interval: 0 }, axisTick: { show: false } }),
+      yAxis: valueAxis({ min: 0, max: xMax, axisLabel: axisLabel({ formatter: (v) => `${v}%` }) }),
+      dataZoom: names.length > 14 ? [{ type: "slider", xAxisIndex: 0, bottom: 4, height: 14, startValue: 0, endValue: 13, showDetail: false, brushSelect: false }, { type: "inside", xAxisIndex: 0 }] : undefined,
       series: [
+        {
+          type: "bar", name: "All NG", barMaxWidth: 56, z: 2,
+          data: ciDies.map((d) => ({
+            value: clip(d.rate),
+            itemStyle: d.lowVolume
+              ? { color: withAlpha(OUTCOME.wip, 0.35), borderColor: OUTCOME.wip, borderWidth: 1, borderType: "dashed", borderRadius: [4, 4, 0, 0] }
+              : { color: signalColor(d), borderRadius: [4, 4, 0, 0] },
+          })),
+          label: {
+            show: true, position: "insideBottom", distance: 6, lineHeight: 14, backgroundColor: "rgba(255,255,255,.88)", padding: [2, 4], borderRadius: 4, color: INK.primary, fontSize: 11, fontWeight: 700, fontFamily: FONT_FAMILY,
+            formatter: (p) => { const d = ciDies[p.dataIndex]; return `${fmtPct(d.rate, 2)}${d.rate > xMax ? " ▴" : ""}\n${fmtInt(d.ng_count)}/${fmtInt(d.inspected)}`; },
+          },
+          markLine: plant.rate != null ? {
+            symbol: "none", silent: true,
+            lineStyle: { color: AVG_LINE, type: [4, 3], width: 1.5 },
+            label: { formatter: `K-12 avg\n${fmtPct(plant.rate, 2)}`, color: AVG_LINE, fontWeight: 700, fontSize: 10.5, position: "end", distance: 4 },
+            data: [{ yAxis: plant.rate }],
+          } : undefined,
+        },
+        ...(filterText ? [{
+          type: "bar", name: `NG matching ${filterText}`, barMaxWidth: 56, z: 2,
+          data: ciDies.map((d) => clip(filtRate(d) || 0)),
+          itemStyle: { color: "#475569", borderRadius: [4, 4, 0, 0] },
+          label: { show: true, position: "top", distance: 8, color: INK.secondary, fontSize: 10.5, fontWeight: 600, fontFamily: FONT_FAMILY, formatter: (p) => fmtPct(filtRate(ciDies[p.dataIndex]), 2) },
+        }] : []),
         {
           type: "custom",
           name: "95% CI",
-          encode: { x: [0, 1], y: 2 },
-          data: ciDies.map((d, i) => [clip(d.ci.lo), clip(d.ci.hi), i]),
+          silent: true,
+          z: 4,
+          encode: { x: 0, y: [1, 2] },
+          data: ciDies.map((d, i) => [i, clip(d.ci.lo), clip(d.ci.hi)]),
           renderItem: (params, api) => {
             const d = ciDies[params.dataIndex];
-            const lo = api.coord([api.value(0), api.value(2)]);
-            const hi = api.coord([api.value(1), api.value(2)]);
-            const cap = 6;
-            const clipped = d.ci.hi > xMax;
-            const style = { stroke: signalColor(d), lineWidth: 2, lineCap: "round" };
-            const end = clipped
-              ? { type: "polyline", shape: { points: [[hi[0] - 7, hi[1] - 5], [hi[0], hi[1]], [hi[0] - 7, hi[1] + 5]] }, style }
-              : { type: "line", shape: { x1: hi[0], y1: hi[1] - cap, x2: hi[0], y2: hi[1] + cap }, style };
+            const lo = api.coord([api.value(0), api.value(1)]);
+            const hi = api.coord([api.value(0), api.value(2)]);
+            const cap = 5;
+            const style = { stroke: INK.primary, lineWidth: 1.3, opacity: 0.75 };
+            const end = d.ci.hi > xMax
+              ? { type: "polyline", shape: { points: [[hi[0] - 4, hi[1] + 6], [hi[0], hi[1]], [hi[0] + 4, hi[1] + 6]] }, style }
+              : { type: "line", shape: { x1: hi[0] - cap, y1: hi[1], x2: hi[0] + cap, y2: hi[1] }, style };
             return {
               type: "group",
               children: [
                 { type: "line", shape: { x1: lo[0], y1: lo[1], x2: hi[0], y2: hi[1] }, style },
-                { type: "line", shape: { x1: lo[0], y1: lo[1] - cap, x2: lo[0], y2: lo[1] + cap }, style },
+                { type: "line", shape: { x1: lo[0] - cap, y1: lo[1], x2: lo[0] + cap, y2: lo[1] }, style },
                 end,
               ],
             };
           },
-          z: 2,
-        },
-        {
-          type: "scatter",
-          name: "Rejection rate",
-          symbolSize: 12,
-          z: 3,
-          data: ciDies.map((d, i) => ({
-            value: [clip(d.rate), i],
-            itemStyle: d.lowVolume
-              ? { color: "#fff", borderColor: OUTCOME.wip, borderWidth: 2 }
-              : { color: signalColor(d), borderColor: "#fff", borderWidth: 2 },
-          })),
-          label: { show: true, position: "top", distance: 5, formatter: (p) => { const d = ciDies[p.dataIndex]; return `${fmtPct(d.rate, 2)}${d.rate > xMax ? " ▸" : ""}`; }, color: INK.secondary, fontSize: 10.5, fontWeight: 600 },
-          markLine: plant.rate != null ? {
-            symbol: "none", silent: true,
-            lineStyle: { color: AVG_LINE, type: [4, 3], width: 1.5 },
-            label: { formatter: `K-12 avg ${fmtPct(plant.rate, 2)}`, color: AVG_LINE, fontWeight: 700, fontSize: 10.5, position: "start", distance: 4 },
-            data: [{ xAxis: plant.rate }],
-          } : undefined,
         },
       ],
     });
-  }, [ciDies, plant.rate, byName]);
-
-  /* (2) Daily NG trend per die */
-  const trendOption = useMemo(() => {
-    if (!recDies.length || !defects.days.length) return null;
-    const days = defects.days;
-    const dayTotals = days.map((k) => sum(recDies.map((d) => defects.perDie[d.die_name].days[k] || 0)));
-    const zoom = days.length > 21;
-    return baseOption({
-      grid: { left: 8, right: 16, top: 36, bottom: zoom ? 56 : 12, containLabel: true },
-      legend: { ...LEGEND, type: "scroll", data: recDies.map((d) => d.die_name) },
-      tooltip: {
-        ...ECHART_TOOLTIP, trigger: "axis",
-        axisPointer: { type: "line", lineStyle: { color: INK.axis } },
-        formatter: (ps) => {
-          const i = ps[0]?.dataIndex ?? 0;
-          const tot = dayTotals[i];
-          return tooltipHtml({
-            title: dayLabel(days[i]),
-            subtitle: `${fmtInt(tot)} NG records on K-12 dies`,
-            rows: ps.map((p) => ({ label: dieText(p.seriesName), color: p.color, value: fmtInt(p.value) })),
-          });
-        },
-      },
-      xAxis: categoryAxis(days.map(dayLabel), { boundaryGap: false }),
-      yAxis: valueAxis({ minInterval: 1, ...axisName("NG / day", 32) }),
-      dataZoom: zoom ? [{ type: "inside" }, { type: "slider", height: 14, bottom: 6, borderColor: INK.border, fillerColor: withAlpha(ACCENT.process, 0.12), handleSize: 14, showDetail: false }] : undefined,
-      series: recDies.map((d) => ({
-        type: "line",
-        name: d.die_name,
-        data: days.map((k) => defects.perDie[d.die_name].days[k] || 0),
-        smooth: 0.25,
-        symbol: "circle",
-        symbolSize: 5,
-        showSymbol: days.length <= 45,
-        lineStyle: { width: 2, color: dieColor(d.die_name) },
-        itemStyle: { color: dieColor(d.die_name) },
-        emphasis: { focus: "series" },
-      })),
-    });
-  }, [recDies, defects, dieColor]);
+  }, [ciDies, plant.rate, byName, filterText, defects]);
 
   /* (3) Per-die Pareto of top defects */
   const [paretoPick, setParetoPick] = useState("");
@@ -559,80 +557,6 @@ export default function DieWiseTab({
       ],
     });
   }, [pareto, paretoDie, defects]);
-
-  /* (4) Defect-category mix per die — 100 % stacked bars */
-  const catKeys = useMemo(
-    () => [...CATEGORY_KEYS, UNCLASSIFIED].filter((k) => defects.catTotals[k] > 0),
-    [defects.catTotals]
-  );
-  const catOption = useMemo(() => {
-    if (!recDies.length || !catKeys.length) return null;
-    const names = recDies.map((d) => d.die_name);
-    return baseOption({
-      grid: { left: 8, right: 16, top: 8, bottom: 30, containLabel: true },
-      tooltip: {
-        ...ECHART_TOOLTIP, trigger: "axis", axisPointer: SHADOW_POINTER,
-        formatter: (ps) => {
-          const d = recDies[ps[0]?.dataIndex ?? 0];
-          const p = defects.perDie[d.die_name];
-          return tooltipHtml({
-            title: dieText(d.die_name),
-            subtitle: `${fmtInt(p.records)} NG records`,
-            rows: catKeys.map((k) => ({ label: k, color: categoryFill(k), value: `${fmtInt(p.cats[k])} · ${fmtPct(pctOf(p.cats[k], p.records), 0)}` })),
-          });
-        },
-      },
-      xAxis: valueAxis({ min: 0, max: 100, interval: 25, axisLabel: axisLabel({ formatter: (v) => `${v}%` }) }),
-      yAxis: categoryAxis(names, { inverse: true, axisLabel: dieAxisLabel(byName), axisLine: { show: false } }),
-      series: catKeys.map((k) => ({
-        type: "bar", name: k, stack: "cat", barMaxWidth: 26,
-        data: recDies.map((d) => {
-          const p = defects.perDie[d.die_name];
-          return Number((pctOf(p.cats[k], p.records) || 0).toFixed(2));
-        }),
-        itemStyle: { color: categoryFill(k) },
-        label: { show: true, position: "inside", color: "#fff", fontSize: 10.5, fontWeight: 600, formatter: (p) => (p.value >= 9 ? `${Math.round(p.value)}%` : "") },
-        emphasis: { focus: "series" },
-      })),
-    });
-  }, [recDies, catKeys, defects, byName]);
-
-  /* (5) Die × shift grouped bars */
-  const shiftsPresent = useMemo(
-    () => SHIFT_KEYS.filter((k) => recDies.some((d) => defects.perDie[d.die_name].shifts[k] > 0)),
-    [recDies, defects]
-  );
-  const shiftOption = useMemo(() => {
-    if (!recDies.length || !shiftsPresent.length) return null;
-    return baseOption({
-      grid: { left: 8, right: 16, top: 36, bottom: 8, containLabel: true },
-      legend: { ...LEGEND, data: shiftsPresent.map(shiftLabel) },
-      tooltip: {
-        ...ECHART_TOOLTIP, trigger: "axis", axisPointer: SHADOW_POINTER,
-        formatter: (ps) => {
-          const d = recDies[ps[0]?.dataIndex ?? 0];
-          const tot = defects.perDie[d.die_name].records;
-          return tooltipHtml({
-            title: dieText(d.die_name),
-            subtitle: `${fmtInt(tot)} NG records`,
-            rows: ps.map((p) => ({ label: p.seriesName, color: p.color, value: `${fmtInt(p.value)} · ${fmtPct(pctOf(p.value, tot), 0)}` })),
-          });
-        },
-      },
-      xAxis: categoryAxis(recDies.map((d) => d.die_name), { axisLabel: axisLabel({ interval: 0, fontWeight: 600, color: INK.secondary }) }),
-      yAxis: valueAxis({ minInterval: 1, ...axisName("NG records", 34) }),
-      series: shiftsPresent.map((k) => ({
-        type: "bar",
-        name: shiftLabel(k),
-        data: recDies.map((d) => defects.perDie[d.die_name].shifts[k]),
-        barMaxWidth: 26,
-        barGap: "12%",
-        itemStyle: { color: SHIFT[k], borderRadius: [3, 3, 0, 0] },
-        label: { show: recDies.length * shiftsPresent.length <= 16, position: "top", color: INK.secondary, fontSize: 10, fontWeight: 600, formatter: (p) => (p.value ? fmtInt(p.value) : "") },
-        emphasis: { focus: "series" },
-      })),
-    });
-  }, [recDies, shiftsPresent, defects]);
 
   /* ── Excel export (K-12 dies only) ──────────────────────────────────── */
   const handleExportDieExcel = async () => {
@@ -749,14 +673,10 @@ export default function DieWiseTab({
     saveAs(new Blob([buffer]), `Die_Scrap_Report_K12_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
-  /* Chart geometry */
-  const rowsHeight = (n, per = 44, pad = 64) => Math.max(180, n * per + pad);
-  const dieChartHeight = rowsHeight(ordered.length);
+  /* Parts left out of the die analysis: no die name = no DCM shot record (the die comes from the shot) */
+  const tracked = Number(summary?.totalProduction ?? summary?.totalParts);
+  const excl = Number.isFinite(tracked) && tracked > 0 && noDieParts > 0 ? { tracked, noDie: noDieParts } : null;
   const recordsGap = defects.matched - plant.ng;
-  const scopeBits = [
-    excludedDies.length > 0 && `excluded: ${excludedDies.map((d) => d.die_name).join(", ")}`,
-    noDieParts != null && noDieParts > 0 && `${fmtInt(noDieParts)} parts without a die`,
-  ].filter(Boolean);
 
   /* ═══════════════════════════════════════════════════════════════════════
      RENDER
@@ -768,6 +688,7 @@ export default function DieWiseTab({
         .die-root * { box-sizing: border-box; }
         .die-scope { font-size: 12px; color: ${INK.muted}; margin: 0 2px; }
         .die-scope b { color: ${INK.secondary}; font-weight: 600; }
+        .die-excl-line { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-left: 6px; }
         .die-kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
         .ra-kpi.die-kpi { box-shadow: 0 1px 2px rgba(15,23,42,.04); }
         .die-empty { min-height: 160px; display: grid; place-content: center; color: ${INK.faint}; font-size: 12px; text-align: center; padding: 16px; }
@@ -775,6 +696,10 @@ export default function DieWiseTab({
         .die-btn:hover:not(:disabled) { border-color: ${INK.faint}; color: ${INK.primary}; }
         .die-btn:disabled { opacity: .4; cursor: not-allowed; }
         .die-select { max-width: 100%; padding: 5px 10px; border-radius: 8px; border: 1px solid ${INK.axis}; font-size: 12px; font-weight: 600; color: ${INK.primary}; background: #fff; font-family: inherit; }
+        .die-totals { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin: 0 4px 6px; font-size: 12px; color: ${INK.body}; }
+        .die-totals b { color: ${INK.primary}; font-variant-numeric: tabular-nums; }
+        .die-totals i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+        .die-totals .muted { color: ${INK.faint}; }
         .die-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
         @media (max-width: 1100px) { .die-split { grid-template-columns: 1fr; } }
         .die-panel-head { display: flex; justify-content: space-between; gap: 6px 12px; flex-wrap: wrap; align-items: baseline; margin: 0 4px 4px; }
@@ -789,11 +714,33 @@ export default function DieWiseTab({
         .die-table tfoot td { font-weight: 700; color: ${INK.primary}; background: ${INK.surfaceAlt}; border-top: 1px solid ${INK.border}; border-bottom: none; }
         .die-name { font-weight: 600; color: ${INK.primary}; }
         .die-lv { margin-left: 6px; font-size: 10.5px; color: ${INK.faint}; font-weight: 500; }
+        .die-excl { padding: 14px 18px; display: flex; flex-direction: column; gap: 8px; }
+        .die-excl-main { display: flex; justify-content: space-between; align-items: baseline; gap: 8px 16px; flex-wrap: wrap; }
+        .die-excl-label { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: ${INK.muted}; }
+        .die-excl-value { font-size: 22px; font-weight: 750; color: ${INK.primary}; font-variant-numeric: tabular-nums; }
+        .die-excl-value em { font-style: normal; font-size: 12.5px; font-weight: 600; color: ${INK.muted}; margin-left: 6px; }
+        .die-excl-bar { display: flex; gap: 2px; height: 10px; border-radius: 5px; overflow: hidden; background: ${INK.grid}; }
+        .die-excl-bar i { display: block; height: 100%; }
+        .die-excl-parts { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; color: ${INK.body}; }
+        .die-excl-parts span { display: inline-flex; align-items: center; gap: 6px; }
+        .die-excl-parts i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+        .die-excl-parts b { color: ${INK.primary}; font-variant-numeric: tabular-nums; }
       `}</style>
 
-      {/* ═══ SCOPE (one line) ═══ */}
+      {/* ═══ SCOPE (one line) + parts without shot details ═══ */}
       <div className="die-scope">
-        <b>Oil Pan K-12 ({K12_PART}) dies only</b>{scopeBits.length ? ` · ${scopeBits.join(" · ")}` : ""}
+        <b>Oil Pan K-12 ({K12_PART}) dies in this period: {ordered.map((d) => d.die_name).join(", ") || "—"}</b>
+        {excl && (
+          <span className="die-excl-line">
+            <span aria-hidden="true">·</span><b>{fmtInt(excl.noDie)}</b> parts ({fmtPct(pctOf(excl.noDie, excl.tracked), 1)} of {fmtInt(excl.tracked)} tracked) have no shot details and are not in the die charts
+            <InfoTip label="Why parts are excluded" info={{
+              title: "Parts without shot details",
+              what: "The die of a part comes from its DCM shot record (PlcCycleReadings: the shot that cast it). Parts without a shot record — e.g. parts traced only by customer QR, or shots not transferred from the die-casting machine — have no die, so they cannot be placed on a die.",
+              formula: ["Excluded = tracked parts − parts on Oil Pan K-12 dies", "Share = excluded ÷ tracked parts of the period"],
+              note: "They are still counted in the page totals (KPI strip, Overview).",
+            }} />
+          </span>
+        )}
       </div>
 
       {/* ═══ KPI ROW ═══ */}
@@ -802,17 +749,17 @@ export default function DieWiseTab({
         <KPI label="OK parts" value={fmtInt(plant.ok)} color={OUTCOME.ok} />
         <KPI label="NG parts" value={fmtInt(plant.ng)} color={OUTCOME.ng} />
         <KPI label="Rejection rate" value={fmtPct(plant.rate, 2)} color={OUTCOME.ng} />
-        <KPI
-          label="Highest-rate die" value={worst ? worst.die_name : "—"}
+        {worst && <KPI
+          label="Highest-rate die" value={worst.die_name}
           sub={worst ? `${fmtPct(worst.rate, 2)} · ${fmtPP(worst.vsPlant)}` : undefined}
-          color={worst ? OUTCOME.ng : ACCENT.neutral}
-        />
+          color={OUTCOME.ng}
+        />}
       </div>
 
-      {/* ═══ (1) OUTPUT + RATE WITH CI ═══ */}
+      {/* ═══ (1) PRODUCTION OUTPUT BY DIE ═══ */}
       <Card
-        color={OUTCOME.ng} icon={BarChart3} title="Output and rejection rate by die"
-        sub={`Worst rate first · rate = NG ÷ (OK + NG) · dies under ${MIN_INSPECTED_FOR_RANK} inspected are not ranked${recordsGap > 0 ? ` · ${fmtInt(recordsGap)} NG records still in process not counted` : ""}`}
+        color={ACCENT.neutral} icon={BarChart3} title="Production Output by Die"
+        sub={`Parts produced per die — OK · NG · in process${hasPending ? " (in process = no final result yet)" : ""} · total and NG at the end of each bar`}
         actions={(
           <button type="button" onClick={handleExportDieExcel} className="die-btn" disabled={!dies.length}>
             <FileSpreadsheet size={14} /> Excel
@@ -820,43 +767,49 @@ export default function DieWiseTab({
         )}
       >
         {ordered.length === 0 ? (
-          <Empty>No K-12 die statistics for the selected filters.</Empty>
+          <Empty>{loading ? "Loading die statistics…" : "No K-12 die statistics for the selected filters."}</Empty>
         ) : (
-          <div className="die-split">
-            <div style={{ minWidth: 0 }}>
-              <div className="die-panel-head">
-                <h4 className="die-panel-title">Parts produced</h4>
-                <Legend items={[
-                  { label: "OK", color: OUTCOME.ok },
-                  { label: "NG", color: OUTCOME.ng },
-                  hasPending && { label: "In process", color: OUTCOME.wip },
-                ]} />
-              </div>
-              <EChart option={outputOption} style={{ height: dieChartHeight }} />
+          <>
+            <div className="die-totals">
+              <span>Total <b>{fmtInt(plant.total)}</b> parts on {ordered.length} {ordered.length === 1 ? "die" : "dies"}</span>
+              <span><i style={{ background: OUTCOME.ok }} />OK <b>{fmtInt(plant.ok)}</b></span>
+              <span><i style={{ background: OUTCOME.ng }} />NG <b>{fmtInt(plant.ng)}</b></span>
+              {hasPending && <span><i style={{ background: OUTCOME.wip }} />In process <b>{fmtInt(plant.pending)}</b></span>}
             </div>
-            <div style={{ minWidth: 0 }}>
-              <div className="die-panel-head">
-                <h4 className="die-panel-title">Rejection rate, 95% CI</h4>
-                <Legend items={[
-                  { label: "Above avg", style: { background: OUTCOME.ng, borderRadius: 99 } },
-                  { label: "Not significant", style: { background: ACCENT.neutral, borderRadius: 99 } },
-                  { label: "Below avg", style: { background: OUTCOME.ok, borderRadius: 99 } },
-                  { label: "K-12 avg", style: { background: "transparent", borderTop: `2px dashed ${AVG_LINE}`, height: 0, borderRadius: 0 } },
-                ]} />
-              </div>
-              {ciOption ? <EChart option={ciOption} style={{ height: Math.max(dieChartHeight, rowsHeight(ciDies.length, 50, 70)) }} /> : <Empty>No inspected parts.</Empty>}
-            </div>
-          </div>
+            <EChart option={outputOption} style={{ height: 380 }} />
+          </>
         )}
       </Card>
 
-      {/* ═══ (2) DAILY TREND ═══ */}
+      {/* ═══ (2) REJECTION RATE BY DIE ═══ */}
       <Card
-        color={ACCENT.process} icon={LineChartIcon} title="Daily NG trend by die"
-        sub={`NG records per day by recorded date (count, not rate)${defects.noDay ? ` · ${fmtInt(defects.noDay)} undated not shown` : ""}`}
+        color={OUTCOME.ng} icon={Percent} title="Rejection Rate by Die"
+        sub={`Rate = NG ÷ (OK + NG) of each die — every part counted once, parts in process excluded · whisker = 95% confidence interval · dies under ${MIN_INSPECTED_FOR_RANK} inspected are not ranked${recordsGap > 0 ? ` · ${fmtInt(recordsGap)} NG records still in process not counted` : ""}`}
       >
-        {trendOption ? <EChart option={trendOption} style={{ height: 300 }} /> : <Empty>No dated NG records on K-12 dies.</Empty>}
+        {!rateOption ? (
+          <Empty>{loading ? "Loading die statistics…" : "No inspected parts on K-12 dies for the selected filters."}</Empty>
+        ) : (
+          <>
+            <div className="die-totals">
+              <span>K-12 average <b>{fmtPct(plant.rate, 2)}</b> = {fmtInt(plant.ng)} ÷ {fmtInt(plant.inspected)}</span>
+              <Legend items={[
+                { label: "Significantly above avg", color: OUTCOME.ng },
+                { label: "Not significant", color: ACCENT.neutral },
+                { label: "Significantly below avg", color: OUTCOME.ok },
+                { label: "Low volume", style: { background: withAlpha(OUTCOME.wip, 0.35), border: `1px dashed ${OUTCOME.wip}` } },
+              ]} />
+            </div>
+            <EChart option={rateOption} style={{ height: 380 }} />
+          </>
+        )}
       </Card>
+
+      {/* ═══ (3) TREND PER DIE + CATEGORY / SHIFT BREAK-UP ═══ */}
+      <DieTrendCard dieDaily={dieDaily} dies={dieNames} />
+      <div className="ra-grid2">
+        <DieCategoryCard byDie={byDie} dies={dieNames} />
+        <DieShiftCard byDieShift={byDieShift} dies={dieNames} />
+      </div>
 
       {/* ═══ (3) PARETO ═══ */}
       <Card
@@ -870,30 +823,6 @@ export default function DieWiseTab({
       >
         {paretoOption ? <EChart option={paretoOption} style={{ height: 340 }} /> : <Empty>No NG records on K-12 dies.</Empty>}
       </Card>
-
-      {/* ═══ (4) CATEGORY MIX + (5) SHIFT ═══ */}
-      <div className="ra-grid2">
-        <Card
-          color={DEFECT_CATEGORY.CRAM} icon={PieChart} title="Defect category mix by die"
-          sub="Share of each die's NG records by category"
-          actions={catKeys.length ? (
-            <Legend items={catKeys.map((k) => ({ label: k, color: categoryFill(k) }))} />
-          ) : null}
-        >
-          {catOption ? <EChart option={catOption} style={{ height: rowsHeight(recDies.length, 44, 50) }} /> : <Empty>No NG records on K-12 dies.</Empty>}
-          {catKeys.length > 0 && (
-            <div className="die-scope" style={{ marginTop: 2 }} title={catKeys.map((k) => DEFECT_CATEGORY_LABEL[k] || "Unclassified = no category and no reason").join("\n")}>
-              {catKeys.map((k) => `${k} ${fmtPct(pctOf(defects.catTotals[k], defects.matched), 0)}`).join(" · ")} of all K-12 NG records
-            </div>
-          )}
-        </Card>
-        <Card
-          color={SHIFT.B} icon={Clock} title="NG by shift and die"
-          sub="NG records per shift code on the record"
-        >
-          {shiftOption ? <EChart option={shiftOption} style={{ height: 300 }} /> : <Empty>No NG records on K-12 dies.</Empty>}
-        </Card>
-      </div>
 
       {/* ═══ COMPARISON TABLE ═══ */}
       <Card

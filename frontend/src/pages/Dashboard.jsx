@@ -67,7 +67,26 @@ import OverviewCharts from "../components/dashboard/OverviewCharts";
 import { useDailyQualityCards } from "./Rejection/DailyQualityTrend";
 import { CHART_COLORS } from "../constants/chartTheme";
 import { useLanguage } from "../context/LanguageContext";
-import { fitViewFrame } from "../utils/viewImageFrame";
+import CadStage from "./Rejection/components/CadStage";
+import {
+  boxStyle,
+  buildViewLocations,
+  parseRowDefect,
+  subBoxStyle,
+} from "./Rejection/rejectionConstants";
+
+// Zone heat ramp (light → dark red), sqrt-scaled so a zone with one reject is still visible on a light image
+const ZONE_HEAT_RAMP = ["#fbc7a2", "#f59e6b", "#e8743f", "#cc4e22", "#a33417", "#7a210f"];
+const zoneHeatIndex = (count, max) =>
+  count > 0
+    ? Math.min(
+      ZONE_HEAT_RAMP.length - 1,
+      Math.floor(Math.sqrt(count / Math.max(max, 1)) * ZONE_HEAT_RAMP.length),
+    )
+    : -1;
+const zoneHeatColor = (count, max) => ZONE_HEAT_RAMP[zoneHeatIndex(count, max)] || null;
+const hexAlpha = (hex, alpha) =>
+  `${hex}${Math.round(Math.max(0, Math.min(1, alpha)) * 255).toString(16).padStart(2, "0")}`;
 
 // —— Design tokens —————————————————————————————————————————————————————————————
 const DS = `
@@ -1761,6 +1780,7 @@ const Dashboard = () => {
   const [report, setReport] = useState(EMPTY_REPORT);
   const [reportMetrics, setReportMetrics] = useState(null);
   const lastStableReportMetricsRef = useRef(null);
+  const hasLoadedOnceRef = useRef(false);
   const [shiftManagerShifts, setShiftManagerShifts] = useState([]);
   const [oeeData, setOeeData] = useState([]);
   const [, setTrendsData] = useState([]);
@@ -1792,6 +1812,10 @@ const Dashboard = () => {
   const [heatMapConfig, setHeatMapConfig] = useState(null);
   const [heatMapViewId, setHeatMapViewId] = useState("");
   const [heatMapSelection, setHeatMapSelection] = useState(null);
+  const heatMapViewPickedRef = useRef(false);
+  // NG rows (with view / zone) for the Rejection tab — the same list Rejection Analysis uses
+  const [rejectionRowsState, setRejectionRowsState] = useState({ status: "idle", rows: [] });
+  const [rejectionRowsTick, setRejectionRowsTick] = useState(0);
   const [rejectionFilters, setRejectionFilters] = useState({
     category: "",
     view: "",
@@ -1805,6 +1829,12 @@ const Dashboard = () => {
   const refreshTimerRef = useRef(null);
   const lastRefreshAtRef = useRef(0);
   const latestLoadDataRef = useRef(null);
+  // machines are read through a ref so the first machine list arriving does not change loadData and re-run the
+  // whole dashboard load a second time
+  const machinesRef = useRef(machines);
+  useEffect(() => {
+    machinesRef.current = machines;
+  }, [machines]);
 
   // ---- Compute isMultiDayRange early ----
   const isMultiDayRange = useMemo(() => {
@@ -1828,7 +1858,11 @@ const Dashboard = () => {
         const parts = partsResult?.parts || [];
         setRejectionConfigParts(parts);
         setHeatMapPart((current) =>
-          current && parts.includes(current) ? current : parts[0] || "",
+          current && parts.includes(current)
+            ? current
+            : parts.includes("OIL PAN K-12")
+              ? "OIL PAN K-12"
+              : parts[0] || "",
         );
       })
       .catch((error) =>
@@ -1962,7 +1996,8 @@ const Dashboard = () => {
     const freshReportMetricsQuery = { ...requestReportMetricsQuery, noCache: "1", _ts: requestTs };
     try {
       setNowMs(requestTs);
-      setLoading(showLoading || !lastStableReportMetricsRef.current);
+      // spinner ("Updating…") only for the first load and a manual refresh — never for background loads
+      setLoading(showLoading || !hasLoadedOnceRef.current);
       // The full report (/reports/report/data) used to run on every 30-second refresh only to get totals the
       // summary already returns; on long ranges it took minutes and blocked the server (→ "Server timeout").
       void freshReportMetricsQuery;
@@ -1976,8 +2011,8 @@ const Dashboard = () => {
         reportMetricsResult,
         shiftsResult,
       ] = await Promise.allSettled([
-        machines.length
-          ? Promise.resolve(machines)
+        machinesRef.current.length
+          ? Promise.resolve(machinesRef.current)
           : machineApi.list({ timeout: 20000, suppressGlobalError: true, params: { noCache: "1", _ts: requestTs } }),
         dashboardApi.summary(freshQuery, {
           timeout: 25000,
@@ -2049,6 +2084,7 @@ const Dashboard = () => {
     } catch (e) {
       console.error("Dashboard load error", e);
     } finally {
+      hasLoadedOnceRef.current = true;
       setLoading(false);
       refreshInFlightRef.current = false;
       if (refreshQueuedRef.current) {
@@ -2056,7 +2092,7 @@ const Dashboard = () => {
         latestLoadDataRef.current?.();
       }
     }
-  }, [query, reportMetricsQuery, machines, isLiveProductionRange]);
+  }, [query, reportMetricsQuery, isLiveProductionRange]);
 
   useEffect(() => {
     latestLoadDataRef.current = loadData;
@@ -2076,27 +2112,62 @@ const Dashboard = () => {
     [loadData],
   );
 
-  // opening the Machines or Rejection tab loads the part / machine report (once, then with the normal refresh)
+  // opening the Machines tab loads the part / machine report (once, then with the normal refresh). The Rejection
+  // tab does not need it: it reads the NG rows (/rejection-rows) below.
   useEffect(() => {
-    if ((activeTab === "machines" || activeTab === "rejection") && !needsReportRef.current) {
+    if (activeTab === "machines" && !needsReportRef.current) {
       needsReportRef.current = true;
       scheduleRefresh(0);
     }
   }, [activeTab, scheduleRefresh]);
 
+  // Rejection tab: NG rows with view / zone / category — loaded when the tab opens, when the period changes and on a
+  // manual Refresh (no auto refresh)
+  useEffect(() => {
+    if (activeTab !== "rejection") return undefined;
+    let active = true;
+    const requestTs = Date.now();
+    const liveRange = isLiveProductionRange
+      ? getCurrentDashboardProductionRange(new Date(requestTs))
+      : null;
+    const params = {
+      ...(liveRange ? { ...query, dateFrom: liveRange.start, dateTo: liveRange.end } : query),
+      status: "NG",
+      page: 1,
+      pageSize: 5000,
+      _ts: requestTs,
+    };
+    setRejectionRowsState((prev) => ({ ...prev, status: "loading" }));
+    dashboardApi
+      .rejectionRows(params, { timeout: 90000, suppressGlobalError: true })
+      .then((result) => {
+        if (!active) return;
+        setRejectionRowsState({
+          status: "ready",
+          rows: Array.isArray(result?.rows) ? result.rows : [],
+          total: Number(result?.total || 0),
+        });
+      })
+      .catch((error) => {
+        if (!active) return;
+        const code = error?.response?.status || error?.status;
+        setRejectionRowsState({
+          status: code === 401 || code === 403 ? "noaccess" : "error",
+          rows: [],
+          message: error?.message || "",
+        });
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeTab, query, isLiveProductionRange, rejectionRowsTick]);
+
+  // Loads once when the page opens and again when the period / filters change; otherwise only when the user
+  // clicks Refresh. (It used to reload every 30 s, on every tab focus and on every scan event from the server —
+  // with the line running that was every few seconds, so the dashboard was always "Updating…".)
   useEffect(() => {
     scheduleRefresh(0);
-    // auto-refresh only while the dashboard is visible; a hidden / minimised tab makes no API calls and
-    // refreshes once as soon as it is shown again
-    const t = setInterval(() => {
-      if (typeof document !== "undefined" && document.hidden) return;
-      scheduleRefresh(500);
-    }, 30000);
-    const onVisible = () => { if (!document.hidden) scheduleRefresh(0); };
-    document.addEventListener("visibilitychange", onVisible);
     return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      clearInterval(t);
       if (refreshTimerRef.current) {
         clearTimeout(refreshTimerRef.current);
         refreshTimerRef.current = null;
@@ -2118,7 +2189,6 @@ const Dashboard = () => {
         reconnection: true,
         reconnectionAttempts: Infinity,
       });
-      sock.on("dashboard_refresh", () => scheduleRefresh(350));
       sock.on("plc_connection_event", (d) => {
         if (d.machineId)
           setPlcMap((p) => ({
@@ -2560,7 +2630,11 @@ const Dashboard = () => {
         ? row.leakTestReadings
         : [];
       if (leakReadings.length > 0) {
-        leakReadings.forEach((reading) => {
+        // the part counts at the leak machine of its LATEST test (an NG then a retest OK = OK at the retest machine)
+        const leakTimeOf = (r) => new Date(r?.cycleEndTime || r?.Cycle_End_Time || 0).getTime() || 0;
+        const latestLeak = leakReadings.filter((r) => r && typeof r === "object")
+          .map((r, i) => ({ r, i, t: leakTimeOf(r) })).sort((a, b) => a.t - b.t || a.i - b.i).map((x) => x.r).slice(-1);
+        latestLeak.forEach((reading) => {
           addMachinePartStatus({
             machineId: reading?.matchedMachineId,
             partId,
@@ -2601,7 +2675,10 @@ const Dashboard = () => {
 
     return (report.machineCards || []).map((row) => {
       const machineId = Number(row.machineId || row.machine_id || 0);
-      const derived = machineCountSummary.get(machineId);
+      // The server's OK / NG per machine (latest OK / NG scan per part, leak testers from their own results) is the
+      // reports' figure. The parts list is capped (3,000 rows), so recounting it gave e.g. Final 224 instead of 324;
+      // it is only a fallback when the server sent no counts.
+      const derived = row.okCount === undefined && row.ngCount === undefined ? machineCountSummary.get(machineId) : null;
       if (!derived) {
         const plannedMinutes = Number(row.plannedProductionMinutes || 0);
         const effectiveCycleSeconds =
@@ -2759,21 +2836,25 @@ const Dashboard = () => {
   // Shift bar data follows Shift Management and keeps configured shifts visible.
 
   const hasFilters = Object.values(filters).some(Boolean);
+  // One row per NG part from /rejection-rows, read with the Rejection Analysis helpers (category / reason / view /
+  // zone from the operator entry). It used to come from /dashboard/report's part list, which never carried the
+  // view or zone — so the zone heat map was always empty.
   const rejectionAnalysisRows = useMemo(() => {
-    return dashboardParts
-      .filter((part) => part.finalStatus === "FAILED")
-      .map((part) => ({
-        partId: part.partId || "-",
-        reason: String(part.rejectionReason || "").trim(),
-        category: String(part.rejectionCategory || "").trim(),
-        view: String(part.rejectionView || "").trim(),
-        zone: String(part.rejectionZone || "").trim(),
-        rejectionReasonOnly: String(part.rejectionReasonOnly || "").trim(),
+    return (rejectionRowsState.rows || []).map((row) => {
+      const parsed = parseRowDefect(row);
+      return {
+        partId: row.customer_qr || row.part_id || row.partId || "-",
+        reason: parsed.reason,
+        category: parsed.category,
+        view: parsed.view,
+        zone: parsed.zone,
+        rejectionReasonOnly: parsed.reason,
         result: "NG",
-        createdAt: part.latestCreatedAt || part.createdAt || null,
-      }))
-      .filter((part) => part.reason);
-  }, [dashboardParts]);
+        createdAt: row.ngRecordedAt || row.createdAt || row.first_scan_at || null,
+        raw: row,
+      };
+    });
+  }, [rejectionRowsState.rows]);
 
   const rejectionFilterOptions = useMemo(() => {
     const matches = (row, ignoredKey) =>
@@ -2883,34 +2964,41 @@ const Dashboard = () => {
       null,
     [heatMapConfig, heatMapViewId],
   );
-  const heatMapZoneCounts = useMemo(() => {
-    const counts = {};
-    filteredRejectionRows
-      .filter(
-        (row) =>
-          !heatMapView?.name ||
-          normalizeAnalysisToken(row.view) ===
-          normalizeAnalysisToken(heatMapView.name),
-      )
-      .forEach((row) => {
-        const key = normalizeAnalysisToken(row.zone);
-        if (key) counts[key] = (counts[key] || 0) + 1;
-      });
-    return counts;
-  }, [filteredRejectionRows, heatMapView]);
-  const heatMapSubZoneCounts = useMemo(() => {
-    const counts = {};
-    (heatMapConfig?.mappings || []).forEach((mapping) => {
-      if (!mapping.subZoneId) return;
-      const key = String(mapping.subZoneId);
-      counts[key] = (counts[key] || 0) + 1;
-    });
-    return counts;
-  }, [heatMapConfig]);
-  const heatMapMax = useMemo(
-    () => Math.max(1, ...Object.values(heatMapZoneCounts).map(Number)),
-    [heatMapZoneCounts],
+  // Rejects per configured view / zone / sub-zone — same placement rules as Rejection Analysis → Defect Location
+  const heatMapLocations = useMemo(
+    () =>
+      buildViewLocations(
+        filteredRejectionRows.map((row) => row.raw).filter(Boolean),
+        heatMapConfig?.views || [],
+      ),
+    [filteredRejectionRows, heatMapConfig],
   );
+  const heatMapViewCounts = useMemo(
+    () =>
+      heatMapLocations.views.find(
+        (view) => String(view.id) === String(heatMapView?.id),
+      ) || null,
+    [heatMapLocations, heatMapView],
+  );
+  // Until the user picks a view, show the view with the most rejects (the first view is often empty)
+  useEffect(() => {
+    if (heatMapViewPickedRef.current || !heatMapLocations.views.length) return;
+    const best = heatMapLocations.views.reduce(
+      (top, view) => (view.totalDefects > (top?.totalDefects || 0) ? view : top),
+      null,
+    );
+    if (best && String(best.id) !== String(heatMapViewId)) setHeatMapViewId(String(best.id));
+  }, [heatMapLocations, heatMapViewId]);
+  const heatMapMax = useMemo(() => {
+    const zones = heatMapViewCounts?.zones || [];
+    return {
+      zone: Math.max(1, ...zones.map((zone) => zone.count)),
+      sub: Math.max(
+        1,
+        ...zones.flatMap((zone) => zone.subZones.map((sub) => sub.count)),
+      ),
+    };
+  }, [heatMapViewCounts]);
 
   const rejectionPieData = useMemo(() => {
     const grouped = filteredRejectionRows.reduce((acc, row) => {
@@ -3292,7 +3380,10 @@ const Dashboard = () => {
             {/* Refresh Button */}
             <button
               type="button"
-              onClick={() => loadData(true)}
+              onClick={() => {
+                loadData(true);
+                if (activeTab === "rejection") setRejectionRowsTick((n) => n + 1);
+              }}
               style={{
                 display: "inline-flex",
                 alignItems: "center",
@@ -4511,9 +4602,10 @@ const Dashboard = () => {
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                       <select
                         value={heatMapViewId}
-                        onChange={(event) =>
-                          setHeatMapViewId(event.target.value)
-                        }
+                        onChange={(event) => {
+                          heatMapViewPickedRef.current = true;
+                          setHeatMapViewId(event.target.value);
+                        }}
                         style={{
                           background: C.bg("input"),
                           border: `1px solid ${C.bdr()}`,
@@ -4524,16 +4616,44 @@ const Dashboard = () => {
                           fontWeight: 800,
                         }}
                       >
-                        {(heatMapConfig?.views || []).map((view) => (
-                          <option key={view.id} value={view.id}>
-                            {view.name}
-                          </option>
-                        ))}
+                        {(heatMapConfig?.views || []).map((view) => {
+                          const n =
+                            heatMapLocations.views.find(
+                              (row) => String(row.id) === String(view.id),
+                            )?.totalDefects || 0;
+                          return (
+                            <option key={view.id} value={view.id}>
+                              {view.name} ({n})
+                            </option>
+                          );
+                        })}
                       </select>
                     </div>
                   }
                 />
-                {!heatMapView ? (
+                {rejectionRowsState.status === "noaccess" ? (
+                  <p
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 700,
+                      color: C.txt("sec"),
+                    }}
+                  >
+                    No access to rejection records. Ask an administrator for
+                    Dashboard or Rejection Analysis view access.
+                  </p>
+                ) : rejectionRowsState.status === "error" ? (
+                  <p
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 700,
+                      color: C.ng(),
+                    }}
+                  >
+                    Could not load rejection records. Press Refresh to try
+                    again.
+                  </p>
+                ) : !heatMapView ? (
                   <p
                     style={{
                       fontSize: 12,
@@ -4547,296 +4667,118 @@ const Dashboard = () => {
                   <div
                     style={{
                       display: "grid",
-                      gridTemplateColumns: "minmax(280px,1fr) 190px",
+                      gridTemplateColumns: "minmax(280px,1fr) 220px",
                       gap: 18,
-                      alignItems: "center",
+                      alignItems: "start",
                     }}
                     className="db-grid-responsive"
                   >
-                    <div
-                      style={{
-                        position: "relative",
-                        width: "100%",
-                        maxWidth: 900,
-                        margin: "0 auto",
-                        aspectRatio: "900 / 520",
-                        overflow: "hidden",
-                        borderRadius: 10,
-                        border: `1px solid ${C.bdr()}`,
-                        background: C.bg("surf"),
-                      }}
-                    >
-                      {heatMapView.imageUrl ? (
-                        <img
-                          src={heatMapView.imageUrl}
-                          alt={heatMapView.name}
-                          onLoad={fitViewFrame("420px")}
-                          style={{
-                            position: "absolute",
-                            inset: 0,
-                            width: "100%",
-                            height: "100%",
-                            objectFit: "fill",
-                            display: "block",
-                          }}
-                        />
-                      ) : (
-                        <div
-                          style={{
-                            position: "absolute",
-                            inset: 0,
-                            display: "grid",
-                            placeItems: "center",
-                            color: C.txt("sec"),
-                            fontSize: 12,
-                            fontWeight: 800,
-                          }}
-                        >
-                          No part image configured for this view
-                        </div>
-                      )}
-                      <svg
-                        viewBox="0 0 900 520"
-                        preserveAspectRatio="none"
-                        aria-hidden="true"
-                        style={{
-                          position: "absolute",
-                          inset: 0,
-                          width: "100%",
-                          height: "100%",
-                          zIndex: 1,
-                          pointerEvents: "none",
-                          mixBlendMode: "screen",
-                        }}
-                      >
-                        <defs>
-                          <filter
-                            id={`heat-blur-${heatMapView.id}`}
-                            x="-40%"
-                            y="-40%"
-                            width="180%"
-                            height="180%"
-                          >
-                            <feGaussianBlur stdDeviation="34" />
-                          </filter>
-                          <clipPath id={`part-clip-${heatMapView.id}`}>
-                            <path d="M140 125 C200 85 320 80 420 100 C520 120 625 90 745 115 C790 125 830 165 840 220 L860 350 C868 410 815 455 750 465 L230 485 C155 485 108 430 115 365 L128 215 C132 175 108 150 140 125Z" />
-                          </clipPath>
-                        </defs>
-                        <g
-                          clipPath={`url(#part-clip-${heatMapView.id})`}
-                          filter={`url(#heat-blur-${heatMapView.id})`}
-                          opacity=".9"
-                        >
-                          {(heatMapView.zones || []).map((zone) => {
-                            const key = normalizeAnalysisToken(
-                              zone.code || zone.name,
-                            );
-                            const count = Number(heatMapZoneCounts[key] || 0);
-                            if (count <= 0) return null;
-                            const intensity = count / heatMapMax;
-                            const color =
-                              intensity > 0.66
-                                ? "#ef4444"
-                                : intensity > 0.33
-                                  ? "#f97316"
-                                  : "#facc15";
-                            const cx =
-                              (Number(zone.xPercent || 0) +
-                                Number(zone.widthPercent || 0) / 2) *
-                              9;
-                            const cy =
-                              (Number(zone.yPercent || 0) +
-                                Number(zone.heightPercent || 0) / 2) *
-                              5.2;
-                            const rx = Math.max(
-                              95,
-                              Number(zone.widthPercent || 10) * 9 * 0.9,
-                            );
-                            const ry = Math.max(
-                              75,
-                              Number(zone.heightPercent || 10) * 5.2 * 1.1,
-                            );
-                            return (
-                              <ellipse
-                                key={`heat-${zone.id}`}
-                                cx={cx}
-                                cy={cy}
-                                rx={rx}
-                                ry={ry}
-                                fill={color}
-                                fillOpacity={0.75 + 0.2 * intensity}
-                              />
-                            );
-                          })}
-                        </g>
-                      </svg>
-                      {(heatMapView.zones || []).map((zone) => (
-                        <div
-                          key={`division-${zone.id}`}
-                          aria-hidden="true"
-                          style={{
-                            position: "absolute",
-                            left: `${Math.max(0, Number(zone.xPercent || 0))}%`,
-                            top: `${Math.max(0, Number(zone.yPercent || 0))}%`,
-                            width: `${Math.max(1, Math.min(100 - Number(zone.xPercent || 0), Number(zone.widthPercent || 10)))}%`,
-                            height: `${Math.max(1, Math.min(100 - Number(zone.yPercent || 0), Number(zone.heightPercent || 10)))}%`,
-                            border: "2px dashed rgba(220,38,38,.95)",
-                            boxSizing: "border-box",
-                            pointerEvents: "none",
-                            zIndex: 2,
-                          }}
-                        />
-                      ))}
-                      {(heatMapView.zones || []).map((zone) => {
-                        const shortKey = normalizeAnalysisToken(
-                          zone.code || zone.name,
-                        );
-                        const count = Number(heatMapZoneCounts[shortKey] || 0);
-                        const intensity = count / heatMapMax;
-                        const borderColor =
-                          count === 0
-                            ? "rgba(100,116,139,.65)"
-                            : intensity > 0.66
-                              ? "rgba(185,28,28,.95)"
-                              : intensity > 0.33
-                                ? "rgba(234,88,12,.95)"
-                                : "rgba(202,138,4,.95)";
-                        const centerX = Math.max(
-                          2,
-                          Math.min(
-                            98,
-                            Number(zone.xPercent || 0) +
-                            Number(zone.widthPercent || 0) / 2,
-                          ),
-                        );
-                        const centerY = Math.max(
-                          2,
-                          Math.min(
-                            98,
-                            Number(zone.yPercent || 0) +
-                            Number(zone.heightPercent || 0) / 2,
-                          ),
-                        );
-                        return (
-                          <div
-                            key={zone.id}
-                            title={`${zone.name || zone.code}: ${count} rejection${count === 1 ? "" : "s"}`}
-                            style={{
-                              position: "absolute",
-                              left: `${centerX}%`,
-                              top: `${centerY}%`,
-                              transform: "translate(-50%,-50%)",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              transition: "all .2s ease",
-                              zIndex: 3,
-                            }}
-                          >
-                            <span
-                              style={{
-                                minWidth: 46,
-                                height: 34,
-                                padding: "0 9px",
-                                borderRadius: 10,
-                                background: "rgba(255,244,150,.95)",
-                                border: `2px solid ${borderColor}`,
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                fontSize: 12,
-                                fontWeight: 900,
-                                color: "#0f172a",
-                                boxShadow: "0 3px 12px rgba(15,23,42,.28)",
-                              }}
-                            >
-                              {zone.code || zone.name} · {count}
-                            </span>
-                          </div>
-                        );
-                      })}
-                      {(heatMapView.zones || []).flatMap((zone) =>
-                        (zone.subZones || []).map((subZone) => {
-                          const zoneX = Number(zone.xPercent || 0);
-                          const zoneY = Number(zone.yPercent || 0);
-                          const zoneW = Number(zone.widthPercent || 10);
-                          const zoneH = Number(zone.heightPercent || 10);
-                          const left =
-                            zoneX +
-                            (zoneW * Number(subZone.xPercent || 0)) / 100;
-                          const top =
-                            zoneY +
-                            (zoneH * Number(subZone.yPercent || 0)) / 100;
-                          const width = Math.max(
-                            1,
-                            (zoneW * Number(subZone.widthPercent || 10)) / 100,
-                          );
-                          const height = Math.max(
-                            1,
-                            (zoneH * Number(subZone.heightPercent || 10)) / 100,
-                          );
-                          const count = Number(
-                            heatMapSubZoneCounts[String(subZone.id)] || 0,
-                          );
-                          const selected =
-                            heatMapSelection?.type === "subZone" &&
-                            Number(heatMapSelection.id) === Number(subZone.id);
+                    <div style={{ width: "100%", maxWidth: 900, margin: "0 auto" }}>
+                      {/* same stage as Rejection Analysis → Defect Location: zones use the configured
+                          percentages of the 900×520 frame (boxStyle / subBoxStyle) */}
+                      <CadStage imageUrl={heatMapView.imageUrl} alt={heatMapView.name}>
+                        {(heatMapViewCounts?.zones || []).map((zone) => {
+                          const zc = zone.count;
+                          const zCol = zoneHeatColor(zc, heatMapMax.zone);
+                          const zShare = Math.sqrt(zc / heatMapMax.zone);
+                          const hasSubs = zone.subZones.length > 0;
                           return (
-                            <button
-                              key={`sub-zone-${subZone.id}`}
-                              type="button"
-                              title={`${zone.name || zone.code} / ${subZone.name || subZone.code}: ${count} mapped reason${count === 1 ? "" : "s"}`}
-                              onClick={() =>
-                                setHeatMapSelection({
-                                  type: "subZone",
-                                  id: subZone.id,
-                                  zone: zone.name || zone.code,
-                                  name: subZone.name || subZone.code,
-                                  count,
-                                })
-                              }
-                              style={{
-                                position: "absolute",
-                                left: `${left}%`,
-                                top: `${top}%`,
-                                width: `${width}%`,
-                                height: `${height}%`,
-                                border: selected
-                                  ? "2px solid #0891b2"
-                                  : "1px solid rgba(14,165,233,.85)",
-                                background: count
-                                  ? "rgba(14,165,233,.24)"
-                                  : "rgba(255,255,255,.08)",
-                                color: "#0f172a",
-                                zIndex: selected ? 7 : 4,
-                                cursor: "pointer",
-                                boxShadow: selected
-                                  ? "0 0 0 3px rgba(14,165,233,.25)"
-                                  : "none",
-                              }}
-                            >
-                              <span
+                            <Fragment key={`zone-${zone.id || zone.code}`}>
+                              <div
+                                className="cad-zone"
+                                title={`${zone.name || zone.code}: ${zc} reject${zc === 1 ? "" : "s"}`}
                                 style={{
-                                  position: "absolute",
-                                  left: "50%",
-                                  top: "50%",
-                                  transform: "translate(-50%,-50%)",
-                                  borderRadius: 7,
-                                  background: "rgba(255,255,255,.92)",
-                                  border: "1px solid rgba(14,165,233,.8)",
-                                  padding: "2px 5px",
-                                  fontSize: 9,
-                                  fontWeight: 900,
-                                  whiteSpace: "nowrap",
+                                  ...boxStyle(zone),
+                                  ...(zCol
+                                    ? {
+                                      border: `2px solid ${zCol}`,
+                                      background: hexAlpha(
+                                        zCol,
+                                        hasSubs ? 0.1 + zShare * 0.15 : 0.25 + zShare * 0.4,
+                                      ),
+                                    }
+                                    : {}),
                                 }}
                               >
-                                {subZone.code || subZone.name}
-                              </span>
-                            </button>
+                                <span className="cad-tag">
+                                  {zone.code || zone.name}
+                                  {zc > 0 && (
+                                    <span
+                                      className="cad-count"
+                                      style={{
+                                        background: zCol,
+                                        color: zoneHeatIndex(zc, heatMapMax.zone) >= 3 ? "#ffffff" : "#0f172a",
+                                      }}
+                                    >
+                                      {zc}
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+                              {zone.subZones.map((subZone) => {
+                                const sc = subZone.count;
+                                const sCol = zoneHeatColor(sc, heatMapMax.sub);
+                                const selected =
+                                  heatMapSelection?.type === "subZone" &&
+                                  String(heatMapSelection.id) === String(subZone.id);
+                                return (
+                                  <button
+                                    key={`sub-zone-${subZone.id || subZone.code}`}
+                                    type="button"
+                                    className="cad-sub"
+                                    title={`${zone.name || zone.code} / ${subZone.name || subZone.code}: ${sc} reject${sc === 1 ? "" : "s"}`}
+                                    onClick={() =>
+                                      setHeatMapSelection({
+                                        type: "subZone",
+                                        id: subZone.id,
+                                        zone: zone.name || zone.code,
+                                        name: subZone.name || subZone.code,
+                                        count: sc,
+                                      })
+                                    }
+                                    style={{
+                                      ...subBoxStyle(zone, subZone),
+                                      padding: 0,
+                                      cursor: "pointer",
+                                      ...(sCol
+                                        ? {
+                                          border: `1.5px solid ${sCol}`,
+                                          background: hexAlpha(
+                                            sCol,
+                                            0.35 + Math.sqrt(sc / heatMapMax.sub) * 0.45,
+                                          ),
+                                        }
+                                        : {}),
+                                      ...(selected
+                                        ? {
+                                          border: "2px solid #2563eb",
+                                          boxShadow: "0 0 0 3px rgba(37,99,235,.25)",
+                                          zIndex: 2,
+                                        }
+                                        : {}),
+                                    }}
+                                  >
+                                    {sc > 0 && (
+                                      <span className="cad-tag">
+                                        {subZone.code || subZone.name}
+                                        <span
+                                          className="cad-count"
+                                          style={{
+                                            background: sCol,
+                                            color: zoneHeatIndex(sc, heatMapMax.sub) >= 3 ? "#ffffff" : "#0f172a",
+                                          }}
+                                        >
+                                          {sc}
+                                        </span>
+                                      </span>
+                                    )}
+                                  </button>
+                                );
+                              })}
+                            </Fragment>
                           );
-                        }),
-                      )}
+                        })}
+                      </CadStage>
                     </div>
                     <div
                       style={{
@@ -4845,13 +4787,26 @@ const Dashboard = () => {
                         gap: 8,
                       }}
                     >
+                      <p
+                        style={{
+                          margin: 0,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          color: C.txt("sec"),
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        {rejectionRowsState.status === "loading" && !rejectionRowsState.rows.length
+                          ? "Loading rejects…"
+                          : `${heatMapViewCounts?.totalDefects || 0} reject${(heatMapViewCounts?.totalDefects || 0) === 1 ? "" : "s"} on this view · ${heatMapLocations.stats.localized} of ${heatMapLocations.stats.records} placed on the part${heatMapLocations.stats.inferred ? ` (${heatMapLocations.stats.inferred} from defect type)` : ""}${heatMapLocations.stats.sensor ? ` · ${heatMapLocations.stats.sensor} leak-test rejects (no location)` : ""}`}
+                      </p>
                       {heatMapSelection && (
                         <div
                           style={{
                             padding: "10px",
                             borderRadius: 8,
-                            background: "rgba(14,165,233,.08)",
-                            border: "1px solid rgba(14,165,233,.35)",
+                            background: "rgba(37,99,235,.08)",
+                            border: "1px solid rgba(37,99,235,.35)",
                           }}
                         >
                           <p
@@ -4883,7 +4838,7 @@ const Dashboard = () => {
                               color: C.txt("sec"),
                             }}
                           >
-                            {heatMapSelection.count} mapped reasons
+                            {heatMapSelection.count} reject{heatMapSelection.count === 1 ? "" : "s"}
                           </p>
                         </div>
                       )}
@@ -4914,14 +4869,14 @@ const Dashboard = () => {
                           style={{
                             display: "flex",
                             alignItems: "center",
-                            gap: 5,
+                            gap: 3,
                           }}
                         >
-                          {["#facc15", "#f97316", "#ef4444"].map((color) => (
+                          {ZONE_HEAT_RAMP.map((color) => (
                             <span
                               key={color}
                               style={{
-                                width: 18,
+                                width: 14,
                                 height: 8,
                                 borderRadius: 99,
                                 background: color,
@@ -4930,44 +4885,38 @@ const Dashboard = () => {
                           ))}
                         </div>
                       </div>
-                      {(heatMapView.zones || []).map((zone) => {
-                        const key = normalizeAnalysisToken(
-                          zone.code || zone.name,
-                        );
-                        const count = Number(heatMapZoneCounts[key] || 0);
-                        return (
-                          <div
-                            key={zone.id}
+                      {(heatMapViewCounts?.zones || []).map((zone) => (
+                        <div
+                          key={zone.id || zone.code}
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            padding: "9px 10px",
+                            borderRadius: 8,
+                            background: C.bg("surf"),
+                            border: `1px solid ${C.bdr()}`,
+                          }}
+                        >
+                          <span
                             style={{
-                              display: "flex",
-                              justifyContent: "space-between",
-                              padding: "9px 10px",
-                              borderRadius: 8,
-                              background: C.bg("surf"),
-                              border: `1px solid ${C.bdr()}`,
+                              fontSize: 11,
+                              fontWeight: 800,
+                              color: C.txt("pri"),
                             }}
                           >
-                            <span
-                              style={{
-                                fontSize: 11,
-                                fontWeight: 800,
-                                color: C.txt("pri"),
-                              }}
-                            >
-                              {zone.name || zone.code}
-                            </span>
-                            <span
-                              style={{
-                                fontSize: 12,
-                                fontWeight: 900,
-                                color: count ? C.ng() : C.txt("sec"),
-                              }}
-                            >
-                              {count}
-                            </span>
-                          </div>
-                        );
-                      })}
+                            {zone.name || zone.code}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: 12,
+                              fontWeight: 900,
+                              color: zone.count ? C.ng() : C.txt("sec"),
+                            }}
+                          >
+                            {zone.count}
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}

@@ -1,365 +1,228 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Sliders, Download, X, Search } from "lucide-react";
 import { saveAs } from "file-saver";
 import { MASTER_RECIPE_SET_PARAMETERS } from "../rejectionConstants";
+import { NAVY, NAVY_3, OUTCOME_COLOR, SLATE, STATUS_BG, STATUS_COLOR, alpha } from "../../../components/mgmt/mgmtTheme";
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Master casting recipe & parameter intelligence — every PLC parameter with its set limits (LSL · nominal · USL),
+   the live OK-part mean and NG-part mean (part-level process analysis), where they sit in the limit band and a
+   status: in limits · near a limit (outer 10 % of the band) · outside · no limits set.
+   ═══════════════════════════════════════════════════════════════════════════ */
+const CSS = `
+.mr-back{position:fixed;inset:0;z-index:99999;background:rgba(15,23,42,.45);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:16px}
+.mr{width:100%;max-width:1280px;max-height:92vh;display:flex;flex-direction:column;background:#fff;border-radius:16px;box-shadow:0 30px 60px -20px rgba(15,23,42,.45);overflow:hidden;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;color:#0f172a}
+.mr-head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid #e2e8f0}
+.mr-id{display:flex;align-items:center;gap:12px;min-width:0}
+.mr-logo{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;background:linear-gradient(145deg,#0f2a4a,#1e3a5f);color:#fff;flex-shrink:0}
+.mr-head h3{margin:0;font-size:17px;font-weight:800;color:#0f2a4a;letter-spacing:-.01em}
+.mr-head p{margin:2px 0 0;font-size:12.5px;color:#64748b}
+.mr-actions{display:flex;gap:8px}
+.mr-btn{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 12px;border:1px solid #cbd5e1;border-radius:9px;background:#fff;color:#1e293b;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer}
+.mr-btn:hover{background:#f8fafc}
+.mr-btn.icon{width:34px;padding:0;justify-content:center}
+.mr-tiles{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;padding:14px 20px;background:#f8fafc;border-bottom:1px solid #e2e8f0}
+@media(max-width:900px){.mr-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.mr-tile{border:1px solid #e2e8f0;border-top:3px solid var(--c);border-radius:12px;background:#fff;padding:9px 12px}
+.mr-tile span{display:block;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#64748b}
+.mr-tile b{font-size:22px;font-weight:800;color:var(--c);font-variant-numeric:tabular-nums}
+.mr-tile em{font-style:normal;font-size:11.5px;color:#64748b;margin-left:6px}
+.mr-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 20px;border-bottom:1px solid #e2e8f0}
+.mr-search{display:flex;align-items:center;gap:6px;height:32px;padding:0 10px;border:1px solid #cbd5e1;border-radius:9px;background:#fff;min-width:220px}
+.mr-search input{border:none;outline:none;font:inherit;font-size:12.5px;flex:1;min-width:0;background:transparent}
+.mr-seg{display:inline-flex;flex-wrap:wrap;gap:3px;padding:3px;border-radius:10px;background:#f1f5f9;border:1px solid #e2e8f0}
+.mr-seg button{height:26px;padding:0 10px;border:none;border-radius:7px;background:transparent;font:inherit;font-size:12px;font-weight:600;color:#334155;cursor:pointer;white-space:nowrap}
+.mr-seg button.on{background:#0f2a4a;color:#fff}
+.mr-body{flex:1;overflow:auto}
+.mr-table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px;font-variant-numeric:tabular-nums}
+.mr-table th{position:sticky;top:0;z-index:2;background:#f8fafc;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#64748b;text-align:right;padding:9px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap}
+.mr-table th.l,.mr-table td.l{text-align:left}
+.mr-table td{padding:9px 10px;text-align:right;border-bottom:1px solid #f1f5f9;color:#334155;vertical-align:middle}
+.mr-table tbody tr:hover td{background:#f8fafc}
+.mr-group td{background:#eef3f9!important;color:#0f2a4a;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;text-align:left;padding:7px 10px}
+.mr-name b{display:block;font-size:13px;color:#0f172a}
+.mr-name code{font-size:10.5px;color:#94a3b8}
+.mr-lim{font-weight:700;color:#0f2a4a}
+.mr-nom{display:inline-block;padding:1px 8px;border-radius:6px;background:#eef3f9;color:#0f2a4a;font-weight:800}
+.mr-band{position:relative;height:16px;min-width:150px}
+.mr-band .track{position:absolute;left:0;right:0;top:6px;height:4px;border-radius:2px;background:#e2e8f0}
+.mr-band .ok{position:absolute;top:5px;height:6px;border-radius:3px;background:${alpha(STATUS_COLOR.good, 0.35)}}
+.mr-band .mk{position:absolute;top:1px;width:3px;height:14px;border-radius:2px;transform:translateX(-50%)}
+.mr-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:800;white-space:nowrap;border:1px solid}
+.mr-chip i{width:7px;height:7px;border-radius:50%}
+.mr-foot{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 20px;border-top:1px solid #e2e8f0;background:#f8fafc;font-size:11.5px;color:#64748b}
+.mr-foot span{display:inline-flex;align-items:center;gap:5px;margin-right:12px}
+.mr-foot i{width:9px;height:9px;border-radius:2px;display:inline-block}
+`;
+
+const STATE = {
+  ok: { label: "In limits", c: STATUS_COLOR.good, bg: STATUS_BG.good },
+  near: { label: "Near limit", c: STATUS_COLOR.warn, bg: STATUS_BG.warn },
+  out: { label: "Outside", c: STATUS_COLOR.bad, bg: STATUS_BG.bad },
+  none: { label: "No limits", c: SLATE[500], bg: SLATE[100] },
+  nodata: { label: "No readings", c: SLATE[400], bg: SLATE[50] },
+};
+const fmt = (v) => (v == null || !Number.isFinite(Number(v)) ? "—" : Math.abs(v) < 10 ? Number(v).toFixed(2) : Number(v).toFixed(1));
+const num = (v) => (v == null || v === "" || !Number.isFinite(Number(v)) || Number(v) === 0 ? null : Number(v));
 
 export default function MasterRecipeModal({ isOpen, onClose, mlInsights = {} }) {
-  const [setParamsSearch, setSetParamsSearch] = useState("");
-  const [setParamsCategoryFilter, setSetParamsCategoryFilter] = useState("ALL");
-  const [setParamsScope, setSetParamsScope] = useState("ALL"); // "ALL", "RECIPE_BOUND", "AI_DYNAMIC"
+  const [search, setSearch] = useState("");
+  const [scope, setScope] = useState("ALL"); // ALL · LIMITS · MONITOR · ATTENTION
+  const [group, setGroup] = useState("ALL");
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const esc = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", esc);
+    return () => document.removeEventListener("keydown", esc);
+  }, [isOpen, onClose]);
+
+  const list = useMemo(() => MASTER_RECIPE_SET_PARAMETERS.map((p) => {
+    const f = (mlInsights.features || []).find((x) => x.key === p.key || (p.altKeys || []).includes(x.key));
+    let lsl = num(f?.setLowerLimit ?? f?.lsl) ?? (p.hasStaticLimits ? num(p.defaultLower) : null);
+    let usl = num(f?.setUpperLimit ?? f?.usl) ?? (p.hasStaticLimits ? num(p.defaultUpper) : null);
+    if (lsl != null && Math.abs(lsl) >= 9999) lsl = null;
+    if (usl != null && Math.abs(usl) >= 9999) usl = null;
+    const has = lsl != null && usl != null && usl > lsl;
+    const nominal = has ? (num(f?.setPoint) ?? (lsl + usl) / 2) : null;
+    const okMean = num(f?.meanOk);
+    const ngMean = num(f?.meanNg);
+    let state = "nodata";
+    if (!has) state = okMean != null || ngMean != null ? "none" : "nodata";
+    else if (okMean != null || ngMean != null) {
+      const vals = [okMean, ngMean].filter((v) => v != null);
+      const tol = usl - lsl;
+      if (vals.some((v) => v < lsl || v > usl)) state = "out";
+      else if (vals.some((v) => v < lsl + tol * 0.1 || v > usl - tol * 0.1)) state = "near";
+      else state = "ok";
+    }
+    return { p, unit: f?.unit || p.unit || "", group: p.category || "Other", lsl, usl, has, nominal, okMean, ngMean, state };
+  }), [mlInsights]);
+
+  const groups = useMemo(() => [...new Set(list.map((x) => x.group))], [list]);
+  const counts = useMemo(() => ({
+    limits: list.filter((x) => x.has).length,
+    monitor: list.filter((x) => !x.has).length,
+    ok: list.filter((x) => x.state === "ok").length,
+    near: list.filter((x) => x.state === "near").length,
+    out: list.filter((x) => x.state === "out").length,
+  }), [list]);
+  const shown = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return list.filter((x) => (scope === "LIMITS" ? x.has : scope === "MONITOR" ? !x.has : scope === "ATTENTION" ? x.state === "out" || x.state === "near" : true)
+      && (group === "ALL" || x.group === group)
+      && (!q || [x.p.label, x.p.key, x.unit, x.group].some((v) => String(v).toLowerCase().includes(q))));
+  }, [list, scope, group, search]);
 
   if (!isOpen) return null;
 
-  // Resolve dynamic spec for each parameter from live DB / ML features
-  const resolveParam = (p) => {
-    const feat = mlInsights.features?.find(f => f.key === p.key || (p.altKeys && p.altKeys.includes(f.key)));
-    const hasLimits = (feat && feat.hasStaticLimits && feat.setLowerLimit !== null && feat.setUpperLimit !== null)
-      ? true
-      : Boolean(p.hasStaticLimits && p.defaultLower !== null && p.defaultUpper !== null);
-
-    const lsl = (feat && feat.setLowerLimit !== null && feat.setLowerLimit !== undefined)
-      ? feat.setLowerLimit
-      : (hasLimits ? p.defaultLower : null);
-
-    const usl = (feat && feat.setUpperLimit !== null && feat.setUpperLimit !== undefined)
-      ? feat.setUpperLimit
-      : (hasLimits ? p.defaultUpper : null);
-
-    const nominal = (feat && feat.setPoint !== null && feat.setPoint !== undefined)
-      ? feat.setPoint
-      : (hasLimits ? p.setPoint : null);
-
-    const unit = (feat && feat.unit) ? feat.unit : p.unit;
-    const liveMean = feat?.meanNg && feat.meanNg > 0 ? feat.meanNg : (feat?.meanOk && feat.meanOk > 0 ? feat.meanOk : null);
-
-    return { p, feat, hasLimits, lsl, usl, nominal, unit, liveMean };
+  const exportCsv = () => {
+    const rows = [["Parameter", "Key", "Group", "Unit", "LSL", "Nominal", "USL", "OK mean", "NG mean", "Status"],
+      ...list.map((x) => [x.p.label, x.p.key, x.group, x.unit, x.lsl ?? "", x.nominal ?? "", x.usl ?? "", x.okMean ?? "", x.ngMean ?? "", STATE[x.state].label])];
+    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    saveAs(new Blob([csv], { type: "text/csv;charset=utf-8;" }), `Master_Recipe_${new Date().toISOString().slice(0, 10)}.csv`);
   };
 
-  const resolvedList = MASTER_RECIPE_SET_PARAMETERS.map(resolveParam);
-  const recipeBoundParams = resolvedList.filter(item => item.hasLimits);
-  const telemetryOnlyParams = resolvedList.filter(item => !item.hasLimits);
-  const totalParams = resolvedList.length;
-
-  // Compute how many recipe-bound params have live data with drift
-  let driftUpCount = 0, driftDownCount = 0, optimalCount = 0;
-  recipeBoundParams.forEach(item => {
-    if (item.liveMean !== null && item.nominal !== null) {
-      const d = item.liveMean - item.nominal;
-      if (d > 0.05) driftUpCount++;
-      else if (d < -0.05) driftDownCount++;
-      else optimalCount++;
-    }
-  });
+  const band = (x) => {
+    if (!x.has) return <span style={{ color: SLATE[400] }}>—</span>;
+    const span = x.usl - x.lsl;
+    const vals = [x.okMean, x.ngMean, x.lsl, x.usl].filter((v) => v != null);
+    const lo = Math.min(...vals, x.lsl - span * 0.15), hi = Math.max(...vals, x.usl + span * 0.15);
+    const pos = (v) => `${((v - lo) / (hi - lo)) * 100}%`;
+    return (
+      <div className="mr-band" title={`LSL ${fmt(x.lsl)} · USL ${fmt(x.usl)} · OK mean ${fmt(x.okMean)} · NG mean ${fmt(x.ngMean)}`}>
+        <span className="track" />
+        <span className="ok" style={{ left: pos(x.lsl), width: `calc(${pos(x.usl)} - ${pos(x.lsl)})` }} />
+        {x.okMean != null && <span className="mk" style={{ left: pos(x.okMean), background: OUTCOME_COLOR.ok }} />}
+        {x.ngMean != null && <span className="mk" style={{ left: pos(x.ngMean), background: OUTCOME_COLOR.ng }} />}
+      </div>
+    );
+  };
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        top: 0, left: 0, right: 0, bottom: 0,
-        background: "rgba(15, 23, 42, 0.6)",
-        backdropFilter: "blur(8px)",
-        zIndex: 99999,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "16px",
-        animation: "fadeIn 0.15s ease-out",
-      }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div
-        style={{
-          background: "#ffffff",
-          borderRadius: 12,
-          boxShadow: "0 25px 50px -12px rgba(0,0,0,0.25), 0 0 0 1px rgba(226,232,240,0.6)",
-          width: "100%",
-          maxWidth: 1340,
-          maxHeight: "92vh",
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-        }}
-      >
-        {/* ── HEADER ── */}
-        <div style={{ padding: "12px 20px", borderBottom: "1px solid #e2e8f0", display: "flex", alignItems: "center", justifyContent: "space-between", background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ width: 34, height: 34, borderRadius: 8, background: "linear-gradient(135deg, #3b82f6, #2563eb)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
-              <Sliders size={16} />
-            </div>
+    <div className="mr-back" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }} role="dialog" aria-modal="true" aria-label="Master casting recipe">
+      <style>{CSS}</style>
+      <div className="mr">
+        <div className="mr-head">
+          <div className="mr-id">
+            <span className="mr-logo" aria-hidden="true"><Sliders size={18} /></span>
             <div>
-              <h3 style={{ margin: 0, fontSize: 15, fontWeight: 800, color: "#ffffff", letterSpacing: "-0.01em" }}>
-                Master Casting Recipe &amp; Parameter Intelligence
-              </h3>
+              <h3>Master Casting Recipe &amp; Parameter Intelligence</h3>
+              <p>Set limits of every PLC parameter with the live OK-part and NG-part means of the period (parts with DCM shot data)</p>
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <button
-              onClick={() => {
-                const csvContent = [
-                  ["#", "Parameter", "DB Key", "Subsystem", "LSL", "Nominal", "USL", "Live Value", "Drift", "Mode", "Unit"],
-                  ...resolvedList.map(({ p, hasLimits, lsl, nominal, usl, liveMean, unit }) => {
-                    const drift = (liveMean !== null && nominal !== null) ? (liveMean - nominal).toFixed(2) : "—";
-                    return [
-                      p.id, p.label, p.key, p.category,
-                      hasLimits ? (lsl !== null ? lsl : "—") : "—",
-                      hasLimits ? (nominal !== null ? nominal : "—") : "—",
-                      hasLimits ? (usl !== null ? usl : "—") : "—",
-                      liveMean !== null ? liveMean : "—",
-                      drift !== "—" ? `${drift > 0 ? "+" : ""}${drift}` : "—",
-                      hasLimits ? "Recipe Bound" : "Telemetry Only",
-                      unit,
-                    ];
-                  }),
-                ].map((e) => e.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
-                const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-                saveAs(blob, `Master_Recipe_${new Date().toISOString().slice(0,10)}.csv`);
-              }}
-              style={{ fontSize: 10.5, display: "flex", alignItems: "center", gap: 4, padding: "5px 10px", fontWeight: 700, background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 6, color: "#fff", cursor: "pointer", transition: "all 0.15s ease" }}
-              title="Export to CSV"
-            >
-              <Download size={12} />
-              <span>Export</span>
-            </button>
-            <button
-              onClick={onClose}
-              style={{ width: 28, height: 28, borderRadius: 6, border: "1px solid rgba(255,255,255,0.2)", background: "rgba(255,255,255,0.1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "rgba(255,255,255,0.7)", transition: "all 0.15s ease" }}
-              title="Close (Esc)"
-            >
-              <X size={14} />
-            </button>
+          <div className="mr-actions">
+            <button type="button" className="mr-btn" onClick={exportCsv}><Download size={14} /> Export</button>
+            <button type="button" className="mr-btn icon" onClick={onClose} aria-label="Close"><X size={15} /></button>
           </div>
         </div>
 
-        {/* ── STATS STRIP ── */}
-        <div style={{ padding: "8px 20px", background: "#f8fafc", borderBottom: "1px solid #e2e8f0", display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div className="mr-tiles">
           {[
-            { label: "Recipe Gated", value: `${recipeBoundParams.length}`, sub: "LSL/USL Enforced", color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0" },
-            { label: "Telemetry Only", value: `${telemetryOnlyParams.length}`, sub: "No Set Limits", color: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
-            { label: "Optimal", value: `${optimalCount}`, sub: "Within ±0.05", color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0" },
-            { label: "Drifting ▲", value: `${driftUpCount}`, sub: "Above Target", color: "#dc2626", bg: "#fef2f2", border: "#fecaca" },
-            { label: "Drifting ▼", value: `${driftDownCount}`, sub: "Below Target", color: "#2563eb", bg: "#eff6ff", border: "#bfdbfe" },
-          ].map((tile) => (
-            <div key={tile.label} style={{ flex: "1 1 140px", padding: "6px 10px", borderRadius: 6, background: tile.bg, border: `1px solid ${tile.border}`, minWidth: 120 }}>
-              <div style={{ fontSize: 9.5, color: "#64748b", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>{tile.label}</div>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 1 }}>
-                <span style={{ fontSize: 16, fontWeight: 900, color: tile.color }}>{tile.value}</span>
-                <span style={{ fontSize: 9.5, color: tile.color, fontWeight: 600, opacity: 0.8 }}>{tile.sub}</span>
-              </div>
-            </div>
-          ))}
+            { label: "With set limits", v: counts.limits, sub: "LSL / USL", c: NAVY },
+            { label: "Monitor only", v: counts.monitor, sub: "no limits", c: NAVY_3 },
+            { label: "In limits", v: counts.ok, sub: "OK & NG means", c: STATUS_COLOR.good },
+            { label: "Near limit", v: counts.near, sub: "outer 10 % of band", c: STATUS_COLOR.warn },
+            { label: "Outside limits", v: counts.out, sub: "a mean beyond LSL / USL", c: STATUS_COLOR.bad },
+          ].map((t) => <div key={t.label} className="mr-tile" style={{ "--c": t.c }}><span>{t.label}</span><b>{t.v}</b><em>{t.sub}</em></div>)}
         </div>
 
-        {/* ── TOOLBAR: SEARCH + SCOPE + CATEGORY ── */}
-        <div style={{ padding: "8px 20px", borderBottom: "1px solid #e2e8f0", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: "#fff" }}>
-          {/* Search */}
-          <div style={{ position: "relative", width: 240 }}>
-            <Search size={13} style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", color: "#94a3b8" }} />
-            <input
-              type="text" placeholder="Search parameters..."
-              value={setParamsSearch} onChange={(e) => setSetParamsSearch(e.target.value)}
-              style={{ width: "100%", padding: "5px 8px 5px 26px", borderRadius: 6, border: "1px solid #e2e8f0", fontSize: 11, outline: "none", background: "#f8fafc" }}
-            />
-            {setParamsSearch && (
-              <button onClick={() => setSetParamsSearch("")} style={{ position: "absolute", right: 5, top: "50%", transform: "translateY(-50%)", background: "transparent", border: "none", cursor: "pointer", color: "#94a3b8", padding: 0 }}>
-                <X size={11} />
-              </button>
-            )}
-          </div>
-
-          {/* Scope Switcher */}
-          <div style={{ display: "flex", border: "1px solid #e2e8f0", borderRadius: 6, overflow: "hidden", background: "#f8fafc" }}>
-            {[
-              { key: "ALL", label: `All (${totalParams})`, activeColor: "#1e293b" },
-              { key: "RECIPE_BOUND", label: `Recipe (${recipeBoundParams.length})`, activeColor: "#16a34a" },
-              { key: "AI_DYNAMIC", label: `Telemetry (${telemetryOnlyParams.length})`, activeColor: "#7c3aed" },
-            ].map((s, i) => (
-              <button
-                key={s.key}
-                onClick={() => setSetParamsScope(s.key)}
-                style={{
-                  padding: "4px 10px", fontSize: 10.5, fontWeight: 700, border: "none",
-                  borderLeft: i > 0 ? "1px solid #e2e8f0" : "none",
-                  cursor: "pointer",
-                  background: setParamsScope === s.key ? s.activeColor : "transparent",
-                  color: setParamsScope === s.key ? "#fff" : "#475569",
-                  transition: "all 0.12s ease",
-                }}
-              >
-                {s.label}
-              </button>
+        <div className="mr-tools">
+          <label className="mr-search"><Search size={14} color={SLATE[400]} /><input type="text" placeholder="Search parameter, key or unit" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search parameters" /></label>
+          <div className="mr-seg" role="group" aria-label="Scope">
+            {[["ALL", `All ${list.length}`], ["LIMITS", `With limits ${counts.limits}`], ["MONITOR", `Monitor ${counts.monitor}`], ["ATTENTION", `Needs attention ${counts.out + counts.near}`]].map(([k, l]) => (
+              <button key={k} type="button" className={scope === k ? "on" : ""} aria-pressed={scope === k} onClick={() => setScope(k)}>{l}</button>
             ))}
           </div>
-
-          <div style={{ width: 1, height: 20, background: "#e2e8f0" }} />
+          <div className="mr-seg" role="group" aria-label="Parameter group">
+            {["ALL", ...groups].map((g) => (
+              <button key={g} type="button" className={group === g ? "on" : ""} aria-pressed={group === g} onClick={() => setGroup(g)}>{g === "ALL" ? "All groups" : g.replace(/ Parameters?$/, "")}</button>
+            ))}
+          </div>
         </div>
 
-        {/* ── TABLE BODY ── */}
-        <div style={{ flex: 1, overflowY: "auto", overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-            <thead style={{ position: "sticky", top: 0, zIndex: 3 }}>
-              <tr style={{ background: "#f1f5f9" }}>
-                <th style={{ width: 32, textAlign: "center", padding: "7px 4px", fontSize: 10, fontWeight: 700, color: "#64748b", borderBottom: "2px solid #cbd5e1" }}>#</th>
-                <th style={{ textAlign: "left", padding: "7px 8px", fontSize: 10, fontWeight: 700, color: "#64748b", borderBottom: "2px solid #cbd5e1", minWidth: 160 }}>PARAMETER</th>
-                <th style={{ textAlign: "left", padding: "7px 8px", fontSize: 10, fontWeight: 700, color: "#64748b", borderBottom: "2px solid #cbd5e1" }}>SUBSYSTEM</th>
-                <th style={{ textAlign: "center", padding: "7px 6px", fontSize: 10, fontWeight: 700, color: "#d97706", borderBottom: "2px solid #fde68a", background: "#fffbeb", minWidth: 60 }}>LSL</th>
-                <th style={{ textAlign: "center", padding: "7px 6px", fontSize: 10, fontWeight: 700, color: "#2563eb", borderBottom: "2px solid #93c5fd", background: "#eff6ff", minWidth: 70 }}>NOMINAL</th>
-                <th style={{ textAlign: "center", padding: "7px 6px", fontSize: 10, fontWeight: 700, color: "#dc2626", borderBottom: "2px solid #fca5a5", background: "#fef2f2", minWidth: 60 }}>USL</th>
-                <th style={{ textAlign: "center", padding: "7px 8px", fontSize: 10, fontWeight: 700, color: "#0f172a", borderBottom: "2px solid #cbd5e1", minWidth: 80 }}>LIVE VALUE</th>
-                <th style={{ textAlign: "center", padding: "7px 8px", fontSize: 10, fontWeight: 700, color: "#0f172a", borderBottom: "2px solid #cbd5e1", minWidth: 80 }}>DRIFT (Δ)</th>
-                <th style={{ textAlign: "center", padding: "7px 6px", fontSize: 10, fontWeight: 700, color: "#64748b", borderBottom: "2px solid #cbd5e1", minWidth: 80 }}>MODE</th>
-                <th style={{ textAlign: "center", padding: "7px 6px", fontSize: 10, fontWeight: 700, color: "#64748b", borderBottom: "2px solid #cbd5e1", width: 50 }}>UNIT</th>
+        <div className="mr-body">
+          <table className="mr-table">
+            <thead>
+              <tr>
+                <th className="l">Parameter</th><th>Unit</th><th>LSL</th><th>Nominal</th><th>USL</th>
+                <th>OK mean</th><th>NG mean</th><th className="l">Position in the limit band</th><th className="l">Status</th>
               </tr>
             </thead>
             <tbody>
-              {resolvedList.filter((item) => {
-                const { p, hasLimits } = item;
-                if (setParamsScope === "RECIPE_BOUND" && !hasLimits) return false;
-                if (setParamsScope === "AI_DYNAMIC" && hasLimits) return false;
-                if (setParamsCategoryFilter !== "ALL" && p.category !== setParamsCategoryFilter) return false;
-                if (setParamsSearch) {
-                  const q = setParamsSearch.toLowerCase();
-                  return p.label.toLowerCase().includes(q) || p.key.toLowerCase().includes(q) || item.unit.toLowerCase().includes(q) || (p.category && p.category.toLowerCase().includes(q));
-                }
-                return true;
-              }).map((item, idx) => {
-                const { p, hasLimits, lsl, nominal, usl, unit, liveMean } = item;
-
-                const targetRef = hasLimits && nominal !== null ? nominal : null;
-                const delta = (liveMean !== null && targetRef !== null) ? Number((liveMean - targetRef).toFixed(2)) : null;
-
-                const isUp = delta !== null && delta > 0.05;
-                const isDown = delta !== null && delta < -0.05;
-                const isOptimal = delta !== null && Math.abs(delta) <= 0.05;
-
-                const rowBg = !hasLimits
-                  ? (idx % 2 === 0 ? "rgba(245, 243, 255, 0.4)" : "rgba(245, 243, 255, 0.2)")
-                  : (idx % 2 === 0 ? "#ffffff" : "#fafbfc");
-
+              {shown.map((x, i) => {
+                const st = STATE[x.state];
+                const head = i === 0 || shown[i - 1].group !== x.group;
                 return (
-                  <tr key={p.id || p.key} style={{ background: rowBg, borderBottom: "1px solid #f1f5f9", transition: "background 0.1s" }}>
-                    <td style={{ textAlign: "center", fontWeight: 700, color: "#94a3b8", padding: "5px 4px", fontSize: 10 }}>{p.id}</td>
-
-                    <td style={{ padding: "5px 8px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                        <span style={{ fontWeight: 700, color: "#0f172a", fontSize: 11 }}>{p.label}</span>
-                        {!hasLimits && (
-                          <span style={{ fontSize: 8.5, fontWeight: 700, color: "#7c3aed", background: "#f5f3ff", border: "1px solid #ede9fe", borderRadius: 3, padding: "0px 4px", lineHeight: "16px", letterSpacing: "0.02em" }} title="No recipe limits set — telemetry monitoring only">
-                            TELEMETRY
-                          </span>
-                        )}
-                      </div>
-                      <div style={{ fontSize: 9.5, color: "#94a3b8", fontFamily: "'JetBrains Mono', 'Fira Code', monospace", marginTop: 1, fontWeight: 500 }}>{p.key}</div>
-                    </td>
-
-                    <td style={{ padding: "5px 8px" }}>
-                      <span style={{ background: "#f1f5f9", color: "#475569", padding: "1px 6px", borderRadius: 3, fontSize: 10, fontWeight: 600, whiteSpace: "nowrap" }}>{p.category}</span>
-                    </td>
-
-                    <td style={{ textAlign: "center", padding: "5px 4px", background: hasLimits ? "rgba(251, 191, 36, 0.04)" : "transparent" }}>
-                      {hasLimits && lsl !== null ? (
-                        <span style={{ fontWeight: 800, color: "#b45309", fontSize: 11 }}>{lsl}</span>
-                      ) : (
-                        <span style={{ color: "#d4d4d8", fontSize: 11 }}>—</span>
-                      )}
-                    </td>
-
-                    <td style={{ textAlign: "center", padding: "5px 4px", background: hasLimits ? "rgba(37, 99, 235, 0.04)" : "transparent" }}>
-                      {hasLimits && nominal !== null ? (
-                        <span style={{ fontWeight: 900, color: "#1d4ed8", fontSize: 11.5, background: "#eff6ff", padding: "1px 6px", borderRadius: 3, border: "1px solid #bfdbfe" }}>{nominal}</span>
-                      ) : (
-                        <span style={{ color: "#d4d4d8", fontSize: 11 }}>—</span>
-                      )}
-                    </td>
-
-                    <td style={{ textAlign: "center", padding: "5px 4px", background: hasLimits ? "rgba(239, 68, 68, 0.04)" : "transparent" }}>
-                      {hasLimits && usl !== null ? (
-                        <span style={{ fontWeight: 800, color: "#b91c1c", fontSize: 11 }}>{usl}</span>
-                      ) : (
-                        <span style={{ color: "#d4d4d8", fontSize: 11 }}>—</span>
-                      )}
-                    </td>
-
-                    <td style={{ textAlign: "center", padding: "5px 6px" }}>
-                      {liveMean !== null ? (
-                        <span style={{ fontWeight: 750, color: "#0f172a", fontSize: 11 }}>
-                          {typeof liveMean === 'number' ? (liveMean % 1 !== 0 ? liveMean.toFixed(2) : liveMean) : liveMean}
-                          <span style={{ color: "#94a3b8", fontSize: 9, marginLeft: 2 }}>{unit}</span>
-                        </span>
-                      ) : (
-                        <span style={{ color: "#d4d4d8", fontSize: 10, fontStyle: "italic" }}>—</span>
-                      )}
-                    </td>
-
-                    <td style={{ textAlign: "center", padding: "5px 6px" }}>
-                      {hasLimits && delta !== null ? (
-                        <span style={{
-                          display: "inline-flex", alignItems: "center", gap: 2,
-                          fontWeight: 800, fontSize: 10,
-                          padding: "1px 5px", borderRadius: 3,
-                          background: isUp ? "#fef2f2" : isDown ? "#eff6ff" : "#f0fdf4",
-                          color: isUp ? "#dc2626" : isDown ? "#2563eb" : "#16a34a",
-                          border: `1px solid ${isUp ? "#fecaca" : isDown ? "#bfdbfe" : "#bbf7d0"}`,
-                        }}>
-                          {isUp && <>▲ +{Math.abs(delta).toFixed(1)}</>}
-                          {isDown && <>▼ −{Math.abs(delta).toFixed(1)}</>}
-                          {isOptimal && <>● OK</>}
-                        </span>
-                      ) : !hasLimits && liveMean !== null ? (
-                        <span style={{ color: "#a78bfa", fontSize: 9.5, fontWeight: 600 }} title="No set target — drift cannot be calculated">
-                          n/a
-                        </span>
-                      ) : (
-                        <span style={{ color: "#d4d4d8", fontSize: 10 }}>—</span>
-                      )}
-                    </td>
-
-                    <td style={{ textAlign: "center", padding: "5px 4px" }}>
-                      {hasLimits ? (
-                        <span style={{
-                          fontSize: 9, fontWeight: 700, color: "#15803d",
-                          background: "#f0fdf4", border: "1px solid #bbf7d0",
-                          padding: "1px 5px", borderRadius: 3,
-                          display: "inline-flex", alignItems: "center", gap: 2,
-                        }}>
-                          Recipe
-                        </span>
-                      ) : (
-                        <span style={{
-                          fontSize: 9, fontWeight: 700, color: "#7c3aed",
-                          background: "#f5f3ff", border: "1px solid #ddd6fe",
-                          padding: "1px 5px", borderRadius: 3,
-                          display: "inline-flex", alignItems: "center", gap: 2,
-                        }}>
-                          <span style={{ fontSize: 8 }}>📡</span> Monitor
-                        </span>
-                      )}
-                    </td>
-
-                    <td style={{ textAlign: "center", padding: "5px 4px" }}>
-                      <span style={{ fontWeight: 600, color: "#64748b", fontSize: 10 }}>{unit}</span>
-                    </td>
-                  </tr>
+                  <React.Fragment key={x.p.key}>
+                    {head && <tr className="mr-group"><td colSpan={9}>{x.group}</td></tr>}
+                    <tr>
+                      <td className="l mr-name"><b>{x.p.label}</b><code>{x.p.key}</code></td>
+                      <td style={{ color: SLATE[500] }}>{x.unit || "—"}</td>
+                      <td className="mr-lim">{fmt(x.lsl)}</td>
+                      <td>{x.nominal != null ? <span className="mr-nom">{fmt(x.nominal)}</span> : "—"}</td>
+                      <td className="mr-lim">{fmt(x.usl)}</td>
+                      <td style={{ color: OUTCOME_COLOR.ok, fontWeight: 700 }}>{fmt(x.okMean)}</td>
+                      <td style={{ color: OUTCOME_COLOR.ng, fontWeight: 700 }}>{fmt(x.ngMean)}</td>
+                      <td className="l">{band(x)}</td>
+                      <td className="l"><span className="mr-chip" style={{ color: st.c, background: st.bg, borderColor: alpha(st.c, 0.35) }}><i style={{ background: st.c }} />{st.label}</span></td>
+                    </tr>
+                  </React.Fragment>
                 );
               })}
+              {!shown.length && <tr><td colSpan={9} style={{ textAlign: "center", padding: 28, color: SLATE[500] }}>No parameters match.</td></tr>}
             </tbody>
           </table>
         </div>
 
-        {/* ── FOOTER ── */}
-        <div style={{ padding: "8px 20px", borderTop: "1px solid #e2e8f0", background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-          <div style={{ fontSize: 10.5, color: "#94a3b8", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}><span style={{ width: 8, height: 8, borderRadius: 2, background: "#16a34a", display: "inline-block" }} /> Recipe-Gated: LSL/USL enforced from standard recipe</span>
-            <span style={{ color: "#cbd5e1" }}>|</span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}><span style={{ width: 8, height: 8, borderRadius: 2, background: "#7c3aed", display: "inline-block" }} /> Telemetry: No set limits — live monitoring only, dash (—) shown</span>
-            <span style={{ color: "#cbd5e1" }}>|</span>
-            <span>Drift computed only for recipe-bound parameters against nominal setpoint</span>
+        <div className="mr-foot">
+          <div>
+            <span><i style={{ background: alpha(STATUS_COLOR.good, 0.45) }} />LSL – USL band</span>
+            <span><i style={{ background: OUTCOME_COLOR.ok }} />OK-part mean</span>
+            <span><i style={{ background: OUTCOME_COLOR.ng }} />NG-part mean</span>
+            <span>Near limit = within the outer 10 % of the band</span>
           </div>
-          <button
-            onClick={onClose}
-            style={{ padding: "5px 14px", fontSize: 11, fontWeight: 700, background: "#1e293b", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", whiteSpace: "nowrap" }}
-          >
-            Close
-          </button>
+          <button type="button" className="mr-btn" onClick={onClose}>Close</button>
         </div>
       </div>
     </div>
