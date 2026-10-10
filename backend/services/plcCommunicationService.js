@@ -185,16 +185,44 @@ class PlcService {
       return { ok: false, protocol, circuitOpen: true, error: error.message };
     }
 
+    // Callbacks are delivered once, in order (RUNNING before END), and as early as the protocol reports them:
+    // SLMP calls hooks.onRunning / hooks.onEnd from inside the cycle, so the operator sees RUNNING and the END
+    // result immediately (not after the RESET pulse). Other protocols are delivered after handshake() returns.
+    let startDelivery = null;
+    let endDelivery = null;
+    const deliverStart = (ack) => {
+      if (!startDelivery) startDelivery = Promise.resolve().then(() => (typeof onAckStart === "function" ? onAckStart(ack) : null));
+      return startDelivery;
+    };
+    const deliverEnd = (endAck, startAck) => {
+      if (!endDelivery) {
+        endDelivery = deliverStart(startAck).then(() => {
+          if (endAck?.type === "ACK_END_OK") return typeof onAckEndOk === "function" ? onAckEndOk(endAck) : null;
+          return typeof onAckEndNg === "function" ? onAckEndNg(endAck) : null;
+        });
+      }
+      return endDelivery;
+    };
+    const hooks = {
+      onRunning: (ack) => deliverStart(ack),
+      onEnd: (endAck, startAck) => deliverEnd(endAck, startAck),
+    };
+
     for (let attempt = 1; attempt <= this.DEFAULT_RETRIES; attempt += 1) {
       try {
         emitRealtime("plc_connection_event", { machineId, partId, stationNo, protocol, attempt, state: "CONNECTING" });
         this.logPlc("INFO", "PLC handshake attempt", { protocol, machineId, attempt, ip, port, partId, stationNo });
 
-        const result = await service.handshake({ protocol, ip, port, partId, stationNo, machine });
+        const result = await service.handshake({ protocol, ip, port, partId, stationNo, machine, hooks });
 
-        if (typeof onAckStart === "function") await onAckStart(result.startAck);
-        if (result.endAck.type === "ACK_END_OK" && typeof onAckEndOk === "function") await onAckEndOk(result.endAck);
-        else if (typeof onAckEndNg === "function") await onAckEndNg(result.endAck);
+        try {
+          await deliverEnd(result.endAck, result.startAck);
+        } catch (callbackError) {
+          // The PLC cycle completed; a failure while storing/broadcasting the result must never re-run the cycle.
+          callbackError.noRetry = true;
+          callbackError.callbackError = true;
+          throw callbackError;
+        }
 
         emitRealtime("plc_connection_event", { machineId, partId, stationNo, protocol, attempt, state: "COMPLETED", finalAck: result.endAck.type });
         this.recordCircuitSuccess({ key: circuitKey, machineId, partId, stationNo, protocol });
@@ -205,10 +233,19 @@ class PlcService {
         emitRealtime("plc_connection_event", { machineId, partId, stationNo, protocol, attempt, state: "RETRYING", error: error.message });
         this.logPlc("WARN", "PLC handshake failed", { protocol, machineId, attempt, partId, stationNo, error: error.message });
 
-        if (attempt === this.DEFAULT_RETRIES) {
-          this.recordCircuitFailure({ key: circuitKey, machineId, partId, stationNo, protocol, error });
+        // Retry only transport failures that happened BEFORE START reached the PLC. After START was written
+        // (START_ACK / END timeout, connection lost mid-cycle) a retry would re-trigger the machine, and a
+        // "PLC not configured" error cannot be fixed by retrying — fail once, the operator rescans.
+        const notConfigured = error?.code === "PLC_NOT_CONFIGURED";
+        const finalAttempt = attempt === this.DEFAULT_RETRIES ||
+          notConfigured || error?.noRetry === true || error?.startWritten === true || error?.code === "CYCLE_TIMEOUT";
+        if (finalAttempt) {
+          // A configuration problem is not a communication failure: do not open the circuit breaker for it.
+          if (!notConfigured && error?.callbackError !== true) {
+            this.recordCircuitFailure({ key: circuitKey, machineId, partId, stationNo, protocol, error });
+          }
           if (typeof onFailure === "function") await onFailure(error);
-          return { ok: false, protocol, error: error.message };
+          return { ok: false, protocol, error: error.message, code: error?.code || null };
         }
         // Industrial best practice: small delay before next retry
         await sleep(250);

@@ -25,6 +25,7 @@ async function getLegacyReportBundle(cleanFilters = {}, options = {}) {
       includeLeaktest: options.includeLeaktest !== false,
       maxAnchorParts: options.maxAnchorParts,
       maxBaseLogs: options.maxBaseLogs,
+      extraAnchorPartIds: options.extraAnchorPartIds,
     }),
     Shift.findAll({
       where: { is_active: true },

@@ -1,7 +1,7 @@
 const express = require("express");
 const reportController = require("../../controllers/reportController");
 const { verifyToken } = require("../../middleware/authMiddleware");
-const { requireModuleAccess } = require("../../middleware/roleAccessMiddleware");
+const { requireModuleAccess, requireAnyModuleAccess } = require("../../middleware/roleAccessMiddleware");
 
 const router = express.Router();
 
@@ -25,5 +25,12 @@ router.get("/report/historical/export/jobs/:jobId", verifyToken, requireModuleAc
 router.get("/report/historical/export/estimate", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.estimateHistoricalExport);
 router.delete("/report/historical/export/jobs/:jobId", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.cancelHistoricalExportJob);
 router.get("/report/historical/export/jobs/:jobId/file", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.downloadHistoricalExportJob);
+// leak tester PLC values of one part (Component Journey OP150 step)
+router.get(
+  "/report/leak-plc-readings",
+  verifyToken,
+  requireAnyModuleAccess([{ moduleKey: "reports", mode: "view" }, { moduleKey: "part_journey", mode: "view" }]),
+  historicalReportController.getLeakPlcReadings
+);
 
 module.exports = router;

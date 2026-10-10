@@ -101,5 +101,92 @@ async function captureLeakReadingsForScan({ machineId, partId, stationNo, operat
   return created;
 }
 
-module.exports = { captureLeakReadingsForScan };
+/** Column identity across machines: "Gall-1", "Gall1", "gall 1" → "gall1" (label stays the configured name). */
+function normalizeReadingKey(name) {
+  return String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+const BIT_DEVICES = new Set(["M", "X", "Y", "B", "L", "F", "V"]);
+
+function decodeRangeWords(range = {}) {
+  if (!Array.isArray(range.words) || range.words.length === 0) return null;
+  const type = String(range.dataType || "INT16").toUpperCase();
+  // A word read on a bit device (M190) packs 16 bits; the configured bit is the lowest one.
+  if (BIT_DEVICES.has(String(range.device || "").toUpperCase()) || type === "BIT" || type === "BOOL") {
+    return (Number(range.words[0] || 0) & 1) ? 1 : 0;
+  }
+  const value = decodeWords(range.words, type);
+  return typeof value === "number" && !Number.isFinite(value) ? null : value;
+}
+
+/**
+ * Store the data registers read on the PLC handshake socket right after END OK / END NG
+ * (plcHandshakeEngine → slmpService). One LeakTestReadings row per test, keyed by the part ID; the mapped
+ * customer QR, machine, station, operation log, END result and the configured register names are kept in
+ * payload_json._meta (no schema change). Payload keys are the configured names from the Machine page.
+ */
+async function saveLeakReadingsAtEnd({ machine, partId, stationNo, operationLogId, result, readings }) {
+  const normalizedPartId = String(partId || "").trim();
+  const ranges = Array.isArray(readings?.ranges) ? readings.ranges : [];
+  if (!normalizedPartId || !machine?.id || ranges.length === 0) return null;
+
+  const payload = {};
+  for (const range of ranges) {
+    const name = String(range.name || "").trim();
+    if (!name) continue;
+    payload[name] = range.error ? null : decodeRangeWords(range);
+    if (range.error) payload[`${name}__error`] = range.error;
+  }
+
+  // The leak station may be scanned with the part ID (DPM) or with the mapped customer QR: keep both.
+  let customerQr = null;
+  let storedPartId = normalizedPartId;
+  try {
+    const PartCodeMapping = require("../models/PartCodeMapping");
+    const { Op } = require("sequelize");
+    const mapping = await PartCodeMapping.findOne({
+      where: { is_active: true, [Op.or]: [{ old_part_id: normalizedPartId }, { customer_qr: normalizedPartId }] },
+      attributes: ["old_part_id", "customer_qr"],
+      order: [["id", "DESC"]],
+    });
+    if (mapping?.old_part_id && mapping.old_part_id !== mapping.customer_qr) {
+      storedPartId = String(mapping.old_part_id).trim() || normalizedPartId;
+      customerQr = mapping.customer_qr || null;
+    }
+  } catch (_error) {
+    customerQr = null;
+  }
+
+  payload._meta = {
+    source: "PLC_END",
+    result: String(result || "").toUpperCase() || null,
+    machineId: Number(machine.id),
+    machineName: machine.machine_name || null,
+    stationNo: String(stationNo || machine.operation_no || "").trim().toUpperCase() || null,
+    operationLogId: toNum(operationLogId),
+    customerQr,
+    scannedCode: normalizedPartId,
+    endAt: new Date().toISOString(),
+    readMs: toNum(readings?.readMs),
+    ranges: ranges.map((range) => ({
+      name: range.name,
+      key: normalizeReadingKey(range.name),
+      unit: range.unit || "",
+      device: range.device,
+      startReg: range.startReg,
+      count: range.count,
+      dataType: range.dataType,
+    })),
+  };
+
+  return LeakTestReading.create({
+    part_id: storedPartId,
+    machine_id: Number(machine.id),
+    station_no: payload._meta.stationNo,
+    operation_log_id: payload._meta.operationLogId,
+    payload_json: JSON.stringify(payload),
+  });
+}
+
+module.exports = { captureLeakReadingsForScan, saveLeakReadingsAtEnd, normalizeReadingKey, decodeRangeWords, decodeWords };
 

@@ -364,6 +364,8 @@ function shapeHistoricalPart(entries = [], { gateView = false, gateOp = "" } = {
     leakHistory: leakHistoryDetail(leakHistory),
     plc,
     leak,
+    // leak tester PLC values read at END OK / NG (LeakTestReadings), keyed by normalised register name
+    leakPlc: entries.find((row) => row.leakPlc)?.leakPlc || null,
   };
 }
 
@@ -372,7 +374,7 @@ function shapeHistoricalPart(entries = [], { gateView = false, gateOp = "" } = {
  * view: { gateView, gateLabel, gateOp, isLeakGate, stationPairs, includeLeakHistory }
  * Each column: { key, header, width, type: "text" | "status" | "date" | "number" | "wallclock", get(row, i) }
  */
-function buildHistoricalColumns({ gateView = false, gateLabel = "", gateOp = "", stationPairs = [], includeLeakHistory = false } = {}) {
+function buildHistoricalColumns({ gateView = false, gateLabel = "", gateOp = "", stationPairs = [], includeLeakHistory = false, leakPlcColumns = [] } = {}) {
   const dash = (v) => (v === null || v === undefined || v === "" ? "-" : v);
   const isLeakGate = gateView && gateOp === LEAK_TEST_OPERATION;
   const cols = [
@@ -397,6 +399,11 @@ function buildHistoricalColumns({ gateView = false, gateLabel = "", gateOp = "",
   const leakCols = LEAK_TEST_COLUMNS.map((c) => ({
     key: `leak_${c.key}`, header: withUnit(c.label, c.unit), width: 15, type: c.unit ? "number" : "text", get: (r) => r.leak[c.key],
   }));
+  // leak tester PLC values, one column per data register configured on the leak machines (label = Machine page name)
+  const leakPlcCols = (Array.isArray(leakPlcColumns) ? leakPlcColumns : []).map((c) => ({
+    key: `leakplc_${c.key}`, header: c.label, width: Math.min(Math.max(String(c.label).length + 2, 12), 26), type: "measure",
+    get: (r) => { const v = r.leakPlc?.values?.[c.key]; return v === undefined || v === null || v === "" ? "-" : v; },
+  }));
   const leakHistoryCol = { key: "leakHistory", header: "Leak Test History", width: 60, type: "text", get: (r) => dash(r.leakHistory) };
   const finalCol = { key: "overallStatus", header: "Final Status", width: 13, type: "status", get: (r) => r.overall };
   if (gateView) {
@@ -411,7 +418,7 @@ function buildHistoricalColumns({ gateView = false, gateLabel = "", gateOp = "",
       // gate view: the gate's own result only (no Final Status); the shot parameters whenever the part has a shot,
       // the leak readings from the leak test onwards (leak gate, Final Inspection)
       ...plcCols,
-      ...(isLeakGate || gateOp === "OP160" ? leakCols : []),
+      ...(isLeakGate || gateOp === "OP160" ? [...leakPlcCols, ...leakCols] : []),
     ];
   }
   return [
@@ -433,6 +440,7 @@ function buildHistoricalColumns({ gateView = false, gateLabel = "", gateOp = "",
     { key: "progressAt", header: "Where is it", width: 30, type: "text", get: (r) => dash(r.progressAt) },
     ...rejectionCols,
     ...plcCols,
+    ...leakPlcCols,
     ...leakCols,
   ];
 }
@@ -610,9 +618,10 @@ async function writeSheet(workbook, { columns, rows, meta = {}, summary = {}, sh
         const d = wallClockExcelDate(v);
         v = d || (v === null || v === undefined || v === "" ? "-" : v);
         kind = d ? "date" : "text";
-      } else if (kind === "number") {
+      } else if (kind === "number" || kind === "measure") {
         const n = typeof v === "number" ? v : (typeof v === "string" && /^-?\d+(\.\d+)?$/.test(v.trim()) ? Number(v) : null);
-        if (n !== null && Number.isFinite(n)) { v = n; kind = Number.isInteger(n) ? "int" : "dec"; } else { v = v === null || v === undefined || v === "" ? "-" : v; kind = "text"; }
+        // "measure" (leak tester PLC values): small decimals keep their digits (0.0012, not 0.00)
+        if (n !== null && Number.isFinite(n)) { v = n; kind = Number.isInteger(n) ? "int" : (kind === "measure" ? "measure" : "dec"); } else { v = v === null || v === undefined || v === "" ? "-" : v; kind = "text"; }
       } else if (kind === "category") {
         kind = CATEGORY_COLOR[v] ? `cat:${v}` : "text";
       } else if (kind === "shot") {
@@ -642,6 +651,9 @@ async function writeSheet(workbook, { columns, rows, meta = {}, summary = {}, sh
           s.alignment = { vertical: "middle", horizontal: "right" };
         } else if (kind === "dec") {
           s.numFmt = "0.00";
+          s.alignment = { vertical: "middle", horizontal: "right" };
+        } else if (kind === "measure") {
+          s.numFmt = "0.0#####";
           s.alignment = { vertical: "middle", horizontal: "right" };
         }
         return s;

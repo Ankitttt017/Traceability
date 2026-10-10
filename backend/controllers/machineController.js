@@ -507,6 +507,10 @@ async function normalizePayload(body = {}, existing = null) {
     plc_start_register: toInt(plcConfig.startRegister),
     plc_status_register: toInt(plcConfig.statusRegister ?? plcConfig.runningRegister),
     plc_block_register: toInt(plcConfig.blockRegister),
+    // END OK / END NG registers were only kept in the plc_registers JSON, so the handshake fell back to the STATUS
+    // (running) register: with Running = 1 and End OK = 1 a cycle was reported "ended OK" as soon as it started.
+    plc_end_ok_register: toInt(plcConfig.endOkRegister),
+    plc_end_ng_register: toInt(plcConfig.endNgRegister),
     plc_part_register: toInt(plcConfig.partRegister),
     plc_station_register: toInt(plcConfig.stationRegister),
     plc_reset_register: toInt(plcConfig.resetRegister),

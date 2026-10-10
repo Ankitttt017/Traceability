@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { RefreshCw, Save, Settings2, ChevronDown, Info, Activity, X } from "lucide-react";
 import { machineApi, organizationApi, stationSettingsApi, traceabilityApi } from "../api/services";
@@ -6,6 +6,7 @@ import { getMachineStage, sanitizeLineName } from "../utils/machineFields";
 import {
   DEFAULT_STATION_FEATURES,
   getStationFeatureSettings,
+  MACHINE_OVERRIDE_KEYS,
   mergeStationFeatureSettings,
   normalizeStationKey,
   saveStationFeatureSettings,
@@ -149,7 +150,8 @@ const Tooltip = ({ children, content }) => {
 const FEATURE_COLS = [
   { key: "qr", label: "QR", desc: "Barcode / QR scan validation", color: "blue", type: "toggle" },
   { key: "operation", label: "OP", desc: "Operation sequence check", color: "violet", type: "toggle" },
-  { key: "plcCommunication", label: "PLC", desc: "Enable PLC read/write communication for this station", color: "sky", type: "toggle" },
+  { key: "plcCommunication", label: "PLC", desc: "Enable PLC read/write communication for this station (OFF: no handshake, no PLC error - operation completes without PLC)", color: "sky", type: "toggle" },
+  { key: "bypass", label: "Bypass", desc: "Bypass this station / machine: scans complete OK without PLC handshake", color: "rose", type: "toggle" },
   { key: "validateQrFormat", label: "Fmt", desc: "Validate QR format pattern", color: "blue", type: "toggle" },
   { key: "validateShotNumber", label: "Shot", desc: "Verify shot number from PLC/DB mapping", color: "sky", type: "toggle" },
   { key: "validatePreviousStation", label: "Prev", desc: "Validate previous station completion", color: "violet", type: "toggle" },
@@ -364,6 +366,29 @@ const StationControl = () => {
     }));
   };
 
+  // Machine override for stations with several machines: a value equal to the station value is not stored
+  // (the machine keeps inheriting the station setting).
+  const updateMachineOverride = (stationNo, machineId, key, value) => {
+    setStationSettings((prev) => {
+      const stationCfg = { ...DEFAULT_STATION_FEATURES, ...(prev[stationNo] || {}) };
+      const overrides = { ...(stationCfg.machineOverrides || {}) };
+      const current = { ...(overrides[String(machineId)] || {}) };
+      if (value === stationCfg[key]) delete current[key];
+      else current[key] = value;
+      if (Object.keys(current).length > 0) overrides[String(machineId)] = current;
+      else delete overrides[String(machineId)];
+      return { ...prev, [stationNo]: { ...(prev[stationNo] || {}), machineOverrides: overrides } };
+    });
+  };
+
+  const clearMachineOverrides = (stationNo, machineId) => {
+    setStationSettings((prev) => {
+      const overrides = { ...((prev[stationNo] || {}).machineOverrides || {}) };
+      delete overrides[String(machineId)];
+      return { ...prev, [stationNo]: { ...(prev[stationNo] || {}), machineOverrides: overrides } };
+    });
+  };
+
   const saveSettings = async () => {
     setSaving(true);
     try {
@@ -493,8 +518,11 @@ const StationControl = () => {
                 {filteredStationRows.map((row, idx) => {
                   const config = normalizedSettings[row.stationNo] || DEFAULT_STATION_FEATURES;
                   const isEven = idx % 2 === 1;
+                  const machineOverrides = config.machineOverrides || {};
+                  const showMachineRows = row.machines.length > 1;
                   return (
-                    <tr key={row.stationNo} style={{ background: isEven ? "rgba(15,23,42,0.02)" : "transparent", borderBottom: "1px solid rgba(15,23,42,0.06)", transition: "background 0.15s" }}
+                    <Fragment key={row.stationNo}>
+                    <tr style={{ background: isEven ? "rgba(15,23,42,0.02)" : "transparent", borderBottom: "1px solid rgba(15,23,42,0.06)", transition: "background 0.15s" }}
                       onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(59,130,246,0.03)"; }}
                       onMouseLeave={(e) => { e.currentTarget.style.background = isEven ? "rgba(15,23,42,0.02)" : "transparent"; }}>
                       <td style={{ padding: "12px 20px", width: 380, minWidth: 380 }}>
@@ -581,6 +609,50 @@ const StationControl = () => {
                         </td>
                       ))}
                     </tr>
+                    {showMachineRows && row.machines.map((machine) => {
+                      const override = machineOverrides[String(machine.id)] || {};
+                      const overriddenCount = Object.keys(override).length;
+                      return (
+                        <tr key={`${row.stationNo}-m${machine.id}`} data-testid={`machine-override-row-${machine.id}`} style={{ background: "rgba(14,165,233,0.035)", borderBottom: "1px solid rgba(15,23,42,0.05)" }}>
+                          <td style={{ padding: "8px 20px 8px 44px", width: 380, minWidth: 380 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 11, color: "rgba(15,23,42,0.45)" }}>{"\u21b3"}</span>
+                              <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 12, color: "#0f172a" }}>{machine.machineName}</span>
+                              <span style={{ fontSize: 9, fontWeight: 700, color: overriddenCount ? "#b45309" : "rgba(15,23,42,0.5)", background: overriddenCount ? "rgba(245,158,11,0.12)" : "rgba(15,23,42,0.05)", padding: "2px 6px", borderRadius: 4 }}>
+                                {overriddenCount ? `${overriddenCount} machine override${overriddenCount > 1 ? "s" : ""}` : `inherits ${row.stationNo}`}
+                              </span>
+                              {overriddenCount > 0 && (
+                                <button type="button" onClick={() => clearMachineOverrides(row.stationNo, machine.id)} style={{ fontSize: 9, fontWeight: 700, color: "#1d4ed8", background: "transparent", border: "1px solid rgba(59,130,246,0.3)", borderRadius: 4, padding: "1px 6px", cursor: "pointer" }}>
+                                  Use station settings
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                          <td style={{ padding: "8px 12px", textAlign: "center" }}>
+                            <span style={{ fontSize: 8, fontWeight: 700, color: machine.machineBypassEnabled ? "#b45309" : "rgba(15,23,42,0.45)", textTransform: "uppercase" }}>{machine.machineBypassEnabled ? "Bypassed" : "Machine"}</span>
+                          </td>
+                          {FEATURE_COLS.map((col) => {
+                            if (!MACHINE_OVERRIDE_KEYS.includes(col.key)) {
+                              return <td key={col.key} title="Station-level setting (same for all machines)" style={{ padding: "8px 10px", textAlign: "center", fontSize: 10, color: "rgba(15,23,42,0.25)" }}>-</td>;
+                            }
+                            const isOverridden = Object.prototype.hasOwnProperty.call(override, col.key);
+                            const value = isOverridden ? override[col.key] : config[col.key];
+                            return (
+                              <td key={col.key} title={isOverridden ? `Machine override (station: ${String(config[col.key])})` : `Inherited from ${row.stationNo}`} style={{ padding: "8px 10px", textAlign: "center" }}>
+                                <div style={{ display: "inline-flex", justifyContent: "center", padding: 2, borderRadius: 999, outline: isOverridden ? "2px solid rgba(245,158,11,0.55)" : "none", opacity: isOverridden ? 1 : 0.6 }}>
+                                  {col.type === "toggle" ? (
+                                    <Toggle checked={Boolean(value)} color={col.color} onChange={(val) => updateMachineOverride(row.stationNo, machine.id, col.key, val)} />
+                                  ) : (
+                                    <input type="number" min={1} max={20} value={value || 1} onChange={(e) => updateMachineOverride(row.stationNo, machine.id, col.key, Number(e.target.value))} style={{ width: 40, height: 22, borderRadius: 5, border: "1px solid rgba(15,23,42,0.1)", background: "rgba(15,23,42,0.03)", color: "#0f172a", fontWeight: 800, fontSize: 11, textAlign: "center", outline: "none" }} />
+                                  )}
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                    </Fragment>
                   );
                 })}
                 {filteredStationRows.length === 0 && (

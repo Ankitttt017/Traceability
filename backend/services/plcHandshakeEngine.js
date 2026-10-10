@@ -223,6 +223,24 @@ class PlcHandshakeEngine {
     }
   }
 
+  /**
+   * Store the data registers (leak rate, gall pressures, ...) read on the handshake socket right after END,
+   * with the END result. Fire-and-forget: never delays or breaks the cycle result.
+   */
+  saveEndReadings(machine, ack, result) {
+    if (!ack?.readings?.ranges?.length) return;
+    const context = this.cycleContext.get(Number(machine?.id || 0)) || {};
+    const { saveLeakReadingsAtEnd } = require("./leakTestCaptureService");
+    saveLeakReadingsAtEnd({
+      machine,
+      partId: context.partId,
+      stationNo: context.stationNo,
+      operationLogId: context.operationLogId,
+      result,
+      readings: ack.readings,
+    }).catch((error) => logWarn("LEAK_READINGS_SAVE_FAILED", { machineId: machine?.id, error: error.message }));
+  }
+
   async recordTimelineForMachine(machineId, eventType, eventData = {}) {
     const context = this.cycleContext.get(Number(machineId || 0));
     if (!context?.operationLogId) return;
@@ -259,10 +277,21 @@ class PlcHandshakeEngine {
     const machineId = Number(machine?.id || 0);
     if (!machineId) throw new Error("Invalid machine for PLC handshake");
 
+    // onError is reported exactly once, and never after the END result was delivered, so an accepted scan
+    // never stays PENDING with result OK when the cycle could not run (busy, queue timeout, FSM failure).
+    let failureReported = false;
+    let resultDelivered = false;
+    const reportFailure = async (error) => {
+      if (failureReported || resultDelivered) return;
+      failureReported = true;
+      if (typeof onError === "function") await onError(error);
+    };
+
     if (this.machineBusy.has(machineId)) {
       const err = new Error("Machine busy");
       err.code = "MACHINE_BUSY";
       logWarn("MACHINE_BUSY_REJECT", { machineId, partId, stationNo });
+      await reportFailure(err).catch((reportError) => logWarn("MACHINE_BUSY_REPORT_FAILED", { machineId, error: reportError.message }));
       throw err;
     }
 
@@ -338,7 +367,8 @@ class PlcHandshakeEngine {
       // We need at least startAckTimeout + endAckTimeout + buffer
       const startAckTimeoutMs = Number(machine?.plc_start_ack_timeout_ms || process.env.PLC_START_ACK_TIMEOUT_MS || 3000);
       const endAckTimeoutMs = Number(machine?.plc_end_ack_timeout_ms || process.env.PLC_END_ACK_TIMEOUT_MS || 120000);
-      const totalTimeoutMs = startAckTimeoutMs + endAckTimeoutMs + 10000; // 10s buffer
+      // Buffer covers the stale-END reset wait (≤3 s), pre-START transport retries and the RESET pulse.
+      const totalTimeoutMs = startAckTimeoutMs + endAckTimeoutMs + 30000;
 
       const result = await plcConnectionManager.runExclusive({
         machineId,
@@ -361,8 +391,10 @@ class PlcHandshakeEngine {
           console.log(`[PLC:WAITING_RUNNING] machineId=${machineId}`);
 
 
-          // Point 10: Hold START signal
-          if (machine.start_hold_ms > 0) await sleep(machine.start_hold_ms);
+          // Point 10: Hold START signal. For SLMP start_hold_ms is applied inside the handshake as the minimum time
+          // START stays set (cleared after RUNNING); sleeping here only delayed START by that much.
+          const isSlmp = String(machine?.plc_protocol || "").trim().toUpperCase() === "SLMP";
+          if (!isSlmp && machine.start_hold_ms > 0) await sleep(machine.start_hold_ms);
 
           return plcService.executePlcHandshake({
             ip,
@@ -396,6 +428,8 @@ class PlcHandshakeEngine {
               plcPollingService.stopPolling(machineId);
 
               machineWatchdogService.recordSuccess(machineId);
+              resultDelivered = true;
+              this.saveEndReadings(machine, ack, "OK");
               if (typeof onEndedOk === "function") await onEndedOk(ack);
 
               // Move to IDLE after success acknowledgment (1.5s as per rule)
@@ -414,6 +448,8 @@ class PlcHandshakeEngine {
                 await this.recordTimelineForMachine(machineId, "COMPLETED_NG", { ack });
               }
               machineWatchdogService.recordSuccess(machineId);
+              resultDelivered = true;
+              this.saveEndReadings(machine, ack, "NG");
               if (typeof onEndedNg === "function") await onEndedNg(ack);
             },
             onFailure: async (error) => {
@@ -437,7 +473,7 @@ class PlcHandshakeEngine {
               machineWatchdogService.recordError(machineId, timeoutFailure ? "TIMEOUT" : "PLC_ERROR", error.message);
 
               await this.recordTimelineForMachine(machineId, errorState, { error: error.message });
-              if (typeof onError === "function") await onError(error);
+              await reportFailure(error);
             },
           });
         },
@@ -505,6 +541,12 @@ class PlcHandshakeEngine {
         }
       } catch (stateManagementError) {
         logWarn("ERROR_STATE_MANAGEMENT_FAILED", { machineId, error: stateManagementError.message });
+      }
+
+      try {
+        await reportFailure(error);
+      } catch (reportError) {
+        logWarn("CYCLE_FAILURE_REPORT_FAILED", { machineId, error: reportError.message });
       }
 
       try {

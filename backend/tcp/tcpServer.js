@@ -8,7 +8,7 @@ const Part = require("../models/Part");
 const PartCodeMapping = require("../models/PartCodeMapping");
 const ProductionLog = require("../models/ProductionLog");
 const { saveScan } = require("../services/scanService");
-const { getStationFeatureConfig } = require("../services/stationFeatureService");
+const { getStationFeatureConfig, getStationMachineOverrides, isMachineOverrideBypassed } = require("../services/stationFeatureService");
 const { autoPackReadyPart } = require("../services/packingService");
 const plcHandshakeEngine = require("../services/plcHandshakeEngine");
 const {
@@ -402,6 +402,7 @@ async function stationRequiresCustomerQrForCompletion(machine = {}, stationNo = 
   const features = await getStationFeatureConfig(station, {
     plantId: machine.plantId || machine.plant_id,
     lineId: machine.lineId || machine.line_id,
+    machineId: machine.id,
   }).catch(() => null);
   if (features?.customerQrRequiredConfigured === true) {
     return features.customerQrRequired === true && requiresCustomerQrForCompletion(machine);
@@ -612,6 +613,7 @@ async function getTcpStationPlcSettings(machine = {}, stationNo = "") {
   const features = await getStationFeatureConfig(station, {
     plantId: machine.plantId || machine.plant_id,
     lineId: machine.lineId || machine.line_id,
+    machineId: machine.id,
   }).catch(() => ({}));
   return {
     station,
@@ -676,8 +678,13 @@ async function markTcpOperationCommunicationError({ operationLogId, partId, stat
   if (operationLogId) {
     const opLog = await OperationLog.findByPk(operationLogId);
     if (opLog) {
+      // A PLC communication error is NOT a station result: the scan row was
+      // created with result "OK" (scan accepted) — clear it so Operator /
+      // Historical / Dashboard counts (latest OK/NG scan per part) do not count
+      // the part OK. The part stays "not done"; the operator rescans to retry.
       await opLog.update({
         plc_status: "PLC_COMM_ERROR",
+        result: "PLC_ERROR",
         operation_result: "FAILED",
         interlock_reason: reason || "PLC_COMMUNICATION_FAILED",
         plc_end_time: new Date(),
@@ -768,7 +775,10 @@ async function startTcpPlcCycle({ response, machine, stationNo, partId }) {
       emitRealtime("dashboard_refresh", { reason: "TCP_PLC_END_NG", partId, stationNo, machineId: machine.id });
     },
     onError: async (error) => {
-      const reason = `PLC_COMMUNICATION_FAILED_${String(error?.message || "").slice(0, 120)}`;
+      const notConfigured = error?.code === "PLC_NOT_CONFIGURED";
+      const reason = notConfigured
+        ? "PLC_NOT_CONFIGURED"
+        : `PLC_COMMUNICATION_FAILED_${String(error?.message || "").slice(0, 120)}`;
       await markTcpOperationCommunicationError({
         operationLogId: response.operationLogId,
         partId,
@@ -783,10 +793,14 @@ async function startTcpPlcCycle({ response, machine, stationNo, partId }) {
         machineId: machine.id,
         machineName: machine.machine_name,
         qrStatus: "PASSED",
-        operationStatus: "PLC_TIMEOUT",
+        operationStatus: notConfigured ? "PLC_NOT_CONFIGURED" : "PLC_TIMEOUT",
         status: "PLC_COMM_ERROR",
         plcStatus: "PLC_COMM_ERROR",
-        message: "PLC communication issue. Use Reset Operation, then scan again.",
+        reason,
+        // Not counted as OK: the part stays "not done" at this station until a rescan completes the cycle.
+        message: notConfigured
+          ? error.message
+          : `PLC communication error (${String(error?.message || "no response").slice(0, 80)}). Part NOT completed — scan again to retry; if it repeats, call maintenance.`,
         timestamp: new Date().toISOString(),
       });
       emitRealtime("dashboard_refresh", { reason: "TCP_PLC_COMM_ERROR", partId, stationNo, machineId: machine.id });
@@ -854,6 +868,7 @@ async function finalizeCustomerQrMappingIfEligible({ partId, stationNo, machine 
   const features = await getStationFeatureConfig(station, {
     plantId: machine.plantId || machine.plant_id,
     lineId: machine.lineId || machine.line_id,
+    machineId: machine.id,
   }).catch(() => null);
   const machineBypassEnabled = isMachineBypassEnabled(machine.id) || machine.bypass_enabled === true;
   const plcConfigured = isPlcConfiguredForMachine(machine);
@@ -1128,6 +1143,7 @@ async function canStartCustomerQrOnlyPart({ code, stationNo, machine }) {
   const features = await getStationFeatureConfig(station, {
     plantId: machine.plantId || machine.plant_id,
     lineId: machine.lineId || machine.line_id,
+    machineId: machine.id,
   }).catch(() => null);
   if (features?.allowCustomerQrOnlyStart !== true) return false;
   return !(await isKnownPartOrMappedCustomerQr(raw));
@@ -1701,8 +1717,11 @@ async function isStationBypassedForValidation(stationNo) {
     attributes: ["id", "bypass_enabled"],
     raw: true,
   });
+  const machineOverrides = await getStationMachineOverrides(station).catch(() => ({}));
   return machines.length > 0 && machines.every((machine) => (
-    machine.bypass_enabled === true || isMachineBypassEnabled(machine.id)
+    machine.bypass_enabled === true ||
+    isMachineBypassEnabled(machine.id) ||
+    isMachineOverrideBypassed(machineOverrides, machine.id)
   ));
 }
 

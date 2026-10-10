@@ -6,7 +6,7 @@ import ReportSummaryCards from './ReportSummaryCards';
 import ReportTable from './ReportTable';
 import NgCategorySplit from './NgCategorySplit';
 import PlantLineSelector from '../../components/PlantLineSelector';
-import { FileText, Download, RefreshCw, Filter, Calendar, Clock, ChevronDown, X, Zap, TrendingUp, AlertCircle, CheckCircle, Activity, BarChart3, Database, ChevronLeft, ChevronRight, ArrowUp, ArrowDown, ArrowUpDown, Shield, Percent, Info, Hourglass } from 'lucide-react';
+import { FileText, Download, RefreshCw, Filter, Calendar, Clock, ChevronDown, X, Zap, TrendingUp, AlertCircle, CheckCircle, Activity, BarChart3, Database, ChevronLeft, ChevronRight, ArrowUp, ArrowDown, ArrowUpDown, Shield, Percent, Info } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useLanguage } from '../../context/LanguageContext';
 
@@ -1347,13 +1347,6 @@ const StationSummaryCards = ({ metrics = {}, stationLabel = "", loading = false,
   const ng = Number(metrics.totalNG || 0);
   const total = ok + ng;
   const station = stationLabel || "station";
-  // parts waiting for this station (null: not defined, e.g. the first station has no previous gate)
-  const wipInfo = metrics.gateInProgress || null;
-  const wip = wipInfo ? Number(wipInfo.count || 0) : null;
-  const prevGate = wipInfo?.previousGate === "OP150" ? "the leak test" : (wipInfo?.previousGate || "the previous gate");
-  const wipDefinition = wipInfo
-    ? `Passed ${prevGate} in the period${wipInfo.fallbackGate ? ` (or ${wipInfo.fallbackGate}, for parts with no leak test result)` : ""}, not yet tested at ${station} by the end of the period. Not included in the inspected total.`
-    : "";
   const shotCards = [
     { label: "Total Shots", value: plc.totalProduction ?? 0, icon: TrendingUp, colorClass: "navy", subValue: "HPDC Machine", subtitle: "shots" },
     { label: "OK Shots", value: plc.okShot ?? 0, icon: CheckCircle, colorClass: "green", subValue: "Passed", subtitle: "shots" },
@@ -1364,7 +1357,6 @@ const StationSummaryCards = ({ metrics = {}, stationLabel = "", loading = false,
     { label: `Inspected at ${station}`, value: total, icon: BarChart3, colorClass: "navy", subValue: "OK + NG", subtitle: "parts", info: `Parts with an OK / NG result at ${station} in the period (OK + NG).` },
     { label: "OK", value: ok, icon: Shield, colorClass: "green", subValue: "Station OK", subtitle: "parts" },
     { label: "NG", value: ng, icon: AlertCircle, colorClass: "red", subValue: "Station NG", subtitle: ng > 0 ? "Needs review" : "All good", split: metrics.ngCategories || null },
-    ...(wip !== null ? [{ label: `In progress (waiting for ${station})`, value: wip, icon: Hourglass, colorClass: "orange", subValue: "Not in total", subtitle: "parts", info: wipDefinition }] : []),
     { label: "Pass rate", value: total > 0 ? `${Number(metrics.passRate || 0).toFixed(2)}%` : "-", icon: Percent, colorClass: "amber", subValue: "OK / (OK + NG)" },
   ];
   const stationGridCls = stationCards.length > 4 ? "grid grid-cols-2 lg:grid-cols-5 gap-3" : "grid grid-cols-2 lg:grid-cols-4 gap-3";
@@ -1429,6 +1421,7 @@ const HistoricalReportsPage = () => {
     metrics: {},
     availableShifts: [],
     plcColumns: [],
+    leakPlcColumns: [],
     pagination: { page: 1, pageSize: REPORT_PREVIEW_ROWS_LIMIT, totalRows: 0, totalPages: 1 },
   });
   const [reportPage, setReportPage] = useState({ page: 1, pageSize: REPORT_PREVIEW_ROWS_LIMIT });
@@ -1584,6 +1577,8 @@ const HistoricalReportsPage = () => {
         },
         availableShifts: response.availableShifts || [],
         plcColumns: response.plcColumns || [],
+        // leak tester PLC value columns: [{ key, label }] named as on the Machine page (data register ranges)
+        leakPlcColumns: Array.isArray(response.leakPlcColumns) ? response.leakPlcColumns : [],
         // Rows are log entries (several per part); the part count comes from the server pagination total
         pagination: (response.pagination && Number.isFinite(Number(response.pagination.totalRows)))
           ? response.pagination
@@ -2056,7 +2051,13 @@ const HistoricalReportsPage = () => {
        details, the shot (PLC) parameters and, from the leak test onwards, the leak readings (no Final Status and
        no per-station columns of the whole line). */
     const isLeakGate = hasAppliedGate && scopedOperationKey === LEAK_TEST_OPERATION;
-    const leakColumns = LEAK_TEST_COLUMNS.map((c) => ({ key: `leak_${c.key}`, label: withUnit(c.label, c.unit) }));
+    // Leak tester PLC values (read at END OK / NG) — one column per data register configured on the leak machines,
+    // labelled with the Machine page name; shown before the leak tester database columns (Body Leak Value, Gall…)
+    const leakPlcColumnDefs = (Array.isArray(data.leakPlcColumns) ? data.leakPlcColumns : []).filter((c) => c && c.key);
+    const leakColumns = [
+      ...leakPlcColumnDefs.map((c) => ({ key: `leakplc_${c.key}`, label: c.label || c.name || c.key, renderAsText: true })),
+      ...LEAK_TEST_COLUMNS.map((c) => ({ key: `leak_${c.key}`, label: withUnit(c.label, c.unit) })),
+    ];
     const plcTableColumns = plcColumns.map((c) => ({ key: `plc_${c.key}`, label: c.label }));
     const rejectionColumns = [
       { key: "rejectionCategory", label: "Category" },
@@ -2417,6 +2418,13 @@ const HistoricalReportsPage = () => {
       LEAK_TEST_COLUMNS.forEach(({ key }) => {
         shaped[`leak_${key}`] = getLeakTestValue(leakReadingsSorted.length ? leakReadingsSorted : leakData, key);
       });
+      // leak tester PLC values: the part's latest END OK / NG reading (server: LeakTestReadings), by normalised key
+      const leakPlcValues = (entries.find((row) => row.leakPlc || row.__pr_leak_plc) || {});
+      const leakPlcReading = leakPlcValues.leakPlc || leakPlcValues.__pr_leak_plc || null;
+      leakPlcColumnDefs.forEach(({ key }) => {
+        const v = leakPlcReading?.values?.[key];
+        shaped[`leakplc_${key}`] = v === undefined || v === null || v === "" ? "-" : v;
+      });
       // Every leak test (machine, time, value) when the part was tested more than once
       shaped.leakHistory = formatLeakHistoryDetail(leakHistory) || "-";
       return shaped;
@@ -2455,7 +2463,7 @@ const HistoricalReportsPage = () => {
     }));
 
     return { columns: dynamicColumns, rows: visibleRows };
-  }, [data.rows, data.plcColumns, data.pagination, machines, shownFilters.machineId, shownFilters.status, gateSortDir, cycleGateSort]);
+  }, [data.rows, data.plcColumns, data.leakPlcColumns, data.pagination, machines, shownFilters.machineId, shownFilters.status, gateSortDir, cycleGateSort]);
 
   const reportSummaryMetrics = useMemo(() => {
     const metrics = data.summary || data.metrics || {};

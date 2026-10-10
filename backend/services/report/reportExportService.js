@@ -2186,19 +2186,41 @@ async function fetchProductionData(filters = {}, options = {}) {
       .map((log) => String(log.part_id || "").trim())
       .filter(Boolean)
   )];
-  const anchorPartIds = maxAnchorParts
+  const windowAnchorPartIds = maxAnchorParts
     ? allAnchorPartIds.slice(0, maxAnchorParts)
     : allAnchorPartIds;
-  if (maxAnchorParts && anchorPartIds.length < allAnchorPartIds.length) {
-    const anchorSet = new Set(anchorPartIds);
+  if (maxAnchorParts && windowAnchorPartIds.length < allAnchorPartIds.length) {
+    const anchorSet = new Set(windowAnchorPartIds);
     productionLogs = productionLogs.filter((log) => anchorSet.has(String(log.part_id || "").trim()));
   }
+  // Extra anchors (historical sync): parts whose only event in the window is outside OperationLogs — a leak test
+  // (written by the leak collector into the Leaktest table). They are built with the same code path as the
+  // window parts (full history, leak readings, PLC) and kept by the activity filter below.
+  const extraAnchorIds = [...new Set((options.extraAnchorPartIds || [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))];
+  const windowAnchorKeys = new Set(windowAnchorPartIds.map(normalizeKey));
+  const anchorPartIds = [
+    ...windowAnchorPartIds,
+    ...extraAnchorIds.filter((id) => !windowAnchorKeys.has(normalizeKey(id))),
+  ];
 
   if (!anchorPartIds.length) {
     return fetchPartStatusFallbackRows();
   }
 
   const anchorMappings = await fetchPartCodeMappingsForIds(anchorPartIds);
+  const extraAnchorKeys = new Set(extraAnchorIds.map(normalizeKey));
+  if (extraAnchorKeys.size) {
+    anchorMappings.forEach((row) => {
+      const oldKey = normalizeKey(row.old_part_id);
+      const customerKey = normalizeKey(sanitizeCustomerQrValue(row.customer_qr));
+      if (extraAnchorKeys.has(oldKey) || extraAnchorKeys.has(customerKey)) {
+        if (oldKey) extraAnchorKeys.add(oldKey);
+        if (customerKey) extraAnchorKeys.add(customerKey);
+      }
+    });
+  }
   const linkedAnchorPartIds = [...new Set([
     ...anchorPartIds,
     ...anchorMappings.flatMap((row) => [row.old_part_id, sanitizeCustomerQrValue(row.customer_qr)]),
@@ -2568,6 +2590,8 @@ async function fetchProductionData(filters = {}, options = {}) {
     return earliest === 0 ? time : Math.min(earliest, time);
   }, 0);
   const groupHasActivityInRange = (entries = []) => entries.some((row) => (
+    (extraAnchorKeys.size > 0 && [row.part_id, row.traceabilityPartId, row.customerCode]
+      .some((value) => extraAnchorKeys.has(normalizeKey(value)))) ||
     isReportTimeWithinRange(row.latestAnchorCreatedAt || row.createdAt || row.updatedAt, filters) ||
     isReportTimeWithinRange(row.finalResultCreatedAt || row.finalResultAt || row.cycleEndAt || row.plc_end_at || row.plcEndAt, filters)
   ));

@@ -15,7 +15,6 @@ const RejectionView = require("../models/RejectionView");
 const FinalProductionResult = require("../models/FinalProductionResult");
 const LinePartAssignment = require("../models/LinePartAssignment");
 const { saveScan } = require("../services/scanService");
-const { captureLeakReadingsForScan } = require("../services/leakTestCaptureService");
 const LeakTestReading = require("../models/LeakTestReading");
 const {
   LEAKTEST_OPERATION,
@@ -58,6 +57,8 @@ const { TIMELINE_EVENTS, recordTimelineEvent } = require("../services/operationT
 const {
   getStationFeatureConfig,
   normalizePlcPartCount,
+  getStationMachineOverrides,
+  isMachineOverrideBypassed,
 } = require("../services/stationFeatureService");
 const {
   setMachineBypass,
@@ -190,7 +191,7 @@ async function canStartCustomerQrOnlyPart({ code, stationNo, machine, stationFea
   const raw = sanitizeCustomerQrValue(code);
   const station = normalizeStation(stationNo);
   if (!raw || !station || !machine || !requiresCustomerQrForCompletion(machine)) return false;
-  const features = stationFeatures || await getStationFeatureConfig(station).catch(() => null);
+  const features = stationFeatures || await getStationFeatureConfig(station, getMachineStationScope(machine)).catch(() => null);
   if (features?.allowCustomerQrOnlyStart !== true) return false;
   return !(await isKnownPartOrMappedCustomerQr(raw));
 }
@@ -237,7 +238,7 @@ async function saveCustomerQrOnlyStart({ code, stationNo, machine, userId = null
       stationNo: station,
       machine,
       userId,
-      stationFeatures: await getStationFeatureConfig(station).catch(() => null),
+      stationFeatures: await getStationFeatureConfig(station, getMachineStationScope(machine)).catch(() => null),
     });
     if (finalized?.finalized) {
       response.operationStatus = "ENDED_OK";
@@ -328,6 +329,8 @@ function getMachineStationScope(machine) {
   return {
     plantId: getModelValue(machine, "plant_id") ?? getModelValue(machine, "plantId"),
     lineId: getModelValue(machine, "line_id") ?? getModelValue(machine, "lineId"),
+    // Resolve per-machine overrides of shared stations (OP150 leak testers).
+    machineId: getModelValue(machine, "id") ?? null,
   };
 }
 
@@ -1097,9 +1100,12 @@ async function getStationBypassMetaForJourney(stationNo, machines = []) {
 
   const stationMachines = (Array.isArray(machines) ? machines : [])
     .filter((machine) => getMachineOperationStage(machine) === station);
+  const machineOverrides = await getStationMachineOverrides(station).catch(() => ({}));
   const allMachinesBypassed = stationMachines.length > 0 && stationMachines.every((machine) => {
     const machineId = getModelValue(machine, "id");
-    return getModelValue(machine, "bypass_enabled") === true || isMachineBypassEnabled(machineId);
+    return getModelValue(machine, "bypass_enabled") === true ||
+      isMachineBypassEnabled(machineId) ||
+      isMachineOverrideBypassed(machineOverrides, machineId);
   });
 
   return {
@@ -1331,7 +1337,7 @@ async function machineDecisiveCounts(machines, range, shiftCode, shifts = []) {
                               WHERE m.customer_qr = o.part_id AND m.is_active = 1 AND m.old_part_id <> m.customer_qr
                                 AND o.part_id LIKE '%[^0-9]%') al
                WHERE o.createdAt >= :from AND o.createdAt <= :to AND o.machine_id IN (:ids)
-                 AND UPPER(o.result) IN ('OK', 'NG') AND LEN(o.part_id) >= 7
+                 AND UPPER(o.result) IN ('OK', 'NG') AND NOT (ISNULL(o.plc_status, '') = 'PLC_COMM_ERROR' AND ISNULL(o.interlock_reason, '') <> 'RECOVERY_PENDING_AFTER_BACKEND_RESTART') AND LEN(o.part_id) >= 7
                  -- reports' part-ID rule: 13-digit DPM or a customer QR (20–32 chars, starts with a letter)
                  AND ((o.part_id NOT LIKE '%[^0-9]%' AND LEN(o.part_id) = 13)
                       OR (o.part_id LIKE '[A-Za-z]%' AND LEN(o.part_id) BETWEEN 20 AND 32))) x
@@ -2168,8 +2174,12 @@ async function markOperationEndedNg({ operationLogId, partId, stationNo, machine
 async function markOperationCommunicationError({ operationLogId, partId, stationNo, machineId, reason }) {
   const opLog = await OperationLog.findByPk(operationLogId);
   if (opLog) {
+    // Not a station result (see tcpServer markTcpOperationCommunicationError):
+    // the part stays "not done / PLC error" and is not counted OK.
     await opLog.update({
       plc_status: "PLC_COMM_ERROR",
+      result: "PLC_ERROR",
+      operation_result: "FAILED",
       interlock_reason: reason || "PLC_COMMUNICATION_FAILED",
       plc_end_time: new Date(),
       plc_end_at: new Date(),
@@ -2294,12 +2304,13 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId
         emitRealtime("dashboard_refresh", { reason: "PLC_END_NG" });
       },
       onError: async (error) => {
+        const notConfigured = error?.code === "PLC_NOT_CONFIGURED";
         await markOperationCommunicationError({
           operationLogId,
           partId,
           stationNo,
           machineId: machine.id,
-          reason: `PLC_TIMEOUT_${String(error.message || "").slice(0, 120)}`,
+          reason: notConfigured ? "PLC_NOT_CONFIGURED" : `PLC_TIMEOUT_${String(error.message || "").slice(0, 120)}`,
         });
         await safeRecordTimeline({
           operationId: operationLogId,
@@ -2317,10 +2328,14 @@ async function startPlcFlow({ operationLogId, partId, stationNo, machine, userId
           machineId: machine.id,
           machineName: machine.machine_name,
           qrStatus: "PASSED",
-          operationStatus: "PLC_TIMEOUT",
+          operationStatus: notConfigured ? "PLC_NOT_CONFIGURED" : "PLC_TIMEOUT",
           status: "PLC_COMM_ERROR",
           plcStatus: "PLC_COMM_ERROR",
-          message: "PLC communication issue. Use Reset Operation, then scan again.",
+          reason: notConfigured ? "PLC_NOT_CONFIGURED" : "PLC_COMM_ERROR",
+          // Not counted as OK: the part stays "not done" at this station until a rescan completes the cycle.
+          message: notConfigured
+            ? error.message
+            : `PLC communication error (${String(error?.message || "no response").slice(0, 80)}). Part NOT completed — scan again to retry; if it repeats, call maintenance.`,
         });
         emitRealtime("dashboard_refresh", { reason: "PLC_COMM_ERROR" });
       },
@@ -4480,6 +4495,9 @@ exports.getMachineStationStats = async (req, res) => {
     const rawKeyOf = (row) => String(row?.part_id || "").trim().toUpperCase();
     const decisiveResult = (row) => {
       const r = String(row?.result || "").trim().toUpperCase();
+      // a PLC communication error is not a station result (same rule as the reports' SQL counts)
+      if (String(row?.plc_status || "").trim().toUpperCase() === "PLC_COMM_ERROR"
+        && String(row?.interlock_reason || "").trim().toUpperCase() !== "RECOVERY_PENDING_AFTER_BACKEND_RESTART") return null;
       return r === "OK" || r === "NG" ? r : null;
     };
     // One part = one count, as in the reports: a part scanned at the station under its customer QR and under its
@@ -5292,19 +5310,9 @@ exports.processScan = async (req, res) => {
 
     if (response.decision === "ALLOW") {
       emitRealtime("QR_VALIDATED", { partId: normalizedPartId, machineId: machine.id, stationNo: normalizedStation });
-      try {
-        const leakRecord = await captureLeakReadingsForScan({
-          machineId: machine.id,
-          partId: normalizedPartId,
-          stationNo: normalizedStation,
-          operationLogId: response.operationLogId || null,
-        });
-        if (leakRecord?.payload_json) {
-          response.leakTestReading = JSON.parse(leakRecord.payload_json);
-        }
-      } catch (_leakCaptureError) {
-        // Leak capture is non-blocking; keep scan flow stable.
-      }
+      // Leak / data registers are NOT read here any more: at scan time the test has not run yet, so the PLC still
+      // holds the previous part's values. They are read on the handshake socket right after END OK / END NG
+      // (plcHandshakeEngine.saveEndReadings → leakTestCaptureService.saveLeakReadingsAtEnd) for TCP and HTTP scans.
     } else if (response.reason === "DUPLICATE_SCAN") {
       emitRealtime("DUPLICATE_SCAN_BLOCKED", { partId: normalizedPartId, machineId: machine.id, stationNo: normalizedStation });
     }
@@ -6470,6 +6478,55 @@ exports.deletePartTraceability = async (req, res) => {
   }
 };
 
+/**
+ * Mirror the machine bypass toggle to the PLC Bypass register (Machine page I/O "Bypass", direction BOTH,
+ * e.g. D364 = bypassValue when ON, 0 when OFF). Only for SLMP machines with a configured (non-zero) bypass
+ * register and PLC communication ON for this machine. Never throws: the software bypass is already applied.
+ */
+async function writeMachineBypassRegister(machine, enabled) {
+  try {
+    const { resolveHandshakeConfig } = require("../services/plcHandshakeConfig");
+    const cfg = resolveHandshakeConfig(machine);
+    const protocol = String(machine?.plc_protocol || "").trim().toUpperCase();
+    const ip = machine?.plc_ip || machine?.machine_ip;
+    const port = Number(machine?.plc_port || machine?.machine_port || 0);
+    if (protocol !== "SLMP" || !cfg.bypassRegister || !ip || !port) {
+      return { written: false, reason: !cfg.bypassRegister ? "BYPASS_REGISTER_NOT_CONFIGURED" : "NOT_SLMP_OR_NO_ENDPOINT" };
+    }
+    const station = normalizeStation(getMachineOperationStage(machine));
+    const features = await getStationFeatureConfig(station, getMachineStationScope(machine)).catch(() => ({}));
+    if (features?.plcCommunication === false) {
+      return { written: false, reason: "PLC_COMMUNICATION_OFF" };
+    }
+    const value = enabled ? cfg.bypassValue : 0;
+    const outcome = await plcConnectionManager.runExclusive({
+      machineId: machine.id,
+      ip,
+      port,
+      operationName: "PLC_BYPASS_REGISTER_WRITE",
+      timeoutMs: 5000,
+      task: () => writeSlmpRegister({
+        ip,
+        port,
+        register: cfg.bypassRegister,
+        value,
+        device: String(machine.plc_slmp_device || "D").trim().toUpperCase() || "D",
+        timeoutMs: 2000,
+        frameMode: String(machine.plc_slmp_frame_mode || "AUTO").trim().toUpperCase() || "AUTO",
+      }),
+    });
+    if (outcome && outcome.ok === false) {
+      console.warn(`[PLC:BYPASS_WRITE_FAILED] machineId=${machine.id} D${cfg.bypassRegister}=${value}: ${outcome.error}`);
+      return { written: false, register: cfg.bypassRegister, value, error: outcome.error };
+    }
+    console.log(`[PLC:BYPASS_WRITE] machineId=${machine.id} D${cfg.bypassRegister}=${value}`);
+    return { written: true, register: cfg.bypassRegister, value };
+  } catch (error) {
+    console.warn(`[PLC:BYPASS_WRITE_FAILED] machineId=${machine?.id}: ${error.message}`);
+    return { written: false, error: error.message };
+  }
+}
+
 exports.bypassOperation = async (req, res) => {
   try {
     const { partId, machineId, stationNo, reason, bypassEnabled } = req.body;
@@ -6503,8 +6560,10 @@ exports.bypassOperation = async (req, res) => {
         req.user?.id || null
       );
       await machine.update({ bypass_enabled: enabled });
+      const plcBypassWrite = await writeMachineBypassRegister(machine, enabled);
       emitRealtime("dashboard_refresh", { reason: "MACHINE_BYPASS_TOGGLED", machineId: machine.id, enabled });
       return res.json({
+        plcBypassWrite,
         message: enabled
           ? "Machine bypass enabled (part-level interlock checks skipped)"
           : "Machine bypass disabled",
@@ -7113,7 +7172,7 @@ async function finalizeCustomerQrMappingIfEligible({
   stationFeatures = null,
 }) {
   const station = normalizeStation(stationNo);
-  const features = stationFeatures || await getStationFeatureConfig(station).catch(() => null);
+  const features = stationFeatures || await getStationFeatureConfig(station, getMachineStationScope(machine)).catch(() => null);
   if (!partId || !station || !machine?.id || !features) {
     return { finalized: false, operationStatus: "WAITING" };
   }
@@ -9142,7 +9201,7 @@ async function stationOpCountsFromLogs(ops, { prWhereSql, replacements }, ctx) {
   const PD = require("../utils/productionDay");
   const key = (v) => (v === null || v === undefined ? null : String(v).replace(/ +$/, "").toUpperCase());
   const opList = ops.map((o) => `'${o}'`).join(", ");
-  const decisiveScan = "UPPER(result) IN ('OK', 'NG') AND LEN(part_id) >= 7";
+  const decisiveScan = "UPPER(result) IN ('OK', 'NG') AND NOT (ISNULL(plc_status, '') = 'PLC_COMM_ERROR' AND ISNULL(interlock_reason, '') <> 'RECOVERY_PENDING_AFTER_BACKEND_RESTART') AND LEN(part_id) >= 7";
   const scanned = `SELECT DISTINCT part_id FROM OperationLogs
      WHERE createdAt >= :scanFrom AND (operation_no IN (${opList}) OR station_no IN (${opList})) AND ${decisiveScan}`;
   const prWhere = prWhereSql ? `${prWhereSql} AND` : "WHERE";
@@ -9254,10 +9313,10 @@ async function stationCountsByScan(query, ctx) {
   const opCountsPromise = ctx.isAllTime
     ? Promise.all(ops.map((op) => {
       const c = timeCond("MAX(createdAt)");
-      const decisive = `(operation_no = '${op}' OR station_no = '${op}') AND UPPER(result) IN ('OK', 'NG') AND LEN(part_id) >= 7`;
+      const decisive = `(operation_no = '${op}' OR station_no = '${op}') AND UPPER(result) IN ('OK', 'NG') AND NOT (ISNULL(plc_status, '') = 'PLC_COMM_ERROR' AND ISNULL(interlock_reason, '') <> 'RECOVERY_PENDING_AFTER_BACKEND_RESTART') AND LEN(part_id) >= 7`;
       const sub = `SELECT part_id FROM OperationLogs WHERE ${decisive} GROUP BY part_id${c ? ` HAVING ${c}` : ""}`;
       const res = `(SELECT TOP 1 UPPER(o.result) FROM OperationLogs o
-          WHERE (o.operation_no = '${op}' OR o.station_no = '${op}') AND UPPER(o.result) IN ('OK', 'NG') AND LEN(o.part_id) >= 7
+          WHERE (o.operation_no = '${op}' OR o.station_no = '${op}') AND UPPER(o.result) IN ('OK', 'NG') AND NOT (ISNULL(o.plc_status, '') = 'PLC_COMM_ERROR' AND ISNULL(o.interlock_reason, '') <> 'RECOVERY_PENDING_AFTER_BACKEND_RESTART') AND LEN(o.part_id) >= 7
             AND o.part_id IN (pr.part_id, pr.customer_qr) ORDER BY o.createdAt DESC, o.id DESC)`;
       return sequelize.query(`
         SELECT SUM(CASE WHEN r = 'OK' THEN 1 ELSE 0 END) AS ok,
@@ -9922,7 +9981,7 @@ exports.getRejectionPareto = async (req, res) => {
             CAST(o.createdAt AS datetime2) AS createdAt,
             ROW_NUMBER() OVER (PARTITION BY o.part_id, UPPER(o.operation_no) ORDER BY o.createdAt DESC, o.id DESC) AS rn
           FROM [RICO_IOT].[dbo].[OperationLogs] o WITH (NOLOCK)
-          WHERE UPPER(o.result) IN ('OK', 'NG') AND LEN(o.part_id) >= 7 AND UPPER(o.operation_no) <> 'OP150'
+          WHERE UPPER(o.result) IN ('OK', 'NG') AND NOT (ISNULL(o.plc_status, '') = 'PLC_COMM_ERROR' AND ISNULL(o.interlock_reason, '') <> 'RECOVERY_PENDING_AFTER_BACKEND_RESTART') AND LEN(o.part_id) >= 7 AND UPPER(o.operation_no) <> 'OP150'
             ${logTime.length ? `AND ${logTime.join(" AND ")}` : ""}
         )
         SELECT d.id, d.part_id, d.op, d.station_no, d.rejection_category, d.rejection_reason, d.rejection_view, d.rejection_zone,
@@ -10273,7 +10332,7 @@ exports.getRejectionDaily = async (req, res) => {
             FROM (SELECT createdAt, UPPER(result) AS r,
                          ROW_NUMBER() OVER (PARTITION BY part_id ORDER BY createdAt DESC, id DESC) AS rn
                     FROM OperationLogs
-                   WHERE (operation_no = 'OP160' OR station_no = 'OP160') AND UPPER(result) IN ('OK', 'NG')
+                   WHERE (operation_no = 'OP160' OR station_no = 'OP160') AND UPPER(result) IN ('OK', 'NG') AND NOT (ISNULL(plc_status, '') = 'PLC_COMM_ERROR' AND ISNULL(interlock_reason, '') <> 'RECOVERY_PENDING_AFTER_BACKEND_RESTART')
                      AND LEN(part_id) >= 7 AND createdAt >= :from AND createdAt < :to) x
            WHERE rn = 1 AND r = 'OK'${ctx.shiftCodeFilter ? ` AND ${okShift} = :shiftCode` : ""}
            GROUP BY ${okDay}, ${okShift}${hourly ? `, ${okHour}` : ""}`, {
