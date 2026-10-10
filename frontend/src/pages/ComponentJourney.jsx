@@ -16,7 +16,7 @@ import {
   Calendar, ChevronDown, ChevronLeft, ChevronRight as ChevronRightIcon,
   Sparkles, TrendingUp, Shield, Award, Target, Anchor,
 } from "lucide-react";
-import { machineApi, shiftApi, stationSettingsApi, traceabilityApi } from "../api/services";
+import { machineApi, reportApi, shiftApi, stationSettingsApi, traceabilityApi } from "../api/services";
 import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
 import {
   getStationFeatureSettings, getStationFeatures, saveStationFeatureSettings,
@@ -1085,6 +1085,25 @@ const ComponentJourney = () => {
   const stationTimeline = useMemo(()=>journeyData?.stationTimeline||[],[journeyData?.stationTimeline]);
   const selectedPartDisplayId = selectedPart?.displayPartId || journeyData?.part?.displayPartId || selectedPartId || "";
   const selectedCustomerQrCode = sanitizeCustomerQrValue(selectedPart?.customerQrCode || journeyData?.part?.customerQrCode || "");
+  // Leak tester PLC values (read at END OK / NG) for the OP150 step, labelled with the Machine page register names.
+  // Re-read when the part or its OP150 result changes.
+  const leakPlcCodesKey = [selectedPartId, journeyData?.part?.part_id, journeyData?.part?.partId, selectedPartDisplayId, selectedCustomerQrCode]
+    .map((v) => String(v || "").trim()).filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(",");
+  const leakStationToken = (() => {
+    const st = stationTimeline.find((s) => String(s?.stationNo || "").trim().toUpperCase() === "OP150");
+    return st ? `${st.latestStatus || ""}|${st.latestAt || ""}|${(st.leakTestReadings || []).length}` : "";
+  })();
+  const [leakPlcState, setLeakPlcState] = useState({ key: "", columns: [], readings: [] });
+  useEffect(() => {
+    if (!leakPlcCodesKey) return undefined;
+    const controller = new AbortController();
+    const key = `${leakPlcCodesKey}#${leakStationToken}`;
+    reportApi.leakPlcReadings(leakPlcCodesKey.split(","), { signal: controller.signal, suppressGlobalError: true })
+      .then((res) => setLeakPlcState({ key, columns: Array.isArray(res?.columns) ? res.columns : [], readings: Array.isArray(res?.readings) ? res.readings : [] }))
+      .catch(() => { if (!controller.signal.aborted) setLeakPlcState({ key, columns: [], readings: [] }); });
+    return () => controller.abort();
+  }, [leakPlcCodesKey, leakStationToken]);
+  const leakPlc = leakPlcState.key.split("#")[0] === leakPlcCodesKey && leakPlcCodesKey ? leakPlcState : { columns: [], readings: [] };
   const selectedDerivedPartStatus = useMemo(
     () => deriveJourneyPartStatus(journeyData?.part || selectedPart || {}, stationTimeline, qrByStation, stationSettings),
     [journeyData?.part, selectedPart, stationTimeline, qrByStation, stationSettings]
@@ -2384,6 +2403,40 @@ const ComponentJourney = () => {
                         </div>
                       </div>
                     ))}
+                    {/* Leak tester PLC values read at END OK / NG — labels are the Machine page data register names */}
+                    {String(station.stationNo || "").trim().toUpperCase() === "OP150" && leakPlc.readings.length > 0 && leakPlc.columns.length > 0 && (
+                      <div style={{marginTop:8,borderRadius:8,padding:"10px 12px",background:C.steel(0.06),border:`1px solid ${C.steel(0.22)}`}}>
+                        <p style={{fontSize:10,fontWeight:800,color:C.steel(),textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>
+                          Leak Tester PLC Values{leakPlc.readings.length > 1 ? ` · ${leakPlc.readings.length} tests (latest decides)` : ""}
+                        </p>
+                        {[...leakPlc.readings].reverse().map((reading, rIdx) => {
+                          const lMeta = getLeakResultMeta(reading);
+                          return (
+                            <div key={`${reading.machineId || ""}-${reading.endAt || rIdx}`} style={{marginTop:rIdx ? 10 : 0,opacity:rIdx ? 0.75 : 1}}>
+                              <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:6}}>
+                                <span style={{fontSize:11,fontWeight:800,color:C.txt("primary")}}>{reading.machineName || "Leak Test"}</span>
+                                {lMeta && <Badge variant={lMeta.variant} label={lMeta.label} />}
+                                <span style={{fontSize:10,color:C.txt("muted")}}>{formatDate(reading.endAt)}</span>
+                                {rIdx === 0 && leakPlc.readings.length > 1 && <span style={{fontSize:10,fontWeight:700,color:C.steel()}}>latest</span>}
+                              </div>
+                              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:8}}>
+                                {leakPlc.columns.map((col) => {
+                                  const v = reading.values?.[col.key];
+                                  return (
+                                    <div key={col.key} style={{display:"flex",flexDirection:"column",gap:2}}>
+                                      <span style={{fontSize:10,color:C.txt("muted"),fontWeight:700}}>{col.label || col.name || col.key}</span>
+                                      <span style={{fontSize:11,color:C.txt("primary"),fontWeight:700,wordBreak:"break-word"}}>
+                                        {v === undefined || v === null || v === "" ? "—" : String(v)}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 );
               })}

@@ -1,11 +1,30 @@
-const { Op } = require("sequelize");
+const { Op, QueryTypes } = require("sequelize");
 const ProductionReport = require("../../models/ProductionReport");
 const reportController = require("../../controllers/reportController");
 const { normalizeResult } = require("./reportMetricsService");
-const { shiftCodeAt } = require("../../utils/productionDay");
+const { shiftCodeAt, PLANT_OFFSET_MIN } = require("../../utils/productionDay");
+const LeaktestRecord = require("../../models/LeaktestRecord");
 
 // Use exported private methods to ensure 100% logic parity with the live UI
 const { getLegacyReportBundle, formatCleanReportResponse, paginateReportRowsByPart } = reportController._private;
+
+/**
+ * Customer QRs leak-tested in [dateFrom, dateTo]. Leak tests are not in OperationLogs (the leak collector writes
+ * the Leaktest table), so a part whose only event in a sync window is its leak test was never re-synced and its
+ * report row kept no / an old leak result. These QRs are passed to the bundle as extra anchors (it maps them to
+ * the traceability part via PartCodeMappings, like every other part). Cycle_End_Time is the plant's local clock.
+ */
+async function findLeakTestedPartQrs(dateFrom, dateTo) {
+  // Plant-local bounds as plain ISO strings: the column is a datetime, which rejects the "+00:00" offset a JS Date
+  // parameter is sent with.
+  const plantLocal = (date) => new Date(date.getTime() + PLANT_OFFSET_MIN * 60000).toISOString().replace("Z", "");
+  const rows = await LeaktestRecord.sequelize.query(
+    `SELECT DISTINCT LTRIM(RTRIM(Part_QR_Code)) AS qr FROM [Leaktest]
+      WHERE Cycle_End_Time >= :from AND Cycle_End_Time <= :to AND Part_QR_Code IS NOT NULL AND Part_QR_Code <> ''`,
+    { replacements: { from: plantLocal(dateFrom), to: plantLocal(dateTo) }, type: QueryTypes.SELECT },
+  );
+  return [...new Set(rows.map((row) => String(row.qr || "").trim()).filter(Boolean))];
+}
 
 /**
  * Syncs a specific date range of production data into the Master Table.
@@ -21,9 +40,13 @@ function syncDateRange(dateFrom, dateTo) {
   return run;
 }
 
-async function syncDateRangeNow(dateFrom, dateTo) {
+// options.dryRun: build and merge the records exactly like a real sync, but write nothing — returns
+// { records: [{ action: "create" | "update", record }], leakQrs } (read-only diagnostics / tests).
+async function syncDateRangeNow(dateFrom, dateTo, options = {}) {
   // console.log(`[HistoricalSync] Starting sync for range: ${dateFrom.toISOString()} to ${dateTo.toISOString()}`);
-  
+  const dryRun = options.dryRun === true;
+  const dryRunRecords = [];
+
   const filters = {
     dateFrom: dateFrom.toISOString(),
     dateTo: dateTo.toISOString(),
@@ -31,6 +54,15 @@ async function syncDateRangeNow(dateFrom, dateTo) {
   };
 
   try {
+    // Parts leak-tested in the window (their leak test is their only event there when the other stations were
+    // scanned earlier) are re-synced too, so leak_data / op150_status / overall_status follow the latest test.
+    let leakQrs = [];
+    try {
+      leakQrs = await findLeakTestedPartQrs(dateFrom, dateTo);
+    } catch (leakErr) {
+      console.error(`[HistoricalSync] Leak test lookup error:`, leakErr.message);
+    }
+
     // 1. Fetch raw data exactly as the UI would
     const { rows, shifts, plcColumnSet, metrics } = await getLegacyReportBundle(filters, {
       includePlcReadings: true,
@@ -38,11 +70,12 @@ async function syncDateRangeNow(dateFrom, dateTo) {
       includePlcSummary: true,
       maxAnchorParts: null,
       maxBaseLogs: null,
+      extraAnchorPartIds: leakQrs,
     });
 
     if (!rows || rows.length === 0) {
       // console.log(`[HistoricalSync] No rows found for range.`);
-      return { success: true, count: 0 };
+      return dryRun ? { success: true, count: 0, records: [], leakQrs } : { success: true, count: 0 };
     }
 
     // 2. Paginate to group them by part (fetch all at once for the sync chunk)
@@ -371,6 +404,12 @@ async function syncDateRangeNow(dateFrom, dateTo) {
           }
         }
 
+        if (dryRun) {
+          toCreate.forEach((record) => dryRunRecords.push({ action: "create", record }));
+          toUpdate.forEach((item) => dryRunRecords.push({ action: "update", record: item.record, existingId: item.existing.id }));
+          continue;
+        }
+
         // Bulk insert new records in one single query
         if (toCreate.length > 0) {
           try {
@@ -391,12 +430,16 @@ async function syncDateRangeNow(dateFrom, dateTo) {
       }
       // console.log(`[HistoricalSync] Upserted ${validRecords.length} records successfully.`);
     }
+    if (dryRun) return { success: true, count: dryRunRecords.length, records: dryRunRecords, leakQrs };
 
   } catch (error) {
     console.error(`[HistoricalSync] Error syncing range ${dateFrom} - ${dateTo}:`, error);
+    if (dryRun) throw error;
   }
 }
 
 module.exports = {
-  syncDateRange
+  syncDateRange,
+  // read-only diagnostics / tests: syncDateRangeNow(from, to, { dryRun: true }) writes nothing
+  _private: { syncDateRangeNow, findLeakTestedPartQrs },
 };

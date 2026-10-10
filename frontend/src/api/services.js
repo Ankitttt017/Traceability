@@ -767,6 +767,14 @@ export const reportApi = {
     if (data && data.summary && !data.metrics) data.metrics = data.summary;
     return data;
   },
+  // leak tester PLC values (END OK / NG reads) of one part: { columns: [{ key, label }], readings: [...] }
+  leakPlcReadings: async (codes = [], config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.reports.leakPlcReadings, {
+      params: { codes: (Array.isArray(codes) ? codes : [codes]).filter(Boolean).join(",") },
+      ...config,
+    });
+    return data;
+  },
   syncHistoricalData: async (payload, config = {}) => {
     const { data } = await apiClient.post(ENDPOINTS.reports.syncHistoricalData, payload, {
       timeout: 60000,

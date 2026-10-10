@@ -118,6 +118,7 @@ export const ENDPOINTS = {
   reports: {
     data: "/reports/report/data",
     historicalData: "/reports/report/historical",
+    leakPlcReadings: "/reports/report/leak-plc-readings",
     syncHistoricalData: "/reports/report/historical/sync",
     summaryMetrics: "/reports/report/summary-metrics",
     shotSummary: "/reports/report/shot-summary",

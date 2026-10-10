@@ -2,6 +2,26 @@ import React, { createContext, useContext, useState, useEffect } from "react";
 import { io } from "socket.io-client";
 import { alarmApi } from "../api/services";
 import { SOCKET_OPTIONS, SOCKET_URL } from "../constants/network";
+import { getPopupMachineId, isPopupForMachine } from "../utils/popupScope";
+
+// Operator terminals lock themselves to one machine (OperatorView stores the
+// lock here). On such a terminal, station alerts from other machines of the
+// same station (e.g. OP150 Leak-Test-01 vs Leak-Test-02) must not be raised.
+const OPERATOR_STATION_LOCK_KEY = "operator-view-station-lock-v1";
+function readOperatorLock() {
+  try {
+    const lock = JSON.parse(localStorage.getItem(OPERATOR_STATION_LOCK_KEY) || "null");
+    return lock && lock.machineId ? lock : null;
+  } catch {
+    return null;
+  }
+}
+function isScanAlertForThisTerminal(data = {}) {
+  const lock = readOperatorLock();
+  if (!lock) return true; // supervisor / plant-wide view: show all machines
+  if (!getPopupMachineId(data) && !String(data.stationNo || data.station_no || "").trim()) return true;
+  return isPopupForMachine(data, { machineId: lock.machineId, stationNo: lock.stationNo, stationReady: true });
+}
 
 const NotificationContext = createContext();
 
@@ -93,6 +113,7 @@ export const NotificationProvider = ({ children }) => {
     });
 
     socket.on("scan_event", (data) => {
+      if (data && !isScanAlertForThisTerminal(data)) return;
       const status = String(data?.status || data?.plcStatus || data?.operationStatus || "").toUpperCase();
       const decision = String(data?.decision || data?.qrResult || "").toUpperCase();
       const reason = String(data?.reason || "").toUpperCase();

@@ -71,7 +71,7 @@ function gateStatusSql(stationScope) {
   const st = sequelize.escape(stationScope);
   return `(SELECT TOP 1 UPPER(o.result) FROM OperationLogs o
     WHERE o.part_id IN ([ProductionReport].[part_id], [ProductionReport].[customer_qr])
-      AND (o.operation_no = ${st} OR o.station_no = ${st}) AND UPPER(o.result) IN ('OK', 'NG')
+      AND (o.operation_no = ${st} OR o.station_no = ${st}) AND UPPER(o.result) IN ('OK', 'NG') AND NOT (ISNULL(o.plc_status, '') = 'PLC_COMM_ERROR' AND ISNULL(o.interlock_reason, '') <> 'RECOVERY_PENDING_AFTER_BACKEND_RESTART')
     ORDER BY o.createdAt DESC, o.id DESC)`;
 }
 
@@ -143,7 +143,7 @@ async function buildHistoricalWhere(q = {}, opts = {}) {
     // (with gateKeys the same part list was already worked out from one read of the station's scans)
     const sub = gateKeys
       ? `SELECT part_id FROM OPENJSON(${esc(JSON.stringify(gateKeys))}) WITH (part_id nvarchar(255) '$')`
-      : `SELECT part_id FROM OperationLogs WHERE (operation_no = ${esc(stationScope)} OR station_no = ${esc(stationScope)}) AND LEN(part_id) >= 7 AND UPPER(result) IN ('OK', 'NG')${since} GROUP BY part_id${gateTime ? ` HAVING ${gateTime}` : ""}`;
+      : `SELECT part_id FROM OperationLogs WHERE (operation_no = ${esc(stationScope)} OR station_no = ${esc(stationScope)}) AND LEN(part_id) >= 7 AND UPPER(result) IN ('OK', 'NG') AND NOT (ISNULL(plc_status, '') = 'PLC_COMM_ERROR' AND ISNULL(interlock_reason, '') <> 'RECOVERY_PENDING_AFTER_BACKEND_RESTART')${since} GROUP BY part_id${gateTime ? ` HAVING ${gateTime}` : ""}`;
     // The newest report row of each part scanned at the station (matched by part ID or by its customer QR).
     // Written as joins + one id list: "part_id IN (…) OR customer_qr IN (…)" made SQL Server pick plans that took
     // up to 60 s.
@@ -353,7 +353,7 @@ async function loadGateWip(q = {}, ctx, { order = "default" } = {}) {
     const hits = await sequelize.query(
       `SELECT DISTINCT o.part_id FROM OperationLogs o
         JOIN OPENJSON(:keys) WITH (k nvarchar(255) '$') j ON o.part_id = j.k
-        WHERE (o.operation_no = :st OR o.station_no = :st) AND UPPER(o.result) IN ('OK', 'NG') AND o.createdAt < :to`,
+        WHERE (o.operation_no = :st OR o.station_no = :st) AND UPPER(o.result) IN ('OK', 'NG') AND NOT (ISNULL(o.plc_status, '') = 'PLC_COMM_ERROR' AND ISNULL(o.interlock_reason, '') <> 'RECOVERY_PENDING_AFTER_BACKEND_RESTART') AND o.createdAt < :to`,
       { replacements: { keys: JSON.stringify(allKeys), st: stationScope, to: win.to.toISOString() }, type: sequelize.QueryTypes.SELECT },
     );
     tested = new Set(hits.map((h) => gateKeyOf(h.part_id)));
@@ -387,7 +387,7 @@ async function loadGateSet(q = {}, { ctx: givenCtx, order = "default" } = {}) {
 
   // 1. the station's scans since the window start
   const logs = await sequelize.query(
-    `SELECT part_id, result, createdAt, id FROM OperationLogs
+    `SELECT part_id, result, plc_status, interlock_reason, createdAt, id FROM OperationLogs
       WHERE (operation_no = :st OR station_no = :st) AND createdAt >= :from`,
     { replacements: { st: stationScope, from: win.from.toISOString() }, type: sequelize.QueryTypes.SELECT },
   );
@@ -403,6 +403,9 @@ async function loadGateSet(q = {}, { ctx: givenCtx, order = "default" } = {}) {
     if (!(lastAny.get(key) >= at)) lastAny.set(key, at);
     const result = String(log.result || "").toUpperCase().replace(/\s+$/, "");
     if (result !== "OK" && result !== "NG") continue;
+    // a PLC communication error is not a station result (same rule as the other counts)
+    if (String(log.plc_status || "").toUpperCase() === "PLC_COMM_ERROR"
+      && String(log.interlock_reason || "").toUpperCase() !== "RECOVERY_PENDING_AFTER_BACKEND_RESTART") continue;
     decisive.set(key, laterScan(decisive.get(key), { at, id: log.id, result }));
   }
   // parts whose decisive scan is inside the window / shift (placeholder IDs shorter than 7 characters are not parts)
@@ -511,6 +514,10 @@ async function partsEntriesFor(reports) {
 const entryOf = (entries, rep) => entries.get(String(rep.part_id)) || entries.get(String(rep.customer_qr)) || "";
 // gate view: the selected gate the NG belongs to ("OP130", "OP150" for the leak machines); "" = overall view
 const categoryGateHint = (stationScope, leak) => (leak ? "OP150" : (stationScope || ""));
+// Leak tester PLC values (LeakTestReadings, read at END OK / NG) — columns named as on the Machine page.
+// Shown where the leak readings are: overall view, leak gate and the gates after it (OP160).
+const leakPlc = require("../services/report/leakPlcValuesService");
+const leakPlcInScope = (stationScope, leak) => !stationScope || Boolean(leak) || (parseInt(String(stationScope).replace(/\D/g, ""), 10) || 0) >= 150;
 
 /* CR / MR / CRAM split of the NG parts of the WHOLE filtered set (not just the page), same category rule as the
    rows' Category column and Rejection Analysis (utils/rejectionCategory). Only the NG rows' short columns are read
@@ -729,7 +736,7 @@ async function historicalSummary({ q = {}, ctx, gateSet = null, where = null, st
           SELECT UPPER(result) AS r, createdAt,
                  ROW_NUMBER() OVER (PARTITION BY part_id ORDER BY createdAt DESC, id DESC) AS rn
             FROM OperationLogs
-           WHERE (operation_no = 'OP160' OR station_no = 'OP160') AND UPPER(result) IN ('OK', 'NG') AND LEN(part_id) >= 7
+           WHERE (operation_no = 'OP160' OR station_no = 'OP160') AND UPPER(result) IN ('OK', 'NG') AND NOT (ISNULL(plc_status, '') = 'PLC_COMM_ERROR' AND ISNULL(interlock_reason, '') <> 'RECOVERY_PENDING_AFTER_BACKEND_RESTART') AND LEN(part_id) >= 7
              AND createdAt >= :from AND createdAt < :to) x
          WHERE rn = 1 AND r = 'OK'${shiftSql}`, {
         replacements: { from: ctx.win.from, to: ctx.win.to, shift: q.shiftCode ? String(q.shiftCode).trim().toUpperCase() : null },
@@ -776,7 +783,7 @@ exports.getHistoricalReportData = async (req, res) => {
     // Station gate: the part set is worked out once (see loadGateSet) — totals, OK / NG and the page all come from it
     const reqStatus = String(q.status || "").trim().toUpperCase();
     // Gate view with no status filter: the parts waiting for the gate ("in progress") are counted alongside OK / NG
-    const wipPromise = stationScope && ctx.win && !reqStatus ? loadGateWip(q, ctx) : null;
+    const wipPromise = null; // gate view shows the gate's own OK / NG only — the "waiting for this gate" count (2–5 s) is not shown any more
     if (wipPromise) wipPromise.catch(() => {}); // awaited below
     const gateSet = await loadGateSet(q, { ctx, order: gateSortDir });
 
@@ -817,6 +824,14 @@ exports.getHistoricalReportData = async (req, res) => {
 
     const plcColumnSet = await plcColumnsPromise;
     const { metrics: summaryMetrics, gateWip } = await summaryPromise;
+    // leak tester PLC values: the latest END OK / NG reading of each part on the page (one query for the page)
+    const [leakPlcById, leakPlcBaseColumns] = leakPlcInScope(stationScope, leak)
+      ? await Promise.all([
+        leakPlc.loadLeakPlcForReports(rows).catch((e) => { console.warn("[HistoricalReport] leak PLC values:", e.message); return new Map(); }),
+        leakPlc.getLeakPlcColumns().catch(() => []),
+      ])
+      : [new Map(), []];
+    const leakPlcColumns = leakPlc.withReadingColumns(leakPlcBaseColumns, [...leakPlcById.values()]);
 
     // 3. Format rows back exactly as the UI expects (array of OperationLog arrays)
     // The Master Table stored the raw OperationLog entries array in `raw_logs` for this part.
@@ -858,6 +873,8 @@ exports.getHistoricalReportData = async (req, res) => {
         rawLogs.forEach((log) => { log.__pr_gate_status = gateStatus; log.__pr_gate_shift = gateShift; });
       }
       stampRejection(rawLogs, rejInfo.get(row.id));
+      // decisive leak PLC reading: on the part's first log only (the page groups logs by part)
+      if (leakPlcById.has(row.id) && rawLogs.length) rawLogs[0].__pr_leak_plc = leakPlcById.get(row.id);
 
       // Clean up legacy duplicate leak test structures to prevent showing double in Postman
       rawLogs.forEach(log => {
@@ -883,6 +900,7 @@ exports.getHistoricalReportData = async (req, res) => {
         hasPrevPage: page > 1,
       },
       plcColumns: [...plcColumnSet],
+      leakPlcColumns,
       reportMode: "HISTORICAL_MASTER",
       gateScope: stationScope ? {
         station: stationScope, leakMachineId: leak?.machineId ?? null, leakMachineName: leak?.machineName || null,
@@ -904,6 +922,12 @@ exports.getHistoricalReportData = async (req, res) => {
           }
         });
       }
+      if (Array.isArray(clean.records)) {
+        clean.records.forEach((rec, i) => {
+          if (rec && formattedRows[i]?.__pr_leak_plc) rec.leakPlc = formattedRows[i].__pr_leak_plc;
+        });
+      }
+      clean.leakPlcColumns = leakPlcColumns;
       if (clean.summary) {
         clean.summary.gateScope = payload.gateScope;
         // CR / MR / CRAM split of the NG figure (whole filtered set)
@@ -1086,7 +1110,7 @@ async function runHistoricalExport({ filters = {}, reportConfig = {}, type = "fu
   const { stationScope, leak } = ctx;
   const gateSortDir = String(q.sortBy || "") === "gateScanAt" ? (String(q.sortDir || "").toLowerCase() === "asc" ? "asc" : "desc") : "default";
   const reqStatus = String(q.status || "").trim().toUpperCase();
-  const wipPromise = stationScope && ctx.win && !reqStatus ? loadGateWip(q, ctx) : null;
+  const wipPromise = null; // gate view shows the gate's own OK / NG only — the "waiting for this gate" count (2–5 s) is not shown any more
   if (wipPromise) wipPromise.catch(() => {}); // awaited by historicalSummary
   const machinesPromise = sequelize.query(
     "SELECT id, machine_name, operation_no FROM Machines ORDER BY sequence_no ASC, id ASC",
@@ -1122,19 +1146,22 @@ async function runHistoricalExport({ filters = {}, reportConfig = {}, type = "fu
   const chunks = [];
   for (let i = 0; i < ids.length; i += EXPORT_CHUNK_SIZE) chunks.push(ids.slice(i, i + EXPORT_CHUNK_SIZE));
   const gateHint = categoryGateHint(stationScope, leak);
+  const withLeakPlc = leakPlcInScope(stationScope, leak);
 
   // read one chunk: report rows in id-list order, raw logs unzipped (zlib thread pool), gate times, rejections
   const fetchChunk = async (chunkIds) => {
-    if (isCancelled()) return { reports: [], texts: [], gateTimes: new Map(), rejInfo: new Map() };
+    if (isCancelled()) return { reports: [], texts: [], gateTimes: new Map(), rejInfo: new Map(), leakPlcById: new Map() };
     const found = await findReportsWithLogs(chunkIds);
     const byId = new Map(found.map((r) => [String(r.id), r]));
     const reports = chunkIds.map((id) => byId.get(String(id))).filter(Boolean);
     const texts = reports.map((r) => { const t = r.raw_logs; r.raw_logs = null; return t; });
-    const [gateTimes, rejInfo] = await Promise.all([
+    const [gateTimes, rejInfo, leakPlcById] = await Promise.all([
       knownGateTimes || gateScanTimes(reports, stationScope, leak),
       rejectionInfoFor(reports, gateHint),
+      // leak tester PLC values (latest END OK / NG reading per part), one query per chunk
+      withLeakPlc ? leakPlc.loadLeakPlcForReports(reports).catch(() => new Map()) : new Map(),
     ]);
-    return { reports, texts, gateTimes, rejInfo };
+    return { reports, texts, gateTimes, rejInfo, leakPlcById };
   };
 
   const gateOp = leak ? "OP150" : (stationScope || "");
@@ -1158,7 +1185,7 @@ async function runHistoricalExport({ filters = {}, reportConfig = {}, type = "fu
       lap("readWait");
       checkCancel();
       launch(); // keep the next reads going while this chunk is processed
-      const { reports, texts, gateTimes, rejInfo } = chunk;
+      const { reports, texts, gateTimes, rejInfo, leakPlcById } = chunk;
       for (let i = 0; i < reports.length; i += 1) {
         const rep = reports[i];
         const rawLogs = parseRawLogs(texts[i]);
@@ -1180,6 +1207,7 @@ async function runHistoricalExport({ filters = {}, reportConfig = {}, type = "fu
           const name = String(rec.station?.name || "").trim();
           if (op && name && !rowStations.has(op.toUpperCase())) rowStations.set(op.toUpperCase(), { machineName: name, op });
         });
+        if (leakPlcById.has(rep.id) && records[0]) records[0].leakPlc = leakPlcById.get(rep.id);
         shaped.push(xl.shapeHistoricalPart(records, { gateView: Boolean(stationScope), gateOp }));
         // keep the event loop free for API requests / scanning while a big export runs
         if (i % 50 === 49) await new Promise((resolve) => setImmediate(resolve));
@@ -1201,6 +1229,10 @@ async function runHistoricalExport({ filters = {}, reportConfig = {}, type = "fu
   const machines = await machinesPromise.catch(() => []);
   const { metrics, gateWip } = await summaryPromise;
   const gateLabel = gateLabelFor(stationScope, leak, machines);
+  // leak tester PLC value columns (Machine page names) — same set as the page
+  const leakPlcColumns = withLeakPlc
+    ? leakPlc.withReadingColumns(await leakPlc.getLeakPlcColumns().catch(() => []), shaped.map((r) => r.leakPlc).filter(Boolean))
+    : [];
   const columns = xl.buildHistoricalColumns({
     gateView: Boolean(stationScope),
     gateLabel,
@@ -1208,6 +1240,7 @@ async function runHistoricalExport({ filters = {}, reportConfig = {}, type = "fu
     stationPairs: xl.stationPairsOf(machines, [...rowStations.values()]),
     // like the page: the leak-test history column only when a part was tested more than once
     includeLeakHistory: shaped.some((r) => r.leakHistory),
+    leakPlcColumns,
   });
   const statusName = { OK: "OK", PASSED: "OK", NG: "NG", FAILED: "NG", WIP: "In Progress", IN_PROGRESS: "In Progress" }[reqStatus] || "All";
   const search = String(q.barcode || q.customerCode || q.partId || "").trim();
@@ -1357,6 +1390,26 @@ exports.exportHistoricalReportExcel = async (req, res) => {
   } catch (error) {
     console.error("[HistoricalReport] Excel export error:", error);
     if (!res.headersSent) res.status(error.statusCode || 500).json({ error: error.message });
+  }
+};
+
+/* GET /report/leak-plc-readings?codes=<part id>,<customer QR> — the leak tester PLC values (END OK / NG reads) of
+   one part with the Machine-page column names; used by Component Journey's OP150 step. Codes are widened with the
+   part's customer-QR mapping, so either code finds the readings. */
+exports.getLeakPlcReadings = async (req, res) => {
+  try {
+    const codes = [...new Set(String(req.query.codes || req.query.partId || "").split(",").map((s) => s.trim()).filter(Boolean))].slice(0, 20);
+    if (!codes.length) return res.json({ columns: [], readings: [] });
+    const mapped = await sequelize.query(
+      "SELECT old_part_id, customer_qr FROM PartCodeMappings WHERE old_part_id IN (:codes) OR customer_qr IN (:codes)",
+      { replacements: { codes }, type: sequelize.QueryTypes.SELECT },
+    ).catch(() => []);
+    const keys = [...new Set([...codes, ...mapped.flatMap((m) => [m.old_part_id, m.customer_qr])].map((s) => String(s || "").trim()).filter(Boolean))];
+    const [readings, columns] = await Promise.all([leakPlc.loadLeakPlcForPart(keys), leakPlc.getLeakPlcColumns().catch(() => [])]);
+    return res.json({ columns: leakPlc.withReadingColumns(columns, readings), readings });
+  } catch (error) {
+    console.error("[HistoricalReport] leak PLC readings error:", error);
+    return res.status(500).json({ error: error.message });
   }
 };
 

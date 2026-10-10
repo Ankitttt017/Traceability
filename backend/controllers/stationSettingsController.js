@@ -1,5 +1,6 @@
 const StationFeatureSetting = require("../models/StationFeatureSetting");
 const sequelize = require("../config/db");
+const { normalizeMachineOverrides } = require("../services/stationFeatureService");
 
 function normalizeStation(value) {
   return String(value || "")
@@ -73,6 +74,14 @@ function normalizeInputMap(rawSettings = {}) {
       customerCodePattern: String(rawValue.customerCodePattern || ""),
       finalPacking: rawValue.finalPacking === true,
     };
+    // Per-machine overrides (stations with several machines, e.g. OP150).
+    // Only touched when the client sends the key; otherwise the stored
+    // overrides are preserved on save (see saveSettings).
+    if (Object.prototype.hasOwnProperty.call(rawValue, "machineOverrides")) {
+      acc[stationNo].machineOverrides = normalizeMachineOverrides(rawValue.machineOverrides);
+    } else {
+      delete acc[stationNo].machineOverrides;
+    }
     return acc;
   }, {});
 }
@@ -121,6 +130,7 @@ function rowsToMap(rows = []) {
       allowCustomerQrOnlyStart: config.allowCustomerQrOnlyStart === true,
       customerCodePattern: String(config.customerCodePattern || ""),
       finalPacking: row.final_packing_enabled === true,
+      machineOverrides: normalizeMachineOverrides(config.machineOverrides),
     };
     return acc;
   }, {});
@@ -166,7 +176,6 @@ exports.saveSettings = async (req, res) => {
           manual_result_enabled: data.manualResult === true,
           plc_part_count: normalizePlcPartCount(data.plcPartCount ?? data.plc_part_count),
           final_packing_enabled: data.finalPacking === true,
-          config: JSON.stringify(data), // JSON column handles the full object as string
           updated_by: req.user?.id || null,
         };
 
@@ -175,7 +184,21 @@ exports.saveSettings = async (req, res) => {
             ...scopeWhere(scope),
             station_no: stationNo,
           },
-        }).then((row) => (row ? row.update(updateData) : StationFeatureSetting.create(updateData)));
+        }).then((row) => {
+          const configData = { ...data };
+          if (!Object.prototype.hasOwnProperty.call(configData, "machineOverrides") && row?.config) {
+            try {
+              const existing = typeof row.config === "string" ? JSON.parse(row.config) : row.config;
+              const kept = normalizeMachineOverrides(existing?.machineOverrides);
+              if (Object.keys(kept).length > 0) configData.machineOverrides = kept;
+            } catch (_err) {
+              // corrupt stored config: nothing to preserve
+            }
+          }
+          // JSON column handles the full object as string
+          const fullUpdate = { ...updateData, config: JSON.stringify(configData) };
+          return row ? row.update(fullUpdate) : StationFeatureSetting.create(fullUpdate);
+        });
       })
     );
 

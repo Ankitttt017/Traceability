@@ -1217,6 +1217,7 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
     const stationFeatures = options?.stationFeatures || await getStationFeatureConfig(station, {
       plantId: currentMachine?.plant_id,
       lineId: currentMachine?.line_id,
+      machineId: currentMachine?.id || mId || null,
     });
     const qrValidationEnabled = stationFeatures.qr !== false;
     skipQrFormatValidation = skipQrFormatValidation || !qrValidationEnabled || stationFeatures.validateQrFormat === false;
@@ -1604,7 +1605,12 @@ exports.saveScan = async (partId, stationNo, result, machineId = 0, userId = nul
       }
     }
 
-    if (hasExistingTerminal && !part.is_rework) {
+    // Leak test retest: at the leak station (OP150) a part whose LATEST leak test is NG may be tested again on any
+    // leak machine (latest test decides — a retest OK makes the part OK). A part whose latest leak test is OK, or a
+    // part still waiting for its leak result, stays blocked as "already done at OP150", so a part that passed LT-1
+    // cannot be run again on LT-2.
+    const leakRetestAllowed = leakNgBlockedStation && leakNgBlockedStation === normalizeStation(station);
+    if (hasExistingTerminal && !part.is_rework && !leakRetestAllowed) {
       const blockedLog = await OperationLog.create({
         part_id: normalizedPartId,
         machine_id: mId || null,

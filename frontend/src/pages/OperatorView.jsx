@@ -16,6 +16,7 @@ import { machineApi, scannerApi, shiftApi, stationSettingsApi, traceabilityApi }
 import GlobalPopup from "../components/GlobalPopup";
 import ConfirmModal from "../components/ConfirmModal";
 import { getMachineStage } from "../utils/machineFields";
+import { isPopupForMachine } from "../utils/popupScope";
 import { getStationFeatureSettings, getStationFeatures, saveStationFeatureSettings } from "../utils/stationSettings";
 import { useLanguage } from "../context/LanguageContext";
 
@@ -700,7 +701,8 @@ const OperatorView = () => {
     }
   }, [enforceStationLockMode, machines, selectedMachineId, stationLock]);
 
-  const stationFeatureConfig = useMemo(() => getStationFeatures(selectedStation, stationSettings), [selectedStation, stationSettings]);
+  // Per-machine settings (Station Control machine overrides, e.g. OP150 Leak Test-03 PLC OFF) win over the station.
+  const stationFeatureConfig = useMemo(() => getStationFeatures(selectedStation, stationSettings, selectedMachineId), [selectedStation, stationSettings, selectedMachineId]);
   const popupStationReady = useMemo(() => {
     if (!selectedMachineId || !selectedStation) return false;
     if (!enforceStationLockMode) return true;
@@ -717,23 +719,6 @@ const OperatorView = () => {
       payload.source_station_no ||
       ""
     ).trim().toUpperCase();
-  }, []);
-
-  const resolvePopupStationCandidates = useCallback((payload = {}) => {
-    return [
-      payload.stationNo,
-      payload.station_no,
-      payload.sourceStationNo,
-      payload.source_station_no,
-      payload.expectedStation ||
-      payload.expected_station ||
-      payload.lastCompletedStation ||
-      payload.last_completed_station ||
-      ""
-    ]
-      .flat()
-      .map((value) => String(value || "").trim().toUpperCase())
-      .filter(Boolean);
   }, []);
 
   const qualitySummary = stationStats?.summary || { okCount: 0, ngCount: 0, interlockedCount: 0, inProgressCount: 0, processedCount: 0, accuracy: 0 };
@@ -1141,25 +1126,14 @@ const OperatorView = () => {
     lastPopupEventRef.current = { key, at: now }; return false;
   }, []);
 
-  const isPayloadForActiveMachine = useCallback((payload = {}) => {
-    const payloadMachineId = String(payload.machineId || payload.machine_id || "").trim();
-    const payloadStation = resolvePopupStationNo(payload);
-    const stationCandidates = resolvePopupStationCandidates(payload);
-    const activeMachineId = String(selectedMachineIdRef.current || "").trim();
-    const activeStation = String(selectedStationRef.current || "").trim().toUpperCase();
-    const stationMatchesActive = Boolean(activeStation) && (
-      payloadStation === activeStation || stationCandidates.includes(activeStation)
-    );
-
-    if (payloadMachineId) {
-      if (payloadMachineId !== activeMachineId) return false;
-      if (!payloadStation && stationCandidates.length === 0) return true;
-      return stationMatchesActive || !activeStation;
-    }
-    if (!popupStationReady) return false;
-    if (!payloadStation && stationCandidates.length === 0) return false;
-    return stationMatchesActive;
-  }, [popupStationReady, resolvePopupStationNo, resolvePopupStationCandidates]);
+  // Popups are machine-scoped: an event that carries machineId is shown only on
+  // the Operator page of that machine (OP150 has three leak testers on one
+  // station). Station matching is only a fallback for events without machineId.
+  const isPayloadForActiveMachine = useCallback((payload = {}) => isPopupForMachine(payload, {
+    machineId: selectedMachineIdRef.current,
+    stationNo: selectedStationRef.current,
+    stationReady: popupStationReady,
+  }), [popupStationReady]);
 
   const shouldIgnoreStartupPopup = useCallback((payload = {}) => {
     const now = Date.now();
@@ -1193,7 +1167,7 @@ const OperatorView = () => {
       const passed = ["ALLOW", "PASS", "OK", "ACCEPT", "VALID"].includes(decision);
       const nextQrStatus = failed ? (String(payload.reason || "").toUpperCase() === "PREVIOUS_STATION_NOT_COMPLETED" ? "BLOCKED" : "FAIL") : passed ? "PASS" : "IDLE";
       const stationKey = String(sig.stationNo || selectedStationRef.current || "").trim().toUpperCase();
-      const stationFeatures = getStationFeatures(stationKey, stationSettings);
+      const stationFeatures = getStationFeatures(stationKey, stationSettings, selectedMachineIdRef.current);
       const manualRequired = passed && stationFeatures?.manualResult === true;
       const previousOp = String(prev.operationStatus || "WAIT").toUpperCase();
       const nextOp = failed ? "FAIL" : manualRequired ? "WAIT" : (previousOp && previousOp !== "FAIL" ? previousOp : "WAIT");
@@ -1214,7 +1188,7 @@ const OperatorView = () => {
     const decision = String(sig.decision || "").trim().toUpperCase();
     const isBlockedDecision = ["BLOCK", "FAIL", "NG", "REJECT", "INVALID"].includes(decision);
     const signalStation = String(sig.stationNo || selectedStationRef.current || "").trim().toUpperCase();
-    const signalFeatures = getStationFeatures(signalStation, stationSettings);
+    const signalFeatures = getStationFeatures(signalStation, stationSettings, selectedMachineIdRef.current);
     const isFinalPackingStation = Boolean(signalFeatures?.finalPacking);
     const isCustomerMappingStation =
       signalFeatures?.manualResult !== true &&
@@ -1475,6 +1449,9 @@ const OperatorView = () => {
       socket.connect();
     }, 0);
     const handleUnifiedScanPayload = (p = {}) => {
+      // Machine scope first: a scan on Leak-Test-01 must not raise a popup on
+      // the Operator page of Leak-Test-02 (same station OP150).
+      if (!isPayloadForActiveMachine(p)) return;
       const rel = processIncomingSocketScanEvent(p, "unified");
       const d = extractQrDecision(p);
       if (d) {
@@ -1500,6 +1477,7 @@ const OperatorView = () => {
             message: t("operatorView.qrValidatedAt", "QR Validated at {station}").replace("{station}", p.stationNo || "Station"),
             partId: p.partId || p.part_id,
             stationNo: p.stationNo || p.station_no,
+            machineId: p.machineId || p.machine_id,
             qrStatus: "PASSED",
             operationStatus: getPassOperationStatusForStation(p.stationNo || p.station_no, stationSettings)
           });

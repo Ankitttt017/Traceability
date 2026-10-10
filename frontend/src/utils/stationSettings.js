@@ -52,6 +52,40 @@ function toNullableNumber(value) {
   return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
+// Per-machine overrides for stations with several machines (e.g. OP150 Leak-Test-01/02/03). Stored in the
+// station config as machineOverrides = { "<machineId>": { plcCommunication: false, ... } }; a machine inherits
+// every station value it does not override. Must match backend stationFeatureService MACHINE_OVERRIDE_KEYS.
+export const MACHINE_OVERRIDE_BOOLEAN_KEYS = [
+  "qr",
+  "operation",
+  "plcCommunication",
+  "bypass",
+  "rejectionBin",
+  "manualResult",
+  "validateQrFormat",
+  "validateShotNumber",
+  "validatePreviousStation",
+  "validateDuplicateBarcode",
+];
+export const MACHINE_OVERRIDE_KEYS = [...MACHINE_OVERRIDE_BOOLEAN_KEYS, "plcPartCount"];
+
+export function normalizeMachineOverrides(raw) {
+  if (!isObject(raw)) return {};
+  return Object.entries(raw).reduce((acc, [machineId, value]) => {
+    const id = Number(machineId);
+    if (!Number.isInteger(id) || id <= 0 || !isObject(value)) return acc;
+    const out = {};
+    for (const key of MACHINE_OVERRIDE_BOOLEAN_KEYS) {
+      if (value[key] === true || value[key] === false) out[key] = value[key];
+    }
+    if (value.plcPartCount !== undefined && value.plcPartCount !== null && value.plcPartCount !== "") {
+      out.plcPartCount = normalizePlcPartCount(value.plcPartCount);
+    }
+    if (Object.keys(out).length > 0) acc[String(id)] = out;
+    return acc;
+  }, {});
+}
+
 export function normalizeStationKey(value) {
   return String(value || "")
     .trim()
@@ -102,6 +136,7 @@ function normalizeFeatureMap(rawMap) {
       torqueRegister: toNullableNumber(rawValue.torqueRegister),
       partPresence: rawValue.partPresence === true,
       partPresenceRegister: toNullableNumber(rawValue.partPresenceRegister),
+      machineOverrides: normalizeMachineOverrides(rawValue.machineOverrides),
     };
     return acc;
   }, {});
@@ -162,7 +197,17 @@ export function saveStationFeatureSettings(settings) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
 }
 
-export function getStationFeatures(stationNo, settings = {}) {
+/** Station features, resolved for one machine when machineId is given (machine override → station → default). */
+export function getStationFeatures(stationNo, settings = {}, machineId = null) {
+  const base = getStationLevelFeatures(stationNo, settings);
+  const id = Number(machineId || 0);
+  if (!id) return base;
+  const stationSettings = settings?.[normalizeStationKey(stationNo)];
+  const override = normalizeMachineOverrides(stationSettings?.machineOverrides)[String(id)];
+  return override ? { ...base, ...override } : base;
+}
+
+function getStationLevelFeatures(stationNo, settings = {}) {
   const stationKey = normalizeStationKey(stationNo);
   if (!stationKey) {
     return { ...DEFAULT_STATION_FEATURES };
