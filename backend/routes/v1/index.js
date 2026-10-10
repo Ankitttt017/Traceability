@@ -16,6 +16,7 @@ const industrialRoutes = require("./industrialRoutes");
 const reportRoutes = require("./reportRoutes");
 const rejectionConfigRoutes = require("./rejectionConfigRoutes");
 const organizationRoutes = require("./organizationRoutes");
+const scannerReviewRoutes = require("./scannerReviewRoutes"); // SCANNER-FIX: read-only review list
 
 const router = express.Router();
 
@@ -33,6 +34,7 @@ router.use("/alarms", alarmRoutes);
 router.use("/reports", reportRoutes);
 router.use("/rejection-config", rejectionConfigRoutes);
 router.use("/organization", organizationRoutes);
+router.use("/scanner-review", scannerReviewRoutes);
 router.use(industrialRoutes);
 router.use(traceabilityRoutes);
 router.use(dashboardRoutes);

@@ -267,17 +267,22 @@ function getAllLeaktestReadingsForPart(byPartAndIp, partId, stationNo) {
 
 /**
  * getLeaktestStageStateFromReadings
- * Determines the aggregate pass/fail state from ALL physical machines:
- *   - Any NG  → FAILED
- *   - All OK  → PASSED
- *   - Otherwise → PENDING (at least one machine hasn't reported yet)
+ * The part's leak state from the readings of ALL physical machines (plant rule): the LATEST test decides —
+ * NG on one leak machine then OK on a retest (same or another machine) = PASSED, like the latest OK / NG scan
+ * at every station.
+ *   - latest reading OK → PASSED
+ *   - latest reading NG → FAILED
+ *   - no readings / latest reading without a result → PENDING
  */
 function getLeaktestStageStateFromReadings(readings = []) {
-  if (!readings.length) return "PENDING";
-  const results = readings.map((r) => normalizeLeaktestResult(r?.result || r?.Result)).filter(Boolean);
-  if (!results.length) return "PENDING";
-  if (results.some((result) => result === "NG")) return "FAILED";
-  if (results.length === readings.length && results.every((result) => result === "OK")) return "PASSED";
+  const list = (readings || []).filter((r) => r && typeof r === "object");
+  if (!list.length) return "PENDING";
+  const timeOf = (r) => new Date(r?.cycleEndTime || r?.Cycle_End_Time || 0).getTime() || 0;
+  // readings arrive in IP order; a stable sort keeps that order for equal / missing times
+  const latest = list.map((r, i) => ({ r, i, t: timeOf(r) })).sort((a, b) => a.t - b.t || a.i - b.i).pop().r;
+  const result = normalizeLeaktestResult(latest?.result || latest?.Result);
+  if (result === "OK") return "PASSED";
+  if (result === "NG") return "FAILED";
   return "PENDING";
 }
 

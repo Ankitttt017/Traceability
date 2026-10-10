@@ -195,6 +195,14 @@ async function canStartCustomerQrOnlyPart({ code, stationNo, machine, stationFea
   return !(await isKnownPartOrMappedCustomerQr(raw));
 }
 
+// true when the "customer QR" is really a Part ID: a DPM code, or the part's own ID
+function isPartIdAsCustomerQr(customerQr, partId) {
+  const qr = String(customerQr || "").trim();
+  if (!qr) return false;
+  if (partId && qr === String(partId).trim()) return false; // QR-only parts map to themselves
+  return require("../tcp/scannerFlowUtils").isDpmCode(qr);
+}
+
 async function markCustomerQrOnlyMapping({ code, machine, stationNo }) {
   const raw = sanitizeCustomerQrValue(code);
   if (!raw) return;
@@ -1282,15 +1290,8 @@ function getEffectiveOperationOutcome(log, mappedCustomerQr = null) {
   return "";
 }
 
-function getQualitySummaryFromOperationLogs(rows, getMappedCustomerQr = null) {
-  const summary = {
-    okCount: 0,
-    ngCount: 0,
-    interlockedCount: 0,
-    commErrorCount: 0,
-    inProgressCount: 0,
-  };
-
+// One row per part ID: its latest scan (by updatedAt, else createdAt).
+function latestOperationRowPerPart(rows) {
   const latestByPart = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
     const partKey = String(row?.part_id || row?.partId || "").trim().toUpperCase();
@@ -1302,8 +1303,88 @@ function getQualitySummaryFromOperationLogs(rows, getMappedCustomerQr = null) {
       latestByPart.set(partKey, row);
     }
   }
+  return [...latestByPart.values()];
+}
 
-  for (const row of latestByPart.values()) {
+// OK / NG of one leak tester in [range.from, range.to) (and shift), from the leak results stored on the report rows
+// (leak_data.matchedMachineId, result time = cycleEndTime, plant time written with "Z") — the same rows and filters
+// the Rejection Analysis / Dashboard leak counts use (valid scans, newest report row per part).
+// OK / NG per machine for [range.from, range.to]: the latest OK / NG scan of each part at that machine decides it,
+// counted in the shift of that scan (same rule as the Historical gate view and the Operator page). Leak testers
+// (OP150) use their leak results (leakMachineResultCounts). Returns Map(machineId -> { ok, ng }).
+async function machineDecisiveCounts(machines, range, shiftCode, shifts = []) {
+  const PD = require("../utils/productionDay");
+  const out = new Map();
+  const list = (machines || []).filter((m) => Number(m.id) > 0);
+  const isLeak = (m) => String(m.operation_no || m.operationNo || "").trim().toUpperCase() === "OP150";
+  const ids = list.filter((m) => !isLeak(m)).map((m) => Number(m.id));
+  const shiftSql = PD.shiftCaseSql("createdAt", shifts);
+  const shiftFilter = shiftCode ? ` AND ${shiftSql} = :shift` : "";
+  if (ids.length) {
+    const rows = await sequelize.query(`
+      SELECT machine_id, SUM(CASE WHEN r = 'OK' THEN 1 ELSE 0 END) AS ok, SUM(CASE WHEN r = 'NG' THEN 1 ELSE 0 END) AS ng
+        FROM (SELECT o.machine_id, UPPER(o.result) AS r, o.createdAt,
+                     -- a part scanned under its customer QR and its part ID counts once (customer QR → part ID)
+                     ROW_NUMBER() OVER (PARTITION BY COALESCE(al.old_part_id, o.part_id), o.machine_id ORDER BY o.createdAt DESC, o.id DESC) AS rn
+                FROM OperationLogs o
+                OUTER APPLY (SELECT TOP 1 m.old_part_id FROM PartCodeMappings m
+                              WHERE m.customer_qr = o.part_id AND m.is_active = 1 AND m.old_part_id <> m.customer_qr
+                                AND o.part_id LIKE '%[^0-9]%') al
+               WHERE o.createdAt >= :from AND o.createdAt <= :to AND o.machine_id IN (:ids)
+                 AND UPPER(o.result) IN ('OK', 'NG') AND LEN(o.part_id) >= 7
+                 -- reports' part-ID rule: 13-digit DPM or a customer QR (20–32 chars, starts with a letter)
+                 AND ((o.part_id NOT LIKE '%[^0-9]%' AND LEN(o.part_id) = 13)
+                      OR (o.part_id LIKE '[A-Za-z]%' AND LEN(o.part_id) BETWEEN 20 AND 32))) x
+       WHERE rn = 1${shiftFilter}
+       GROUP BY machine_id`, {
+      replacements: { from: range.from, to: range.to, ids, shift: shiftCode ? String(shiftCode).trim().toUpperCase() : null },
+      type: sequelize.QueryTypes.SELECT,
+    });
+    for (const id of ids) out.set(id, { ok: 0, ng: 0 });
+    for (const r of rows) out.set(Number(r.machine_id), { ok: Number(r.ok || 0), ng: Number(r.ng || 0) });
+  }
+  const leakTo = new Date(new Date(range.to).getTime() + 1);
+  await Promise.all(list.filter(isLeak).map(async (m) => {
+    out.set(Number(m.id), await leakMachineResultCounts(Number(m.id), { from: range.from, to: leakTo }, shiftCode, shifts));
+  }));
+  return out;
+}
+
+async function leakMachineResultCounts(machineId, range, shiftCode, shifts = []) {
+  const PD = require("../utils/productionDay");
+  const leakJson = (path) => `(CASE WHEN ISJSON(leak_data) = 1 THEN JSON_VALUE(leak_data, '${path}') END)`;
+  const leakTime = `TODATETIMEOFFSET(DATEADD(MINUTE, -${PD.PLANT_OFFSET_MIN}, TRY_CAST(${leakJson("$.cycleEndTime")} AS datetime2)), 0)`;
+  const rows = await sequelize.query(`
+    SELECT UPPER(${leakJson("$.result")}) AS result, ${leakTime} AS at
+      FROM [RICO_IOT].[dbo].[ProductionReports]
+     WHERE ${PD.VALID_SCAN_SQL} AND ${PD.notStaleRowSql("id")}
+       AND ${leakJson("$.matchedMachineId")} = :mid AND ${leakJson("$.result")} IS NOT NULL
+       AND ${leakTime} >= :from AND ${leakTime} < :to
+       AND first_scan_at < :to AND first_scan_at >= DATEADD(DAY, -60, CAST(:from AS datetimeoffset))`,
+  { replacements: { mid: String(machineId), from: range.from, to: range.to }, type: sequelize.QueryTypes.SELECT });
+  const OK = new Set(["OK", "PASS", "PASSED", "ENDED_OK", "COMPLETED_OK"]);
+  const NG = new Set(["NG", "FAIL", "FAILED", "ENDED_NG", "COMPLETED_NG"]);
+  const target = shiftCode ? normalizeShiftAlias(shiftCode) : "";
+  const out = { ok: 0, ng: 0 };
+  for (const r of rows) {
+    if (target && normalizeShiftAlias(PD.shiftCodeAt(new Date(r.at), shifts) || "") !== target) continue;
+    const res = String(r.result || "").trim();
+    if (OK.has(res)) out.ok += 1;
+    else if (NG.has(res)) out.ng += 1;
+  }
+  return out;
+}
+
+function getQualitySummaryFromOperationLogs(rows, getMappedCustomerQr = null) {
+  const summary = {
+    okCount: 0,
+    ngCount: 0,
+    interlockedCount: 0,
+    commErrorCount: 0,
+    inProgressCount: 0,
+  };
+
+  for (const row of latestOperationRowPerPart(rows)) {
     const mappedCustomerQr = typeof getMappedCustomerQr === "function" ? getMappedCustomerQr(row) : null;
     const effectiveOutcome = getEffectiveOperationOutcome(row, mappedCustomerQr);
 
@@ -3440,8 +3521,543 @@ exports.getPartJourney = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Part catalog — paged mode (GET /traceability/parts?paged=1), used by the Component Journey page.
+//
+// List mode (no search, or search with scopeSearchToFilters=1):
+//   one row per physical part with at least one production (non-noise) operation log inside the window and the
+//   machine / station / operator filters. Customer-QR logs are folded into their old_part_id when a mapping exists,
+//   so a part appears once. Ordered by the part's last activity in the window (lastAt DESC, part id), paged with
+//   OFFSET/FETCH, total from the same query.
+//   Shift filter: the shift of the part's LAST production scan inside the window (lastAt) — every part has exactly
+//   one lastAt, so Shift A + B + C pages add up to the day.
+//   Status filter: Parts.status of the physical part; OTHER = customer-QR-only parts (as in the legacy response).
+// Search mode (search given, scopeSearchToFilters != 1): independent of dates / shift / machine / status.
+//   exact (customer QR / part ID / old part ID) → shot number (DPM shot segment) → partial (≥ 4 chars, prefix
+//   matches ranked before contains matches).
+// latestAt / latestStation / machineName are computed from production logs inside the window (all-time in search
+// mode) for the returned page only.
+// ─────────────────────────────────────────────────────────────────────────────
+const CATALOG_PAGE_SIZE_DEFAULT = 100;
+const CATALOG_PAGE_SIZE_MAX = 500;
+const CATALOG_PARTIAL_MIN_LENGTH = 4;
+const CATALOG_STATUSES = new Set(["IN_PROGRESS", "COMPLETED", "NG", "INTERLOCKED", "REWORK"]);
+
+const sqlQuote = (value) => `N'${String(value).replace(/'/g, "''")}'`;
+
+// Mirror of isJourneyNoiseLog() as a SQL predicate (TRUE = production log). Collation is case-insensitive.
+function catalogProductionLogSql(alias = "ol") {
+  const reasons = [...JOURNEY_NOISE_REASONS].map(sqlQuote).join(", ");
+  const plc = `LTRIM(RTRIM(ISNULL(${alias}.plc_status, '')))`;
+  const vr = `LTRIM(RTRIM(ISNULL(${alias}.validation_result, '')))`;
+  const reason = `LTRIM(RTRIM(ISNULL(${alias}.interlock_reason, '')))`;
+  const result = `LTRIM(RTRIM(ISNULL(${alias}.result, '')))`;
+  return `(
+    (ISNULL(${alias}.is_bypassed, 0) = 1 AND (${result} = 'OK' OR ${plc} = 'ENDED_OK'))
+    OR (ISNULL(${alias}.is_bypassed, 0) = 0
+      AND ${plc} <> 'VALIDATION_ONLY'
+      AND ${vr} NOT IN ('FAILED', 'DUPLICATE', 'BLOCKED')
+      AND ${reason} NOT IN (${reasons})
+      AND NOT (${plc} = 'INTERLOCKED' AND ${result} = 'BLOCK'))
+  )`;
+}
+
+// Mirror of looksLikePartialTraceabilityId() (stray scanner fragments) — plus empty / "-" ids.
+function catalogPartialIdSql(column) {
+  const alnumOnly = `${column} NOT LIKE '%[^A-Za-z0-9]%'`;
+  const shotTail = "T[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][A-Za-z][0-9][0-9][0-9][0-9]";
+  return `(
+    ${column} IS NULL OR LTRIM(RTRIM(${column})) IN ('', '-')
+    OR (LEN(${column}) <= 6 AND ${alnumOnly})
+    OR (LEN(${column}) = 7 AND ${column} LIKE '[A-Za-z][0-9][0-9][0-9][0-9][0-9][0-9]')
+    OR (${alnumOnly} AND ${column} LIKE '%${shotTail}'
+      AND (LEN(${column}) <= 18 OR (LEN(${column}) <= 20 AND SUBSTRING(${column}, LEN(${column}) - 15, 2) = '54')))
+  )`;
+}
+
+// A row is kept unless its id is a fragment AND no customer-QR mapping knows it (legacy rule).
+function catalogUsableKeySql(column) {
+  return `NOT (${catalogPartialIdSql(column)} AND NOT EXISTS (
+    SELECT 1 FROM PartCodeMappings um WHERE um.is_active = 1 AND (um.old_part_id = ${column} OR um.customer_qr = ${column})
+  ))`;
+}
+
+// Customer-QR-only = no distinct old-part ↔ customer-QR mapping, and the part is flagged / self-mapped as customer QR.
+function catalogCustomerQrOnlySql(keyColumn, partAlias = "p") {
+  return `(
+    NOT EXISTS (SELECT 1 FROM PartCodeMappings dm WHERE dm.is_active = 1 AND dm.old_part_id <> dm.customer_qr
+      AND (dm.old_part_id = ${keyColumn} OR dm.customer_qr = ${keyColumn}))
+    AND (UPPER(LTRIM(RTRIM(ISNULL(${partAlias}.qr_format_name, '')))) = '${CUSTOMER_QR_ONLY_FORMAT}'
+      OR EXISTS (SELECT 1 FROM PartCodeMappings sm WHERE sm.is_active = 1 AND sm.old_part_id = sm.customer_qr AND sm.old_part_id = ${keyColumn}))
+  )`;
+}
+
+const isDateOnlyValue = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
+
+function resolveCatalogWindow(query, shifts, now = new Date()) {
+  const dateFrom = String(query.dateFrom || "").trim();
+  const dateTo = String(query.dateTo || "").trim();
+  // asOf freezes the upper bound for "load more" pages so offsets stay stable while new scans arrive
+  const asOf = query.asOf ? new Date(query.asOf) : null;
+  const validAsOf = asOf && !Number.isNaN(asOf.getTime()) ? asOf : null;
+  if (!dateFrom && !dateTo) return validAsOf ? { from: new Date(0), to: validAsOf, allDates: true } : null; // all dates
+  let window;
+  if (isDateOnlyValue(dateFrom) && (!dateTo || isDateOnlyValue(dateTo))) {
+    window = require("../utils/productionDay").productionWindow({ dateFrom, dateTo: dateTo || dateFrom, shifts, now });
+  } else {
+    window = getDateRangeFromQuery(query);
+  }
+  if (validAsOf && validAsOf < window.to) window = { from: window.from, to: validAsOf };
+  return window;
+}
+
+async function resolveCatalogScope(query) {
+  const shifts = await getActiveShiftDefinitions();
+  const now = new Date();
+  const window = resolveCatalogWindow(query, shifts, now);
+  const statusFilter = String(query.status || "").trim().toUpperCase();
+  const shiftInput = normalizeShiftAlias(query.shiftCode);
+  const shiftDef = shiftInput
+    ? shifts.find((row) => normalizeShiftAlias(row.shift_code || row.shift_name) === shiftInput) || null
+    : null;
+  const lineNameFilter = normalizeLineName(query.lineName);
+  const machineIdFilter = Number(query.machineId || 0) || null;
+  let machineIds = null;
+  if (machineIdFilter) {
+    machineIds = [machineIdFilter];
+  } else if (lineNameFilter) {
+    const machines = await Machine.findAll({ where: { line_name: lineNameFilter }, attributes: ["id"], raw: true });
+    machineIds = machines.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+  }
+  return {
+    now,
+    shifts,
+    window,
+    status: statusFilter === "OTHER" || CATALOG_STATUSES.has(statusFilter) ? statusFilter : "",
+    shiftCode: shiftInput ? (shiftDef ? shiftDef.shift_code : "__NO_SUCH_SHIFT__") : "",
+    machineIds,
+    stationNo: normalizeStation(query.stationNo) || "",
+    operatorId: Number(query.operatorId || 0) || null,
+    partId: String(query.partId || "").trim(),
+  };
+}
+
+// WHERE fragments for operation logs (alias ol) inside the scope. Returns null when the scope can match nothing.
+function catalogLogScopeSql(scope, replacements, { useWindow = true } = {}) {
+  const where = [catalogProductionLogSql("ol"), "ol.part_id IS NOT NULL"];
+  if (useWindow && scope.window) {
+    where.push("ol.createdAt >= :winFrom AND ol.createdAt < :winTo");
+    replacements.winFrom = scope.window.from;
+    replacements.winTo = scope.window.to;
+  }
+  if (scope.machineIds) {
+    if (!scope.machineIds.length) return null;
+    where.push("ol.machine_id IN (:machineIds)");
+    replacements.machineIds = scope.machineIds;
+  }
+  if (scope.stationNo) {
+    where.push("(ol.station_no = :stationNo OR (NULLIF(LTRIM(RTRIM(ISNULL(ol.station_no, ''))), '') IS NULL AND ol.operation_no = :stationNo))");
+    replacements.stationNo = scope.stationNo;
+  }
+  if (scope.operatorId) {
+    where.push("ol.user_id = :operatorId");
+    replacements.operatorId = scope.operatorId;
+  }
+  return where.join("\n      AND ");
+}
+
+// Predicate on a part key: matches the key itself or the customer QR mapped to it.
+function catalogKeyLikeSql(keyColumn, paramName) {
+  return `(${keyColumn} LIKE :${paramName} ESCAPE '\\' OR EXISTS (SELECT 1 FROM PartCodeMappings km WHERE km.is_active = 1
+    AND km.old_part_id = ${keyColumn} AND km.customer_qr LIKE :${paramName} ESCAPE '\\'))`;
+}
+
+function catalogLikeParam(value, mode) {
+  const escaped = String(value || "").replace(/[\\%_[]/g, (ch) => `\\${ch}`);
+  return mode === "prefix" ? `${escaped}%` : `%${escaped}%`;
+}
+
+function catalogStatusSql(scope, keyColumn, partAlias, replacements) {
+  if (!scope.status) return null;
+  if (scope.status === "OTHER") return catalogCustomerQrOnlySql(keyColumn, partAlias);
+  replacements.statusFilter = scope.status;
+  return `${partAlias}.status = :statusFilter`;
+}
+
+/** Physical part key for a code: old_part_id when the code is a mapped customer QR, else the code. */
+async function resolveCatalogKeysForCodes(codes) {
+  const values = uniqueStages(codes.map((value) => String(value || "").trim()).filter(Boolean));
+  if (!values.length) return [];
+  const mappings = await PartCodeMapping.findAll({
+    where: { is_active: true, [Op.or]: [{ customer_qr: { [Op.in]: values } }, { old_part_id: { [Op.in]: values } }] },
+    attributes: ["old_part_id", "customer_qr"],
+    raw: true,
+  });
+  const parts = await Part.findAll({ where: { part_id: { [Op.in]: values } }, attributes: ["part_id"], raw: true });
+  const keys = [];
+  for (const row of mappings) keys.push(String(row.old_part_id || "").trim());
+  const mappedCodes = new Set(mappings.flatMap((row) => [String(row.old_part_id || "").trim().toUpperCase(), String(row.customer_qr || "").trim().toUpperCase()]));
+  for (const row of parts) {
+    const id = String(row.part_id || "").trim();
+    if (!mappedCodes.has(id.toUpperCase())) keys.push(id);
+  }
+  return uniqueStages(keys.filter(Boolean));
+}
+
+/** Hydrate a page of part keys into catalog rows (same fields as the legacy response, plus firstAt/logCount). */
+async function hydrateCatalogRows(entries, scope, { useWindow }) {
+  const keys = entries.map((entry) => entry.key);
+  if (!keys.length) return [];
+  // two single-column lookups (each a unique-index seek) instead of one OR'd query
+  const [mappingsByOld, mappingsByCustomer, parts, qrRules] = await Promise.all([
+    PartCodeMapping.findAll({
+      where: { is_active: true, old_part_id: { [Op.in]: keys } },
+      attributes: ["old_part_id", "customer_qr", "updatedAt"],
+      raw: true,
+    }),
+    PartCodeMapping.findAll({
+      where: { is_active: true, customer_qr: { [Op.in]: keys } },
+      attributes: ["old_part_id", "customer_qr", "updatedAt"],
+      raw: true,
+    }),
+    Part.findAll({ where: { part_id: { [Op.in]: keys } }, raw: true }),
+    QrFormatRule.findAll({ where: { is_active: true }, attributes: ["regex_pattern"], raw: true }),
+  ]);
+  const mappings = [...mappingsByOld, ...mappingsByCustomer]
+    .sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime());
+  const customerQrByKey = {};
+  const oldPartByKey = {};
+  for (const row of mappings) {
+    const oldPart = String(row.old_part_id || "").trim();
+    const customerQr = String(row.customer_qr || "").trim();
+    for (const k of [oldPart.toUpperCase(), customerQr.toUpperCase()]) {
+      if (!k) continue;
+      if (customerQr && !customerQrByKey[k]) customerQrByKey[k] = customerQr;
+      if (oldPart && !oldPartByKey[k]) oldPartByKey[k] = oldPart;
+    }
+  }
+  const partByKey = new Map(parts.map((row) => [String(row.part_id || "").trim().toUpperCase(), row]));
+
+  // Latest production log per part inside the scope — the part's own logs plus the logs of the customer QR mapped
+  // to it — one index seek per key (OperationLogs.part_id).
+  const replacements = {};
+  const scopeSql = catalogLogScopeSql(scope, replacements, { useWindow }) || "1 = 0";
+  const cols = "ol.id, ol.station_no, ol.operation_no, ol.plc_status, ol.result, ol.machine_id, ol.user_id, ol.createdAt";
+  const latestRows = await sequelize.query(`
+    SELECT k.pkey, x.station_no, x.operation_no, x.plc_status, x.result, x.machine_id, x.user_id, x.createdAt
+    FROM (VALUES ${keys.map((key) => `(${sqlQuote(key)})`).join(", ")}) AS k(pkey)
+    CROSS APPLY (
+      SELECT TOP 1 u.* FROM (
+        SELECT ${cols} FROM OperationLogs ol
+        WHERE ol.part_id = k.pkey AND ${scopeSql}
+        UNION ALL
+        SELECT ${cols} FROM PartCodeMappings m
+        JOIN OperationLogs ol ON ol.part_id = m.customer_qr
+        WHERE m.old_part_id = k.pkey AND m.old_part_id <> m.customer_qr AND m.is_active = 1 AND ${scopeSql}
+      ) u
+      ORDER BY u.createdAt DESC, u.id DESC
+    ) x
+  `, { replacements, type: sequelize.QueryTypes.SELECT });
+  const latestByKey = new Map(latestRows.map((row) => [String(row.pkey || "").trim().toUpperCase(), row]));
+  const machineIds = uniqueStages(latestRows.map((row) => String(row.machine_id || "")).filter(Boolean)).map(Number).filter(Number.isFinite);
+  const machineRows = machineIds.length
+    ? await Machine.findAll({ where: { id: { [Op.in]: machineIds } }, attributes: ["id", "machine_name", "line_name"], raw: true })
+    : [];
+  const machineMap = new Map(machineRows.map((row) => [Number(row.id), row]));
+
+  const matchesQrRule = (value) => {
+    const raw = String(value || "").trim();
+    if (!raw) return false;
+    return qrRules.some((rule) => {
+      const pattern = String(rule.regex_pattern || "").trim();
+      if (!pattern) return false;
+      try { return new RegExp(pattern, "i").test(raw); } catch (_error) { return false; }
+    });
+  };
+  const looksPartial = (value) => {
+    const raw = String(value || "").trim().toUpperCase();
+    if (!raw) return false;
+    if (/^R\d{9}-[A-Z0-9-]{10,}$/.test(raw)) return false;
+    if (/^\d{8}[A-Z0-9]\d{1,6}$/.test(raw)) return false;
+    return /^[A-Z]?\d{3,6}$/.test(raw) || /^[A-Z0-9]{1,6}$/.test(raw)
+      || /^[A-Z0-9]{0,4}54T\d{8}[A-Z]\d{4}$/i.test(raw) || /^[A-Z0-9]{0,4}T\d{8}[A-Z]\d{4}$/i.test(raw);
+  };
+  const isUsable = (value) => {
+    const raw = String(value || "").trim();
+    if (!raw || raw === "-") return false;
+    if (matchesQrRule(raw)) return true;
+    if (looksPartial(raw)) return false;
+    return qrRules.length === 0 && /^[A-Za-z0-9][A-Za-z0-9\-_/.:]{7,127}$/.test(raw);
+  };
+
+  return entries.map((entry) => {
+    const rawPartId = String(entry.key || "").trim();
+    const upper = rawPartId.toUpperCase();
+    const part = partByKey.get(upper) || null;
+    const latest = latestByKey.get(upper) || null;
+    const machine = latest ? machineMap.get(Number(latest.machine_id)) || null : null;
+    const mappedCustomerQr = customerQrByKey[upper] || "";
+    const mappedOldPart = oldPartByKey[upper] || "";
+    const hasDistinctCustomerMapping = Boolean(mappedOldPart && mappedCustomerQr && mappedOldPart.toUpperCase() !== mappedCustomerQr.toUpperCase());
+    const canonicalPartId = mappedOldPart || rawPartId;
+    const isCustomerQrOnly = !hasDistinctCustomerMapping && (
+      String(part?.qr_format_name || "").trim().toUpperCase() === CUSTOMER_QR_ONLY_FORMAT ||
+      Boolean(mappedOldPart && mappedCustomerQr && mappedOldPart.toUpperCase() === mappedCustomerQr.toUpperCase())
+    );
+    const safeDisplay = isUsable(canonicalPartId) ? canonicalPartId : isUsable(mappedOldPart) ? mappedOldPart : isUsable(rawPartId) ? rawPartId : "";
+    const displayPartId = isCustomerQrOnly ? "" : safeDisplay;
+    const traceabilityPartId = displayPartId || mappedCustomerQr || canonicalPartId;
+    return {
+      partId: traceabilityPartId,
+      traceabilityPartId,
+      rawPartId,
+      displayPartId,
+      mappedPartId: mappedOldPart || null,
+      customerQrCode: mappedCustomerQr || null,
+      isCustomerQrOnly,
+      status: part?.status || "UNKNOWN",
+      currentStation: part?.current_station || null,
+      currentOperation: part?.current_operation || null,
+      isInterlocked: Boolean(part?.is_interlocked),
+      interlockReason: part?.interlock_reason || null,
+      isRework: Boolean(part?.is_rework),
+      qrFormatName: part?.qr_format_name || null,
+      updatedAt: part?.updatedAt || null,
+      latestStatus: latest?.plc_status || null,
+      latestResult: latest?.result || null,
+      latestStation: normalizeStation(latest?.station_no || latest?.operation_no) || null,
+      latestAt: entry.lastAt || latest?.createdAt || null,
+      firstAt: entry.firstAt || null,
+      logCount: entry.logCount ?? null,
+      machineId: latest?.machine_id || null,
+      machineName: machine?.machine_name || null,
+      lineName: machine?.line_name || null,
+      operatorId: latest?.user_id || null,
+      matchRank: entry.rank ?? null,
+    };
+  });
+}
+
+/** Window list: distinct physical parts with production activity in the scope (optionally narrowed by a search predicate). */
+async function queryCatalogWindowPage(scope, { page, pageSize, keyPredicate = null, keyPredicateReplacements = {} }) {
+  const replacements = { ...keyPredicateReplacements, offset: (page - 1) * pageSize, pageSize };
+  const logScopeSql = catalogLogScopeSql(scope, replacements, { useWindow: true });
+  if (!logScopeSql) return { rows: [], total: 0 };
+  const outer = [`${catalogUsableKeySql("g.pkey")}`, "p.id IS NOT NULL"];
+  if (scope.shiftCode) {
+    outer.push(`${require("../utils/productionDay").shiftCaseSql("g.lastAt", scope.shifts)} = :shiftCode`);
+    replacements.shiftCode = scope.shiftCode;
+  }
+  const statusSql = catalogStatusSql(scope, "g.pkey", "p", replacements);
+  if (statusSql) outer.push(statusSql);
+  if (scope.partId) {
+    outer.push(catalogKeyLikeSql("g.pkey", "partIdLike"));
+    replacements.partIdLike = catalogLikeParam(scope.partId, "contains");
+  }
+  if (keyPredicate) outer.push(keyPredicate);
+  const rows = await sequelize.query(`
+    WITH scoped AS (
+      SELECT COALESCE(m.old_part_id, ol.part_id) AS pkey, ol.createdAt
+      FROM OperationLogs ol
+      LEFT JOIN PartCodeMappings m ON m.customer_qr = ol.part_id AND m.old_part_id <> m.customer_qr AND m.is_active = 1
+      WHERE ${logScopeSql}
+    ), g AS (
+      SELECT pkey, MIN(createdAt) AS firstAt, MAX(createdAt) AS lastAt, COUNT(*) AS logCount
+      FROM scoped GROUP BY pkey
+    )
+    SELECT g.pkey, g.firstAt, g.lastAt, g.logCount, COUNT(*) OVER () AS total
+    FROM g
+    LEFT JOIN Parts p ON p.part_id = g.pkey
+    WHERE ${outer.join("\n      AND ")}
+    ORDER BY g.lastAt DESC, g.pkey ASC
+    OFFSET :offset ROWS FETCH NEXT :pageSize ROWS ONLY
+  `, { replacements, type: sequelize.QueryTypes.SELECT });
+  return {
+    rows: rows.map((row) => ({ key: row.pkey, firstAt: row.firstAt, lastAt: row.lastAt, logCount: Number(row.logCount || 0) })),
+    // past the last page there is no row to carry COUNT(*) OVER () — total unknown (null), hasMore false
+    total: rows.length ? Number(rows[0].total || 0) : (page > 1 ? null : 0),
+  };
+}
+
+/** Search outside the filters: exact → shot number → partial. */
+async function queryCatalogSearch(search, scope, { page, pageSize }) {
+  const raw = String(search || "").trim();
+  const collapsed = collapseRepeatedQrValue(raw);
+  const partIdFilterSql = scope.partId ? catalogKeyLikeSql("k.pkey", "partIdLike") : null;
+  const partIdReplacements = scope.partId ? { partIdLike: catalogLikeParam(scope.partId, "contains") } : {};
+
+  // 1) exact customer QR / part id / old part id
+  const exactKeys = await resolveCatalogKeysForCodes([raw, collapsed]);
+  if (exactKeys.length) {
+    let keys = exactKeys;
+    if (scope.partId) {
+      const needle = scope.partId.toUpperCase();
+      const keyMappings = await PartCodeMapping.findAll({
+        where: { is_active: true, old_part_id: { [Op.in]: keys } },
+        attributes: ["old_part_id", "customer_qr"],
+        raw: true,
+      });
+      keys = keys.filter((key) => key.toUpperCase().includes(needle) || keyMappings.some((row) =>
+        String(row.old_part_id || "").trim().toUpperCase() === key.toUpperCase() && String(row.customer_qr || "").toUpperCase().includes(needle)));
+    }
+    const slice = keys.slice((page - 1) * pageSize, page * pageSize);
+    return { rows: slice.map((key) => ({ key, rank: 0 })), total: keys.length, matchType: "exact", matchKind: "code" };
+  }
+
+  // 2) shot number (DPM part ids: 8 digits + machine code + shot) — same padding variants as the legacy search
+  if (/^\d{1,6}$/.test(raw)) {
+    const numericShot = String(Number(raw));
+    const variants = uniqueStages([raw, numericShot, numericShot.padStart(4, "0"), numericShot.padStart(5, "0"), numericShot.padStart(6, "0")]);
+    const replacements = { offset: (page - 1) * pageSize, pageSize, ...partIdReplacements };
+    const variantSql = variants.map((value, index) => {
+      replacements[`shot${index}`] = value;
+      return `(LEN(p.part_id) = ${9 + value.length} AND SUBSTRING(p.part_id, 10, 6) = :shot${index})`;
+    }).join(" OR ");
+    const rows = await sequelize.query(`
+      WITH k AS (
+        SELECT p.part_id AS pkey, p.updatedAt
+        FROM Parts p
+        WHERE p.part_id LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]%' AND (${variantSql})
+      )
+      SELECT k.pkey, COUNT(*) OVER () AS total FROM k
+      ${partIdFilterSql ? `WHERE ${partIdFilterSql}` : ""}
+      ORDER BY k.updatedAt DESC, k.pkey ASC
+      OFFSET :offset ROWS FETCH NEXT :pageSize ROWS ONLY
+    `, { replacements, type: sequelize.QueryTypes.SELECT });
+    if (rows.length || page > 1) {
+      return {
+        rows: rows.map((row) => ({ key: row.pkey, rank: 0 })),
+        total: rows.length ? Number(rows[0].total || 0) : null,
+        matchType: "exact",
+        matchKind: "shot",
+      };
+    }
+  }
+
+  // 3) partial — prefix matches first, then contains; on part id, customer QR and old part id
+  if (raw.length < CATALOG_PARTIAL_MIN_LENGTH) {
+    return { rows: [], total: 0, matchType: "none", matchKind: null, minLength: CATALOG_PARTIAL_MIN_LENGTH };
+  }
+  const replacements = {
+    offset: (page - 1) * pageSize,
+    pageSize,
+    prefixLike: catalogLikeParam(raw, "prefix"),
+    containsLike: catalogLikeParam(raw, "contains"),
+    ...partIdReplacements,
+  };
+  const outer = [catalogUsableKeySql("k.pkey")];
+  if (partIdFilterSql) outer.push(partIdFilterSql);
+  const rows = await sequelize.query(`
+    WITH cand AS (
+      SELECT COALESCE(m.old_part_id, p.part_id) AS pkey,
+        CASE WHEN p.part_id LIKE :prefixLike ESCAPE '\\' THEN 0 ELSE 1 END AS rnk
+      FROM Parts p
+      LEFT JOIN PartCodeMappings m ON m.customer_qr = p.part_id AND m.old_part_id <> m.customer_qr AND m.is_active = 1
+      WHERE p.part_id LIKE :containsLike ESCAPE '\\'
+      UNION ALL
+      SELECT m.old_part_id AS pkey,
+        CASE WHEN m.customer_qr LIKE :prefixLike ESCAPE '\\' OR m.old_part_id LIKE :prefixLike ESCAPE '\\' THEN 0 ELSE 1 END AS rnk
+      FROM PartCodeMappings m
+      WHERE m.is_active = 1 AND (m.customer_qr LIKE :containsLike ESCAPE '\\' OR m.old_part_id LIKE :containsLike ESCAPE '\\')
+    ), k AS (
+      SELECT pkey, MIN(rnk) AS rnk FROM cand WHERE pkey IS NOT NULL GROUP BY pkey
+    )
+    SELECT k.pkey, k.rnk, COUNT(*) OVER () AS total
+    FROM k
+    LEFT JOIN Parts p ON p.part_id = k.pkey
+    WHERE ${outer.join(" AND ")}
+    ORDER BY k.rnk ASC, p.updatedAt DESC, k.pkey ASC
+    OFFSET :offset ROWS FETCH NEXT :pageSize ROWS ONLY
+  `, { replacements, type: sequelize.QueryTypes.SELECT });
+  return {
+    rows: rows.map((row) => ({ key: row.pkey, rank: Number(row.rnk) })),
+    total: rows.length ? Number(rows[0].total || 0) : (page > 1 ? null : 0),
+    matchType: rows.length || page > 1 ? "partial" : "none",
+    matchKind: rows.length ? "partial" : null,
+  };
+}
+
+/** Search narrowed to the filters (scopeSearchToFilters=1): the window list with a key predicate. */
+async function queryCatalogScopedSearch(search, scope, { page, pageSize }) {
+  const raw = String(search || "").trim();
+  const exactKeys = await resolveCatalogKeysForCodes([raw, collapseRepeatedQrValue(raw)]);
+  if (exactKeys.length) {
+    const result = await queryCatalogWindowPage(scope, {
+      page,
+      pageSize,
+      keyPredicate: "g.pkey IN (:exactKeys)",
+      keyPredicateReplacements: { exactKeys },
+    });
+    return { ...result, matchType: "exact", matchKind: "code" };
+  }
+  if (/^\d{1,6}$/.test(raw)) {
+    const numericShot = String(Number(raw));
+    const variants = uniqueStages([raw, numericShot, numericShot.padStart(4, "0"), numericShot.padStart(5, "0"), numericShot.padStart(6, "0")]);
+    const keyPredicateReplacements = {};
+    const keyPredicate = `(g.pkey LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]%' AND (${variants.map((value, index) => {
+      keyPredicateReplacements[`shot${index}`] = value;
+      return `(LEN(g.pkey) = ${9 + value.length} AND SUBSTRING(g.pkey, 10, 6) = :shot${index})`;
+    }).join(" OR ")}))`;
+    const result = await queryCatalogWindowPage(scope, { page, pageSize, keyPredicate, keyPredicateReplacements });
+    if (result.rows.length || page > 1) return { ...result, matchType: "exact", matchKind: "shot" };
+  }
+  if (raw.length < CATALOG_PARTIAL_MIN_LENGTH) {
+    return { rows: [], total: 0, matchType: "none", matchKind: null, minLength: CATALOG_PARTIAL_MIN_LENGTH };
+  }
+  const result = await queryCatalogWindowPage(scope, {
+    page,
+    pageSize,
+    keyPredicate: catalogKeyLikeSql("g.pkey", "searchLike"),
+    keyPredicateReplacements: { searchLike: catalogLikeParam(raw, "contains") },
+  });
+  return { ...result, matchType: result.rows.length || page > 1 ? "partial" : "none", matchKind: result.rows.length ? "partial" : null };
+}
+
+async function getPartCatalogPaged(req, res) {
+  const startedAt = Date.now();
+  const page = Math.max(Math.floor(Number(req.query.page || 1)) || 1, 1);
+  const pageSize = Math.min(Math.max(Math.floor(Number(req.query.pageSize || CATALOG_PAGE_SIZE_DEFAULT)) || CATALOG_PAGE_SIZE_DEFAULT, 1), CATALOG_PAGE_SIZE_MAX);
+  const search = String(req.query.search || "").trim();
+  const scopeSearch = String(req.query.scopeSearchToFilters || "") === "1";
+  const scope = await resolveCatalogScope(req.query);
+
+  let result;
+  let useWindowForLatest = true;
+  if (!search) {
+    result = { ...(await queryCatalogWindowPage(scope, { page, pageSize })), matchType: null, matchKind: null };
+  } else if (scopeSearch) {
+    result = await queryCatalogScopedSearch(search, scope, { page, pageSize });
+  } else {
+    result = await queryCatalogSearch(search, scope, { page, pageSize });
+    useWindowForLatest = false;
+  }
+
+  const hydrateScope = useWindowForLatest ? scope : { ...scope, machineIds: null, stationNo: "", operatorId: null };
+  const rows = await hydrateCatalogRows(result.rows, hydrateScope, { useWindow: useWindowForLatest });
+  const total = result.total;
+  res.json({
+    rows,
+    total,
+    page,
+    pageSize,
+    hasMore: total === null ? false : page * pageSize < total,
+    matchType: result.matchType || null,
+    matchKind: result.matchKind || null,
+    minSearchLength: result.minLength || undefined,
+    searchScoped: Boolean(search && scopeSearch),
+    window: useWindowForLatest && scope.window && !scope.window.allDates
+      ? { from: scope.window.from.toISOString(), to: scope.window.to.toISOString() }
+      : null,
+    asOf: (scope.window ? scope.window.to : scope.now).toISOString(),
+    tookMs: Date.now() - startedAt,
+  });
+}
+
 exports.getPartCatalog = async (req, res) => {
   try {
+    if (String(req.query.paged || "") === "1") {
+      return await getPartCatalogPaged(req, res);
+    }
     const search = String(req.query.search || "").trim();
     const limit = Math.min(Math.max(Number(req.query.limit || 120), 1), 400);
     const { from, to } = getDateRangeFromQuery(req.query);
@@ -3751,7 +4367,9 @@ exports.getMachineStationStats = async (req, res) => {
     }
 
     const requestedShiftCode = String(req.query.shiftCode || req.query.shift_code || "").trim().toUpperCase();
-    const cacheKey = `${machineId}:${requestedShiftCode}:${req.query.from || ""}:${req.query.to || ""}`;
+    // keyed by everything that decides the window (dateFrom / dateTo are what getOperatorStatsDateRange reads)
+    const cacheKey = [machineId, requestedShiftCode, req.query.dateFrom, req.query.dateTo, req.query.from, req.query.to]
+      .map((v) => (v === undefined || v === null ? "" : String(v))).join("|");
     const cachedEntry = machineStationStatsCache.get(cacheKey);
     if (cachedEntry && Date.now() - cachedEntry.timestamp < STATS_CACHE_TTL_MS) {
       return res.json(cachedEntry.data);
@@ -3776,15 +4394,24 @@ exports.getMachineStationStats = async (req, res) => {
     const effectiveShiftCode = isAllShiftToken(requestedShiftCode)
       ? ""
       : (requestedShiftCode || String(currentShift?.shift_code || "").trim().toUpperCase());
+    // [from, to) — end exclusive
     const { from, to } = getOperatorStatsDateRange(req.query, shifts, effectiveShiftCode, currentShift);
+    const PD = require("../utils/productionDay");
+    // With a shift selected the scans up to the end of that production day are read too, so a part scanned again in
+    // a later shift counts once — in the shift of its latest scan (the reports' rule) — and not in both shifts.
+    const dayEnd = PD.currentProductionDay(shifts, new Date(to.getTime() - 1)).to;
+    const fetchTo = effectiveShiftCode && dayEnd > to ? dayEnd : to;
+    // Leak testers: bypass auto-OK rows of OP150 are all written to the first leak machine (scanService), so they are
+    // not that machine's tests; its OK / NG come from the leak results (ProductionReports.leak_data) like the reports.
+    const isLeakMachine = String(machine.machine_type || "").trim().toUpperCase() === "LEAK";
 
-    const logs = await OperationLog.findAll({
+    const fetchedLogs = await OperationLog.findAll({
       where: {
         machine_id: machine.id,
         station_no: stationNo,
         createdAt: {
           [Op.gte]: from,
-          [Op.lte]: to,
+          [Op.lt]: fetchTo,
         },
       },
       order: [["createdAt", "DESC"]],
@@ -3793,10 +4420,12 @@ exports.getMachineStationStats = async (req, res) => {
       // OP120 Shift A = 12 pass instead of 459. A station logs up to ~2,000 scans a day; 5,000 covers it.
       limit: 5000,
     });
+    const allLogs = isLeakMachine ? fetchedLogs.filter((row) => !row.is_bypassed) : fetchedLogs;
+    const logs = allLogs.filter((row) => new Date(row.createdAt) < to); // inside the selected window
 
     // Targeted PartCodeMapping lookup: only look up parts that actually need customer QR
     // (the recent 25 visible parts + any log with recovery pending)
-    const recoveryRows = logs.filter((row) => {
+    const recoveryRows = allLogs.filter((row) => {
       const reason = String(row?.interlock_reason || "").toUpperCase();
       return reason.includes("RECOVERY");
     });
@@ -3840,7 +4469,83 @@ exports.getMachineStationStats = async (req, res) => {
       ? applyShiftFilter(effectiveLogs, effectiveShiftCode, shifts, { from, to })
       : effectiveLogs;
 
-    const summary = getQualitySummaryFromOperationLogs(shiftFilteredLogs, getMappedCustomerQr);
+    // Pass / Fail: one row per part = its latest scan, chosen BEFORE the shift filter (over the rest of the
+    // production day too), then counted only when that latest scan is in the selected window / shift.
+    const allStationLogs = allLogs.filter((row) => !isJourneyNoiseLog(row));
+    // Same rule as the Historical / Rejection reports: a part's latest OK / NG scan decides it (by scan time, then
+    // log id). The scan result counts even while the PLC status is still PENDING (PLC communication is off on the
+    // stations) — counting only ENDED_OK left 1–6 parts per shift as "in progress" here but OK in the reports.
+    // Parts with no OK / NG scan keep their latest row (in progress / interlocked).
+    const baseStationLogs = stationLogs.length > 0 ? allStationLogs : allLogs;
+    const rawKeyOf = (row) => String(row?.part_id || "").trim().toUpperCase();
+    const decisiveResult = (row) => {
+      const r = String(row?.result || "").trim().toUpperCase();
+      return r === "OK" || r === "NG" ? r : null;
+    };
+    // One part = one count, as in the reports: a part scanned at the station under its customer QR and under its
+    // part ID counts once (customer QR → mapped part ID), and part-ID fragments (< 7 characters) are not parts.
+    const aliasOf = new Map();
+    {
+      const qrKeys = [...new Set(baseStationLogs.filter((row) => decisiveResult(row)).map(rawKeyOf))]
+        .filter((k) => k.length >= 7 && /[^0-9]/.test(k));
+      for (let i = 0; i < qrKeys.length; i += 1000) {
+        const rows = await PartCodeMapping.findAll({
+          where: { customer_qr: { [Op.in]: qrKeys.slice(i, i + 1000) }, is_active: true },
+          attributes: ["old_part_id", "customer_qr"],
+          raw: true,
+        }).catch(() => []);
+        for (const m of rows) {
+          const qr = String(m.customer_qr || "").trim().toUpperCase();
+          const pid = String(m.old_part_id || "").trim().toUpperCase();
+          if (qr && pid && qr !== pid) aliasOf.set(qr, pid);
+        }
+      }
+    }
+    const partKeyOf = (row) => { const k = rawKeyOf(row); return aliasOf.get(k) || k; };
+    // same part-ID rule as the reports (VALID_SCAN_SQL): a 13-digit DPM code or a customer QR of 20–32 characters
+    // starting with a letter; broken reads such as "1026B0681" or "11511-54T00071026A0405" are not parts
+    const isValidPartKey = (k) => /^[0-9]{13}$/.test(k) || /^[A-Z].{19,31}$/.test(k);
+    const latestDecisive = new Map();
+    for (const row of baseStationLogs) {
+      if (!decisiveResult(row)) continue;
+      const k = partKeyOf(row);
+      if (!k || rawKeyOf(row).length < 7 || !isValidPartKey(rawKeyOf(row))) continue;
+      const cur = latestDecisive.get(k);
+      const t = new Date(row.createdAt).getTime() || 0;
+      const ct = cur ? new Date(cur.createdAt).getTime() || 0 : -1;
+      if (!cur || t > ct || (t === ct && Number(row.id) > Number(cur.id))) latestDecisive.set(k, row);
+    }
+    const latestRows = [
+      ...latestDecisive.values(),
+      ...latestOperationRowPerPart(baseStationLogs.filter((row) => rawKeyOf(row).length >= 7 && isValidPartKey(rawKeyOf(row)) && !latestDecisive.has(partKeyOf(row)))),
+    ];
+    const summaryRows = effectiveShiftCode
+      ? applyShiftFilter(latestRows, effectiveShiftCode, shifts, { from, to })
+      : latestRows.filter((row) => isDateWithinRange(row.createdAt, { from, to }));
+    let summary = getQualitySummaryFromOperationLogs(summaryRows.filter((row) => !decisiveResult(row)), getMappedCustomerQr);
+    {
+      const okCount = summaryRows.filter((row) => decisiveResult(row) === "OK").length;
+      const ngCount = summaryRows.filter((row) => decisiveResult(row) === "NG").length;
+      const processedCount = okCount + ngCount;
+      summary = {
+        ...summary,
+        okCount,
+        ngCount,
+        processedCount,
+        accuracy: processedCount > 0 ? Number(((okCount / processedCount) * 100).toFixed(2)) : 0,
+      };
+    }
+    if (isLeakMachine) {
+      const leak = await leakMachineResultCounts(machine.id, { from, to }, effectiveShiftCode, shifts);
+      const processedCount = leak.ok + leak.ng;
+      summary = {
+        ...summary,
+        okCount: leak.ok,
+        ngCount: leak.ng,
+        processedCount,
+        accuracy: processedCount > 0 ? Number(((leak.ok / processedCount) * 100).toFixed(2)) : 0,
+      };
+    }
     const selectedShift = effectiveShiftCode
       ? shifts.find((row) => normalizeShiftAlias(row.shift_code || row.shift_name) === normalizeShiftAlias(effectiveShiftCode)) || currentShift
       : null;
@@ -4236,6 +4941,15 @@ exports.processScan = async (req, res) => {
         });
       }
 
+      // a Part ID (DPM) read by the customer-QR scanner must never be stored as a customer QR (8–9 Oct: 12 parts
+      // were mapped to another part's DPM code this way). The TCP path has the same check.
+      if (isPartIdAsCustomerQr(mappedCustomerQrValue, activePartId)) {
+        return res.status(400).json({
+          error: "This is a Part ID (DPM), not a customer QR. Scan the customer QR label.",
+          reason: "PART_ID_SCANNED_AS_CUSTOMER_QR",
+          customerQrPending: true,
+        });
+      }
       await PartCodeMapping.upsert({
         old_part_id: activePartId,
         customer_qr: mappedCustomerQrValue,
@@ -4812,6 +5526,15 @@ exports.verifyScanForOperator = async (req, res) => {
         });
       }
 
+      // a Part ID (DPM) read by the customer-QR scanner must never be stored as a customer QR (8–9 Oct: 12 parts
+      // were mapped to another part's DPM code this way). The TCP path has the same check.
+      if (isPartIdAsCustomerQr(mappedCustomerQrValue, activePartIdForMachine)) {
+        return res.status(400).json({
+          error: "This is a Part ID (DPM), not a customer QR. Scan the customer QR label.",
+          reason: "PART_ID_SCANNED_AS_CUSTOMER_QR",
+          customerQrPending: true,
+        });
+      }
       await PartCodeMapping.upsert({
         old_part_id: activePartIdForMachine,
         customer_qr: mappedCustomerQrValue,
@@ -6074,6 +6797,15 @@ exports.mapCustomerQrCode = async (req, res) => {
       }
     }
 
+    // a Part ID (DPM) read by the customer-QR scanner must never be stored as a customer QR (8–9 Oct: 12 parts
+    // were mapped to another part's DPM code this way). The TCP path has the same check.
+    if (isPartIdAsCustomerQr(customerQrCode, oldPartId)) {
+      return res.status(400).json({
+        error: "This is a Part ID (DPM), not a customer QR. Scan the customer QR label.",
+        reason: "PART_ID_SCANNED_AS_CUSTOMER_QR",
+        customerQrPending: true,
+      });
+    }
     await PartCodeMapping.upsert({
       old_part_id: oldPartId,
       customer_qr: customerQrCode,
@@ -6335,50 +7067,39 @@ function setDateSeconds(baseDate, seconds) {
   return date;
 }
 
-function getShiftWindowForDate(shift, now = new Date()) {
+// Window of `shift` in the CURRENT production day (the day containing `now`, which starts at the earliest shift
+// start, e.g. 06:00): at 02:00 "Shift A" is the Shift A that ran yesterday 06:00–14:30, not tomorrow's empty one.
+// Returns { from, to } with `to` EXCLUSIVE (shift end second + 1 s, end_time being the last second of the shift).
+// Plant time comes from utils/productionDay, so the result does not depend on the server's time zone.
+function getShiftWindowForDate(shift, now = new Date(), shifts = []) {
+  const PD = require("../utils/productionDay");
   const startSeconds = toShiftSeconds(shift?.start_time);
   const endSeconds = toShiftSeconds(shift?.end_time);
   if (startSeconds === null || endSeconds === null) {
     return null;
   }
-
-  const currentSeconds = getSecondsForDate(now);
-  let from = setDateSeconds(now, startSeconds);
-  let to = setDateSeconds(now, endSeconds);
-
-  if (startSeconds === endSeconds) {
-    to = new Date(from.getTime() + 24 * 60 * 60 * 1000);
-  } else if (startSeconds > endSeconds) {
-    if (currentSeconds <= endSeconds) {
-      from.setDate(from.getDate() - 1);
-    } else {
-      to.setDate(to.getDate() + 1);
-    }
-  }
-
+  const dayShifts = Array.isArray(shifts) && shifts.length ? shifts : [shift];
+  const day = PD.currentProductionDay(dayShifts, now);
+  const offsetSeconds = (startSeconds - PD.dayStartSeconds(dayShifts) + 24 * 3600) % (24 * 3600);
+  const durationSeconds = startSeconds === endSeconds ? 24 * 3600 : PD.shiftDurationSeconds(shift);
+  const from = new Date(day.from.getTime() + offsetSeconds * 1000);
+  const to = new Date(from.getTime() + durationSeconds * 1000);
   return { from, to };
 }
 
+// The production day containing `now`: [earliest shift start, +24 h) — see utils/productionDay (time-zone safe).
 function getProductionDayWindow(shifts = [], now = new Date()) {
-  const starts = shifts
-    .map((shift) => toShiftSeconds(shift?.start_time))
-    .filter((value) => value !== null);
-  const startSeconds = starts.length ? Math.min(...starts) : 6 * 3600;
-  let from = setDateSeconds(now, startSeconds);
-  if (getSecondsForDate(now) < startSeconds) {
-    from.setDate(from.getDate() - 1);
-  }
-  const to = new Date(from.getTime() + 24 * 60 * 60 * 1000);
-  return { from, to };
+  return require("../utils/productionDay").currentProductionDay(shifts, now);
 }
 
+// Operator page window, { from, to } with `to` EXCLUSIVE.
 function getOperatorStatsDateRange(query, shifts, effectiveShiftCode, currentShift) {
   if (query?.dateFrom || query?.dateTo) {
     return getDateRangeFromQuery(query);
   }
   if (effectiveShiftCode) {
     const selectedShift = shifts.find((row) => normalizeShiftAlias(row.shift_code || row.shift_name) === normalizeShiftAlias(effectiveShiftCode)) || currentShift;
-    const selectedWindow = getShiftWindowForDate(selectedShift);
+    const selectedWindow = getShiftWindowForDate(selectedShift, new Date(), shifts);
     if (selectedWindow) return selectedWindow;
   }
   return getProductionDayWindow(shifts);
@@ -6550,7 +7271,7 @@ function isDateWithinRange(dateValue, range) {
   if (!range?.from || !range?.to) return true;
   const date = new Date(dateValue);
   if (Number.isNaN(date.getTime())) return false;
-  return date >= range.from && date <= range.to;
+  return date >= range.from && date < range.to; // end exclusive
 }
 
 function applyShiftFilter(rows, shiftCode, shifts, range = null) {
@@ -6681,6 +7402,13 @@ exports.getDashboardSummary = async (req, res) => {
       whereConditions.push(`first_scan_at >= :from AND first_scan_at < :to`);
       replacements.from = from;
       replacements.to = to;
+    }
+    // Shift filter on the totals too (it used to apply only to the station counts): the part's first scan decides
+    // its shift, as for the day.
+    const dashShift = normalizeShiftAlias(req.query.shiftCode || req.query.shift_code || "");
+    if (dashShift && shifts.length) {
+      whereConditions.push(`${require("../utils/productionDay").shiftCaseSql("first_scan_at", shifts.map((s) => (s.get ? s.get({ plain: true }) : s)))} = :dashShift`);
+      replacements.dashShift = dashShift;
     }
 
     const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
@@ -6904,12 +7632,15 @@ exports.getDashboardSummary = async (req, res) => {
 
     const agg = aggregatesRes?.[0] || {};
     const scanCounts = await scanCountsPromise;
-    const totalParts = Number(agg.totalParts || 0);
+    const castParts = Number(agg.totalParts || 0);
     // Final OK = parts that passed final inspection (OP160) in the period. The first-scan count only holds parts
     // CAST in the period that already finished, so "Today" showed e.g. 2 OK while OP160 had passed hundreds.
     const totalOK = Math.max(Number(agg.totalOK || 0), Number(scanCounts?.OP160?.ok || 0));
     const totalNG = Number(agg.totalNG || 0);
-    const totalInProgress = Math.max(0, totalParts - totalOK - totalNG);
+    // In progress = parts cast in the period that are still in process; Total = OK + NG + In progress. (Total used to
+    // be the cast count alone, so a day that finished many earlier parts showed OK 1,186 against Total 1,028.)
+    const totalInProgress = Math.max(0, castParts - Number(agg.totalOK || 0) - totalNG);
+    const totalParts = totalOK + totalNG + totalInProgress;
     const scrapRate = (totalOK + totalNG) > 0 ? Number(((totalNG / (totalOK + totalNG)) * 100).toFixed(2)) : (totalParts > 0 ? Number(((totalNG / totalParts) * 100).toFixed(2)) : 0);
     const okRate = (totalOK + totalNG) > 0 ? Number(((totalOK / (totalOK + totalNG)) * 100).toFixed(2)) : 100;
 
@@ -7112,7 +7843,48 @@ exports.getDashboardTrends = async (req, res) => {
   }
 };
 
+// Machine KPIs report: building a 30-day result reads every scan of the range and takes ~10 s, partly on the Node
+// event loop that also serves the scanners. Identical requests within 60 s share one result, and a request that
+// arrives while the same report is still being built waits for it instead of building it again.
+const DASHBOARD_REPORT_TTL_MS = 60 * 1000;
+const dashboardReportCache = new Map(); // key -> { at, status, body } | { pending: Promise }
 exports.getDashboardReport = async (req, res) => {
+  const q = req.query || {};
+  // the page adds _ts / noCache to every request; they must not split the cache. A manual refresh (noCache) still
+  // gets a result at most 15 s old.
+  const key = JSON.stringify(Object.keys(q).filter((k) => k !== "_ts" && k !== "noCache").sort().map((k) => [k, String(q[k])]));
+  const ttl = q.noCache ? 15 * 1000 : DASHBOARD_REPORT_TTL_MS;
+  const hit = dashboardReportCache.get(key);
+  if (hit && !hit.pending && Date.now() - hit.at < ttl) return res.status(hit.status).json(hit.body);
+  if (hit && hit.pending) {
+    try {
+      const done = await hit.pending;
+      return res.status(done.status).json(done.body);
+    } catch (err) { void err; /* fall through and build it */ }
+  }
+  let resolveFn;
+  const pending = new Promise((resolve) => { resolveFn = resolve; });
+  dashboardReportCache.set(key, { pending });
+  const captured = { status: 200, body: null };
+  const capture = {
+    status(code) { captured.status = code; return capture; },
+    json(body) { captured.body = body; return capture; },
+  };
+  try {
+    await getDashboardReportUncached(req, capture);
+  } finally {
+    resolveFn(captured);
+    if (captured.status === 200 && captured.body) {
+      dashboardReportCache.set(key, { at: Date.now(), status: captured.status, body: captured.body });
+      if (dashboardReportCache.size > 50) dashboardReportCache.delete(dashboardReportCache.keys().next().value);
+    } else {
+      dashboardReportCache.delete(key);
+    }
+  }
+  return res.status(captured.status).json(captured.body);
+};
+
+async function getDashboardReportUncached(req, res) {
   try {
     const { from, to } = getDateRangeFromQuery(req.query);
     const shiftCodeFilter = req.query.shiftCode ? String(req.query.shiftCode).trim().toUpperCase() : null;
@@ -7215,18 +7987,19 @@ exports.getDashboardReport = async (req, res) => {
       if (chunk.length === 0) {
         continue;
       }
-      const chunkRows = await PartCodeMapping.findAll({
-        where: {
-          [Op.or]: [
-            { old_part_id: { [Op.in]: chunk } },
-            { customer_qr: { [Op.in]: chunk } },
-          ],
-          is_active: true,
-        },
-        attributes: ["old_part_id", "customer_qr"],
-        order: [["updatedAt", "DESC"]],
+      // Two index seeks (old_part_id, customer_qr) instead of one "old IN (…) OR qr IN (…)" query: SQL Server
+      // scanned the table for the OR form (~2 s per 1 000 IDs → ~60 s for a 30-day Machine KPIs tab). Same rows:
+      // merged, de-duplicated by id and kept newest first.
+      const mappingQuery = (column) => PartCodeMapping.findAll({
+        where: { [column]: { [Op.in]: chunk }, is_active: true },
+        attributes: ["id", "old_part_id", "customer_qr", "updatedAt"],
         raw: true,
       });
+      const [byOldPart, byCustomerQr] = await Promise.all([mappingQuery("old_part_id"), mappingQuery("customer_qr")]);
+      const chunkRowsById = new Map();
+      for (const row of [...byOldPart, ...byCustomerQr]) chunkRowsById.set(row.id, row);
+      const chunkRows = [...chunkRowsById.values()]
+        .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
       dashboardPartCodeMappings.push(...chunkRows);
     }
     const customerQrByPartId = dashboardPartCodeMappings.reduce((acc, row) => {
@@ -7405,6 +8178,23 @@ exports.getDashboardReport = async (req, res) => {
       ];
     }));
     const machineHealthById = Object.fromEntries(machineHealthEntries);
+
+    // OK / NG per machine by the reports' rule (Historical gate view, Operator page): each part's latest OK / NG scan
+    // at the machine in the window (BLOCK and other non-decisive rows ignored, shift of that scan); leak testers from
+    // their own leak results. The per-row tally above counted every scan row and put all OP150 bypass rows on the
+    // first leak tester.
+    if (!requestedPartId && !operatorIdFilter && !req.query.status) {
+      try {
+        const decisive = await machineDecisiveCounts(machineRows, { from, to }, shiftCodeFilter, shifts);
+        for (const [id, c] of decisive) {
+          if (!machineCardMap[id]) continue;
+          machineCardMap[id].okCount = c.ok;
+          machineCardMap[id].ngCount = c.ng;
+        }
+      } catch (err) {
+        console.warn("[DASHBOARD_REPORT] decisive machine counts failed, using scan tally:", err.message);
+      }
+    }
 
     const machineCards = Object.values(machineCardMap)
       .map((row) => {
@@ -8000,10 +8790,8 @@ exports.getDashboardReport = async (req, res) => {
           : aggregateLeakState === "PASSED"
             ? "OK"
             : "IN_PROGRESS";
-        const current = group.operations.get(LEAKTEST_OPERATION);
-        const priority = aggregateLeakStatus === "NG" ? 3 : aggregateLeakStatus === "OK" ? 2 : 1;
-        const currentPriority = current === "NG" ? 3 : current === "OK" ? 2 : 1;
-        if (!current || priority >= currentPriority) {
+        // the latest leak test decides OP150 (a retest OK overrides an earlier NG); pending keeps what is there
+        if (aggregateLeakStatus !== "IN_PROGRESS" || !group.operations.get(LEAKTEST_OPERATION)) {
           group.operations.set(LEAKTEST_OPERATION, aggregateLeakStatus);
         }
       }
@@ -8336,6 +9124,103 @@ function shiftBreakdownSql({ whereSql = "", shifts = [], isOpGate = false, isLea
 }
 
 /**
+ * Station OK / NG for OP100–OP160 inside a date window, from ONE read of the scan log (two queries in parallel).
+ * Same rule as the Historical Report with a station selected (historicalReportController loadGateSet):
+ *  1. per part per station, the DECISIVE scan = the latest OK / NG scan since the window start (a log counts for a
+ *     station when its operation_no OR station_no is that station). BLOCK / INTERLOCKED / pending rows never decide,
+ *     and IDs shorter than 7 characters are scanner fragments, not parts. The part is kept when that scan falls
+ *     before the window end and, with a shift filter, in that shift (same rule as shiftCaseSql);
+ *  2. the report rows (other filters + first scan before the window end) whose part_id or customer_qr was scanned
+ *     at any station in the window — written as two joins + UNION, never "part_id IN (…) OR customer_qr IN (…)",
+ *     which made SQL Server pick plans that ran for 60 s;
+ *  3. each row counted once per station whose kept set holds its part_id or customer_qr, as OK / NG by the result
+ *     of the decisive scan itself (the later of its part_id / customer_qr scans) — not the report's opXXX_status
+ *     column, which can lag behind or be overwritten by a later blocked re-scan.
+ * SQL Server's case-insensitive, trailing-space-insensitive matching is reproduced on the keys.
+ */
+async function stationOpCountsFromLogs(ops, { prWhereSql, replacements }, ctx) {
+  const PD = require("../utils/productionDay");
+  const key = (v) => (v === null || v === undefined ? null : String(v).replace(/ +$/, "").toUpperCase());
+  const opList = ops.map((o) => `'${o}'`).join(", ");
+  const decisiveScan = "UPPER(result) IN ('OK', 'NG') AND LEN(part_id) >= 7";
+  const scanned = `SELECT DISTINCT part_id FROM OperationLogs
+     WHERE createdAt >= :scanFrom AND (operation_no IN (${opList}) OR station_no IN (${opList})) AND ${decisiveScan}`;
+  const prWhere = prWhereSql ? `${prWhereSql} AND` : "WHERE";
+  const cols = `pr.id, pr.part_id, pr.customer_qr`;
+  const [logRows, reportRows] = await Promise.all([
+    sequelize.query(`
+      SELECT part_id, operation_no, station_no, UPPER(result) AS result, createdAt AS at, id FROM (
+        SELECT part_id, operation_no, station_no, result, createdAt, id,
+               ROW_NUMBER() OVER (PARTITION BY part_id, operation_no, station_no ORDER BY createdAt DESC, id DESC) AS rn
+          FROM OperationLogs
+         WHERE createdAt >= :scanFrom AND (operation_no IN (${opList}) OR station_no IN (${opList})) AND ${decisiveScan}
+      ) x WHERE rn = 1`,
+    { replacements: { scanFrom: ctx.from }, type: sequelize.QueryTypes.SELECT }),
+    sequelize.query(`
+      SELECT ${cols} FROM [RICO_IOT].[dbo].[ProductionReports] pr JOIN (${scanned}) g ON g.part_id = pr.part_id
+      ${prWhere} pr.first_scan_at < :scanTo
+      UNION
+      SELECT ${cols} FROM [RICO_IOT].[dbo].[ProductionReports] pr JOIN (${scanned}) g ON g.part_id = pr.customer_qr
+      ${prWhere} pr.first_scan_at < :scanTo`,
+    { replacements: { ...replacements, scanFrom: ctx.from, scanTo: ctx.to }, type: sequelize.QueryTypes.SELECT }),
+  ]);
+
+  // decisive (latest OK / NG) scan per station per part ID: { t, id, result } — ties broken by log id
+  const latest = new Map(ops.map((op) => [op, new Map()]));
+  const later = (a, b) => (!a ? b : !b ? a : (b.t > a.t || (b.t === a.t && b.id > a.id)) ? b : a);
+  const note = (st, k, scan) => { const m = latest.get(st); if (m) m.set(k, later(m.get(k), scan)); };
+  for (const r of logRows) {
+    const k = key(r.part_id);
+    if (k === null || k.length < 7) continue;
+    const scan = { t: new Date(r.at).getTime(), id: Number(r.id) || 0, result: key(r.result) };
+    const a = key(r.operation_no), b = key(r.station_no);
+    note(a, k, scan);
+    if (b !== a) note(b, k, scan);
+  }
+
+  const toMs = new Date(ctx.to).getTime();
+  const shiftFilter = ctx.shiftCodeFilter && ctx.shifts.length ? key(ctx.shiftCodeFilter) : null;
+  const shiftDefs = shiftFilter ? ctx.shifts.map((s) => ({
+    a: PD.timeToSeconds(s.start_time ?? s.startTime),
+    b: PD.timeToSeconds(s.end_time ?? s.endTime),
+    code: String(s.shift_code || s.shiftCode || ""),
+  })).filter((s) => s.a !== null && s.b !== null && s.code) : [];
+  const shiftOf = (ms) => {
+    const sec = PD.plantSecondOfDay(new Date(ms));
+    const hit = shiftDefs.find((s) => (s.a <= s.b ? sec >= s.a && sec <= s.b : sec >= s.a || sec <= s.b));
+    return hit ? key(hit.code) : "UNASSIGNED";
+  };
+  const gate = new Map();
+  latest.forEach((byKey, op) => {
+    const set = new Set();
+    byKey.forEach((scan, k) => {
+      if (scan.t >= toMs) return;
+      if (shiftFilter && shiftOf(scan.t) !== shiftFilter) return;
+      set.add(k);
+    });
+    gate.set(op, set);
+  });
+
+  const out = Object.fromEntries(ops.map((op) => [op, { ok: 0, ng: 0 }]));
+  const seen = new Set();
+  reportRows.forEach((r) => {
+    if (seen.has(r.id)) return;
+    seen.add(r.id);
+    const pk = key(r.part_id), qk = key(r.customer_qr);
+    ops.forEach((op) => {
+      const set = gate.get(op);
+      if (!((pk !== null && set.has(pk)) || (qk !== null && set.has(qk)))) return;
+      // result of the decisive scan (the later one when both the part ID and the customer QR were scanned)
+      const byKey = latest.get(op);
+      const scan = later(pk !== null ? byKey.get(pk) : null, qk !== null ? byKey.get(qk) : null);
+      if (scan?.result === "OK") out[op].ok += 1;
+      else if (scan?.result === "NG") out[op].ng += 1;
+    });
+  });
+  return out;
+}
+
+/**
  * Station results counted the way the station / operator sees them (same rule as the Historical Report with a
  * station selected): a part counts at a station when that station's LATEST scan of it falls in the selected
  * production-day window (and shift), with the station's own OK / NG result. Leak machines count by leak result time.
@@ -8362,25 +9247,33 @@ async function stationCountsByScan(query, ctx) {
   const out = {};
 
   const ops = ["OP100", "OP110", "OP120", "OP130", "OP140", "OP160"];
-  const opRows = await Promise.all(ops.map((op) => {
-    const c = timeCond("MAX(createdAt)");
-    // only logs from the window start (index on createdAt): a latest scan inside the window is always >= its start
-    const since = ctx.isAllTime ? "" : " AND createdAt >= :scanFrom";
-    const sub = `SELECT part_id FROM OperationLogs WHERE (operation_no = '${op}' OR station_no = '${op}')${since} GROUP BY part_id${c ? ` HAVING ${c}` : ""}`;
-    const col = `pr.${op.toLowerCase()}_status`;
-    return sequelize.query(`
-      SELECT SUM(CASE WHEN ${col} IN ${OK_LIST} THEN 1 ELSE 0 END) AS ok,
-             SUM(CASE WHEN ${col} IN ${NG_STATUS_LIST} THEN 1 ELSE 0 END) AS ng
-      FROM [RICO_IOT].[dbo].[ProductionReports] pr
-      ${where} (pr.part_id IN (${sub}) OR pr.customer_qr IN (${sub}))${ctx.isAllTime ? "" : " AND pr.first_scan_at < :scanTo"}`, { replacements: repl, type: sequelize.QueryTypes.SELECT });
-  }));
-  ops.forEach((op, i) => { out[op] = { ok: Number(opRows[i]?.[0]?.ok || 0), ng: Number(opRows[i]?.[0]?.ng || 0) }; });
+  // With a date window the scan log is read once for all stations (see stationOpCountsFromLogs). The old form —
+  // one "part_id IN (sub) OR customer_qr IN (sub)" query per station — made SQL Server pick plans that ran for
+  // 60 s on a single day. All time (no window) keeps the SQL form, with the same decisive-scan rule: only OK / NG
+  // scans of real part IDs (7+ characters) count, and the result is that latest OK / NG scan's own result.
+  const opCountsPromise = ctx.isAllTime
+    ? Promise.all(ops.map((op) => {
+      const c = timeCond("MAX(createdAt)");
+      const decisive = `(operation_no = '${op}' OR station_no = '${op}') AND UPPER(result) IN ('OK', 'NG') AND LEN(part_id) >= 7`;
+      const sub = `SELECT part_id FROM OperationLogs WHERE ${decisive} GROUP BY part_id${c ? ` HAVING ${c}` : ""}`;
+      const res = `(SELECT TOP 1 UPPER(o.result) FROM OperationLogs o
+          WHERE (o.operation_no = '${op}' OR o.station_no = '${op}') AND UPPER(o.result) IN ('OK', 'NG') AND LEN(o.part_id) >= 7
+            AND o.part_id IN (pr.part_id, pr.customer_qr) ORDER BY o.createdAt DESC, o.id DESC)`;
+      return sequelize.query(`
+        SELECT SUM(CASE WHEN r = 'OK' THEN 1 ELSE 0 END) AS ok,
+               SUM(CASE WHEN r = 'NG' THEN 1 ELSE 0 END) AS ng
+        FROM (SELECT ${res} AS r
+          FROM [RICO_IOT].[dbo].[ProductionReports] pr
+          ${where} (pr.part_id IN (${sub}) OR pr.customer_qr IN (${sub}))) x`, { replacements: repl, type: sequelize.QueryTypes.SELECT });
+    })).then((opRows) => Object.fromEntries(ops.map((op, i) => [op, { ok: Number(opRows[i]?.[0]?.ok || 0), ng: Number(opRows[i]?.[0]?.ng || 0) }])))
+    : stationOpCountsFromLogs(ops, { prWhereSql: base.prWhereSql, replacements: base.replacements }, ctx);
 
   // leak machines: by the machine that tested the part and the leak result time (stored as plant time + "Z")
   const leakJson = (path) => `(CASE WHEN ISJSON(pr.leak_data) = 1 THEN JSON_VALUE(pr.leak_data, '${path}') END)`;
   const leakTime = `TODATETIMEOFFSET(DATEADD(MINUTE, -${PD.PLANT_OFFSET_MIN}, TRY_CAST(${leakJson("$.cycleEndTime")} AS datetime2)), 0)`;
   const lc = timeCond(leakTime);
-  const [leakRows, leakMachines] = await Promise.all([
+  const [opCounts, leakRows, leakMachines] = await Promise.all([
+    opCountsPromise,
     sequelize.query(`
       SELECT ${leakJson("$.matchedMachineId")} AS mid, ${leakJson("$.matchedMachineName")} AS mname,
              SUM(CASE WHEN UPPER(${leakJson("$.result")}) IN ${OK_LIST} THEN 1 ELSE 0 END) AS ok,
@@ -8390,6 +9283,7 @@ async function stationCountsByScan(query, ctx) {
       GROUP BY ${leakJson("$.matchedMachineId")}, ${leakJson("$.matchedMachineName")}`, { replacements: repl, type: sequelize.QueryTypes.SELECT }),
     Machine.findAll({ attributes: ["id", "machine_name", "operation_no"], raw: true }).catch(() => []),
   ]);
+  ops.forEach((op) => { out[op] = opCounts[op] || { ok: 0, ng: 0 }; });
   const nameById = new Map((leakMachines || []).map((m) => [String(m.id), String(m.machine_name || "")]));
   const leakCode = { 1: "Leak-Test-01", 2: "Leak-Test-02", 3: "Leak Test-03" };
   ["Leak-Test-01", "Leak-Test-02", "Leak Test-03"].forEach((c) => { out[c] = { ok: 0, ng: 0 }; });
@@ -8670,10 +9564,67 @@ async function buildRejectionFilterContext(query = {}) {
 }
 
 // ─── Modular Endpoint 1: Summary & Quality Gates ────────────────────────────
+// Rejection summary: 7–20 s on long ranges (station scan counts + leak results). Identical requests within 60 s
+// (15 s when the page asks for fresh data) share one result, and a request arriving while the same summary is being
+// built waits for it instead of running the queries again — several viewers opening the page cost one build.
+const rejectionSummaryCache = new Map(); // key -> { at, status, body } | { pending: Promise }
 exports.getRejectionSummary = async (req, res) => {
+  const q = req.query || {};
+  const key = JSON.stringify(Object.keys(q).filter((k) => k !== "_ts" && k !== "noCache").sort().map((k) => [k, String(q[k])]));
+  const ttl = q.noCache ? 15 * 1000 : 60 * 1000;
+  const hit = rejectionSummaryCache.get(key);
+  if (hit && !hit.pending && Date.now() - hit.at < ttl) return res.status(hit.status).json(hit.body);
+  if (hit && hit.pending) {
+    try {
+      const done = await hit.pending;
+      if (done.body) return res.status(done.status).json(done.body);
+    } catch (err) { void err; }
+  }
+  let resolveFn;
+  rejectionSummaryCache.set(key, { pending: new Promise((resolve) => { resolveFn = resolve; }) });
+  const captured = { status: 200, body: null };
+  const capture = {
+    status(code) { captured.status = code; return capture; },
+    json(body) { captured.body = body; return capture; },
+  };
+  try {
+    await getRejectionSummaryUncached(req, capture);
+  } finally {
+    resolveFn(captured);
+    if (captured.status === 200 && captured.body) {
+      rejectionSummaryCache.set(key, { at: Date.now(), status: captured.status, body: captured.body });
+      if (rejectionSummaryCache.size > 50) rejectionSummaryCache.delete(rejectionSummaryCache.keys().next().value);
+    } else {
+      rejectionSummaryCache.delete(key);
+    }
+  }
+  return res.status(captured.status).json(captured.body);
+};
+
+async function getRejectionSummaryUncached(req, res) {
   try {
     const ctx = await buildRejectionFilterContext(req.query);
     const { replacements, whereSql, stationLabelMap, shifts, dateFrom, dateTo, shiftCodeFilter, machineNameFilter, partNameFilter, dieNameFilter } = ctx;
+
+    // die × production day (first scan, 06:00 → 06:00 plant time): parts, OK, NG — same part filter and NG rule as
+    // dieStats, for the per-die trend of the Die Performance tab. Runs alongside the summary queries.
+    const dieDailyPromise = (() => {
+      const PDd = require("../utils/productionDay");
+      const shiftMin = PDd.PLANT_OFFSET_MIN - Math.round(PDd.dayStartSeconds(shifts) / 60);
+      const NG_EXPR = `(overall_status IN ('NG', 'FAILED') OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR JSON_VALUE(leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED'))`;
+      const DAY = `CONVERT(varchar(10), CAST(DATEADD(MINUTE, ${shiftMin}, first_scan_at) AS date), 23)`;
+      return sequelize.query(`
+        SELECT die_name AS die, ${DAY} AS day, COUNT(*) AS parts,
+          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') AND (CASE WHEN ${NG_EXPR} THEN 1 ELSE 0 END) = 0 THEN 1 ELSE 0 END) AS ok,
+          SUM(CASE WHEN ${NG_EXPR} THEN 1 ELSE 0 END) AS ng
+        FROM [RICO_IOT].[dbo].[ProductionReports] WITH (NOLOCK)
+        ${whereSql ? whereSql + " AND" : "WHERE"} die_name IS NOT NULL AND die_name <> '' AND die_name <> '-' AND first_scan_at IS NOT NULL
+        GROUP BY die_name, ${DAY}
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[REJECTION] dieDaily query error:", err.message);
+        return [];
+      });
+    })();
 
     // station figures (by station scan time) start now and run alongside the summary queries
     const scanCountsPromise = stationCountsByScan(req.query, ctx).catch((err) => {
@@ -8685,6 +9636,7 @@ exports.getRejectionSummary = async (req, res) => {
         SELECT 
           COUNT(*) as totalParts,
           SUM(CASE WHEN (op160_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') OR overall_status IN ('OK', 'PASSED')) AND COALESCE(overall_status, '') NOT IN ('NG', 'FAILED') THEN 1 ELSE 0 END) as totalOK,
+          SUM(CASE WHEN ${PART_NG_SQL} THEN 0 WHEN ${PART_OK_SQL} THEN 1 ELSE 0 END) as cohortOK,
           SUM(CASE WHEN (
             overall_status IN ('NG', 'FAILED')
             OR op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
@@ -8788,7 +9740,7 @@ exports.getRejectionSummary = async (req, res) => {
           ) THEN 1 ELSE 0 END) as leak03_ok,
           SUM(CASE WHEN op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG') OR (machine_name LIKE '%Final%' AND (overall_status IN ('NG', 'FAILED') OR op160_status IN ('NG','FAIL'))) THEN 1 ELSE 0 END) as op160_ng,
           SUM(CASE WHEN op160_status IN ('OK', 'PASSED', 'ENDED_OK', 'COMPLETED_OK') OR (machine_name LIKE '%Final%' AND overall_status IN ('OK', 'PASSED')) THEN 1 ELSE 0 END) as op160_ok
-        FROM [RICO_IOT].[dbo].[ProductionReports]
+        FROM [RICO_IOT].[dbo].[ProductionReports] pr
         ${whereSql}
       `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
         console.warn("[REJECTION] summary agg query error:", err.message);
@@ -8831,11 +9783,13 @@ exports.getRejectionSummary = async (req, res) => {
     const totalParts = Number(agg.totalParts || 0);
     const op160Ok = Number(agg.op160_ok || 0);
     const rawTotalOk = Number(agg.totalOK || 0);
-    const totalOK = Math.max(rawTotalOk, op160Ok);
+    let totalOK = Math.max(rawTotalOk, op160Ok);
     const totalNG = Number(agg.totalNG || 0);
-    const inProgress = Math.max(0, totalParts - totalOK - totalNG);
-    const completedProduction = totalOK + totalNG;
-    const rejectRate = completedProduction > 0 ? Number(((totalNG / completedProduction) * 100).toFixed(2)) : 0;
+    // In progress = parts cast in the period still in process; Total = OK + NG + In progress (Dashboard / Historical)
+    // same part-status rule as the Dashboard / Historical (PART_OK_SQL) so the in-progress count is identical
+    const inProgress = Math.max(0, totalParts - Number(agg.cohortOK ?? rawTotalOk) - totalNG);
+    let completedProduction = totalOK + totalNG;
+    let rejectRate = completedProduction > 0 ? Number(((totalNG / completedProduction) * 100).toFixed(2)) : 0;
 
     let qualityGates = [
       { code: "OP100", name: stationLabelMap["OP100"] || "DCM+DPM + OP100", ngCount: Number(agg.op100_ng || 0), okCount: Number(agg.op100_ok || 0) },
@@ -8856,6 +9810,14 @@ exports.getRejectionSummary = async (req, res) => {
     // Station OK / NG as the station sees it (its own scan time in the window) — matches the Historical Report
     // with that station selected and the operator view. The part totals above stay on the first-scan rule.
     const scanCounts = await scanCountsPromise;
+    // OK = parts that passed Final Inspection (OP160) in the period, by its scan — also parts cast earlier. The
+    // first-scan rows alone gave e.g. 133 OK for a day the line passed 324 at Final (Dashboard / Historical rule).
+    if (scanCounts?.OP160 && !ctx.qualityGateFilter && !ctx.statusFilter) {
+      totalOK = Math.max(totalOK, Number(scanCounts.OP160.ok || 0));
+      completedProduction = totalOK + totalNG;
+      rejectRate = completedProduction > 0 ? Number(((totalNG / completedProduction) * 100).toFixed(2)) : 0;
+    }
+    const totalProductionAll = totalOK + totalNG + inProgress;
     if (scanCounts) {
       qualityGates.forEach((gate) => {
         const c = scanCounts[gate.code];
@@ -8887,7 +9849,7 @@ exports.getRejectionSummary = async (req, res) => {
         dieName: dieNameFilter || null,
       },
       summary: {
-        totalProduction: totalParts,
+        totalProduction: totalProductionAll,
         completedProduction,
         totalOK,
         totalNG,
@@ -8898,6 +9860,7 @@ exports.getRejectionSummary = async (req, res) => {
       },
       qualityGates,
       dieStats: dieStatsRes || [],
+      dieDaily: await dieDailyPromise,
       stationLabels: stationLabelMap,
       filterOptions: {
         machines: distinctMachines,
@@ -8907,7 +9870,7 @@ exports.getRejectionSummary = async (req, res) => {
       },
       traceabilityMetrics: {
         traceabilityProduction: totalParts,
-        totalProduction: totalParts,
+        totalProduction: totalProductionAll,
         completedProduction,
         totalOK,
         totalNG,
@@ -8928,61 +9891,98 @@ exports.getRejectionPareto = async (req, res) => {
     const ctx = await buildRejectionFilterContext(req.query);
     const { prWhereSql, replacements } = ctx;
 
-    const paretoRows = await sequelize.query(`
-      SELECT
-        CASE
-          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR pr.leak_data LIKE '%1773%' OR pr.machine_name = 'Leak-Test-01' OR pr.machine_name LIKE '%Leak%01%' THEN 'Leak-Test-01'
-          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR pr.leak_data LIKE '%1774%' OR pr.machine_name = 'Leak-Test-02' OR pr.machine_name LIKE '%Leak%02%' THEN 'Leak-Test-02'
-          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak Test-03' OR JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-03' OR pr.leak_data LIKE '%1776%' OR pr.machine_name = 'Leak Test-03' OR pr.machine_name LIKE '%Leak%03%' THEN 'Leak Test-03'
-          WHEN pr.machine_name LIKE '%Leak%' OR pr.op150_status IN ('NG','FAIL','FAILED') OR pr.rejection_reason LIKE '%Leak%' OR pr.ng_reason LIKE '%Leak%' THEN 'Leak-Test-01'
-          WHEN pr.op120_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Casting PDi' THEN 'OP120'
-          WHEN pr.op130_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Pre Inspection' THEN 'OP130'
-          WHEN pr.op140_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Auto Guaging' THEN 'OP140'
-          WHEN pr.op100_status IN ('NG','FAIL','FAILED') OR pr.machine_name LIKE '%DCM%' THEN 'OP100'
-          WHEN pr.op110_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Laser Marking' THEN 'OP110'
-          WHEN pr.op160_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Final Inspection' THEN 'OP160'
-          ELSE 'OP120'
-        END as gateCode,
-        pr.rejection_reason,
-        pr.rejection_category,
-        pr.ng_reason,
-        p.interlock_reason as parts_interlock_reason,
-        COUNT(*) as cnt
-      FROM [RICO_IOT].[dbo].[ProductionReports] pr
-      LEFT JOIN [RICO_IOT].[dbo].[Parts] p ON p.part_id = pr.part_id
-      ${prWhereSql ? prWhereSql + " AND" : "WHERE"} (
-        pr.overall_status IN ('NG', 'FAILED')
-        OR pr.op100_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
-        OR pr.op110_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
-        OR pr.op120_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
-        OR pr.op130_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
-        OR pr.op140_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
-        OR pr.op150_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
-        OR pr.op160_status IN ('NG', 'FAIL', 'FAILED', 'ENDED_NG', 'COMPLETED_NG')
-        OR (pr.machine_name LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
-        OR (pr.rejection_reason LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
-        OR (pr.ng_reason LIKE '%Leak%' AND pr.overall_status IN ('NG', 'FAILED'))
-        OR JSON_VALUE(pr.leak_data, '$.result') IN ('NG', 'FAIL', 'FAILED')
-      )
-      GROUP BY 
-        CASE
-          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-01' OR pr.leak_data LIKE '%1773%' OR pr.machine_name = 'Leak-Test-01' OR pr.machine_name LIKE '%Leak%01%' THEN 'Leak-Test-01'
-          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-02' OR pr.leak_data LIKE '%1774%' OR pr.machine_name = 'Leak-Test-02' OR pr.machine_name LIKE '%Leak%02%' THEN 'Leak-Test-02'
-          WHEN JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak Test-03' OR JSON_VALUE(pr.leak_data, '$.matchedMachineName') = 'Leak-Test-03' OR pr.leak_data LIKE '%1776%' OR pr.machine_name = 'Leak Test-03' OR pr.machine_name LIKE '%Leak%03%' THEN 'Leak Test-03'
-          WHEN pr.machine_name LIKE '%Leak%' OR pr.op150_status IN ('NG','FAIL','FAILED') OR pr.rejection_reason LIKE '%Leak%' OR pr.ng_reason LIKE '%Leak%' THEN 'Leak-Test-01'
-          WHEN pr.op120_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Casting PDi' THEN 'OP120'
-          WHEN pr.op130_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Pre Inspection' THEN 'OP130'
-          WHEN pr.op140_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Auto Guaging' THEN 'OP140'
-          WHEN pr.op100_status IN ('NG','FAIL','FAILED') OR pr.machine_name LIKE '%DCM%' THEN 'OP100'
-          WHEN pr.op110_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Laser Marking' THEN 'OP110'
-          WHEN pr.op160_status IN ('NG','FAIL','FAILED') OR pr.machine_name = 'Final Inspection' THEN 'OP160'
-          ELSE 'OP120'
-        END,
-        pr.rejection_reason, pr.rejection_category, pr.ng_reason, p.interlock_reason
-    `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
-      console.warn("[REJECTION] Pareto query error:", err.message);
-      return [];
+    /* NG of every quality gate = the DECISIVE scan (Historical page / plant sheet rule):
+         • OP100–OP140 / OP160: the part's latest OK / NG scan at the station in the window (OperationLogs,
+           LEN(part_id) >= 7, BLOCK scans ignored) — NG when that scan is NG; shift and production day = that scan's;
+           category / reason / view / zone = that NG scan's own entry
+         • OP150 leak test (three machines, not in OperationLogs): ProductionReports.leak_data result NG (the
+           part's LATEST leak test decides — a retest OK is OK), at the leak result time, per matched machine — category CRAM
+       The page's other widgets (gauges, pies, Pareto, matrix, calendar, KPI NG) use `ngRecords` from here. */
+    const PDay = require("../utils/productionDay");
+    const ngShifts = ctx.shifts || [];
+    const ngRepl = {};
+    const logTime = [], leakTime = [];
+    if (!ctx.isAllTime) {
+      ngRepl.ngFrom = ctx.from.toISOString();
+      ngRepl.ngTo = ctx.to.toISOString();
+      ngRepl.ngFromL = ctx.from.toISOString().slice(0, 23);
+      ngRepl.ngToL = ctx.to.toISOString().slice(0, 23);
+      logTime.push("o.createdAt >= CAST(:ngFrom AS datetimeoffset) AND o.createdAt < CAST(:ngTo AS datetimeoffset)");
+      leakTime.push("l.leakAt >= CAST(:ngFromL AS datetime2) AND l.leakAt < CAST(:ngToL AS datetime2)");
+    }
+    const logShiftSql = PDay.shiftCaseSql("d.createdAt", ngShifts);
+    const leakShiftSql = PDay.shiftCaseSql("l.leakAt", ngShifts);
+    const ngShiftFilter = ctx.shiftCodeFilter && ngShifts.length ? (ngRepl.ngShift = ctx.shiftCodeFilter, true) : false;
+    const LEAK_J = (path) => `(CASE WHEN ISJSON(pr.leak_data) = 1 THEN JSON_VALUE(pr.leak_data, '${path}') END)`;
+    const [gateNgRows, leakNgRows] = await Promise.all([
+      sequelize.query(`
+        WITH d AS (
+          SELECT o.id, o.part_id, UPPER(o.operation_no) AS op, o.station_no, UPPER(o.result) AS result,
+            o.rejection_category, o.rejection_reason, o.rejection_view, o.rejection_zone, o.rejection_remark, o.interlock_reason,
+            CAST(o.createdAt AS datetime2) AS createdAt,
+            ROW_NUMBER() OVER (PARTITION BY o.part_id, UPPER(o.operation_no) ORDER BY o.createdAt DESC, o.id DESC) AS rn
+          FROM [RICO_IOT].[dbo].[OperationLogs] o WITH (NOLOCK)
+          WHERE UPPER(o.result) IN ('OK', 'NG') AND LEN(o.part_id) >= 7 AND UPPER(o.operation_no) <> 'OP150'
+            ${logTime.length ? `AND ${logTime.join(" AND ")}` : ""}
+        )
+        SELECT d.id, d.part_id, d.op, d.station_no, d.rejection_category, d.rejection_reason, d.rejection_view, d.rejection_zone,
+          d.rejection_remark, d.interlock_reason, d.createdAt, ${logShiftSql} AS shift_code
+        FROM d
+        WHERE d.rn = 1 AND d.result = 'NG'${ngShiftFilter ? ` AND ${logShiftSql} = :ngShift` : ""}
+      `, { replacements: ngRepl, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[REJECTION] Pareto decisive-scan query error:", err.message);
+        return [];
+      }),
+      sequelize.query(`
+        WITH l AS (
+          SELECT pr.id, pr.part_id, pr.customer_qr, pr.die_name, pr.rejection_reason, pr.ng_reason,
+            ${LEAK_J("$.matchedMachineName")} AS machine, ${LEAK_J("$.matchedMachineId")} AS machine_id,
+            DATEADD(MINUTE, -${PDay.PLANT_OFFSET_MIN}, TRY_CAST(${LEAK_J("$.cycleEndTime")} AS datetime2)) AS leakAt
+          FROM [RICO_IOT].[dbo].[ProductionReports] pr WITH (NOLOCK)
+          WHERE ISJSON(pr.leak_data) = 1 AND UPPER(${LEAK_J("$.result")}) IN ('NG', 'FAIL', 'FAILED')
+            AND ${PDay.notStaleRowSql("pr.id")}
+        )
+        SELECT l.*, ${leakShiftSql} AS shift_code FROM l
+        WHERE l.leakAt IS NOT NULL${leakTime.length ? ` AND ${leakTime.join(" AND ")}` : ""}${ngShiftFilter ? ` AND ${leakShiftSql} = :ngShift` : ""}
+      `, { replacements: ngRepl, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[REJECTION] Pareto leak NG query error:", err.message);
+        return [];
+      }),
+    ]);
+
+    // production day (06:00 → 06:00 plant time) of a UTC timestamp
+    const ngDayStart = PDay.dayStartSeconds(ngShifts);
+    const ngDayOf = (t) => {
+      const ms = new Date(String(t).endsWith("Z") || String(t).includes("+") ? t : `${t}Z`).getTime();
+      return Number.isNaN(ms) ? null : new Date(ms + PDay.PLANT_OFFSET_MIN * 60000 - ngDayStart * 1000).toISOString().slice(0, 10);
+    };
+    const ngIso = (t) => { const ms = new Date(String(t).endsWith("Z") || String(t).includes("+") ? t : `${t}Z`).getTime(); return Number.isNaN(ms) ? null : new Date(ms).toISOString(); };
+    const leakCode = (r) => {
+      const n = String(r.machine || "");
+      const m = n.match(/(\d+)\s*$/);
+      return m ? (Number(m[1]) === 3 ? "Leak Test-03" : `Leak-Test-0${Number(m[1])}`) : "Leak-Test-01";
+    };
+    const ngRecords = [];
+    (gateNgRows || []).forEach((r) => {
+      ngRecords.push({
+        id: `log-${r.id}`, partId: r.part_id, gate: r.op, op: r.op, station: r.station_no || r.op,
+        shift: r.shift_code, at: ngIso(r.createdAt), day: ngDayOf(r.createdAt),
+        rawCategory: r.rejection_category || "", reason: r.rejection_reason || "", view: r.rejection_view || "",
+        zone: r.rejection_zone || "", remark: r.rejection_remark || "", interlock: r.interlock_reason || "",
+      });
     });
+    (leakNgRows || []).forEach((r) => {
+      const why = [r.rejection_reason, r.ng_reason].map((x) => String(x || "")).find((x) => /leak/i.test(x)) || "Pressure Leakage Fail (OP150)";
+      ngRecords.push({
+        id: `leak-${r.id}`, partId: r.part_id, customerQr: r.customer_qr || "", gate: leakCode(r), op: "OP150", station: r.machine || leakCode(r),
+        shift: r.shift_code, at: ngIso(r.leakAt), day: ngDayOf(r.leakAt), dieName: r.die_name || "",
+        rawCategory: "CRAM", reason: why, view: "Leak Testing", zone: "Leak Test", remark: "", interlock: "",
+      });
+    });
+    const paretoRows = ngRecords.map((r) => ({
+      gateCode: r.gate, rejection_reason: r.reason, rejection_category: r.rawCategory, ng_reason: r.interlock,
+      parts_interlock_reason: "", rejection_zone: r.zone, cnt: 1, _rec: r,
+    }));
 
     const parseTextField = (text, label) => {
       if (!text || typeof text !== 'string') return '';
@@ -9057,6 +10057,7 @@ exports.getRejectionPareto = async (req, res) => {
       let subZone = splitRejectionZoneHelper(rawSubZone).subZone;
       if (!subZone || subZone === '-') subZone = rawSubZone;
 
+      if (r._rec) { r._rec.category = cat; r._rec.reasonCanonical = rawReason; }
       reasonMap[rawReason] = (reasonMap[rawReason] || 0) + cnt;
       categoryMap[cat] = (categoryMap[cat] || 0) + cnt;
       zoneMap[zone] = (zoneMap[zone] || 0) + cnt;
@@ -9183,6 +10184,13 @@ exports.getRejectionPareto = async (req, res) => {
       categoryPareto,
       zonePareto,
       qualityGateDrillDown,
+      // NG per gate × shift and every decisive NG record (one per part per gate) — the page's single NG source
+      gateShiftNg: ngRecords.reduce((m, r) => { const g = m[r.gate] || (m[r.gate] = { total: 0 }); g.total += 1; g[r.shift || "UNASSIGNED"] = (g[r.shift || "UNASSIGNED"] || 0) + 1; return m; }, {}),
+      // compact: the canonical reason replaces the raw one; the interlock text / raw category are not sent
+      ngRecords: ngRecords.map(({ rawCategory: _c, interlock: _i, reasonCanonical, remark, ...r }) => ({
+        ...r, reason: reasonCanonical || r.reason, ...(remark ? { remark } : {}),
+      })),
+      ngSource: "OperationLogs decisive scan (latest OK/NG per part per station) + leak_data NG",
     });
   } catch (error) {
     console.error("[REJECTION] getRejectionPareto error:", error);
@@ -9252,6 +10260,45 @@ exports.getRejectionDaily = async (req, res) => {
       sequelize.query(`SELECT id, part_id, customer_qr, day, shift, hr FROM (${base}) x WHERE is_ng = 1 AND day IS NOT NULL`, { replacements, type: sequelize.QueryTypes.SELECT }),
     ]);
 
+    // OK = parts that passed Final Inspection (OP160) in that day / shift (latest OK / NG scan there) — the Dashboard
+    // and Historical rule. The first-scan rows only hold parts CAST that day that already finished, so a day showed
+    // e.g. 831 OK while Final passed 1,186 and NG % came out too high. Whole line only (no gate / status filter).
+    if (!isOpGate && !isLeakGate && !ctx.qualityGateFilter && !ctx.statusFilter && replacements.from && replacements.to) {
+      try {
+        const okDay = `CONVERT(char(10), CAST(DATEADD(MINUTE, ${dayShiftMin}, createdAt) AS date), 23)`;
+        const okShift = shifts.length ? PD.shiftCaseSql("createdAt", shifts) : "'UNASSIGNED'";
+        const okHour = `DATEPART(HOUR, DATEADD(MINUTE, ${PD.PLANT_OFFSET_MIN}, createdAt))`;
+        const finalRows = await sequelize.query(`
+          SELECT ${okDay} AS day, ${okShift} AS shift${hourly ? `, ${okHour} AS hr` : ""}, COUNT(*) AS ok
+            FROM (SELECT createdAt, UPPER(result) AS r,
+                         ROW_NUMBER() OVER (PARTITION BY part_id ORDER BY createdAt DESC, id DESC) AS rn
+                    FROM OperationLogs
+                   WHERE (operation_no = 'OP160' OR station_no = 'OP160') AND UPPER(result) IN ('OK', 'NG')
+                     AND LEN(part_id) >= 7 AND createdAt >= :from AND createdAt < :to) x
+           WHERE rn = 1 AND r = 'OK'${ctx.shiftCodeFilter ? ` AND ${okShift} = :shiftCode` : ""}
+           GROUP BY ${okDay}, ${okShift}${hourly ? `, ${okHour}` : ""}`, {
+          replacements: { from: replacements.from, to: replacements.to, shiftCode: ctx.shiftCodeFilter || null },
+          type: sequelize.QueryTypes.SELECT,
+        });
+        const keyOf = (r) => `${r.day}|${r.shift}${hourly ? `|${Number(r.hr)}` : ""}`;
+        const finalOk = new Map(finalRows.map((r) => [keyOf(r), Number(r.ok) || 0]));
+        for (const d of days) {
+          const k = keyOf(d);
+          d.ok = finalOk.get(k) || 0;
+          finalOk.delete(k);
+          d.produced = (Number(d.ok) || 0) + (Number(d.ng) || 0) + (Number(d.wip) || 0);
+        }
+        // days / shifts with Final passes but no part cast in them
+        for (const [k, ok] of finalOk) {
+          const [day, shift, hr] = k.split("|");
+          days.push({ day, shift, ...(hourly ? { hr } : {}), produced: ok, ok, ng: 0, wip: 0 });
+        }
+        days.sort((a, b) => String(a.day).localeCompare(String(b.day)) || String(a.shift).localeCompare(String(b.shift)));
+      } catch (err) {
+        console.warn("[REJECTION] final OK per day failed, using first-scan OK:", err.message);
+      }
+    }
+
     return res.json({
       success: true,
       dayRule: {
@@ -9275,14 +10322,20 @@ exports.getRejectionMlInsights = async (req, res) => {
   try {
     const ctx = await buildRejectionFilterContext(req.query);
     const { replacements, whereSql, dieNameFilter, partNameFilter, machineNameFilter } = ctx;
+    // Root cause / SPC use ONLY parts with DCM shot data: the part's PlcCycleReadings record (shot_number, process
+    // parameters and plc_cycle_time = PlcCycleReadings.cycle_time of that shot). The laser-marking cycle time
+    // (ProductionReports.cycle_time, from the OP110 log) is never mixed in. Parts without a shot record are
+    // excluded and counted in `analysis`.
+    const HAS_SHOT_SQL = "(shot_number IS NOT NULL AND plc_cycle_time IS NOT NULL AND plc_cycle_time > 0)";
+    const shotWhereSql = whereSql ? `${whereSql} AND ${HAS_SHOT_SQL}` : `WHERE ${HAS_SHOT_SQL}`;
 
-    const [mlTelemetryRes, latestLimitsRes] = await Promise.all([
+    const [mlTelemetryRes, latestLimitsRes, coverageRes] = await Promise.all([
       sequelize.query(`
         SELECT
           -- 1. Machine Process Parameters (9)
-          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN COALESCE(plc_cycle_time, cycle_time) ELSE NULL END) as plc_cycle_time_mean_ok,
-          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN COALESCE(plc_cycle_time, cycle_time) ELSE NULL END) as plc_cycle_time_std_ok,
-          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN COALESCE(plc_cycle_time, cycle_time) ELSE NULL END) as plc_cycle_time_mean_ng,
+          AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN plc_cycle_time ELSE NULL END) as plc_cycle_time_mean_ok,
+          STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN plc_cycle_time ELSE NULL END) as plc_cycle_time_std_ok,
+          AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN plc_cycle_time ELSE NULL END) as plc_cycle_time_mean_ng,
           AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_mean_ok,
           STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_std_ok,
           AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN die_open_core_out_time ELSE NULL END) as die_open_core_out_time_mean_ng,
@@ -9421,8 +10474,8 @@ exports.getRejectionMlInsights = async (req, res) => {
           AVG(CASE WHEN overall_status IN ('OK', 'PASSED') THEN slide_temp_s1 ELSE NULL END) as slide_temp_s1_mean_ok,
           STDEV(CASE WHEN overall_status IN ('OK', 'PASSED') THEN slide_temp_s1 ELSE NULL END) as slide_temp_s1_std_ok,
           AVG(CASE WHEN overall_status IN ('NG', 'FAILED') THEN slide_temp_s1 ELSE NULL END) as slide_temp_s1_mean_ng
-        FROM [RICO_IOT].[dbo].[ProductionReports]
-        ${whereSql}
+        FROM [RICO_IOT].[dbo].[ProductionReports] WITH (NOLOCK)
+        ${shotWhereSql}
       `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
         console.warn("[REJECTION] ml telemetry query error:", err.message);
         return [{}];
@@ -9474,6 +10527,22 @@ exports.getRejectionMlInsights = async (req, res) => {
           return [{}];
         }
       })(),
+
+      // how many parts of the period have DCM shot data (analysed) and how many are excluded
+      sequelize.query(`
+        SELECT
+          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') THEN 1 ELSE 0 END) AS ok_total,
+          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') THEN 1 ELSE 0 END) AS ng_total,
+          SUM(CASE WHEN overall_status IN ('OK', 'PASSED') AND ${HAS_SHOT_SQL} THEN 1 ELSE 0 END) AS ok_shot,
+          SUM(CASE WHEN overall_status IN ('NG', 'FAILED') AND ${HAS_SHOT_SQL} THEN 1 ELSE 0 END) AS ng_shot,
+          COUNT(*) AS parts_total,
+          SUM(CASE WHEN ${HAS_SHOT_SQL} THEN 1 ELSE 0 END) AS parts_shot
+        FROM [RICO_IOT].[dbo].[ProductionReports] WITH (NOLOCK)
+        ${whereSql}
+      `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
+        console.warn("[REJECTION] ml coverage query error:", err.message);
+        return [{}];
+      }),
     ]);
 
     const mlRaw = mlTelemetryRes?.[0] || {};
@@ -9608,13 +10677,13 @@ exports.getRejectionMlInsights = async (req, res) => {
     const [sampleRows, anomalyCandidates] = await Promise.all([
       sequelize.query(`
         SELECT * FROM (
-          SELECT TOP 400
+          SELECT TOP 1200
             id, part_id as partId, customer_qr as customerQrCode, machine_name as machineName,
             die_name as dieName, shift_code as shiftCode, overall_status as status,
             rejection_category as category, rejection_reason as reason, ng_reason as ngReason,
             shot_number,
             -- 1. Machine Process Parameters (9)
-            plc_cycle_time, cycle_time, die_open_core_out_time, die_close_core_in_time,
+            plc_cycle_time, plc_cycle_time AS cycle_time, die_open_core_out_time, die_close_core_in_time,
             ejector_time, extract_time, pouring_time, shot_fwd_time, spray_time, curing_time,
             -- 2. Product Parameters (22)
             clamp_tonnage_he_low_mn, clamp_tonnage_he_up_pct, clamp_tonnage_op_low_pct, clamp_tonnage_op_up_pct,
@@ -9638,29 +10707,21 @@ exports.getRejectionMlInsights = async (req, res) => {
               OR (intensification_time IS NOT NULL AND intensification_time > 0)
               OR (v1_speed IS NOT NULL AND v1_speed > 0)
               OR (v3_speed IS NOT NULL AND v3_speed > 0)
-              OR (cycle_time IS NOT NULL AND cycle_time > 0)
               OR (plc_cycle_time IS NOT NULL AND plc_cycle_time > 0)
             )
-          ORDER BY (
-            CASE WHEN metal_pressure IS NOT NULL AND metal_pressure > 0 THEN 2 ELSE 0 END +
-            CASE WHEN furnace_metal_temp IS NOT NULL AND furnace_metal_temp > 0 THEN 2 ELSE 0 END +
-            CASE WHEN biscuit_thickness IS NOT NULL AND biscuit_thickness > 0 THEN 2 ELSE 0 END +
-            CASE WHEN intensification_time IS NOT NULL AND intensification_time > 0 THEN 2 ELSE 0 END +
-            CASE WHEN v1_speed IS NOT NULL AND v1_speed > 0 THEN 1 ELSE 0 END +
-            CASE WHEN v4_speed IS NOT NULL AND v4_speed > 0 THEN 1 ELSE 0 END +
-            CASE WHEN pouring_time IS NOT NULL AND pouring_time > 0 THEN 1 ELSE 0 END +
-            CASE WHEN curing_time IS NOT NULL AND curing_time > 0 THEN 1 ELSE 0 END
-          ) DESC, id DESC
+            AND ${HAS_SHOT_SQL}
+          -- finished OK parts first, spread over the whole period (deterministic hash order, not just the newest)
+          ORDER BY CASE WHEN overall_status IN ('OK', 'PASSED') THEN 0 ELSE 1 END, ABS(CHECKSUM(id)), id DESC
         ) as okParts
         UNION ALL
         SELECT * FROM (
-          SELECT TOP 300
+          SELECT TOP 600
             id, part_id as partId, customer_qr as customerQrCode, machine_name as machineName,
             die_name as dieName, shift_code as shiftCode, overall_status as status,
             rejection_category as category, rejection_reason as reason, ng_reason as ngReason,
             shot_number,
             -- 1. Machine Process Parameters (9)
-            plc_cycle_time, cycle_time, die_open_core_out_time, die_close_core_in_time,
+            plc_cycle_time, plc_cycle_time AS cycle_time, die_open_core_out_time, die_close_core_in_time,
             ejector_time, extract_time, pouring_time, shot_fwd_time, spray_time, curing_time,
             -- 2. Product Parameters (22)
             clamp_tonnage_he_low_mn, clamp_tonnage_he_up_pct, clamp_tonnage_op_low_pct, clamp_tonnage_op_up_pct,
@@ -9694,19 +10755,11 @@ exports.getRejectionMlInsights = async (req, res) => {
             OR (intensification_time IS NOT NULL AND intensification_time > 0)
             OR (v1_speed IS NOT NULL AND v1_speed > 0)
             OR (v3_speed IS NOT NULL AND v3_speed > 0)
-            OR (cycle_time IS NOT NULL AND cycle_time > 0)
             OR (plc_cycle_time IS NOT NULL AND plc_cycle_time > 0)
           )
-          ORDER BY (
-            CASE WHEN metal_pressure IS NOT NULL AND metal_pressure > 0 THEN 2 ELSE 0 END +
-            CASE WHEN furnace_metal_temp IS NOT NULL AND furnace_metal_temp > 0 THEN 2 ELSE 0 END +
-            CASE WHEN biscuit_thickness IS NOT NULL AND biscuit_thickness > 0 THEN 2 ELSE 0 END +
-            CASE WHEN intensification_time IS NOT NULL AND intensification_time > 0 THEN 2 ELSE 0 END +
-            CASE WHEN v1_speed IS NOT NULL AND v1_speed > 0 THEN 1 ELSE 0 END +
-            CASE WHEN v4_speed IS NOT NULL AND v4_speed > 0 THEN 1 ELSE 0 END +
-            CASE WHEN pouring_time IS NOT NULL AND pouring_time > 0 THEN 1 ELSE 0 END +
-            CASE WHEN curing_time IS NOT NULL AND curing_time > 0 THEN 1 ELSE 0 END
-          ) DESC, id DESC
+          AND ${HAS_SHOT_SQL}
+          -- parts rejected overall first, then parts NG at a station that are still in progress
+          ORDER BY CASE WHEN overall_status IN ('NG', 'FAILED') THEN 0 ELSE 1 END, id DESC
         ) as ngParts
       `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
         console.warn("[REJECTION] sampleRows query error:", err.message);
@@ -9721,10 +10774,10 @@ exports.getRejectionMlInsights = async (req, res) => {
           rejection_category as category, rejection_reason as reason, ng_reason as ngReason,
           -- view / zone are not columns: they are parsed from the reject text (ng_reason) where needed
           shot_number,
-          metal_pressure, furnace_metal_temp, biscuit_thickness, cycle_time,
+          metal_pressure, furnace_metal_temp, biscuit_thickness, plc_cycle_time, plc_cycle_time AS cycle_time,
           leak_body_leak_value, first_scan_at, createdAt
         FROM [RICO_IOT].[dbo].[ProductionReports] WITH (NOLOCK)
-        ${whereSql ? whereSql + " AND" : "WHERE"} overall_status IN ('NG', 'FAILED')
+        ${shotWhereSql} AND overall_status IN ('NG', 'FAILED')
         ORDER BY id DESC
       `, { replacements, type: sequelize.QueryTypes.SELECT }).catch((err) => {
         console.warn("[Analytics] Unable to fetch anomaly candidates. Adjusting insights threshold.", err.message);
@@ -9765,12 +10818,38 @@ exports.getRejectionMlInsights = async (req, res) => {
       };
     });
 
+    // analysed / excluded parts (period population) and the sample handed to the browser
+    const cov = coverageRes?.[0] || {};
+    const cnt = (v) => Number(v) || 0;
+    const statusOf = (r) => String(r?.status || "").trim().toUpperCase();
+    const analysis = {
+      scope: "Parts with DCM shot data only (PlcCycleReadings record of the part's shot)",
+      cycleTimeSource: "PlcCycleReadings.cycle_time of the part's shot (ProductionReports.plc_cycle_time)",
+      population: {
+        partsTotal: cnt(cov.parts_total),
+        partsWithShot: cnt(cov.parts_shot),
+        okTotal: cnt(cov.ok_total),
+        ngTotal: cnt(cov.ng_total),
+        okWithShot: cnt(cov.ok_shot),
+        ngWithShot: cnt(cov.ng_shot),
+        okExcluded: Math.max(0, cnt(cov.ok_total) - cnt(cov.ok_shot)),
+        ngExcluded: Math.max(0, cnt(cov.ng_total) - cnt(cov.ng_shot)),
+      },
+      sample: {
+        ok: (sampleRows || []).filter((r) => ["OK", "PASSED"].includes(statusOf(r))).length,
+        ng: (sampleRows || []).filter((r) => !["OK", "PASSED", "IN_PROGRESS"].includes(statusOf(r))).length,
+        inProgress: (sampleRows || []).filter((r) => statusOf(r) === "IN_PROGRESS").length,
+      },
+    };
+
     return res.json({
       success: true,
+      analysis,
       mlInsights: {
         features: featureAnalysis,
         topAnomalies,
         setParams: limitsRow,
+        analysis,
       },
       telemetryRows: sampleRows,
       rows: sampleRows,

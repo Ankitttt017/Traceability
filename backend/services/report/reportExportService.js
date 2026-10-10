@@ -19,6 +19,7 @@ const { generateIndustrialExcel } = require("./excelTemplateEngine");
 const { resolveIndustrialResult } = require("./reportFormatter");
 const { buildStationPairsFromRows } = require("./stationPairBuilder");
 const { toSeconds: parseShiftSeconds } = require("../../utils/time");
+const { shiftCaseSql } = require("../../utils/productionDay");
 const {
   LEAKTEST_OPERATION,
   buildLeaktestIndex,
@@ -758,13 +759,18 @@ function parseCompactQrPartId(partId) {
   const minute = Number(groups.minute);
   const shot = Number(groups.shot);
   if (![day, month, hour, minute, shot].every(Number.isFinite)) return null;
+  // DPM part id = MMDDHHMM + machine code (1 char) + shot counter, e.g. 1008043522978 → 10-08 04:35, code 2, shot 2978.
+  const machineCode = String(groups.machineCode || "").trim().toUpperCase();
+  const year = groups.year !== undefined ? 2000 + Number(groups.year) : null;
   return {
-    key: `${month}|${day}|${hour}|${minute}|${shot}`,
+    key: `${month}|${day}|${hour}|${minute}|${machineCode}|${shot}`,
     day,
     month,
     hour,
     minute,
     shot,
+    machineCode,
+    year: Number.isFinite(year) ? year : null,
     shotRaw: String(groups.shot || "").trim(),
   };
 }
@@ -1039,7 +1045,9 @@ async function applyPlcShiftWhere(whereParts, replacements, shiftCode, recordedC
   const istShiftClause = start < end
     ? `(${istSecondExpr} >= :shiftStartSeconds AND ${istSecondExpr} <= :shiftEndSeconds)`
     : `(${istSecondExpr} >= :shiftStartSeconds OR ${istSecondExpr} <= :shiftEndSeconds)`;
-  whereParts.push(`(${directShiftClause} OR ${istShiftClause})`);
+  // One clause only, by the column's time zone ("raw clock OR clock + 330 min" put a shot in two shifts):
+  // PlcCycleReadings.recorded_at is plant-local time; any other column (created_at …) is UTC.
+  whereParts.push(String(recordedColumn).toLowerCase() === "recorded_at" ? directShiftClause : istShiftClause);
 }
 
 async function applyOperationLogShiftWhere(whereParts, replacements, shiftCode) {
@@ -1073,17 +1081,10 @@ async function applyOperationLogShiftWhere(whereParts, replacements, shiftCode) 
     }
   }
 
-  replacements.operationShiftStartSeconds = start;
-  replacements.operationShiftEndSeconds = end;
-  const localSecondExpr = "(DATEPART(HOUR, ol.createdAt) * 3600 + DATEPART(MINUTE, ol.createdAt) * 60 + DATEPART(SECOND, ol.createdAt))";
-  const istSecondExpr = `(DATEPART(HOUR, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, ol.createdAt)) * 3600 + DATEPART(MINUTE, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, ol.createdAt)) * 60 + DATEPART(SECOND, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, ol.createdAt)))`;
-  const directShiftClause = start < end
-    ? `(${localSecondExpr} >= :operationShiftStartSeconds AND ${localSecondExpr} <= :operationShiftEndSeconds)`
-    : `(${localSecondExpr} >= :operationShiftStartSeconds OR ${localSecondExpr} <= :operationShiftEndSeconds)`;
-  const istShiftClause = start < end
-    ? `(${istSecondExpr} >= :operationShiftStartSeconds AND ${istSecondExpr} <= :operationShiftEndSeconds)`
-    : `(${istSecondExpr} >= :operationShiftStartSeconds OR ${istSecondExpr} <= :operationShiftEndSeconds)`;
-  whereParts.push(`(${directShiftClause} OR ${istShiftClause})`);
+  // OperationLogs.createdAt is UTC: the shift is read from the plant-local clock only (shiftCaseSql, +330 min).
+  // The old "raw clock OR clock + 330 min" put a scan in two shifts, so A + B + C exceeded the day.
+  replacements.operationShiftCode = String(shift.shift_code || shift.shiftCode || "");
+  whereParts.push(`${shiftCaseSql("ol.createdAt", shifts)} = :operationShiftCode`);
 }
 
 async function fetchPlcShotSummary(filters = {}) {
@@ -1349,45 +1350,216 @@ async function fetchLatestPlcReadingsByShotTokens(values = []) {
   return map;
 }
 
-async function fetchLatestPlcReadingsByCompactQr(values = []) {
-  const map = new Map();
-  const compactValues = [...new Map(
-    values
-      .map((value) => parseCompactQrPartId(value))
-      .filter(Boolean)
-      .map((parsed) => [parsed.key, parsed])
-  ).values()];
-  if (!compactValues.length) return map;
+// ── Compact (DPM) part id → PlcCycleReadings shot ─────────────────────────────────────────────
+// The DPM id carries the casting minute, but the PLC records the shot up to ~15 s later (often in the
+// next minute), so an exact shot_minute match missed ~5% of parts. Match by machine + shot number with
+// recorded_at (plant-local, same clock as the id) inside [decoded − 2 min, decoded minute start + 4 min),
+// nearest to the decoded minute first; one bulk query per batch instead of one query per part.
+const COMPACT_QR_MATCH_BEFORE_MS = 2 * 60 * 1000;
+const COMPACT_QR_MATCH_AFTER_MS = 4 * 60 * 1000; // from decoded minute start, exclusive
+const COMPACT_QR_QUERY_PAD_MS = 5 * 60 * 1000;
+const COMPACT_QR_MAX_SHOTS_PER_QUERY = 1000; // keeps far below SQL Server's 2100-parameter limit
+const COMPACT_QR_MAX_SPAN_PER_QUERY_MS = 24 * 60 * 60 * 1000;
+const COMPACT_QR_FUTURE_TOLERANCE_MS = 24 * 60 * 60 * 1000;
+const PLC_MACHINE_NAME_CACHE_MS = 10 * 60 * 1000;
 
-  for (const parsed of compactValues) {
+const plcLookupWarnState = new Map();
+function warnPlcLookup(context, error) {
+  const now = Date.now();
+  const state = plcLookupWarnState.get(context) || { last: 0, suppressed: 0 };
+  if (now - state.last < 60 * 1000) {
+    state.suppressed += 1;
+    plcLookupWarnState.set(context, state);
+    return;
+  }
+  const suppressed = state.suppressed ? ` (+${state.suppressed} suppressed)` : "";
+  console.warn(`[ReportExport] ${context} failed${suppressed}: ${error?.message || error}`);
+  plcLookupWarnState.set(context, { last: now, suppressed: 0 });
+}
+
+// Wall-clock ms (plant-local time expressed as UTC fields) of the minute encoded in the part id.
+// The id has no year: take the latest year that does not put the casting after the scan (Dec → Jan safe).
+function resolveCompactQrShotTime(parsed, referenceDate = null) {
+  if (!parsed) return null;
+  const { month, day, hour, minute } = parsed;
+  if (!(month >= 1 && month <= 12 && day >= 1 && day <= 31 && hour >= 0 && hour < 24 && minute >= 0 && minute < 60)) return null;
+  const build = (year) => {
+    const t = Date.UTC(year, month - 1, day, hour, minute);
+    const d = new Date(t);
+    return d.getUTCMonth() === month - 1 && d.getUTCDate() === day ? t : null;
+  };
+  if (parsed.year) return build(parsed.year);
+  const refMs = referenceDate ? new Date(referenceDate).getTime() : NaN;
+  const refLocal = (Number.isFinite(refMs) ? refMs : Date.now()) + IST_OFFSET_MINUTES * 60 * 1000;
+  const refYear = new Date(refLocal).getUTCFullYear();
+  const sameYear = build(refYear);
+  if (sameYear !== null && sameYear <= refLocal + COMPACT_QR_FUTURE_TOLERANCE_MS) return sameYear;
+  return build(refYear - 1) ?? build(refYear - 2) ?? build(refYear - 3) ?? build(refYear - 4);
+}
+
+function plcRecordedAtMs(row) {
+  const value = row?.recorded_at;
+  if (value instanceof Date) return value.getTime(); // tedious returns the stored local clock as UTC fields
+  if (!value) return NaN;
+  const text = String(value).trim().replace(" ", "T");
+  return Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(text) ? text : `${text}Z`);
+}
+
+// Picks the PLC row for one decoded part from rows already fetched (pure; unit-tested).
+function selectCompactQrShotRow({ shot, timeMs, machineNames = null }, rows = []) {
+  if (!Number.isFinite(timeMs)) return null;
+  const allowed = machineNames && machineNames.length
+    ? new Set(machineNames.map((name) => String(name || "").trim().toUpperCase()))
+    : null;
+  const windowStart = timeMs - COMPACT_QR_MATCH_BEFORE_MS;
+  const windowEnd = timeMs + COMPACT_QR_MATCH_AFTER_MS;
+  const minuteEnd = timeMs + 60 * 1000;
+  let best = null;
+  for (const row of rows) {
+    if (Number(row?.shot_number) !== Number(shot)) continue;
+    if (allowed && !allowed.has(String(row.machine_name || "").trim().toUpperCase())) continue;
+    const t = plcRecordedAtMs(row);
+    if (!Number.isFinite(t) || t < windowStart || t >= windowEnd) continue;
+    const distance = t < timeMs ? timeMs - t : t >= minuteEnd ? t - minuteEnd + 1 : 0;
+    if (!best || distance < best.distance || (distance === best.distance && t > best.t)) {
+      best = { row, distance, t };
+    }
+  }
+  return best ? best.row : null;
+}
+
+// Machine code (9th char of the DPM id) → PlcCycleReadings.machine_name(s).
+// PLC_MACHINE_CODE_MAP='{"2":"UBE 850 T - 02"}' overrides; otherwise derived from the names' trailing number.
+function buildPlcMachineCodeMap(machineNames = [], envValue = process.env.PLC_MACHINE_CODE_MAP) {
+  const map = new Map();
+  for (const name of machineNames) {
+    const trimmed = String(name || "").trim();
+    const match = trimmed.match(/(?:^|[^0-9])(\d{1,3})\s*$/);
+    if (!match) continue;
+    const code = String(Number(match[1]));
+    if (code.length !== 1) continue;
+    if (!map.has(code)) map.set(code, []);
+    map.get(code).push(trimmed);
+  }
+  if (envValue) {
+    try {
+      const parsed = JSON.parse(envValue);
+      for (const [code, value] of Object.entries(parsed || {})) {
+        const names = (Array.isArray(value) ? value : [value]).map((v) => String(v || "").trim()).filter(Boolean);
+        if (names.length) map.set(String(code).trim().toUpperCase(), names);
+      }
+    } catch (error) {
+      warnPlcLookup("PLC_MACHINE_CODE_MAP parse", error);
+    }
+  }
+  return map;
+}
+
+let plcMachineNameCache = { at: 0, names: null, promise: null };
+async function getPlcMachineNames() {
+  const now = Date.now();
+  if (plcMachineNameCache.names && now - plcMachineNameCache.at < PLC_MACHINE_NAME_CACHE_MS) return plcMachineNameCache.names;
+  if (plcMachineNameCache.promise) return plcMachineNameCache.promise;
+  plcMachineNameCache.promise = (async () => {
     try {
       const [rows] = await sequelize.query(
-        `
-          SELECT TOP 1 ${PLC_REPORT_SELECT} FROM ${PLC_READING_TABLE}
-          WHERE TRY_CONVERT(INT, shot_day) = :day
-            AND TRY_CONVERT(INT, shot_month) = :month
-            AND TRY_CONVERT(INT, shot_hour) = :hour
-            AND TRY_CONVERT(INT, shot_minute) = :minute
-            AND (
-              TRY_CONVERT(INT, shot_number) = :shot
-              OR LTRIM(RTRIM(CAST(shot_number AS NVARCHAR(255)))) = :shotRaw
-            )
-          ORDER BY recorded_at DESC
-        `,
-        {
-          replacements: {
-            day: parsed.day,
-            month: parsed.month,
-            hour: parsed.hour,
-            minute: parsed.minute,
-            shot: parsed.shot,
-            shotRaw: parsed.shotRaw,
-          },
-        }
+        `SELECT DISTINCT machine_name FROM ${PLC_READING_TABLE} WHERE machine_name IS NOT NULL`
       );
-      if (rows && rows[0]) map.set(parsed.key, rows[0]);
-    } catch (_) {
-      // Keep report resilient even when schema differs on some installations.
+      const names = (rows || []).map((row) => String(row.machine_name || "").trim()).filter(Boolean);
+      plcMachineNameCache = { at: Date.now(), names, promise: null };
+      return names;
+    } catch (error) {
+      warnPlcLookup("PLC machine name lookup", error);
+      plcMachineNameCache = { at: 0, names: null, promise: null };
+      return null;
+    }
+  })();
+  return plcMachineNameCache.promise;
+}
+
+function formatPlcLocalTimestamp(ms) {
+  return new Date(ms).toISOString().slice(0, 19); // recorded_at is datetime2 in plant-local time
+}
+
+/**
+ * @param {string[]} values compact part ids
+ * @param {{ referenceDateByValue?: Map<string, Date|string> }} options scan time per id (picks the year)
+ * @returns {Map<string, object>} parseCompactQrPartId(id).key → PlcCycleReadings row (PLC_REPORT_SELECT columns)
+ */
+async function fetchLatestPlcReadingsByCompactQr(values = [], options = {}) {
+  const map = new Map();
+  const referenceDateByValue = options.referenceDateByValue instanceof Map ? options.referenceDateByValue : new Map();
+  const entriesByKey = new Map();
+  for (const value of values) {
+    const raw = String(value || "").trim();
+    const parsed = parseCompactQrPartId(raw);
+    if (!parsed) continue;
+    const timeMs = resolveCompactQrShotTime(parsed, referenceDateByValue.get(raw) || null);
+    if (timeMs === null) continue;
+    const existing = entriesByKey.get(parsed.key);
+    if (!existing || timeMs > existing.timeMs) entriesByKey.set(parsed.key, { key: parsed.key, parsed, shot: parsed.shot, timeMs });
+  }
+  if (!entriesByKey.size) return map;
+
+  const machineNames = await getPlcMachineNames();
+  const codeMap = buildPlcMachineCodeMap(machineNames || []);
+  const groups = new Map();
+  for (const entry of entriesByKey.values()) {
+    const names = (entry.parsed.machineCode && codeMap.get(entry.parsed.machineCode)) || null;
+    entry.machineNames = names;
+    const groupKey = names ? names.join("\u0001") : "";
+    if (!groups.has(groupKey)) groups.set(groupKey, []);
+    groups.get(groupKey).push(entry);
+  }
+
+  for (const entries of groups.values()) {
+    entries.sort((a, b) => a.timeMs - b.timeMs);
+    const groupMachines = entries[0].machineNames;
+    let index = 0;
+    while (index < entries.length) {
+      const batch = [];
+      const shots = new Set();
+      const batchStart = entries[index].timeMs;
+      while (index < entries.length) {
+        const entry = entries[index];
+        if (batch.length && entry.timeMs - batchStart > COMPACT_QR_MAX_SPAN_PER_QUERY_MS) break;
+        if (!shots.has(entry.shot) && shots.size >= COMPACT_QR_MAX_SHOTS_PER_QUERY) break;
+        shots.add(entry.shot);
+        batch.push(entry);
+        index += 1;
+      }
+      const fromTs = formatPlcLocalTimestamp(batch[0].timeMs - COMPACT_QR_QUERY_PAD_MS);
+      const toTs = formatPlcLocalTimestamp(batch[batch.length - 1].timeMs + COMPACT_QR_QUERY_PAD_MS);
+      try {
+        const [rows] = await sequelize.query(
+          `
+            SELECT ${PLC_REPORT_SELECT} FROM ${PLC_READING_TABLE}
+            WHERE recorded_at >= :fromTs AND recorded_at <= :toTs
+              AND shot_number IN (:shots)
+              ${groupMachines ? "AND machine_name IN (:machines)" : ""}
+          `,
+          {
+            replacements: {
+              fromTs,
+              toTs,
+              shots: [...shots],
+              ...(groupMachines ? { machines: groupMachines } : {}),
+            },
+          }
+        );
+        const rowsByShot = new Map();
+        for (const row of rows || []) {
+          const shotKey = Number(row.shot_number);
+          if (!rowsByShot.has(shotKey)) rowsByShot.set(shotKey, []);
+          rowsByShot.get(shotKey).push(row);
+        }
+        for (const entry of batch) {
+          const row = selectCompactQrShotRow(entry, rowsByShot.get(Number(entry.shot)) || []);
+          if (row) map.set(entry.key, row);
+        }
+      } catch (error) {
+        warnPlcLookup("Compact QR PLC lookup", error);
+      }
     }
   }
 
@@ -1402,6 +1574,10 @@ async function fetchLatestPlcReadingByMachineShotContext({ shotCandidates = [], 
   const logDate = logCreatedAt ? new Date(logCreatedAt) : null;
   const hasLogDate = Boolean(logDate) && !Number.isNaN(logDate.getTime());
   if (!normalizedMachine || !hasLogDate) return null;
+  // The scan station (e.g. "Laser Marking") is not a PLC casting machine, so this per-part query could
+  // never match; skip it unless the station name really occurs in PlcCycleReadings.
+  const plcMachineNames = await getPlcMachineNames();
+  if (plcMachineNames && !plcMachineNames.some((name) => name.toUpperCase() === normalizedMachine.toUpperCase())) return null;
 
   for (const shot of normalizedShots) {
     try {
@@ -1428,8 +1604,9 @@ async function fetchLatestPlcReadingByMachineShotContext({ shotCandidates = [], 
         }
       );
       if (rows && rows[0]) return enrichPlcReadingDisplay(rows[0]);
-    } catch (_) {
+    } catch (error) {
       // Keep report resilient if context fallback is not supported in some installations.
+      warnPlcLookup("Machine/shot PLC fallback lookup", error);
     }
   }
 
@@ -1677,17 +1854,9 @@ async function fetchProductionFirstScanPartCount(filters = {}) {
     const start = shift ? toShiftSeconds(shift.start_time) : null;
     const end = shift ? toShiftSeconds(shift.end_time) : null;
     if (start !== null && end !== null && start !== end) {
-      replacements.firstScanShiftStartSeconds = start;
-      replacements.firstScanShiftEndSeconds = end;
-      const localSecondExpr = "(DATEPART(HOUR, firstScanAt) * 3600 + DATEPART(MINUTE, firstScanAt) * 60 + DATEPART(SECOND, firstScanAt))";
-      const istSecondExpr = `(DATEPART(HOUR, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, firstScanAt)) * 3600 + DATEPART(MINUTE, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, firstScanAt)) * 60 + DATEPART(SECOND, DATEADD(MINUTE, ${IST_OFFSET_MINUTES}, firstScanAt)))`;
-      const directShiftClause = start < end
-        ? `(${localSecondExpr} >= :firstScanShiftStartSeconds AND ${localSecondExpr} <= :firstScanShiftEndSeconds)`
-        : `(${localSecondExpr} >= :firstScanShiftStartSeconds OR ${localSecondExpr} <= :firstScanShiftEndSeconds)`;
-      const istShiftClause = start < end
-        ? `(${istSecondExpr} >= :firstScanShiftStartSeconds AND ${istSecondExpr} <= :firstScanShiftEndSeconds)`
-        : `(${istSecondExpr} >= :firstScanShiftStartSeconds OR ${istSecondExpr} <= :firstScanShiftEndSeconds)`;
-      firstScanWhereParts.push(`(${directShiftClause} OR ${istShiftClause})`);
+      // firstScanAt = MIN(OperationLogs.createdAt), UTC: one clause on the plant-local clock (shiftCaseSql)
+      replacements.firstScanShiftCode = String(shift.shift_code || shift.shiftCode || "");
+      firstScanWhereParts.push(`${shiftCaseSql("firstScanAt", shifts)} = :firstScanShiftCode`);
     }
   }
   const [rows] = await sequelize.query(
@@ -2173,13 +2342,30 @@ async function fetchProductionData(filters = {}, options = {}) {
         .filter(Boolean)
     )];
     const allPartIdsForCompactQrLookup = [...new Set([...partIdsForPlcLookup, ...oldPartIdsForPlcLookup])];
+    // Earliest scan per id: the compact id has no year, the scan date decides it.
+    const compactQrReferenceDates = new Map();
+    const noteReferenceDate = (id, at) => {
+      const key = String(id || "").trim();
+      const ms = new Date(at || 0).getTime();
+      if (!key || !Number.isFinite(ms) || ms <= 0) return;
+      const prev = compactQrReferenceDates.get(key);
+      if (!prev || ms < prev.getTime()) compactQrReferenceDates.set(key, new Date(ms));
+    };
+    for (const log of deduplicatedLogs) {
+      const pid = String(log.part_id || "").trim();
+      const at = earliestScanByPart.get(pid) || log.createdAt;
+      noteReferenceDate(pid, at);
+      noteReferenceDate(oldPartMap[normalizeKey(pid)], at);
+    }
     plcByPartId = partLookupColumn
       ? await fetchLatestPlcReadingsByColumn(partLookupColumn, partIdsForPlcLookup)
       : new Map();
     plcByUid = plcColumns.has("shot_uid")
       ? await fetchLatestPlcReadingsByColumn("shot_uid", partIdsForPlcLookup)
       : new Map();
-    plcByCompactQr = await fetchLatestPlcReadingsByCompactQr(allPartIdsForCompactQrLookup);
+    plcByCompactQr = await fetchLatestPlcReadingsByCompactQr(allPartIdsForCompactQrLookup, {
+      referenceDateByValue: compactQrReferenceDates,
+    });
     plcByShot = plcColumns.has("shot_number")
       ? await fetchLatestPlcReadingsByShotTokens(
           deduplicatedLogs.flatMap((log) => deriveShotCandidates(log))
@@ -2448,4 +2634,12 @@ module.exports = {
   fetchProductionSummaryMetrics,
   getPlcReadingColumns,
   fetchPlcShotSummary,
+  // Exposed for unit tests / read-only diagnostics.
+  _compactQrShotLink: {
+    parseCompactQrPartId,
+    resolveCompactQrShotTime,
+    selectCompactQrShotRow,
+    buildPlcMachineCodeMap,
+    fetchLatestPlcReadingsByCompactQr,
+  },
 };

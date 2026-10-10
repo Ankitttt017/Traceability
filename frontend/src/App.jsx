@@ -22,7 +22,6 @@ import MasterSettingsDashboard from "./pages/MasterSettingsDashboard";
 import StationControls from "./pages/StationControls";
 import PlcConfiguration from "./pages/PlcConfiguration";
 import IoMonitor from "./pages/IoMonitor";
-import ReportConfiguration from "./pages/ReportConfiguration";
 // import ReportsPage from "./pages/Reports/ReportsPage";
 import HistoricalReportsPage from "./pages/Reports/HistoricalReportsPage";
 import RejectionAnalysis from "./pages/Rejection/RejectionAnalysis";
@@ -74,7 +73,7 @@ const MODULE_REDIRECT_ORDER = [
   { moduleKey: "operator_view", path: APP_ROUTES.operatorView },
   { moduleKey: "packing", path: APP_ROUTES.packing },
   { moduleKey: "packing_management", path: APP_ROUTES.packingManagement },
-  { moduleKey: "reports", path: APP_ROUTES.reports },
+  { moduleKey: "reports", path: APP_ROUTES.historicalReports },
   { moduleKey: "rejection_analysis", path: APP_ROUTES.rejectionAnalysis },
   { moduleKey: "io_monitor", path: APP_ROUTES.ioMonitor },
   { moduleKey: "part_journey", path: APP_ROUTES.partJourney },
@@ -86,7 +85,6 @@ const MODULE_REDIRECT_ORDER = [
   { moduleKey: "parts", path: APP_ROUTES.parts },
   { moduleKey: "rejection_config", path: APP_ROUTES.rejectionConfiguration },
   { moduleKey: "station_control", path: APP_ROUTES.stationControls },
-  { moduleKey: "report_config", path: APP_ROUTES.masterReports },
   { moduleKey: "machines", path: APP_ROUTES.machines },
   { moduleKey: "plc_config", path: APP_ROUTES.plcConfig },
   { moduleKey: "scanners", path: APP_ROUTES.scanners },
@@ -255,14 +253,18 @@ function App() {
               }
             />
 
+            {/* Report Config page was retired; keep old bookmarks working. */}
             <Route
               path={APP_ROUTES.masterReports.slice(1)}
-              element={
-                <ModuleRoute moduleKey="report_config">
-                  <ReportConfiguration />
-                </ModuleRoute>
-              }
+              element={<Navigate to={APP_ROUTES.historicalReports} replace />}
             />
+            {/* The old Reports page was retired too; its bookmarks used to open a blank page. */}
+            <Route
+              path={APP_ROUTES.reports.slice(1)}
+              element={<Navigate to={APP_ROUTES.historicalReports} replace />}
+            />
+            {/* Unknown addresses go to the first page the role can open instead of a blank screen. */}
+            <Route path="*" element={<Navigate to={APP_ROUTES.root} replace />} />
 
             
            {/* <Route

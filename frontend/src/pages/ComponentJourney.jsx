@@ -26,7 +26,41 @@ import {
 const REALTIME_REFRESH_COOLDOWN = 350;
 const FALLBACK_POLL_INTERVAL    = 30000;
 const CATALOG_SYNC_INTERVAL     = 60000;
+const CATALOG_PAGE_SIZE         = 100;
+const CATALOG_SEARCH_DEBOUNCE   = 300;
 const QR_DEDUPE_MS              = 3000;
+
+const isRequestCanceled = (error) =>
+  error?.code === "ERR_CANCELED" || error?.name === "CanceledError" || error?.name === "AbortError";
+
+// Identity of a catalog row: traceability id, raw id, old part id or mapped customer QR.
+const catalogRowIds = (row = {}) =>
+  [row.partId, row.rawPartId, row.displayPartId, row.mappedPartId, row.customerQrCode]
+    .map((value) => String(value || "").trim().toUpperCase())
+    .filter(Boolean);
+
+// Append rows that are not already listed (pages can overlap while new scans arrive).
+const appendCatalogRows = (prev, incoming = []) => {
+  const seen = new Set(prev.map((row) => row.partId));
+  const next = [...prev];
+  for (const row of incoming) {
+    if (!row?.partId || seen.has(row.partId)) continue;
+    seen.add(row.partId);
+    next.push(row);
+  }
+  return next;
+};
+
+// Refresh of page 1: fresh rows first, then everything already loaded that is not in the fresh page.
+const mergeCatalogFirstPage = (prev, fresh = []) => {
+  const freshIds = new Set(fresh.map((row) => row.partId));
+  return appendCatalogRows(fresh.filter((row) => row?.partId), prev.filter((row) => !freshIds.has(row.partId)));
+};
+
+const EMPTY_CATALOG_STATE = {
+  loading: false, loadingMore: false, error: "", moreError: "",
+  total: null, page: 0, hasMore: false, matchType: null, matchKind: null, minSearchLength: null, searched: "",
+};
 
 const toLocalDateTimeInput = (dateValue) => {
   const date = new Date(dateValue);
@@ -48,7 +82,9 @@ const getCurrentProductionDateRange = (anchor = new Date()) => {
   const start = new Date(anchor);
   start.setHours(6, 0, 0, 0);
   if (anchor < start) start.setDate(start.getDate() - 1);
-  const end = new Date(anchor);
+  // whole production day (the server stops at "now") so scans after page load stay inside the range
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
   return { start, end };
 };
 
@@ -397,7 +433,14 @@ const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select
 
   useEffect(() => {
     if (startDate) { const start = new Date(startDate); setTempStart(start); } else { setTempStart(null); }
-    if (endDate) { const end = new Date(endDate); setTempEnd(end); } else { setTempEnd(null); }
+    if (endDate) {
+      const end = new Date(endDate);
+      // a production day ends at 06:00 the next morning — show (and re-apply) the last production day itself
+      if (startDate && end.getHours() === 6 && end.getMinutes() === 0 && end.getSeconds() === 0 && end > new Date(startDate)) {
+        end.setDate(end.getDate() - 1);
+      }
+      setTempEnd(end);
+    } else { setTempEnd(null); }
   }, [startDate, endDate]);
 
   useEffect(() => {
@@ -549,8 +592,8 @@ const DateRangePicker = ({ startDate, endDate, onApply, onClear, label = "Select
           </div>
 
           <div className="date-picker-footer">
-            <button className="clear-btn" onClick={handleClear}>
-              Clear
+            <button className="clear-btn" onClick={handleClear} title="Back to the current production day">
+              Today
             </button>
             <button className="apply-btn" onClick={handleApply}>
               Apply Range
@@ -635,12 +678,16 @@ function normalizeLeakResult(value) {
   if (/^\d+$/.test(token) && Number(token) > 0) return "NG";
   return "";
 }
+// Plant rule: the LATEST leak test decides — NG on one leak machine then OK on a retest = PASSED (all attempts
+// stay listed below), like the latest OK / NG scan at every station.
 function getLeakStationState(station={}) {
-  const readings = station.leakTestReadings?.length > 0 ? station.leakTestReadings : (station.leakTestReading ? [station.leakTestReading] : []);
+  const readings = (station.leakTestReadings?.length > 0 ? station.leakTestReadings : (station.leakTestReading ? [station.leakTestReading] : [])).filter((r) => r && typeof r === "object");
   if (!readings.length) return "";
-  const results = readings.map((reading) => normalizeLeakResult(reading?.Result || reading?.result)).filter(Boolean);
-  if (results.some((result) => result === "NG")) return "FAILED";
-  if (results.length === readings.length && results.every((result) => result === "OK")) return "PASSED";
+  const timeOf = (r) => new Date(r?.cycleEndTime || r?.Cycle_End_Time || 0).getTime() || 0;
+  const latest = readings.map((r, i) => ({ r, i, t: timeOf(r) })).sort((a, b) => a.t - b.t || a.i - b.i).pop().r;
+  const result = normalizeLeakResult(latest?.Result || latest?.result);
+  if (result === "NG") return "FAILED";
+  if (result === "OK") return "PASSED";
   return "IN_PROGRESS";
 }
 function getJourneyStationState(station={}, qrMeta=null, settings={}) {
@@ -1002,6 +1049,21 @@ const ComponentJourney = () => {
   const [qrByStation,      setQrByStation]      = useState({});
   const [stationSettings,  setStationSettings]  = useState(()=>getStationFeatureSettings());
   const [qrModalPartId,    setQrModalPartId]    = useState(null);
+  const [debouncedSearch,  setDebouncedSearch]  = useState("");
+  const [searchWithinFilters, setSearchWithinFilters] = useState(false);
+  const [catalog,          setCatalog]          = useState(EMPTY_CATALOG_STATE);
+
+  const catalogRef             = useRef(EMPTY_CATALOG_STATE);
+  const catalogSeqRef          = useRef(0);
+  const catalogAbortRef        = useRef(null);
+  const catalogMoreAbortRef    = useRef(null);
+  const catalogMoreInFlightRef = useRef(false);
+  const catalogSnapshotRef     = useRef(null);
+  const partsRef               = useRef([]);
+  const filtersRef             = useRef(filters);
+  const sentinelRef            = useRef(null);
+  const loadMoreRef            = useRef(()=>{});
+  const resyncRef              = useRef(()=>Promise.resolve());
 
   const selectedPartIdRef      = useRef("");
   const searchTermRef          = useRef("");
@@ -1037,27 +1099,121 @@ const ComponentJourney = () => {
   },{passed:0,failed:0,inProgress:0,pending:0}),[stationTimeline, qrByStation, stationSettings]);
 
   // ── Data Loading ─────────────────────────────────────────────────────
-  const loadPartCatalog = useCallback(async(search)=>{
-    const rows=await traceabilityApi.partCatalog({
-      search,
-      limit:80,
-      dateFrom: filters.dateFrom || undefined,
-      dateTo: filters.dateTo || undefined,
-      partId: filters.partId || undefined,
-      plantId: filters.plantId || undefined,
-      lineId: filters.lineId || undefined,
-      machineId: filters.machineId || undefined,
-      stationNo: filters.stationNo || undefined,
-      status: filters.status || undefined,
-      operatorId: filters.operatorId || undefined,
-      shiftCode: filters.shiftCode || undefined,
-      lineName: filters.lineName || undefined,
+  // Part catalog is server-paged: page 1 on every filter / search change, next pages while scrolling.
+  // A text search ignores dates / shift / machine / status unless "Within selected filters" is ticked.
+  const updateCatalog = useCallback((patch)=>{
+    setCatalog(prev=>{
+      const next={...prev,...(typeof patch==="function"?patch(prev):patch)};
+      catalogRef.current=next;
+      return next;
     });
-    setParts(rows||[]);
-    if (!selectedPartId&&rows?.length) setSelectedPartId(rows[0].partId);
-    if (selectedPartId&&!(rows||[]).some(e=>e.partId===selectedPartId))
-      setSelectedPartId(rows?.[0]?.partId||"");
-  },[selectedPartId, filters]);
+  },[]);
+
+  const buildCatalogParams = useCallback((page, asOf)=>{
+    const term=String(debouncedSearch||"").trim();
+    const scoped=Boolean(term)&&searchWithinFilters;
+    const useFilters=!term||scoped;
+    return {
+      paged: 1,
+      page,
+      pageSize: CATALOG_PAGE_SIZE,
+      search: term || undefined,
+      scopeSearchToFilters: scoped ? 1 : undefined,
+      partId: filters.partId || undefined,
+      asOf: asOf || undefined,
+      ...(useFilters ? {
+        dateFrom: filters.dateFrom || undefined,
+        dateTo: filters.dateTo || undefined,
+        plantId: filters.plantId || undefined,
+        lineId: filters.lineId || undefined,
+        machineId: filters.machineId || undefined,
+        stationNo: filters.stationNo || undefined,
+        status: filters.status || undefined,
+        operatorId: filters.operatorId || undefined,
+        shiftCode: filters.shiftCode || undefined,
+        lineName: filters.lineName || undefined,
+      } : {}),
+    };
+  },[debouncedSearch, searchWithinFilters, filters]);
+
+  const loadFirstPage = useCallback(async()=>{
+    const seq=++catalogSeqRef.current;
+    catalogAbortRef.current?.abort();
+    catalogMoreAbortRef.current?.abort();
+    catalogMoreInFlightRef.current=false;
+    const controller=new AbortController();
+    catalogAbortRef.current=controller;
+    const term=String(debouncedSearch||"").trim();
+    updateCatalog({loading:true,loadingMore:false,error:"",moreError:""});
+    try {
+      const res=await traceabilityApi.partCatalog(buildCatalogParams(1),{signal:controller.signal});
+      if (seq!==catalogSeqRef.current) return;
+      const rows=appendCatalogRows([],res?.rows||[]);
+      catalogSnapshotRef.current=res?.asOf||null;
+      setParts(rows);
+      updateCatalog({
+        loading:false, loadingMore:false, error:"", moreError:"",
+        total: Number.isFinite(Number(res?.total)) && res?.total!==null ? Number(res.total) : rows.length,
+        page:1, hasMore:Boolean(res?.hasMore),
+        matchType:res?.matchType||null, matchKind:res?.matchKind||null,
+        minSearchLength:res?.minSearchLength||null, searched:term,
+      });
+      const current=selectedPartIdRef.current;
+      if (term&&res?.matchType==="exact"&&rows.length) setSelectedPartId(rows[0].partId);
+      else if (!current||!rows.some(e=>e.partId===current)) setSelectedPartId(rows[0]?.partId||"");
+    } catch(e) {
+      if (isRequestCanceled(e)||seq!==catalogSeqRef.current) return;
+      updateCatalog({loading:false,error:e.response?.data?.error||e.message||"Unable to load parts"});
+    }
+  },[buildCatalogParams, debouncedSearch, updateCatalog]);
+
+  const loadMoreParts = useCallback(async()=>{
+    const state=catalogRef.current;
+    if (state.loading||state.loadingMore||!state.hasMore||catalogMoreInFlightRef.current) return;
+    const seq=catalogSeqRef.current;
+    const nextPage=state.page+1;
+    const controller=new AbortController();
+    catalogMoreAbortRef.current=controller;
+    catalogMoreInFlightRef.current=true;
+    updateCatalog({loadingMore:true,moreError:""});
+    try {
+      const res=await traceabilityApi.partCatalog(buildCatalogParams(nextPage,catalogSnapshotRef.current),{signal:controller.signal});
+      if (seq!==catalogSeqRef.current) return;
+      setParts(prev=>appendCatalogRows(prev,res?.rows||[]));
+      updateCatalog(prev=>({
+        loadingMore:false, page:nextPage, hasMore:Boolean(res?.hasMore),
+        total: prev.total ?? (res?.total ?? null),
+      }));
+    } catch(e) {
+      if (isRequestCanceled(e)||seq!==catalogSeqRef.current) return;
+      updateCatalog({loadingMore:false,moreError:e.response?.data?.error||e.message||"Unable to load more parts"});
+    } finally {
+      if (seq===catalogSeqRef.current) catalogMoreInFlightRef.current=false;
+    }
+  },[buildCatalogParams, updateCatalog]);
+
+  // Periodic / manual refresh: re-read page 1 and merge it in front of what is already loaded.
+  // Scrolled pages and the selected part are kept.
+  const resyncFirstPage = useCallback(async()=>{
+    const seq=catalogSeqRef.current;
+    if (catalogRef.current.loading) return;
+    try {
+      const res=await traceabilityApi.partCatalog(buildCatalogParams(1));
+      if (seq!==catalogSeqRef.current) return;
+      setParts(prev=>mergeCatalogFirstPage(prev,res?.rows||[]));
+      // with only page 1 loaded the fresh snapshot becomes the paging snapshot; deeper pages keep theirs
+      if (catalogRef.current.page<=1) catalogSnapshotRef.current=res?.asOf||catalogSnapshotRef.current;
+      updateCatalog(prev=>({
+        error:"",
+        total: res?.total ?? prev.total,
+        hasMore: prev.page<=1 ? Boolean(res?.hasMore) : prev.hasMore,
+        matchType: res?.matchType ?? prev.matchType,
+        matchKind: res?.matchKind ?? prev.matchKind,
+      }));
+    } catch(e) {
+      if (!isRequestCanceled(e)) throw e;
+    }
+  },[buildCatalogParams, updateCatalog]);
 
   const loadJourney = useCallback(async(partId,showLoader=true)=>{
     if (!partId){setJourneyData(null);return;}
@@ -1108,35 +1264,59 @@ const ComponentJourney = () => {
     const mappedPartId=normalizePartId(payload.mappedPartId||payload.mapped_part_id||payload.dotPinPartId||payload.dot_pin_part_id);
     const isCustomerQrOnly=Boolean(customerQrCode&&mappedPartId&&customerQrCode===mappedPartId);
     const displayPartId=isCustomerQrOnly ? "" : mappedPartId;
-    setParts(prev=>{
-      const idx=prev.findIndex(r=>r.partId===rPartId);
-      if (idx===-1){
-        if (searchTermRef.current) return prev;
-        return [{
-          partId:rPartId,
-          displayPartId:displayPartId||undefined,
-          mappedPartId:mappedPartId||undefined,
-          customerQrCode:customerQrCode||undefined,
-          isCustomerQrOnly,
-          status:resolved||"IN_PROGRESS",
-          currentStation:rStation||null,
-          updatedAt:rTimestamp,
-        },...prev].slice(0,80);
-      }
-      const next=[...prev];
-      next[idx]={
-        ...prev[idx],
-        ...(displayPartId ? { displayPartId } : {}),
-        ...(mappedPartId ? { mappedPartId } : {}),
-        ...(customerQrCode ? { customerQrCode } : {}),
-        ...(customerQrCode && mappedPartId ? { isCustomerQrOnly } : {}),
-        status:resolved||prev[idx].status,
-        currentStation:rStation||prev[idx].currentStation,
-        updatedAt:rTimestamp,
-      };
-      return next;
+    const ids=new Set([rPartId,mappedPartId,customerQrCode].map(v=>String(v||"").trim().toUpperCase()).filter(Boolean));
+    const matches=(row)=>catalogRowIds(row).some(v=>ids.has(v));
+    const patchRow=(row)=>({
+      ...row,
+      ...(displayPartId ? { displayPartId } : {}),
+      ...(mappedPartId ? { mappedPartId } : {}),
+      ...(customerQrCode ? { customerQrCode } : {}),
+      ...(customerQrCode && mappedPartId ? { isCustomerQrOnly } : {}),
+      status:resolved||row.status,
+      currentStation:rStation||row.currentStation,
+      latestStation:rStation||row.latestStation,
+      latestAt:rTimestamp,
+      updatedAt:rTimestamp,
     });
-  },[]);
+    if (partsRef.current.some(matches)) {
+      setParts(prev=>prev.map(row=>matches(row)?patchRow(row):row));
+      return;
+    }
+    // Not listed yet: prepend only when the part belongs to the current list (live range, no search,
+    // no filter the event cannot be checked against) and the event is a real production scan.
+    const f=filtersRef.current;
+    const now=Date.now();
+    const noiseToken=[payload.validationResult,payload.validation_result,payload.interlockReason,payload.interlock_reason,payload.reason]
+      .map(v=>String(v||"").toUpperCase()).join(" ");
+    const isNoiseEvent=/DUPLICATE|ALREADY_|INVALID|NOT_FOUND|NOT_CONFIGURED|VALIDATION_ERROR|BLOCKED/.test(noiseToken)
+      || ["BLOCK","FAIL","REJECT","INVALID"].includes(extractQrDecision(payload));
+    const eventMachineId=String(payload.machineId??payload.machine_id??"").trim();
+    const fits=!String(searchTermRef.current||"").trim()
+      && !isNoiseEvent
+      && !f.status && !f.shiftCode && !f.operatorId && !f.partId && !f.lineName && !f.lineId && !f.plantId
+      && (!f.dateFrom || new Date(f.dateFrom).getTime() <= now)
+      && (!f.dateTo || new Date(f.dateTo).getTime() > now)
+      && (!f.machineId || eventMachineId===String(f.machineId))
+      && (!f.stationNo || rStation===String(f.stationNo).trim().toUpperCase());
+    if (!fits) return;
+    const newRow={
+      partId:rPartId,
+      traceabilityPartId:rPartId,
+      rawPartId:rPartId,
+      displayPartId:displayPartId||undefined,
+      mappedPartId:mappedPartId||undefined,
+      customerQrCode:customerQrCode||undefined,
+      isCustomerQrOnly,
+      status:resolved||"IN_PROGRESS",
+      currentStation:rStation||null,
+      latestStation:rStation||null,
+      latestAt:rTimestamp,
+      updatedAt:rTimestamp,
+    };
+    partsRef.current=[newRow,...partsRef.current];
+    setParts(prev=>prev.some(matches)?prev:[newRow,...prev]);
+    updateCatalog(prev=>({total:(prev.total??0)+1}));
+  },[updateCatalog]);
 
   const processQrSignal = useCallback((payload={})=>{
     if (!hasQrDecision(payload)) return;
@@ -1155,10 +1335,10 @@ const ComponentJourney = () => {
 
   const handleRefresh = useCallback(async()=>{
     setRefreshing(true);
-    try { await loadPartCatalog(searchTerm); await refreshJourneyNow(false); setStationSettings(getStationFeatureSettings()); }
+    try { await resyncFirstPage(); await refreshJourneyNow(false); setStationSettings(getStationFeatureSettings()); }
     catch(e){ setPopup({type:"ERROR",title:"Refresh Failed",message:e.response?.data?.error||"Unable to refresh"}); }
     finally { setRefreshing(false); }
-  },[loadPartCatalog,searchTerm,refreshJourneyNow]);
+  },[resyncFirstPage,refreshJourneyNow]);
 
   const exportJourneyReport = useCallback(async () => {
     const rows = (stationTimeline || []).map((station) => {
@@ -1280,18 +1460,19 @@ const ComponentJourney = () => {
     try {
       await traceabilityApi.resetStation({partId:pId,stationNo:sNo,reason:`Manual reset at ${sNo}`});
       setQrByStation({});setLastQrSignal(null);setQrFeed([]);
-      await Promise.all([refreshJourneyNow(false),loadPartCatalog(searchTermRef.current)]);
+      await Promise.all([refreshJourneyNow(false),resyncFirstPage()]);
       setPopup({type:"SUCCESS",title:"Station Reset",message:`Station ${sNo} reset for part ${pId}`});
     } catch(e){ setPopup({type:"ERROR",title:"Reset Failed",message:e.response?.data?.error||"Unable to reset"}); }
     finally { setResettingStation("");setResetConfirm(null); }
-  },[resetConfirm,selectedPartId,refreshJourneyNow,loadPartCatalog]);
+  },[resetConfirm,selectedPartId,refreshJourneyNow,resyncFirstPage]);
 
   const handleDeletePart = useCallback((partId)=>{
     setParts(prev=>prev.filter(p=>p.partId!==partId));
+    updateCatalog(prev=>({total:prev.total===null?null:Math.max(0,prev.total-1)}));
     if (selectedPartId===partId) {
       setSelectedPartId(""); setJourneyData(null);
     }
-  },[selectedPartId]);
+  },[selectedPartId,updateCatalog]);
 
   // ── Effects ─────────────────────────────────────────────────────────
   useEffect(()=>{ selectedPartIdRef.current=selectedPartId; },[selectedPartId]);
@@ -1314,10 +1495,38 @@ const ComponentJourney = () => {
   },[selectedPartId,stationTimeline,lastQrSignal,qrFeed.length]);
 
   useEffect(()=>{ searchTermRef.current=searchTerm; },[searchTerm]);
+  useEffect(()=>{ partsRef.current=parts; },[parts]);
+  useEffect(()=>{ filtersRef.current=filters; },[filters]);
+  useEffect(()=>{ loadMoreRef.current=loadMoreParts; },[loadMoreParts]);
+  useEffect(()=>{ resyncRef.current=resyncFirstPage; },[resyncFirstPage]);
   useEffect(()=>{
-    const t=setTimeout(()=>loadPartCatalog(searchTerm).catch(e=>setPopup({type:"ERROR",title:"Search Failed",message:e.response?.data?.error||"Unable to load catalog"})),220);
+    const next=String(searchTerm||"").trim();
+    const t=setTimeout(()=>setDebouncedSearch(next),next?CATALOG_SEARCH_DEBOUNCE:0);
     return()=>clearTimeout(t);
-  },[searchTerm,loadPartCatalog]);
+  },[searchTerm]);
+  // page 1 on every filter / search change (stale requests are aborted inside loadFirstPage)
+  useEffect(()=>{ loadFirstPage(); },[loadFirstPage]);
+  useEffect(()=>()=>{ catalogAbortRef.current?.abort(); catalogMoreAbortRef.current?.abort(); },[]);
+  // infinite scroll: load the next page when the parts list is scrolled to its end
+  // (root = the list's own scroll box, so it works even while the list's bottom edge is below the fold)
+  useEffect(()=>{
+    const target=sentinelRef.current;
+    if (!target||typeof IntersectionObserver==="undefined") return undefined;
+    const observer=new IntersectionObserver((entries)=>{
+      if (entries.some(entry=>entry.isIntersecting)) loadMoreRef.current();
+    },{root:target.closest(".cj-parts-scroll"),rootMargin:"0px 0px 240px 0px"});
+    observer.observe(target);
+    return()=>observer.disconnect();
+  },[]);
+  // a short page leaves the sentinel visible — the observer does not fire again, so check after each load
+  useEffect(()=>{
+    if (!catalog.hasMore||catalog.loading||catalog.loadingMore||catalog.moreError) return;
+    const target=sentinelRef.current;
+    const box=target?.closest(".cj-parts-scroll");
+    if (!target||!box) return;
+    const t=target.getBoundingClientRect(), b=box.getBoundingClientRect();
+    if (t.top<=b.bottom+240) loadMoreRef.current();
+  },[parts.length,catalog.hasMore,catalog.loading,catalog.loadingMore,catalog.moreError]);
   useEffect(()=>{ refreshJourneyNow(true); },[selectedPartId,refreshJourneyNow]);
 
   // ── Socket ──────────────────────────────────────────────────────────
@@ -1352,7 +1561,7 @@ const ComponentJourney = () => {
   },[selectedPartId]);
 
   useEffect(()=>{const t=setInterval(()=>refreshJourneyNow(false),FALLBACK_POLL_INTERVAL);return()=>clearInterval(t);},[refreshJourneyNow]);
-  useEffect(()=>{const t=setInterval(()=>loadPartCatalog(searchTermRef.current).catch(()=>{}),CATALOG_SYNC_INTERVAL);return()=>clearInterval(t);},[loadPartCatalog]);
+  useEffect(()=>{const t=setInterval(()=>{resyncRef.current().catch(()=>{});},CATALOG_SYNC_INTERVAL);return()=>clearInterval(t);},[]);
   useEffect(()=>{
     const sync=async()=>{
       try { const r=await stationSettingsApi.list(); if (r&&Object.keys(r).length>0){setStationSettings(r);saveStationFeatureSettings(r);return;} } catch (_syncError) { void _syncError; }
@@ -1411,7 +1620,8 @@ const ComponentJourney = () => {
     }));
   };
 
-  const handleDateRangeClear = () => {
+  // Date picker "Today" button and the "Today" link on the date chip: back to the default (current production day)
+  const resetDateRangeToToday = () => {
     const range = getCurrentProductionDateRange();
     setFilters((prev) => ({
       ...prev,
@@ -1420,11 +1630,19 @@ const ComponentJourney = () => {
     }));
   };
 
+  // Date chip ✕: remove the date filter → all dates
+  const removeDateFilter = () => {
+    setFilters((prev) => ({ ...prev, dateFrom: "", dateTo: "" }));
+  };
+
   const removeFilter = (key) => {
     setFilters((prev) => ({ ...prev, [key]: "" }));
   };
 
+  // "Reset filters": every filter back to its default (today, all machines / status / shifts), search cleared
   const clearAllFilters = () => {
+    setSearchTerm("");
+    setDebouncedSearch("");
     const range = getCurrentProductionDateRange();
     setFilters({
       dateFrom: toLocalDateTimeInput(range.start), dateTo: toLocalDateTimeInput(range.end), partId: "", plantId: "",
@@ -1437,6 +1655,34 @@ const ComponentJourney = () => {
     if (['dateFrom', 'dateTo'].includes(key)) return false;
     return value && String(value).trim();
   });
+  const hasDateFilter = Boolean(filters.dateFrom && filters.dateTo);
+  const searchActive = Boolean(String(debouncedSearch || "").trim());
+  const filtersIgnoredBySearch = searchActive && !searchWithinFilters;
+  const dateRangeLabel = (() => {
+    if (!hasDateFilter) return "All dates";
+    const from = new Date(filters.dateFrom);
+    const to = new Date(filters.dateTo);
+    const fmt = (d) => d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    const isProductionDays = from.getHours() === 6 && from.getMinutes() === 0 && to.getHours() === 6 && to.getMinutes() === 0;
+    if (isProductionDays) {
+      const lastDay = new Date(to.getTime() - 24 * 3600 * 1000);
+      return lastDay.toDateString() === from.toDateString()
+        ? `Production day ${fmt(from)}`
+        : `Production days ${fmt(from)} → ${fmt(lastDay)}`;
+    }
+    return `${from.toLocaleString("en-IN")} → ${to.toLocaleString("en-IN")}`;
+  })();
+  const searchStatusLabel = (() => {
+    if (!searchActive) return "";
+    if (String(searchTerm || "").trim() !== debouncedSearch || catalog.loading) return "Searching…";
+    if (catalog.error) return "";
+    const total = Number(catalog.total || 0);
+    if (catalog.matchType === "exact" && catalog.matchKind === "shot") return `Exact shot-number matches (${total.toLocaleString()})`;
+    if (catalog.matchType === "exact") return total > 1 ? `Exact matches (${total.toLocaleString()})` : "Exact match";
+    if (catalog.matchType === "partial") return `Partial matches (${total.toLocaleString()})`;
+    if (catalog.minSearchLength) return `No exact match — type at least ${catalog.minSearchLength} characters for a partial search`;
+    return "No matching part";
+  })();
 
   // ── Render ──────────────────────────────────────────────────────────
   return (
@@ -1552,8 +1798,33 @@ const ComponentJourney = () => {
               <input value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
                 placeholder="🔍 Scan Customer QR or enter Part ID / Shot Number…"
                 className="cj-filter-input"
-                style={{paddingLeft:36}}
+                style={{paddingLeft:36,paddingRight:searchTerm?34:undefined}}
               />
+              {searchTerm && (
+                <button type="button" onClick={()=>setSearchTerm("")} title="Clear search" aria-label="Clear search"
+                  style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",width:22,height:22,
+                    borderRadius:6,border:"none",background:C.bg("hover"),cursor:"pointer",
+                    display:"flex",alignItems:"center",justifyContent:"center"}}>
+                  <X size={12} color={C.txt("muted")}/>
+                </button>
+              )}
+            </div>
+            <div style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:"6px 14px",marginTop:6,minHeight:18}}>
+              <label style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:11,fontWeight:600,
+                color:C.txt("muted"),cursor:"pointer",userSelect:"none"}}>
+                <input type="checkbox" checked={searchWithinFilters}
+                  onChange={e=>setSearchWithinFilters(e.target.checked)}/>
+                Search within selected dates &amp; filters
+              </label>
+              {searchStatusLabel && (
+                <span data-testid="cj-search-status" style={{fontSize:11,fontWeight:700,
+                  color: catalog.matchType==="exact" ? C.ok() : catalog.matchType==="partial" ? C.amber() : C.txt("muted")}}>
+                  {searchStatusLabel}
+                </span>
+              )}
+              {filtersIgnoredBySearch && (
+                <span style={{fontSize:11,color:C.txt("muted")}}>Searching all dates — date, shift, machine and status filters are not applied</span>
+              )}
             </div>
           </div>
 
@@ -1571,7 +1842,7 @@ const ComponentJourney = () => {
               startDate={filters.dateFrom}
               endDate={filters.dateTo}
               onApply={handleDateRangeApply}
-              onClear={handleDateRangeClear}
+              onClear={resetDateRangeToToday}
               label="Select Date Range"
             />
             <select
@@ -1613,14 +1884,14 @@ const ComponentJourney = () => {
               onClick={clearAllFilters}
               className="cj-btn-clear"
               style={{justifyContent:"center"}}
+              title="Reset every filter to its default (today, all machines, all status, all shifts) and clear the search"
             >
-              <X size={14} />  Clear All
+              <X size={14} />  Reset Filters
             </button>
           </div>
 
-          {/* Active Filters Chips */}
-          {(activeFilters.length > 0 || (filters.dateFrom && filters.dateTo)) && (
-            <div style={{
+          {/* Active Filters Chips (the date chip is always shown: a range, or "All dates") */}
+          <div style={{
               display:"flex",
               flexWrap:"wrap",
               gap:6,
@@ -1634,15 +1905,15 @@ const ComponentJourney = () => {
                   <span className="remove" onClick={() => removeFilter(key)}>✕</span>
                 </span>
               ))}
-              {filters.dateFrom && filters.dateTo && (
-                <span className="cj-filter-chip date-chip">
-                  <Calendar size={11} />
-                   {new Date(filters.dateFrom).toLocaleDateString()} → {new Date(filters.dateTo).toLocaleDateString()}
-                  <span className="remove" onClick={() => {
-                    setFilters((p) => ({ ...p, dateFrom: "", dateTo: "" }));
-                  }}>✕</span>
-                </span>
-              )}
+              <span className="cj-filter-chip date-chip" data-testid="cj-date-chip">
+                <Calendar size={11} />
+                {dateRangeLabel}
+                {hasDateFilter ? (
+                  <span className="remove" title="Remove the date filter (show all dates)" onClick={removeDateFilter}>✕</span>
+                ) : (
+                  <span className="remove" title="Back to the current production day" onClick={resetDateRangeToToday}>↺ Today</span>
+                )}
+              </span>
               <span style={{
                 fontSize:9,
                 color:C.muted,
@@ -1650,10 +1921,9 @@ const ComponentJourney = () => {
                 marginLeft:"auto",
                 padding:"4px 8px",
               }}>
-                🔢 {activeFilters.length + (filters.dateFrom && filters.dateTo ? 1 : 0)} active filters
+                🔢 {activeFilters.length + (hasDateFilter ? 1 : 0)} active filters{filtersIgnoredBySearch ? " (not applied to the search)" : ""}
               </span>
-            </div>
-          )}
+          </div>
 
           {/* 3 KPI stat cards */}
           {stationTimeline.length>0&&(
@@ -1686,19 +1956,48 @@ const ComponentJourney = () => {
               <span style={{fontSize:11,fontWeight:700,color:C.txt("muted"),
                 background:C.bg("hover"),padding:"3px 8px",borderRadius:6,
                 border:`1px solid ${C.border()}`}}>
-                📊 {parts.length}
+                <span data-testid="cj-parts-count" title="Parts loaded / total parts matching">
+                  📊 {parts.length.toLocaleString()} / {catalog.total===null ? "…" : Number(catalog.total).toLocaleString()}
+                </span>
               </span>
             }
           />
 
-          <div style={{flex:1,overflowY:"auto",padding:"8px",
-            display:"flex",flexDirection:"column",gap:6,minHeight:0}}>
+          <div className="cj-parts-scroll" data-testid="cj-parts-scroll" style={{flex:1,overflowY:"auto",padding:"8px",
+            display:"flex",flexDirection:"column",gap:6,minHeight:0,
+            opacity: catalog.loading && parts.length>0 ? 0.55 : 1, transition:"opacity 0.15s ease"}}>
 
-            {parts.length===0 && (
+            {catalog.loading && parts.length===0 && (
+              <div style={{textAlign:"center",padding:"32px 16px",color:C.txt("muted"),fontSize:13}}>
+                <RefreshCw size={22} color={C.txt("muted")} style={{margin:"0 auto 10px",animation:"cjSpin 0.9s linear infinite"}}/>
+                <p>{searchActive ? "Searching parts…" : "Loading parts…"}</p>
+              </div>
+            )}
+
+            {!catalog.loading && catalog.error && parts.length===0 && (
+              <div style={{textAlign:"center",padding:"28px 16px",color:C.ng(),fontSize:12}}>
+                <AlertTriangle size={24} color={C.ng()} style={{margin:"0 auto 8px"}}/>
+                <p style={{fontWeight:700}}>Could not load parts</p>
+                <p style={{fontSize:11,marginTop:4,color:C.txt("muted")}}>{catalog.error}</p>
+                <Btn onClick={()=>loadFirstPage()} style={{margin:"10px auto 0"}}><RefreshCw size={12}/> Retry</Btn>
+              </div>
+            )}
+
+            {!catalog.loading && !catalog.error && parts.length===0 && (
               <div style={{textAlign:"center",padding:"32px 16px",color:C.txt("muted"),fontSize:13}}>
                 <Package size={28} color={C.txt("muted")} style={{margin:"0 auto 10px"}}/>
                 <p>📭 No parts found.</p>
-                <p style={{fontSize:11,marginTop:4}}>🔍 Try a different search term.</p>
+                <p style={{fontSize:11,marginTop:4}}>
+                  {searchActive
+                    ? (searchWithinFilters ? "🔍 Nothing matches within the selected filters — untick “Search within selected dates & filters” to search all dates." : "🔍 Try a different Customer QR, part ID or shot number.")
+                    : "🔍 No production scans in the selected range / filters."}
+                </p>
+              </div>
+            )}
+
+            {catalog.error && parts.length>0 && (
+              <div style={{fontSize:11,color:C.ng(),padding:"6px 8px",borderRadius:8,background:C.ng(0.08)}}>
+                Could not refresh the list: {catalog.error}
               </div>
             )}
 
@@ -1748,10 +2047,10 @@ const ComponentJourney = () => {
                         </span>
                       )}
                     </div>
-                    {part.updatedAt&&(
+                    {(part.latestAt||part.updatedAt)&&(
                       <p style={{fontSize:10,color:C.txt("muted"),marginTop:4,
-                        fontFamily:"'DM Mono',monospace"}}>
-                         {formatTime(part.updatedAt)}
+                        fontFamily:"'DM Mono',monospace"}} title="Last production scan">
+                         {formatTime(part.latestAt||part.updatedAt)}{part.latestStation ? ` · ${part.latestStation}` : ""}
                       </p>
                     )}
                   </button>
@@ -1774,6 +2073,30 @@ const ComponentJourney = () => {
                 </div>
               );
             })}
+
+            {/* paging footer: sentinel for infinite scroll + "Load more" fallback */}
+            <div ref={sentinelRef} data-testid="cj-parts-sentinel" style={{height:1,flexShrink:0}}/>
+            {parts.length>0 && (
+              <div style={{flexShrink:0,padding:"4px 2px 6px",textAlign:"center",fontSize:11,color:C.txt("muted")}}>
+                {catalog.loadingMore ? (
+                  <span style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                    <RefreshCw size={12} style={{animation:"cjSpin 0.9s linear infinite"}}/> Loading more parts…
+                  </span>
+                ) : catalog.moreError ? (
+                  <span style={{display:"inline-flex",alignItems:"center",gap:8,color:C.ng()}}>
+                    {catalog.moreError}
+                    <Btn onClick={()=>{updateCatalog({moreError:""});loadMoreParts();}}>Retry</Btn>
+                  </span>
+                ) : catalog.hasMore ? (
+                  <Btn onClick={()=>loadMoreParts()} style={{width:"100%",justifyContent:"center"}}>
+                    <ChevronDown size={12}/> Load more
+                    {catalog.total!==null ? ` (${Math.max(0,Number(catalog.total)-parts.length).toLocaleString()} more)` : ""}
+                  </Btn>
+                ) : (
+                  <span data-testid="cj-parts-end">All {parts.length.toLocaleString()} parts loaded</span>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

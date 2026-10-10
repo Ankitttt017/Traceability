@@ -27,6 +27,19 @@
 const path = require("path");
 
 require("dotenv").config({ path: path.resolve(__dirname, ".env") });
+// Plant time zone for the whole process. Shift / production-day helpers that use getHours / setHours (traceability
+// operator page, OEE resolveShift, legacy report ranges) are only correct when the process runs in plant time, and
+// the server's own zone is not guaranteed (Linux hosts often run UTC). Set before anything else creates Dates;
+// Node applies a TZ change made at runtime. PLANT_TZ (or an explicit TZ) in .env / the pm2 env overrides it.
+process.env.TZ = process.env.PLANT_TZ || process.env.TZ || "Asia/Kolkata";
+{
+  const offsetMin = -new Date().getTimezoneOffset();
+  const expected = Number(process.env.PLANT_UTC_OFFSET_MINUTES || 330);
+  console.log(`[TimeZone] TZ=${process.env.TZ} → UTC${offsetMin >= 0 ? "+" : "-"}${String(Math.floor(Math.abs(offsetMin) / 60)).padStart(2, "0")}:${String(Math.abs(offsetMin) % 60).padStart(2, "0")} (getTimezoneOffset ${new Date().getTimezoneOffset()})`);
+  if (offsetMin !== expected) {
+    console.warn(`[TimeZone] WARNING: process offset ${offsetMin} min differs from the plant offset ${expected} min — shift and production-day windows will be wrong. Set PLANT_TZ=Asia/Kolkata.`);
+  }
+}
 // SHOP_FLOOR_IO=off (local PC only): never connect to PLCs / scanners — installed before anything opens a socket
 const { shopFloorIoEnabled, installShopFloorIoGuard } = require("./utils/shopFloorIoGuard");
 installShopFloorIoGuard();
@@ -531,6 +544,13 @@ async function startServer() {
         await runStartupDbTask("resetAllMachineLocks", () => resetAllMachineLocks());
         await runStartupDbTask("resetAllScannerConnectionStates", () => scannerService.resetAllScannerConnectionStates());
         await runStartupDbTask("runStartupRecovery", () => runStartupRecovery());
+        // SCANNER-FIX: structured scanner event log + persisted laser
+        // Customer-QR waits. Only on the shop-floor instance (the models are
+        // required lazily, so a SHOP_FLOOR_IO=off instance never creates them).
+        const scannerEventService = require("./services/scannerEventService");
+        // never let the scanner-log tables block startup (scanning works without them)
+        await scannerEventService.ensureScannerEventsTable().catch((e) => console.warn("[Startup] ensureScannerEventsTable failed:", e?.message || e));
+        await scannerEventService.ensureLaserWorkflowStatesTable().catch((e) => console.warn("[Startup] ensureLaserWorkflowStatesTable failed:", e?.message || e));
       }
       await runStartupDbTask("ensureDefaultAdminUser", () => ensureDefaultAdminUser());
       await runStartupDbTask("ensureDefaultShifts", () => ensureDefaultShifts());

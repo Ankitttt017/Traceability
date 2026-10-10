@@ -365,8 +365,8 @@ export const traceabilityApi = {
     const { data } = await apiClient.get(ENDPOINTS.traceability.processFlow, { params });
     return data;
   },
-  partCatalog: async (params) => {
-    const { data } = await apiClient.get(ENDPOINTS.traceability.parts, { params });
+  partCatalog: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.traceability.parts, { ...config, params });
     return data;
   },
   historyByPart: async (partId, config = {}) => {
@@ -524,6 +524,11 @@ export const dashboardApi = {
   },
   rejectionMlInsights: async (params, config = {}) => {
     const { data } = await apiClient.get(ENDPOINTS.dashboard.rejectionMlInsights, { ...config, params });
+    return data;
+  },
+  // DCM (OP100) machine shot analytics: shots / OK / warm-up / NG by die, day, shift + NG-shot parameter analysis
+  shotAnalytics: async (params, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.dashboard.shotAnalytics, { ...config, params });
     return data;
   },
   rejectionRows: async (params, config = {}) => {
@@ -835,6 +840,58 @@ export const reportApi = {
       ...config,
     });
     return data;
+  },
+  // Background historical export: start a job (202 { jobId }), poll its status, then download the finished file.
+  startHistoricalExport: async (params, reportConfig, config = {}) => {
+    const cleanParams = normalizeReportFilters(params);
+    const { data } = await apiClient.post(ENDPOINTS.reports.exportHistoricalJobs, {
+      filters: cleanParams,
+      reportConfig: reportConfig || loadReportConfig(),
+      type: params.type || "full",
+    }, {
+      timeout: 60000,
+      ...config,
+    });
+    return data;
+  },
+  getHistoricalExportJob: async (jobId, config = {}) => {
+    const { data } = await apiClient.get(ENDPOINTS.reports.exportHistoricalJob(jobId), {
+      timeout: 30000,
+      ...config,
+    });
+    return data;
+  },
+  // DELETE: cancel a queued / running export (or discard a finished file)
+  cancelHistoricalExportJob: async (jobId, config = {}) => {
+    const { data } = await apiClient.delete(ENDPOINTS.reports.exportHistoricalJob(jobId), {
+      timeout: 30000,
+      ...config,
+    });
+    return data;
+  },
+  // { parts, etaSeconds } for the given filters — shown before / while exporting
+  estimateHistoricalExport: async (params, config = {}) => {
+    const cleanParams = normalizeReportFilters(params);
+    const { data } = await apiClient.get(ENDPOINTS.reports.exportHistoricalEstimate, {
+      params: cleanParams,
+      timeout: 60000,
+      ...config,
+    });
+    return data;
+  },
+  downloadHistoricalExportJob: async (jobId, config = {}) => {
+    const response = await apiClient.get(ENDPOINTS.reports.exportHistoricalJobFile(jobId), {
+      responseType: "blob",
+      timeout: 600000,
+      ...config,
+    });
+    const disposition = String(response.headers?.["content-disposition"] || "");
+    const match = disposition.match(/filename\*=UTF-8''([^;]+)/i) || disposition.match(/filename="?([^";]+)"?/i);
+    let fileName = null;
+    if (match) {
+      try { fileName = decodeURIComponent(match[1]); } catch { fileName = match[1]; }
+    }
+    return { blob: response.data, fileName };
   },
   exportAudit: async (params, reportConfig, config = {}) => {
     const cleanParams = normalizeReportFilters(params);

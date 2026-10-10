@@ -3,12 +3,12 @@
 // One palette, one tooltip, one axis style for every chart in the module, so a colour always
 // means the same thing (OK is always green, NG always red, Shift B always orange …).
 //
-// Colours come from a CVD-validated categorical palette (checked with the dataviz validator):
-//   OK #16a34a vs NG #dc2626      → standard green / red (always paired with an "OK" / "NG" label)
-//   CR / CRAM / MR, Shift A/B/C   → blue / orange / violet, all-pairs ΔE ≥ 13 (pass)
-//   8-slot categorical order      → worst adjacent CVD ΔE 9.1 (pass)
-// Rules: colour follows the entity, never its rank; a 9th+ series folds into "Other";
-// status colours (good / warning / serious / critical) are only for state, never for a series.
+// Same palette as the management views (components/mgmt/mgmtTheme.js):
+//   navy / slate neutrals for normal data (stations, shifts, dies, parameters)
+//   OK #16a34a vs NG #dc2626      → outcome only (always paired with an "OK" / "NG" label)
+//   CR #2563eb · CRAM #ea580c · MR #7c3aed → the three defect categories, everywhere
+//   green / amber / red            → status vs target only (scrap ≤ 2 %, FPY ≥ 97 %), never a series
+// Rules: colour follows the entity, never its rank; a 9th+ series folds into "Other".
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const FONT_FAMILY = "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif";
@@ -35,33 +35,34 @@ export const OUTCOME = {
 };
 
 // Categorical slots (fixed order — the order is what makes it colour-blind safe)
-export const CATEGORICAL = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"];
-export const OTHER = "#a8a29e";
+// navy ramp first, then muted hues that are not green / red / a category colour
+export const CATEGORICAL = ["#0f2a4a", "#4a6d97", "#0e7490", "#a16207", "#9d4b73", "#5b6b80", "#a3bad5", "#7393b8"];
+export const OTHER = "#94a3b8";
 
 // Defect categories — one fixed colour each, used on every chart: CR blue · CRAM orange · MR violet
-export const DEFECT_CATEGORY = { CR: "#2a78d6", CRAM: "#eb6834", MR: "#4a3aa7" };
+export const DEFECT_CATEGORY = { CR: "#2563eb", CRAM: "#ea580c", MR: "#7c3aed" };
 export const DEFECT_CATEGORY_LABEL = {
   CR: "CR · Casting rejection",
   CRAM: "CRAM · Casting rejection after machining",
   MR: "MR · Machining rejection",
 };
-export const SHIFT = { A: "#2a78d6", B: "#eb6834", C: "#4a3aa7", Unassigned: "#a8a29e" };
+export const SHIFT = { A: "#0f2a4a", B: "#4a6d97", C: "#a3bad5", Unassigned: "#94a3b8" };
 
 // Status (state only — always paired with a label or icon)
 export const STATUS = {
   good: "#16a34a",
-  warning: "#fab219",
-  serious: "#ec835a",
+  warning: "#d97706",
+  serious: "#c2410c",
   critical: "#dc2626",
   neutral: "#94a3b8",
 };
 
 // Diverging: lowers scrap ↔ raises scrap
-export const DIVERGING = { low: "#2a78d6", mid: "#f0efec", high: "#dc2626" };
+export const DIVERGING = { low: "#3b5b82", mid: "#f1f5f9", high: "#dc2626" };
 
 // Sequential magnitude ramps (light → dark)
-export const SEQ_BLUE = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];
-export const SEQ_SCRAP = ["#fff1e6", "#fdd0b1", "#f9a77a", "#ef7b4b", "#d9512c", "#b0341f", "#7f1d1d"];
+export const SEQ_BLUE = ["#e2e8f0", "#c9d6e6", "#a3bad5", "#7393b8", "#4a6d97", "#2b4a73", "#0f2a4a"];
+export const SEQ_SCRAP = ["#fde7d6", "#fbc7a2", "#f59e6b", "#e8743f", "#cc4e22", "#a33417", "#7a210f"];
 
 /** Colour for a sequential value (0…max), sqrt-scaled so small values stay visible. */
 export const seqColor = (value, max, ramp = SEQ_SCRAP) => {
@@ -78,7 +79,7 @@ export const withAlpha = (hex, a) =>
  * plant-wide defect Pareto) — never re-rank per chart. Keys past the 8th slot get OTHER.
  */
 // Defect reasons, categories, zones, sub-zones and views: no green — green means OK everywhere on the page
-export const DEFECT_PALETTE = ["#2a78d6", "#eb6834", "#eda100", "#e87ba4", "#4a3aa7", "#e34948", "#5b6b8c", "#9c5b2e", "#b8338f", "#7a6dd0"];
+export const DEFECT_PALETTE = ["#0f2a4a", "#4a6d97", "#0e7490", "#a16207", "#9d4b73", "#5b6b80", "#7393b8", "#b45309", "#6b7fa3", "#a3bad5"];
 
 export const makeColorMap = (orderedKeys = [], slots = DEFECT_PALETTE) => {
   const map = {};
@@ -175,16 +176,16 @@ export const RECHARTS_GRID = { stroke: INK.grid, vertical: false };
 
 /* ── Card accents ──────────────────────────────────────────────────────────
    Every card / KPI carries one semantic accent colour (set inline: style={accent(OUTCOME.ng)} plus
-   data-accent). It drives a 3px top stripe, the icon chip and a faint tint — colour says what the card
-   is about (NG = red, OK = green, category / shift / station = its own colour, process = blue …). */
+   data-accent). It drives the icon chip (and a KPI's left edge) — NG = red, OK = green, everything else navy /
+   slate. Cards themselves stay plain white, like the management cards. */
 export const ACCENT = {
   ok: OUTCOME.ok,
   ng: OUTCOME.ng,
   wip: "#64748b",
-  process: "#2a78d6",
-  model: "#4a3aa7",
-  location: "#eb6834",
-  quality: "#0f766e",
+  process: "#3b5b82",
+  model: "#1e3a5f",
+  location: "#0f2a4a",
+  quality: "#0f2a4a",
   warning: "#d97706",
   neutral: "#475569",
 };
@@ -192,13 +193,11 @@ export const accent = (color) => ({ "--accent": color });
 
 /* ── Shared card CSS (inject once per tab via <style>{CARD_CSS}</style>) ─ */
 export const CARD_CSS = `
-.ra-card{background:#fff;border:1px solid ${INK.border};border-radius:14px;min-width:0;position:relative;overflow:visible;box-shadow:0 1px 2px rgba(15,23,42,.04),0 6px 18px -10px rgba(15,23,42,.12)}
-.ra-card[data-accent]::before{content:"";position:absolute;left:0;top:0;right:0;height:3px;background:var(--accent);border-radius:14px 14px 0 0}
+.ra-card{background:#fff;border:1px solid ${INK.border};border-radius:14px;min-width:0;position:relative;overflow:visible;box-shadow:0 1px 2px rgba(15,23,42,.04),0 8px 22px -14px rgba(15,23,42,.18)}
 .ra-card>.ra-card-head:first-child{border-radius:14px 14px 0 0}
-.ra-card[data-accent] .ra-card-head{background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 6%,#fff),#fff)}
 .ra-icon{width:32px;height:32px;border-radius:9px;display:inline-grid;place-items:center;flex-shrink:0;color:var(--accent,${INK.muted});background:color-mix(in srgb,var(--accent,${INK.muted}) 13%,#fff)}
-.ra-kpi[data-accent]{border-left:3px solid var(--accent);background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 8%,#fff) 0%,#fff 70%)}
-.ra-kpi[data-accent] .ra-kpi-value{color:var(--accent)}
+.ra-kpi[data-accent]{border-left:3px solid var(--accent)}
+.ra-kpi[data-accent] .ra-kpi-value{color:${INK.primary}}
 .ra-kpi-top{display:flex;align-items:center;gap:8px}
 .ra-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;color:var(--accent,${INK.body});background:color-mix(in srgb,var(--accent,${INK.muted}) 12%,#fff);border:1px solid color-mix(in srgb,var(--accent,${INK.muted}) 30%,#fff)}
 .ra-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;padding:14px 18px 10px}

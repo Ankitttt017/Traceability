@@ -19,7 +19,13 @@ const {
   markCustomerQrMapped,
   completeWorkflow,
   enqueueLaserWorkflow,
+  setWorkflowHooks,
+  restoreWorkflowStates,
+  getActiveWaitingPart,
+  resetWorkflowStateUnlessWaitingForOtherPart,
 } = require("../services/laserMarkingWorkflowService");
+const scannerEventService = require("../services/scannerEventService");
+const QrFormatRule = require("../models/QrFormatRule");
 const { emitRealtime } = require("../services/realtimeService");
 const { isMachineBypassEnabled } = require("../services/machineBypassService");
 const {
@@ -29,6 +35,12 @@ const {
   validateScannerPayload,
   parseScannerPacket,
   detectQrType,
+  splitScannerFrames,
+  isCompleteKnownCode,
+  isDpmCode,
+  isCustomerQrCode,
+  setScannerFormatRules,
+  toHex,
 } = require("./scannerFlowUtils");
 const {
   LEAKTEST_OPERATION,
@@ -37,16 +49,27 @@ const {
   getLeaktestStageState,
 } = require("../services/leaktestLookupService");
 const { Op } = require("sequelize");
-const CUSTOMER_QR_ACTIVE_WINDOW_MS = Math.max(
-  Number(process.env.CUSTOMER_QR_ACTIVE_WINDOW_MS || 60 * 60 * 1000),
-  30 * 1000
-);
+// SCANNER-FIX: CUSTOMER_QR_ACTIVE_WINDOW_MS (60-min DB fallback window) is no
+// longer used — see resolveActivePartForMachine / LASER_CUSTOMER_QR_WAIT_MS.
 const TCP_SCANNER_FLUSH_MS = Math.min(
   Math.max(Number(process.env.TCP_SCANNER_FLUSH_MS || 900), 100),
   2000
 );
 const TCP_SCANNER_MIN_FRAME_LENGTH = Math.max(Number(process.env.TCP_QR_MIN_PAYLOAD_LENGTH || 4), 1);
-const TCP_SCANNER_MAX_FRAME_WAIT_MS = Math.max(Number(process.env.TCP_SCANNER_MAX_FRAME_WAIT_MS || 3000), TCP_SCANNER_FLUSH_MS);
+// SCANNER-FIX: maximum time a frame may stay open (first byte → flush) when
+// the scanner sends no terminator. Previously the idle timer restarted on every
+// chunk, so a run of reads < 900 ms apart merged into one payload. Default
+// lowered from 3000 to 1500 ms and now actually enforced on every chunk.
+const TCP_SCANNER_MAX_FRAME_WAIT_MS = Math.max(Number(process.env.TCP_SCANNER_MAX_FRAME_WAIT_MS || 1500), TCP_SCANNER_FLUSH_MS);
+// SCANNER-FIX: throttle for the "Bad scanner read — scan again" popup per IP.
+const TCP_BAD_READ_POPUP_THROTTLE_MS = Math.max(Number(process.env.TCP_BAD_READ_POPUP_THROTTLE_MS || 1500), 0);
+// SCANNER-FIX: DB fallback for "which part is waiting for a customer QR".
+//   off (default)  – only the in-memory / persisted waiting state is used.
+//   strict         – if no waiting state, accept exactly ONE unmapped OP110
+//                    start that is PENDING, created within
+//                    LASER_CUSTOMER_QR_WAIT_MS, with no newer start on the
+//                    machine. (The old 60-min "latest unmapped" lookup is gone.)
+const LASER_ACTIVE_PART_DB_FALLBACK = String(process.env.LASER_ACTIVE_PART_DB_FALLBACK || "off").trim().toLowerCase();
 const TCP_SCANNER_DUPLICATE_DEBOUNCE_MS = Math.max(
   Number(process.env.TCP_SCANNER_DUPLICATE_DEBOUNCE_MS || 600),
   100
@@ -61,6 +84,9 @@ const TCP_SCAN_PROCESSING_TIMEOUT_MS = Math.max(
 );
 const scannerProcessingQueues = new Map();
 const scannerDuplicateCache = new Map();
+const badReadPopupCache = new Map();
+const activeScannerSockets = new Map();
+let nextConnectionSeq = 1;
 const queueRecords = [];
 const tcpDiagnostics = {
   totalScans: 0,
@@ -176,7 +202,28 @@ function enqueueScannerProcessing(scannerIp, processor, queueItem = {}) {
           durationMs: queueItem.processingDurationMs,
           flowType: queueItem.flowType,
           qrType: queueItem.qrType,
+          decision: "REVIEW_TIMEOUT",
         });
+        // SCANNER-FIX: do NOT start the next scan from this scanner while the
+        // timed-out one is still running (it may still write a mapping).
+        // Wait for it to settle, bounded by a hard-release window.
+        const hardReleaseMs = Math.max(Number(process.env.TCP_SCAN_HARD_RELEASE_MS || 120000), TCP_SCAN_PROCESSING_TIMEOUT_MS);
+        const late = await Promise.race([
+          work,
+          new Promise((resolve) => setTimeout(() => resolve({ hardRelease: true }), hardReleaseMs)),
+        ]);
+        if (late?.hardRelease) {
+          logScannerTrace({
+            level: "error",
+            stage: "scan_hard_release",
+            scannerIp: key,
+            queueId: queueItem.queueId,
+            payload: queueItem.rawPayload,
+            reason: "PROCESSING_STILL_RUNNING_AFTER_HARD_RELEASE",
+            status: "TIMEOUT",
+            decision: "REVIEW_TIMEOUT",
+          });
+        }
         return;
       }
 
@@ -234,7 +281,34 @@ function attachScannerDisplayMetadata(payload = {}, { rawPacket = "", rawPayload
 }
 
 
-function logScannerTrace({ level = "info", stage, scannerIp, scannerName, machineId, stationNo, flowType, payload, reason, status, durationMs, queueId, qrType, validationCode, validationMessage, rawPacket }) {
+function logScannerTrace({
+  level = "info",
+  stage,
+  scannerIp,
+  scannerName,
+  machineId,
+  stationNo,
+  flowType,
+  payload,
+  reason,
+  status,
+  durationMs,
+  queueId,
+  qrType,
+  validationCode,
+  validationMessage,
+  rawPacket,
+  // SCANNER-FIX: structured-event fields
+  scannerId,
+  scannerRole,
+  connectionId,
+  rawHex,
+  decision,
+  activePartSource,
+  activePartId,
+  mappingId,
+  eventType,
+}) {
   const line = {
     stage,
     queueId,
@@ -251,12 +325,37 @@ function logScannerTrace({ level = "info", stage, scannerIp, scannerName, machin
     validationMessage,
     status,
     durationMs,
+    connectionId,
+    decision,
+    activePartSource,
+    activePartId,
+    mappingId,
   };
   if (level === "error") {
     console.error(`[TCP][TRACE] ${JSON.stringify(line)}`);
   } else {
     console.info(`[TCP][TRACE] ${JSON.stringify(line)}`);
   }
+  // SCANNER-FIX: persist asynchronously (buffered, batched, never awaited).
+  scannerEventService.logScannerEvent({
+    eventType: eventType || "SCAN",
+    stage,
+    scannerId,
+    scannerIp,
+    scannerRole,
+    connectionId,
+    rawHex,
+    parsedCode: payload,
+    validationCode: validationCode || reason,
+    flowType: flowType || qrType,
+    decision: decision || status,
+    activePartSource,
+    activePartId,
+    mappingId,
+    stationNo,
+    machineId,
+    message: validationMessage || reason,
+  });
 }
 
 
@@ -903,75 +1002,61 @@ async function hasTerminalStationLog(partId, stationNo) {
 }
 
 
-async function resolveActivePartIdForMachine(machine, stationNo) {
-  if (!machine) return "";
+/**
+ * SCANNER-FIX: which part at this machine/station is waiting for a Customer QR,
+ * and where that answer came from (recorded in every mapping trace):
+ *   MEMORY      – DPM scanned in this process, wait not expired
+ *   PERSISTED   – wait restored from LaserWorkflowStates after a restart
+ *   DB_FALLBACK – only if LASER_ACTIVE_PART_DB_FALLBACK=strict (see below)
+ *
+ * The old behaviour (pick the latest unmapped OP110 log updated in the last
+ * 60 min, including ENDED_OK, by updatedAt) attached customer QRs to parts
+ * scanned 58–72 min earlier. It is removed; the waiting state is now
+ * persisted and only expires after LASER_CUSTOMER_QR_WAIT_MS, so the fallback
+ * is no longer needed. The restricted variant is kept behind an env switch.
+ */
+async function resolveActivePartForMachine(machine, stationNo) {
+  if (!machine) return { partId: "", source: null };
   const targetStation = String(stationNo || "").trim().toUpperCase();
   const workflowKey = buildWorkflowKey(machine.id, targetStation);
-  const workflowState = getWorkflowState(workflowKey);
-  if (workflowState?.waitingForCustomerQr && workflowState.activePartId) {
-    return workflowState.activePartId;
+  const waiting = getActiveWaitingPart(workflowKey);
+  if (waiting?.partId) {
+    return { partId: waiting.partId, source: waiting.source || "MEMORY" };
+  }
+  if (LASER_ACTIVE_PART_DB_FALLBACK !== "strict") {
+    return { partId: "", source: null };
   }
   if (!(await stationRequiresCustomerQrForCompletion(machine, targetStation))) {
-    return "";
+    return { partId: "", source: null };
   }
-
-  const activeStatuses = ["PENDING", "STARTED", "RUNNING", "WAITING_PLC", "START_SENT", "WAITING_RUNNING", "ENDED_OK"];
-  const freshCutoff = new Date(Date.now() - CUSTOMER_QR_ACTIVE_WINDOW_MS);
-  const runningPartId = String(machine.running_part_id || "").trim();
-  const runningStation = normalizeStation(machine.running_station_no || "");
-  if (runningPartId && (!targetStation || !runningStation || runningStation === targetStation)) {
-    const runningLog = await OperationLog.findOne({
-      where: {
-        part_id: runningPartId,
-        machine_id: machine.id,
-        ...(targetStation ? { station_no: targetStation } : {}),
-        plc_status: { [Op.in]: activeStatuses },
-        result: "OK",
-        updatedAt: { [Op.gte]: freshCutoff },
-      },
-      attributes: ["id", "part_id"],
-      order: [["updatedAt", "DESC"]],
-    });
-    if (runningLog) return runningPartId;
-  }
-
-  const candidateLogs = await OperationLog.findAll({
+  const { getCustomerQrWaitMs } = require("../services/laserMarkingWorkflowService");
+  const cutoff = new Date(Date.now() - getCustomerQrWaitMs());
+  // Latest OP110 start on this machine (any status). If the newest start is not
+  // a fresh, unmapped PENDING DPM start → no fallback.
+  const latestStarts = await OperationLog.findAll({
     where: {
       machine_id: machine.id,
       ...(targetStation ? { station_no: targetStation } : {}),
-      plc_status: { [Op.in]: activeStatuses },
       result: "OK",
-      updatedAt: { [Op.gte]: freshCutoff },
     },
-    attributes: ["id", "part_id", "updatedAt"],
-    order: [["updatedAt", "DESC"]],
-    limit: 20,
+    attributes: ["id", "part_id", "plc_status", "createdAt"],
+    order: [["createdAt", "DESC"]],
+    limit: 2,
   });
-  const candidatePartIds = [...new Set(
-    candidateLogs
-      .map((log) => String(log.part_id || "").trim())
-      .filter(Boolean)
-  )];
-  if (!candidatePartIds.length) return "";
+  const newest = latestStarts[0];
+  if (!newest) return { partId: "", source: null };
+  const candidate = String(newest.part_id || "").trim();
+  const isFresh = new Date(newest.createdAt).getTime() >= cutoff.getTime();
+  const isPending = ["PENDING", "STARTED", "WAITING_PLC"].includes(String(newest.plc_status || "").toUpperCase());
+  if (!candidate || !isFresh || !isPending || !isDpmCode(candidate)) return { partId: "", source: null };
+  const mapped = await PartCodeMapping.findOne({ where: { old_part_id: candidate, is_active: true }, attributes: ["id"] });
+  if (mapped) return { partId: "", source: null };
+  return { partId: candidate, source: "DB_FALLBACK" };
+}
 
-  const existingMappings = await PartCodeMapping.findAll({
-    where: {
-      is_active: true,
-      old_part_id: { [Op.in]: candidatePartIds },
-    },
-    attributes: ["old_part_id"],
-    raw: true,
-  });
-  const mappedPartIds = new Set(
-    existingMappings
-      .map((row) => String(row.old_part_id || "").trim().toUpperCase())
-      .filter(Boolean)
-  );
-  const latestUnmapped = candidateLogs.find((log) => {
-    const candidatePartId = String(log.part_id || "").trim();
-    return candidatePartId && !mappedPartIds.has(candidatePartId.toUpperCase());
-  });
-  return latestUnmapped ? String(latestUnmapped.part_id || "").trim() : "";
+async function resolveActivePartIdForMachine(machine, stationNo) {
+  const resolved = await resolveActivePartForMachine(machine, stationNo);
+  return resolved.partId || "";
 }
 
 
@@ -1025,10 +1110,19 @@ async function isKnownPartOrMappedCustomerQr(code) {
   return Boolean(part || mapping);
 }
 
+function isRoleFormatValidationOn() {
+  return String(process.env.SCANNER_ROLE_FORMAT_VALIDATION || "on").trim().toLowerCase() !== "off";
+}
+
 async function canStartCustomerQrOnlyPart({ code, stationNo, machine }) {
   const raw = String(code || "").trim();
   const station = normalizeStation(stationNo);
   if (!raw || !station || !machine || !(await stationRequiresCustomerQrForCompletion(machine, station))) return false;
+  // SCANNER-FIX: a DPM part id (or any non-customer-QR read) must never start
+  // a "customer-QR-only" part — that would create a part whose id is a DPM
+  // with no DPM link. Only a valid customer QR label may start QR-only.
+  if (isDpmCode(raw)) return false;
+  if (isRoleFormatValidationOn() && !isCustomerQrCode(raw)) return false;
   const minCustomerQrLength = Math.max(Number(process.env.TCP_CUSTOMER_QR_MIN_LENGTH || 2), 2);
   if (raw.length < minCustomerQrLength) return false;
   const features = await getStationFeatureConfig(station, {
@@ -1055,11 +1149,7 @@ async function resolveScannerFlow({ code, stationNo, machine, qrType = "UNKNOWN"
   }
 
 
-  const workflowKey = buildWorkflowKey(machine.id, station);
-  const workflowState = getWorkflowState(workflowKey);
-  const activeLaserStartPartId = workflowState?.waitingForCustomerQr && workflowState.activePartId
-    ? String(workflowState.activePartId || "").trim()
-    : await resolveActivePartIdForMachine(machine, station);
+  const activeLaserStartPartId = String(await resolveActivePartIdForMachine(machine, station) || "").trim();
   const hasActiveLaserStart = Boolean(activeLaserStartPartId);
 
 
@@ -1073,10 +1163,20 @@ async function resolveScannerFlow({ code, stationNo, machine, qrType = "UNKNOWN"
     };
   }
 
+  // SCANNER-FIX: previously ANY different code arriving while a part was
+  // waiting became the customer QR — including a second DPM read or an
+  // "ERROR…" read from the DPM (START_QR) scanner (33 DPM→DPM and 9 ERROR
+  // mappings in 14 days). Now only a code that matches the customer-QR rule
+  // and does NOT come from a START_QR-role scanner may take this path; a
+  // START_QR read falls through to the normal flow, where
+  // processNormalPartScan's "pending different Start QR" check blocks it
+  // without touching the waiting part.
   if (
     hasActiveLaserStart &&
     raw &&
     raw !== activeLaserStartPartId &&
+    !isStartQrScannerRole(normalizedScannerRole) &&
+    isCustomerQrCode(raw) &&
     await stationRequiresCustomerQrForCompletion(machine, station)
   ) {
     return {
@@ -1236,56 +1336,82 @@ async function isCustomerQrOnlyTracePart(partId, customerQrCode = "") {
 }
 
 
-async function processIncomingScannerPayload({ scannerIp, rawPacket }) {
+/**
+ * SCANNER-FIX: the scanner role used for validation is the REAL role of the
+ * scanner(s) registered on this IP. If several scanner rows share the IP with
+ * different roles, the generic checks (status words, glued codes, length)
+ * still run but the role-specific format check is skipped.
+ */
+function resolveValidationRoleForScanners(scanners = []) {
+  const roles = new Set(
+    scanners.map((scanner) => String(scanner?.scanner_role || "").trim().toUpperCase()).filter(Boolean)
+  );
+  if (roles.size === 1 && scanners.every((scanner) => String(scanner?.scanner_role || "").trim())) {
+    return [...roles][0];
+  }
+  return "UNKNOWN";
+}
+
+function shouldEmitBadReadPopup(scannerIp) {
+  const key = String(scannerIp || "unknown");
+  const now = Date.now();
+  const last = badReadPopupCache.get(key) || 0;
+  if (now - last < TCP_BAD_READ_POPUP_THROTTLE_MS) return false;
+  badReadPopupCache.set(key, now);
+  return true;
+}
+
+async function processIncomingScannerPayload({ scannerIp, rawPacket, rawHex = "", connectionId = "" }) {
   const startedAt = Date.now();
   const packet = parseScannerPacket(rawPacket);
-  const validation = validateScannerPayload({
-    payload: packet.rawPayload,
-    scannerRole: "UNKNOWN",
-  });
-  const sanitizedPayload = validation.sanitizedPayload;
   const scanners = await Scanner.findAll({
     where: { scanner_ip: scannerIp, is_active: true },
     order: [["mapped_machine_id", "ASC"], ["id", "ASC"]],
   });
+  const validationRole = resolveValidationRoleForScanners(scanners);
+  const validation = validateScannerPayload({
+    payload: packet.rawPayload,
+    scannerRole: validationRole,
+  });
+  const sanitizedPayload = validation.sanitizedPayload;
+  const traceScanner = scanners[0] || null;
 
 
   logScannerTrace({
     stage: "scan_received",
     scannerIp,
-    payload: sanitizedPayload,
+    scannerId: traceScanner?.id,
+    scannerName: traceScanner?.scanner_name,
+    scannerRole: validationRole,
+    machineId: traceScanner?.mapped_machine_id,
+    connectionId,
+    rawHex,
+    payload: sanitizedPayload || packet.rawPayload,
     rawPacket: packet.rawPacket,
     status: validation.isValid ? "RECEIVED" : "ERROR",
     reason: validation.reason,
+    validationCode: validation.code || (validation.isValid ? `VALID_${validation.qrKind || "GENERIC"}` : validation.reason),
+    decision: validation.isValid ? "RECEIVED" : "REJECTED_BAD_READ",
     durationMs: Date.now() - startedAt,
   });
 
 
   if (!validation.isValid) {
-    if (["QR_PAYLOAD_STATUS_TOKEN", "QR_PAYLOAD_TOO_SHORT"].includes(validation.reason)) {
-      logScannerTrace({
-        stage: validation.reason === "QR_PAYLOAD_STATUS_TOKEN"
-          ? "scanner_status_token_ignored"
-          : "scanner_short_payload_ignored",
-        scannerIp,
-        payload: sanitizedPayload,
-        rawPacket: packet.rawPacket,
-        reason: validation.reason,
-        status: "IGNORED",
-        durationMs: Date.now() - startedAt,
-      });
+    // SCANNER-FIX: a rejected read is NEVER mapped, never creates a part and
+    // never touches the laser waiting state. The operator gets one throttled
+    // "Bad scanner read — scan again" popup (previously status words and
+    // short frames were silently ignored, and glued codes went through).
+    if (!shouldEmitBadReadPopup(scannerIp)) {
       return;
     }
-
     const targets = scanners.length ? scanners : [null];
     for (const scanner of targets) {
       const machine = scanner?.mapped_machine_id
         ? await Machine.findByPk(scanner.mapped_machine_id)
         : null;
-      const role = String(scanner?.scanner_role || "START_QR").trim().toUpperCase();
-      const message = validation.message || (role === "CUSTOMER_QR"
-        ? `Invalid CUSTOMER_QR payload "${sanitizedPayload || ""}". Scan a valid Customer QR.`
-        : `Invalid START_QR payload "${sanitizedPayload || ""}". Scan a valid Part ID.`);
+      const role = String(scanner?.scanner_role || "").trim().toUpperCase();
+      const scannerLabel = role === "CUSTOMER_QR" ? "Customer QR scanner" : (role === "START_QR" ? "Part ID (DPM) scanner" : "Scanner");
+      const message = `Bad scanner read — scan again. (${scannerLabel}: ${validation.message || validation.reason || "invalid read"})`;
       emitRealtime("operator_popup", attachScannerDisplayMetadata({
         type: "ERROR",
         partId: "",
@@ -1336,6 +1462,8 @@ async function processIncomingScannerPayload({ scannerIp, rawPacket }) {
     logScannerTrace({
       stage: "duplicate_scan",
       scannerIp,
+      connectionId,
+      decision: "IGNORED_DUPLICATE_PACKET",
       payload: sanitizedPayload,
       rawPacket: packet.rawPacket,
       reason: "DUPLICATE_PACKET",
@@ -1412,6 +1540,7 @@ async function processIncomingScannerPayload({ scannerIp, rawPacket }) {
           partId: sanitizedPayload,
           forceCustomerQr: target.forceCustomerQr,
           rawPacket: packet.rawPacket,
+          connectionId,
         });
       },
     });
@@ -1619,7 +1748,7 @@ async function shouldDelayCustomerQrStationStart({ scanner, partId }) {
 }
 
 
-async function processScannerPayloadForMapping({ scanner, scannerIp, partId, forceCustomerQr = false, rawPacket = "" }) {
+async function processScannerPayloadForMapping({ scanner, scannerIp, partId, forceCustomerQr = false, rawPacket = "", connectionId = "" }) {
   const scanStartedAt = Date.now();
   const scannerRole = String(scanner.scanner_role || "GENERAL").trim().toUpperCase() || "GENERAL";
   const effectiveScannerRole = forceCustomerQr ? "CUSTOMER_QR" : scannerRole;
@@ -1713,7 +1842,11 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
   );
 
 
-  const customerQrFlow = effectiveScannerRole === "CUSTOMER_QR" || flowContext.flowType === "CUSTOMER_QR";
+  // SCANNER-FIX: a read from a START_QR-role (DPM) scanner can never be
+  // treated as a customer QR, whatever the flow resolution says.
+  const customerQrFlow =
+    effectiveScannerRole === "CUSTOMER_QR" ||
+    (flowContext.flowType === "CUSTOMER_QR" && !isStartQrScannerRole(effectiveScannerRole));
   const customerQrOnlyStart = flowContext.flowType === "CUSTOMER_QR_ONLY";
 
 
@@ -1728,6 +1861,7 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
       flowContext,
       qrType,
       rawPacket,
+      connectionId,
     });
     return;
   }
@@ -1763,10 +1897,75 @@ async function processScannerPayloadForMapping({ scanner, scannerIp, partId, for
 }
 
 
-async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, machine, scannerRole, flowContext, qrType, rawPacket }) {
+async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, machine, scannerRole, flowContext, qrType, rawPacket, connectionId = "" }) {
   const scanStartedAt = Date.now();
   const workflowKey = buildWorkflowKey(machine.id, stationNo);
-  const activePartId = await resolveActivePartIdForMachine(machine, stationNo);
+  const activePart = await resolveActivePartForMachine(machine, stationNo);
+  const activePartId = activePart.partId;
+  const activePartSource = activePart.source;
+
+  // SCANNER-FIX: never store a Part ID as a customer QR. A value that matches
+  // the DPM rule, or that already exists as a (non-QR-only) part, is rejected
+  // here with a popup; the waiting part (if any) keeps waiting.
+  const scannedValue = String(partId || "").trim();
+  if (activePartId && scannedValue && scannedValue !== String(activePartId).trim()) {
+    let rejectReason = "";
+    if (isDpmCode(scannedValue)) {
+      rejectReason = "PART_ID_SCANNED_AS_CUSTOMER_QR";
+    } else {
+      const existingPart = await Part.findOne({ where: { part_id: scannedValue }, attributes: ["part_id", "qr_format_name"] });
+      if (existingPart && String(existingPart.qr_format_name || "").trim().toUpperCase() !== "CUSTOMER_QR_ONLY") {
+        rejectReason = "EXISTING_PART_ID_SCANNED_AS_CUSTOMER_QR";
+      }
+    }
+    if (!rejectReason && isRoleFormatValidationOn() && !isCustomerQrCode(scannedValue)) {
+      rejectReason = "CUSTOMER_QR_FORMAT_INVALID";
+    }
+    if (rejectReason) {
+      emitCustomerQrScannerResult({
+        type: "ERROR",
+        partId: activePartId,
+        customerQrCode: "",
+        mappedPartId: activePartId,
+        stationNo,
+        machine,
+        scanner,
+        scannerRole,
+        scannerIp,
+        decision: "BLOCK",
+        qrStatus: "FAILED",
+        operationStatus: "WAITING_CUSTOMER_QR",
+        status: "WAITING",
+        plcStatus: "WAITING_PLC",
+        customerQrPending: true,
+        reason: rejectReason,
+        message: rejectReason === "CUSTOMER_QR_FORMAT_INVALID"
+          ? `${stationNo}: Bad scanner read — scan the Customer QR again for part ${activePartId}.`
+          : `${stationNo}: "${scannedValue}" is a Part ID, not a Customer QR. Scan the Customer QR label for part ${activePartId}.`,
+      });
+      logScannerTrace({
+        stage: "customer_qr_rejected_not_customer_code",
+        scannerIp,
+        scannerId: scanner.id,
+        scannerName: scanner.scanner_name,
+        scannerRole,
+        connectionId,
+        machineId: machine.id,
+        stationNo,
+        flowType: flowContext.flowType,
+        qrType,
+        payload: scannedValue,
+        reason: rejectReason,
+        status: "BLOCKED",
+        decision: "REJECTED_NOT_CUSTOMER_QR",
+        activePartSource,
+        activePartId,
+        durationMs: Date.now() - scanStartedAt,
+      });
+      return;
+    }
+  }
+
   if (activePartId && String(activePartId).trim() === String(partId || "").trim()) {
     emitCustomerQrScannerResult({
       type: "WARNING",
@@ -1804,6 +2003,48 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
     return;
   }
   if (!activePartId) {
+    // SCANNER-FIX: the wait for a DPM part has just expired (customer QR came > LASER_CUSTOMER_QR_WAIT_MS after
+    // its DPM). Do NOT turn this label into a customer-QR-only part — that would orphan the DPM. Ask the operator
+    // to rescan the DPM (the rescan exception restarts the wait), then the label. Applies once per expired wait.
+    const priorState = getWorkflowState(workflowKey);
+    const expiredPartId = priorState?.lastError === "CUSTOMER_QR_WAIT_EXPIRED" ? String(priorState.expiredPartId || "") : "";
+    if (expiredPartId && !(await isKnownPartOrMappedCustomerQr(partId))) {
+      priorState.expiredPartId = "";
+      priorState.lastError = "";
+      emitCustomerQrScannerResult({
+        type: "WARNING",
+        partId: expiredPartId,
+        customerQrCode: partId,
+        stationNo,
+        machine,
+        scanner,
+        scannerRole,
+        scannerIp,
+        decision: "WAIT",
+        qrStatus: "WAIT",
+        operationStatus: "WAITING",
+        status: "WAITING",
+        plcStatus: "WAITING_PLC",
+        customerQrPending: true,
+        reason: "CUSTOMER_QR_WAIT_EXPIRED",
+        message: `${stationNo}: Waiting time for part ${expiredPartId} expired. Scan its Part ID (DPM) again, then this Customer QR.`,
+        timestamp: new Date().toISOString(),
+      });
+      logScannerTrace({
+        stage: "customer_qr_after_expired_wait",
+        scannerIp,
+        scannerName: scanner.scanner_name,
+        machineId: machine.id,
+        stationNo,
+        flowType: flowContext.flowType,
+        qrType,
+        payload: partId,
+        reason: "CUSTOMER_QR_WAIT_EXPIRED",
+        status: "WARNING",
+        durationMs: Date.now() - scanStartedAt,
+      });
+      return;
+    }
     resetWorkflowState(workflowKey, { reason: "NO_ACTIVE_START_QR" });
     const allowCustomerQrOnlyStart = isCustomerQrScannerRole(scannerRole, qrType);
     if (
@@ -1855,6 +2096,7 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
 
 
   let existingSamePartMapping = false;
+  let mappingId = null;
   const transaction = await PartCodeMapping.sequelize.transaction();
   try {
     const existingMapping = await PartCodeMapping.findOne({
@@ -1888,15 +2130,33 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
         message: "Customer QR already mapped to another part.",
         timestamp: new Date().toISOString(),
       });
+      logScannerTrace({
+        stage: "customer_qr_conflict_other_part",
+        scannerIp,
+        scannerId: scanner.id,
+        scannerRole,
+        connectionId,
+        machineId: machine.id,
+        stationNo,
+        flowType: "CUSTOMER_QR",
+        payload: partId,
+        reason: "CUSTOMER_QR_ALREADY_MAPPED",
+        status: "BLOCKED",
+        decision: "BLOCKED_ALREADY_MAPPED",
+        activePartSource,
+        activePartId,
+        mappingId: existingMapping.id,
+      });
       return;
     } else {
-      await PartCodeMapping.upsert({
+      const upserted = await PartCodeMapping.upsert({
         old_part_id: activePartId,
         customer_qr: partId,
         machine_id: machine.id,
         station_no: stationNo || null,
         is_active: true,
       }, { transaction });
+      mappingId = Array.isArray(upserted) ? (upserted[0]?.id || null) : null;
       await finishTransactionSafely(transaction, "commit", "customer_qr_upsert");
     }
   } catch (error) {
@@ -1993,7 +2253,10 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
   logScannerTrace({
     stage: "customer_qr_mapped",
     scannerIp,
+    scannerId: scanner.id,
     scannerName: scanner.scanner_name,
+    scannerRole,
+    connectionId,
     machineId: machine.id,
     stationNo,
     flowType: "CUSTOMER_QR",
@@ -2001,6 +2264,11 @@ async function processCustomerQrScan({ scanner, scannerIp, partId, stationNo, ma
     payload: partId,
     reason: finalized.finalized ? "CUSTOMER_QR_MAPPED_FINALIZED" : "CUSTOMER_QR_MAPPED_PENDING",
     status: "SUCCESS",
+    decision: "MAPPED",
+    // SCANNER-FIX: record where the waiting part came from.
+    activePartSource,
+    activePartId,
+    mappingId,
     durationMs: Date.now() - scanStartedAt,
   });
   logScannerTrace({
@@ -2090,6 +2358,8 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
     );
 
   if (repeatedPendingStartQr) {
+    // SCANNER-FIX: a rescan of the waiting part restarts its expiry clock.
+    beginWorkflow(workflowKey, { machineId: machine.id, stationNo, partId: String(existingWorkflowState.activePartId || "").trim() });
     const message = `QR already accepted at ${stationNo}. Waiting for Customer QR.`;
     const payload = attachScannerDisplayMetadata({
       partId: normalizedPartId || partId,
@@ -2170,7 +2440,8 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
       message,
       timestamp: new Date().toISOString(),
     });
-    resetWorkflowState(workflowKey, { reason: "UNKNOWN_QR_AFTER_LASER" });
+    // SCANNER-FIX: a blocked read must not wipe another part's Customer-QR wait.
+    resetWorkflowStateUnlessWaitingForOtherPart(workflowKey, normalizedPartId || partId, { reason: "UNKNOWN_QR_AFTER_LASER" });
     logScannerTrace({
       stage: "unknown_qr_after_laser",
       scannerIp,
@@ -2228,7 +2499,8 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
       message,
       timestamp: new Date().toISOString(),
     });
-    resetWorkflowState(workflowKey, { reason: "CUSTOMER_QR_BLOCKED_AT_START" });
+    // SCANNER-FIX: a blocked read must not wipe another part's Customer-QR wait.
+    resetWorkflowStateUnlessWaitingForOtherPart(workflowKey, normalizedPartId || partId, { reason: "CUSTOMER_QR_BLOCKED_AT_START" });
     logScannerTrace({
       stage: "mapped_customer_qr_at_start_blocked",
       scannerIp,
@@ -2274,6 +2546,15 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
     skipShotValidation: isMappedTraceabilityScan || isCustomerQrOnlyTrace || customerQrRequiredAtStation,
     skipCustomerCodeValidation: isMappedTraceabilityScan || isCustomerQrOnlyStart,
     skipSequenceValidation: isCustomerQrOnlyStart,
+    // SCANNER-FIX: at the Customer-QR (laser) station a DPM rescan of a part
+    // that has NO active customer-QR mapping must restart the Customer-QR wait
+    // instead of being blocked as DUPLICATE_SCAN (see scanService.saveScan).
+    allowCustomerQrWaitRestart:
+      customerQrRequiredAtStation &&
+      !isMappedTraceabilityScan &&
+      !isCustomerQrOnlyStart &&
+      flowContext.qrType === "START_QR" &&
+      isDpmCode(scanPartId),
   });
 
 
@@ -2316,7 +2597,12 @@ async function processNormalPartScan({ scanner, scannerIp, partId, stationNo, ma
 
 
   if (response?.decision !== "ALLOW") {
-    resetWorkflowState(workflowKey, { reason: "START_QR_NOT_ALLOWED" });
+    // SCANNER-FIX: previously ANY blocked scan at the machine (e.g. an
+    // "ERRORERROR" read that resolved via a bad mapping to an old part and was
+    // blocked as DUPLICATE_SCAN) wiped the part that was waiting for its
+    // Customer QR — the next customer QR then had no DPM to attach to and went
+    // "QR-only", so the DPM part id disappeared from the journey.
+    resetWorkflowStateUnlessWaitingForOtherPart(workflowKey, scanPartId, { reason: "START_QR_NOT_ALLOWED" });
   }
 
   await handleTcpPlcAfterScan({
@@ -2436,7 +2722,8 @@ async function processCustomerQrOnlyStart({ scanner, scannerIp, partId, stationN
   }
   const allowed = response?.decision === "ALLOW";
   if (!allowed) {
-    resetWorkflowState(workflowKey, { reason: "QR_ONLY_START_BLOCKED" });
+    // SCANNER-FIX: do not wipe another part's Customer-QR wait.
+    resetWorkflowStateUnlessWaitingForOtherPart(workflowKey, partId, { reason: "QR_ONLY_START_BLOCKED" });
   }
   await handleTcpPlcAfterScan({
     response,
@@ -2526,6 +2813,118 @@ function getTcpPort() {
 }
 
 
+/**
+ * SCANNER-FIX: load plant QR format rules into the scanner validators.
+ */
+async function refreshScannerFormatRules() {
+  try {
+    const rules = await QrFormatRule.findAll({
+      where: { is_active: true },
+      attributes: ["format_name", "regex_pattern", "is_active"],
+      raw: true,
+    });
+    setScannerFormatRules(rules);
+  } catch (error) {
+    console.warn(`[TCP] Could not load QR format rules for scanner validation: ${error?.message || error}`);
+  }
+}
+
+/**
+ * SCANNER-FIX: start structured event logging, wire laser workflow hooks,
+ * restore persisted Customer-QR waits and load format rules. Runs only when
+ * the TCP scanner server is actually started (SHOP_FLOOR_IO=on). Every step
+ * is best-effort: a failure is logged and the scanner server keeps running.
+ */
+async function initializeScannerSafety() {
+  setWorkflowHooks({
+    persistence: {
+      save: (snapshot) => scannerEventService.laserWorkflowPersistence.save(snapshot),
+    },
+    onWaitExpired: (expired) => {
+      logScannerTrace({
+        eventType: "WORKFLOW",
+        stage: "customer_qr_wait_expired",
+        machineId: expired.machineId,
+        stationNo: expired.stationNo,
+        payload: expired.activePartId,
+        reason: "CUSTOMER_QR_WAIT_EXPIRED",
+        decision: "WAIT_EXPIRED_RESCAN_DPM",
+        activePartSource: expired.source,
+        activePartId: expired.activePartId,
+      });
+      emitRealtime("operator_popup", {
+        type: "WARNING",
+        partId: expired.activePartId,
+        stationNo: expired.stationNo,
+        machineId: expired.machineId,
+        qrStatus: "WAIT",
+        operationStatus: "WAITING",
+        status: "WAITING",
+        reason: "CUSTOMER_QR_WAIT_EXPIRED",
+        message: `${expired.stationNo || "Laser"}: Customer QR wait for part ${expired.activePartId} expired. Scan the Part ID (DPM) again, then the Customer QR.`,
+        timestamp: new Date().toISOString(),
+      });
+    },
+    onQueueTimeout: ({ key, itemId, payload, timeoutMs }) => {
+      logScannerTrace({
+        level: "error",
+        eventType: "WORKFLOW",
+        stage: "laser_queue_timeout",
+        payload,
+        reason: `LASER_QUEUE_TIMEOUT_${timeoutMs}MS key=${key} item=${itemId}`,
+        decision: "REVIEW_TIMEOUT_STATE_RESET",
+      });
+    },
+    onQueueHardRelease: ({ key, itemId, payload }) => {
+      logScannerTrace({
+        level: "error",
+        eventType: "WORKFLOW",
+        stage: "laser_queue_hard_release",
+        payload,
+        reason: `LASER_QUEUE_HARD_RELEASE key=${key} item=${itemId}`,
+        decision: "REVIEW_TIMEOUT",
+      });
+    },
+  });
+  await scannerEventService.startScannerEventLogging().catch((error) => {
+    console.warn(`[TCP] Scanner event logging not started: ${error?.message || error}`);
+  });
+  await refreshScannerFormatRules();
+  const rulesTimer = setInterval(refreshScannerFormatRules, 5 * 60 * 1000);
+  if (rulesTimer.unref) rulesTimer.unref();
+  try {
+    await scannerEventService.ensureLaserWorkflowStatesTable();
+    const rows = await scannerEventService.laserWorkflowPersistence.loadWaiting();
+    // Only restore a wait whose part still has no active mapping.
+    const candidates = [];
+    for (const row of rows) {
+      const partId = String(row.active_part_id || "").trim();
+      if (!partId) continue;
+      const mapped = await PartCodeMapping.findOne({ where: { old_part_id: partId, is_active: true }, attributes: ["id"] });
+      if (!mapped) candidates.push(row);
+    }
+    const restored = restoreWorkflowStates(candidates);
+    if (restored.length) {
+      console.log(`[TCP] Restored ${restored.length} persisted Customer-QR wait(s): ${restored.join(", ")}`);
+    }
+    for (const key of restored) {
+      const state = getWorkflowState(key);
+      logScannerTrace({
+        eventType: "WORKFLOW",
+        stage: "customer_qr_wait_restored",
+        machineId: state.machineId,
+        stationNo: state.stationNo,
+        payload: state.activePartId,
+        decision: "WAIT_RESTORED",
+        activePartSource: "PERSISTED",
+        activePartId: state.activePartId,
+      });
+    }
+  } catch (error) {
+    console.warn(`[TCP] Laser workflow state restore skipped: ${error?.message || error}`);
+  }
+}
+
 function startTcpServer() {
   if (running) {
     return;
@@ -2539,16 +2938,59 @@ function startTcpServer() {
     return;
   }
 
+  initializeScannerSafety().catch((error) => {
+    console.warn(`[TCP] Scanner safety initialization failed: ${error?.message || error}`);
+  });
+
 
   tcpServer = net.createServer((socket) => {
     const remoteIp = String(socket.remoteAddress || "").replace(/^::ffff:/, "");
+    // SCANNER-FIX: connection id so every frame/decision can be tied to the
+    // TCP session it arrived on (reconnect storms, half-open sockets).
+    const connectionId = `${remoteIp}#${Date.now().toString(36)}-${nextConnectionSeq++}`;
+    let disconnectReason = "CLIENT_CLOSED";
     socket.setKeepAlive(true, Math.max(Number(process.env.TCP_SCANNER_KEEPALIVE_DELAY_MS || 5000), 1000));
     socket.setNoDelay(true);
-    console.log(`[TCP] Client connected: ${remoteIp}:${socket.remotePort || "-"}`);
+    console.log(`[TCP] Client connected: ${remoteIp}:${socket.remotePort || "-"} conn=${connectionId}`);
     scannerConnectionService.markScannerConnected({ scannerIp: remoteIp });
+    logScannerTrace({
+      eventType: "CONNECTION",
+      stage: "scanner_connected",
+      scannerIp: remoteIp,
+      connectionId,
+      decision: "CONNECTED",
+      reason: `remotePort=${socket.remotePort || "-"}`,
+    });
+
+    // SCANNER-FIX: optional replacement of a stale socket from the same IP.
+    // A scanner that reconnects means its previous socket is dead (half-open);
+    // close the old one. Opt-in (TCP_SCANNER_REPLACE_STALE_CONNECTION=on)
+    // because a device that legitimately keeps two sockets would flap.
+    if (String(process.env.TCP_SCANNER_REPLACE_STALE_CONNECTION || "off").trim().toLowerCase() === "on") {
+      const previous = activeScannerSockets.get(remoteIp);
+      if (previous && previous.socket !== socket && !previous.socket.destroyed) {
+        previous.setReason("REPLACED_BY_NEW_CONNECTION");
+        previous.socket.destroy();
+      }
+    }
+    activeScannerSockets.set(remoteIp, { socket, connectionId, setReason: (reason) => { disconnectReason = reason; } });
+
+    // SCANNER-FIX (F): idle timeout. TCP_SCANNER_CLIENT_TIMEOUT_MS existed but
+    // was never applied. It is applied ONLY when explicitly set in the env,
+    // because many scanners stay silent for long periods between parts and
+    // not every scanner reconnects automatically after the server closes the
+    // socket. Half-open sockets are already detected by TCP keepalive.
+    if (String(process.env.TCP_SCANNER_CLIENT_TIMEOUT_MS || "").trim()) {
+      socket.setTimeout(TCP_SCANNER_CLIENT_TIMEOUT_MS);
+      socket.on("timeout", () => {
+        disconnectReason = `IDLE_TIMEOUT_${TCP_SCANNER_CLIENT_TIMEOUT_MS}MS`;
+        socket.destroy();
+      });
+    }
 
 
     let pending = "";
+    let pendingRawChunks = [];
     let flushTimer = null;
     let pendingFirstAt = 0;
 
@@ -2561,15 +3003,20 @@ function startTcpServer() {
     };
 
 
-    const consumeMessage = (raw) => {
+    const consumeMessage = (raw, { rawHex = "", framing = "TERMINATOR" } = {}) => {
       const data = sanitizeScannerPayload(raw);
       if (!data) return;
-      console.log(`[TCP] Received from ${remoteIp}: ${data}`);
+      console.log(`[TCP] Received from ${remoteIp}: ${data} (framing=${framing})`);
       scannerConnectionService.markScannerData({ scannerIp: remoteIp });
       markScannerHeartbeat({ scannerIp: remoteIp });
       enqueueScannerProcessing(remoteIp, async () => {
         try {
-          await processIncomingScannerPayload({ scannerIp: remoteIp, rawPacket: data });
+          await processIncomingScannerPayload({
+            scannerIp: remoteIp,
+            rawPacket: data,
+            rawHex: rawHex || toHex(raw),
+            connectionId,
+          });
         } catch (error) {
           console.error(`[TCP] Scanner payload processing failed (${remoteIp}): ${error.message}`);
           emitRealtime("operator_popup", attachScannerDisplayMetadata({
@@ -2578,7 +3025,9 @@ function startTcpServer() {
             stationNo: null,
             machineId: null,
             machineName: null,
-            scannerIp,
+            // SCANNER-FIX: was `scannerIp` (undefined here → ReferenceError
+            // inside the catch, so the operator never saw this popup).
+            scannerIp: remoteIp,
             qrStatus: "FAILED",
             operationStatus: "BLOCKED",
             status: "BLOCKED",
@@ -2594,21 +3043,41 @@ function startTcpServer() {
     };
 
 
+    const flushPending = (framing) => {
+      const rawHex = toHex(Buffer.concat(pendingRawChunks));
+      const frame = pending;
+      pending = "";
+      pendingRawChunks = [];
+      pendingFirstAt = 0;
+      consumeMessage(frame, { rawHex, framing });
+    };
+
+    // SCANNER-FIX: unterminated data is flushed after TCP_SCANNER_FLUSH_MS of
+    // silence OR when the frame has been open for TCP_SCANNER_MAX_FRAME_WAIT_MS,
+    // whichever comes first. Previously the idle timer restarted on every
+    // chunk with no cap, so back-to-back reads were glued into one payload.
     const schedulePendingFlush = () => {
       clearFlushTimer();
+      if (!pending) return;
+      const openForMs = pendingFirstAt ? Date.now() - pendingFirstAt : 0;
+      const remainingToCap = Math.max(TCP_SCANNER_MAX_FRAME_WAIT_MS - openForMs, 0);
+      const delay = Math.min(TCP_SCANNER_FLUSH_MS, remainingToCap);
       flushTimer = setTimeout(() => {
-        if (pending.trim()) {
-          const data = sanitizeScannerPayload(pending);
-          const waitedMs = pendingFirstAt ? Date.now() - pendingFirstAt : TCP_SCANNER_MAX_FRAME_WAIT_MS;
-          if (data.length < TCP_SCANNER_MIN_FRAME_LENGTH && waitedMs < TCP_SCANNER_MAX_FRAME_WAIT_MS) {
-            schedulePendingFlush();
-            return;
-          }
-          consumeMessage(pending);
+        flushTimer = null;
+        if (!pending.trim()) {
           pending = "";
+          pendingRawChunks = [];
           pendingFirstAt = 0;
+          return;
         }
-      }, TCP_SCANNER_FLUSH_MS);
+        const data = sanitizeScannerPayload(pending);
+        const waitedMs = pendingFirstAt ? Date.now() - pendingFirstAt : TCP_SCANNER_MAX_FRAME_WAIT_MS;
+        if (data.length < TCP_SCANNER_MIN_FRAME_LENGTH && waitedMs < TCP_SCANNER_MAX_FRAME_WAIT_MS) {
+          schedulePendingFlush();
+          return;
+        }
+        flushPending(waitedMs >= TCP_SCANNER_MAX_FRAME_WAIT_MS ? "MAX_FRAME_WAIT" : "IDLE_FLUSH");
+      }, delay);
     };
 
 
@@ -2618,33 +3087,71 @@ function startTcpServer() {
 
       if (!pending) pendingFirstAt = Date.now();
       pending += chunk;
+      pendingRawChunks.push(buffer);
 
 
-      const parts = pending.split(/\r?\n|\0/);
-      pending = parts.pop() || "";
-
-
-      for (const raw of parts) {
-        consumeMessage(raw);
+      // SCANNER-FIX: CR-only, LF, CRLF and NUL all terminate a frame.
+      const { frames, rest } = splitScannerFrames(pending);
+      if (frames.length > 0) {
+        const rawHex = toHex(Buffer.concat(pendingRawChunks));
+        pending = rest;
+        pendingRawChunks = rest ? [Buffer.from(rest, "utf8")] : [];
+        pendingFirstAt = rest ? Date.now() : 0;
+        for (const raw of frames) {
+          consumeMessage(raw, { rawHex, framing: "TERMINATOR" });
+        }
       }
-      if (!pending) pendingFirstAt = 0;
+      // Cap reached while chunks keep arriving without a terminator.
+      if (pending && pendingFirstAt && Date.now() - pendingFirstAt >= TCP_SCANNER_MAX_FRAME_WAIT_MS) {
+        clearFlushTimer();
+        flushPending("MAX_FRAME_WAIT");
+        return;
+      }
       schedulePendingFlush();
     });
 
 
     socket.on("close", () => {
       clearFlushTimer();
+      // SCANNER-FIX: a partial frame left in the buffer when the socket closes
+      // (e.g. "?V047") used to be processed as a full code. Keep it only if it
+      // is a complete known code (DPM or customer QR); otherwise log + drop.
       if (pending.trim()) {
-        consumeMessage(pending);
+        if (isCompleteKnownCode(pending)) {
+          flushPending("SOCKET_CLOSE");
+        } else {
+          logScannerTrace({
+            stage: "partial_frame_dropped_on_close",
+            scannerIp: remoteIp,
+            connectionId,
+            payload: sanitizeScannerPayload(pending),
+            rawHex: toHex(Buffer.concat(pendingRawChunks)),
+            reason: "PARTIAL_FRAME_ON_CLOSE",
+            decision: "DROPPED",
+          });
+          pending = "";
+          pendingRawChunks = [];
+        }
       }
       pendingFirstAt = 0;
+      const tracked = activeScannerSockets.get(remoteIp);
+      if (tracked && tracked.socket === socket) activeScannerSockets.delete(remoteIp);
       scannerConnectionService.markScannerDisconnected({ scannerIp: remoteIp });
-      console.log(`[TCP] Client disconnected: ${remoteIp}`);
+      console.log(`[TCP] Client disconnected: ${remoteIp} conn=${connectionId} reason=${disconnectReason}`);
+      logScannerTrace({
+        eventType: "CONNECTION",
+        stage: "scanner_disconnected",
+        scannerIp: remoteIp,
+        connectionId,
+        decision: "DISCONNECTED",
+        reason: disconnectReason,
+      });
     });
 
 
     socket.on("error", (error) => {
       clearFlushTimer();
+      disconnectReason = `SOCKET_ERROR_${error?.code || "UNKNOWN"}`;
       if (isExpectedSocketDisconnect(error)) {
         console.warn(`[TCP] Client disconnected unexpectedly: ${remoteIp}:${socket.remotePort || "-"} (${error.code || error.message})`);
         return;
@@ -2680,7 +3187,8 @@ function shutdownTcpServer() {
     tcpServer.close(() => {
       running = false;
       tcpServer = null;
-      resolve();
+      // SCANNER-FIX: write any buffered scanner events before exit.
+      scannerEventService.flushScannerEvents().catch(() => {}).finally(resolve);
     });
   });
 }
@@ -2689,4 +3197,12 @@ function shutdownTcpServer() {
 module.exports = {
   startTcpServer,
   shutdownTcpServer,
+  // SCANNER-FIX: exposed for unit tests only (no side effects on require).
+  _internals: {
+    resolveScannerFlow,
+    processScannerPayloadForMapping,
+    resolveActivePartForMachine,
+    resolveValidationRoleForScanners,
+    canStartCustomerQrOnlyPart,
+  },
 };

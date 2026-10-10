@@ -1,82 +1,188 @@
 import React, { useMemo } from "react";
-import { Factory, CheckCircle2, XCircle, Hourglass, MapPin, Target, Workflow } from "lucide-react";
-import { ACCENT, CARD_CSS, accent, fmtInt, fmtPct } from "./chartTheme";
+import { CheckCircle2, Factory, Hourglass, Layers, XCircle } from "lucide-react";
+import InfoTip from "./components/InfoTip";
+import Sparkline from "../../components/mgmt/Sparkline";
+import Skeleton from "../../components/mgmt/Skeleton";
+import { NAVY_3, OUTCOME_COLOR, SLATE, WARMUP_COLOR, fmtInt, fmtPct, pctOf } from "../../components/mgmt/mgmtTheme";
+import { DEFINITIONS } from "./mgmt/derive";
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   Page-level KPI strip — shown above the tabs, so the headline numbers stay in view on every tab.
-   Same definitions as before (they used to live inside Station Overview):
-   • Final OK = max(summary OK, OP160 OK) — two sources for the same number; a lagging summary never hides passes
-   • NG = summary NG (any station NG or leak NG) · In process = produced − OK − NG
-   • FPY = OK ÷ (OK + NG) · RTY = Π FPY of every station (the three leak machines = one OP150 step)
+   Page-level KPI strip — one compact card, frozen under the header on every tab (the page makes it sticky).
+     DCM shots (OP100)        shots of the die-casting machine: OK · NG · warm-up (shot analytics, part OPK12)
+     Tracked parts            parts first scanned in the period = OK + NG + In progress
+     OK / NG / In progress    the same tracked parts by their result so far (rejection summary)
+   Every cell has the same 24 px sparkline (per production day, or per hour for a single day); a cell without a
+   trend keeps an empty band of the same height so the cells stay aligned. No progress bars.
+   k = computeKpis() (mgmt/derive.js); trendData = rejection-daily (rows per day × shift, or per hour);
+   shot = shot analytics (byDay).
    ═══════════════════════════════════════════════════════════════════════════ */
-const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
-const pctOf = (part, whole) => (whole > 0 ? (part / whole) * 100 : null);
-const isLeak = (c) => { const u = String(c || "").toUpperCase(); return u === "OP150" || u.includes("LEAK"); };
-const opNo = (c) => (isLeak(c) ? 150 : Number(String(c || "").match(/OP\s*(\d+)/i)?.[1]) || 999);
-
-const CSS = `
-.rkpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:0 0 14px}
-.rkpi .ra-kpi{padding:10px 12px;border-radius:12px}
-.rkpi .ra-kpi{display:flex;flex-direction:column;justify-content:space-between;gap:6px}
-.rkpi .ra-kpi-value{font-size:22px;line-height:1.15;font-variant-numeric:tabular-nums}
-.rkpi .ra-kpi-top .ra-icon{width:24px;height:24px;border-radius:7px}
+const STRIP_CSS = `
+.ra-kstrip{display:grid;grid-template-columns:1.35fr repeat(4,minmax(0,1fr));padding:0;overflow:hidden}
+.ra-kcell{position:relative;display:grid;grid-template-columns:34px minmax(0,1fr);column-gap:10px;row-gap:1px;align-items:start;min-width:0;padding:11px 16px 8px}
+.ra-kcell>*:not(.ra-kicon){grid-column:2}
+.ra-kicon{grid-row:1/span 3;width:34px;height:34px;border-radius:10px;display:grid;place-items:center;color:var(--kc);background:color-mix(in srgb,var(--kc) 13%,#fff);margin-top:2px}
+.ra-kcell .ra-kspark{grid-column:1/-1}
+.ra-kcell+.ra-kcell{border-left:1px solid #eef2f6}
+.ra-kcell::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--kc,transparent)}
+.ra-klabel{display:flex;align-items:center;gap:4px;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#64748b;white-space:nowrap;overflow:hidden}
+.ra-kline{display:flex;align-items:baseline;gap:8px;min-width:0}
+.ra-kval{font-size:25px;line-height:1.1;font-weight:750;letter-spacing:-.02em;color:#0f172a;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ra-kpct{font-size:11.5px;font-weight:800;color:var(--kc);background:color-mix(in srgb,var(--kc) 11%,#fff);padding:1px 7px;border-radius:999px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ra-ksub{font-size:11.5px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.ra-ksub b{font-weight:700}
+.ra-kspark{height:26px;margin-top:4px;position:relative}
+.ra-kspark small{position:absolute;right:0;top:-2px;font-size:9.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#94a3b8}
+@media (max-width:1100px){.ra-kstrip{grid-template-columns:repeat(3,minmax(0,1fr))}.ra-kcell:nth-child(4){border-left:none}.ra-kcell:nth-child(n+4){border-top:1px solid #eef2f6}}
+@media (max-width:640px){.ra-kstrip{grid-template-columns:repeat(2,minmax(0,1fr))}.ra-kcell{padding:8px 12px 6px}.ra-kval{font-size:19px}.ra-kcell:nth-child(odd){border-left:none}.ra-kcell:nth-child(4){border-left:1px solid #eef2f6}.ra-kcell:nth-child(n+3){border-top:1px solid #eef2f6}.ra-kspark{display:none}}
 `;
 
-export default function RejectionKpiStrip({ summary = {}, qualityGates = [] }) {
-  const k = useMemo(() => {
-    const gates = qualityGates || [];
-    const op160 = gates.find((g) => String(g.code || "").toUpperCase().includes("OP160"));
-    const ok = Math.max(num(summary.totalOK), num(op160?.okCount));
-    const gateNg = gates.reduce((s, g) => s + num(g.ngCount), 0);
-    const ng = summary.totalNG !== undefined && summary.totalNG !== null && summary.totalNG !== "" ? num(summary.totalNG) : gateNg;
-    const produced = num(summary.totalProduction);
-    const done = ok + ng;
-    const wip = produced > 0 ? Math.max(0, produced - ok - ng) : Number.isFinite(Number(summary.inProgress)) ? num(summary.inProgress) : null;
+const n = (v) => fmtInt(v);
+const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
-    // RTY over the serial flow; leak machines run in parallel → one step
-    const steps = {};
-    gates.forEach((g) => {
-      const key = isLeak(g.code) ? "OP150" : String(g.code || "").toUpperCase();
-      const s = steps[key] || (steps[key] = { ok: 0, ng: 0 });
-      s.ok += Math.max(0, num(g.okCount)); s.ng += Math.max(0, num(g.ngCount));
+/** Per-day (or per-hour) series for the sparklines, in time order. */
+function useSparks(trendData, shot, singleDay) {
+  return useMemo(() => {
+    const rows = Array.isArray(trendData?.days) ? trendData.days : [];
+    const keyOf = (r) => (singleDay ? (r.hour == null ? null : Number(r.hour)) : r.day || null);
+    const map = new Map();
+    rows.forEach((r) => {
+      const k = keyOf(r);
+      if (k == null) return;
+      const b = map.get(k) || { produced: 0, ok: 0, ng: 0, wip: 0 };
+      b.produced += num(r.produced); b.ok += num(r.ok); b.ng += num(r.ng); b.wip += num(r.wip);
+      map.set(k, b);
     });
-    const fpys = Object.keys(steps).sort((a, b) => opNo(a) - opNo(b)).map((c) => steps[c]).filter((s) => s.ok + s.ng > 0).map((s) => s.ok / (s.ok + s.ng));
-    const rty = fpys.length ? fpys.reduce((a, b) => a * b, 1) : null;
+    let keys = [...map.keys()];
+    if (singleDay) {
+      const start = Math.round(num(trendData?.dayRule?.dayStart ?? 21600) / 3600);
+      keys.sort((a, b) => ((a - start + 24) % 24) - ((b - start + 24) % 24));
+    } else keys.sort();
+    const pick = (f) => (keys.length > 1 ? keys.map((k) => map.get(k)[f]) : null);
+    const shotDays = (shot?.byDay || []).slice().sort((a, b) => String(a.day).localeCompare(String(b.day)));
+    return {
+      shots: !singleDay && shotDays.length > 1 ? shotDays.map((d) => num(d.shots)) : null,
+      produced: pick("produced"), ok: pick("ok"), ng: pick("ng"), wip: pick("wip"),
+    };
+  }, [trendData, shot, singleDay]);
+}
 
-    const top = [...gates].sort((a, b) => num(b.ngCount) - num(a.ngCount))[0];
-    const hot = !top || !num(top.ngCount)
-      ? { title: gates.length ? "None" : (summary.topHotspotStation || "—"), sub: gates.length ? "No rejects at any station" : "No station data" }
-      : {
-        title: top.shortLabel || String(top.code).replace(/^Leak-Test-0?(\d)$/i, "Leak-Test-$1").replace(/^Leak Test-0?(\d)$/i, "Leak-Test-$1"),
-        sub: `${fmtInt(top.ngCount)} NG · ${fmtPct(pctOf(num(top.ngCount), num(top.okCount) + num(top.ngCount)))} of inspected · ${fmtPct(pctOf(num(top.ngCount), gateNg), 0)} of all NG`,
-      };
-    return { ok, ng, produced, done, wip, rty, hot };
-  }, [summary, qualityGates]);
+function Cell({ label, color, info, loading, value, valueColor, pct, sub, spark, sparkColor, icon: Icon }) {
+  return (
+    <div className="ra-kcell" style={{ "--kc": color }}>
+      {Icon && <span className="ra-kicon" aria-hidden="true"><Icon size={17} /></span>}
+      <div className="ra-klabel">
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
+        {info && <InfoTip info={{ title: label, ...info }} label={`Definition: ${label}`} />}
+      </div>
+      {loading ? (
+        <>
+          <Skeleton height={26} width="62%" />
+          <Skeleton height={11} width="80%" />
+          <div className="ra-kspark" />
+        </>
+      ) : (
+        <>
+          <div className="ra-kline">
+            <span className="ra-kval" style={valueColor ? { color: valueColor } : undefined}>{value}</span>
+            {pct && <span className="ra-kpct">{pct}</span>}
+          </div>
+          <div className="ra-ksub">{sub || " "}</div>
+          <div className="ra-kspark">
+            {spark ? <><Sparkline values={spark} color={sparkColor || NAVY_3} height={26} area ariaLabel={`${label} trend`} /></> : null}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
-  const cards = [
-    { label: "Parts produced", icon: Factory, color: ACCENT.process, value: fmtInt(k.produced), sub: "All tracked castings in the period" },
-    { label: "Final OK", icon: CheckCircle2, color: ACCENT.ok, value: fmtInt(k.ok), sub: `${fmtPct(pctOf(k.ok, k.produced))} of parts produced` },
-    { label: "Rejected (NG)", icon: XCircle, color: ACCENT.ng, value: fmtInt(k.ng), sub: `${fmtPct(pctOf(k.ng, k.done))} of completed (OK + NG)`, title: "NG ÷ (final OK + NG)" },
-    { label: "In process", icon: Hourglass, color: ACCENT.wip, value: k.wip == null ? "—" : fmtInt(k.wip), sub: "Produced − final OK − NG" },
-    { label: "First-pass yield", icon: Target, color: ACCENT.quality, value: fmtPct(pctOf(k.ok, k.done)), sub: "OK ÷ (OK + NG)", title: "Final OK ÷ (final OK + NG)" },
-    { label: "Rolled throughput yield", icon: Workflow, color: ACCENT.quality, value: k.rty == null ? "—" : fmtPct(k.rty * 100, 2), sub: "Product of station FPYs", title: "RTY = FPY(OP100) × FPY(OP110) × … × FPY(OP160); FPY = OK ÷ (OK + NG) at each step" },
-    { label: "Most rejects at", icon: MapPin, color: ACCENT.location, value: k.hot.title, sub: k.hot.sub },
-  ];
+export default function RejectionKpiStrip({ k, trendData, shot, singleDay, loadingShot, loadingSummary }) {
+  const sp = useSparks(trendData, shot, singleDay);
+  const ofTracked = (v) => (k.traced ? fmtPct(pctOf(v, k.traced), 1) : null);
+  const ngShotPct = k.goodShots != null ? pctOf(k.ngShots, num(k.goodShots) + num(k.ngShots)) : null;
+  const eq = k.traced != null ? `${n(k.totalPass)} + ${n(k.totalNg)} + ${n(k.inProgress)} = ${n(k.tracedSum)}` : null;
 
   return (
-    <>
-      <style>{CARD_CSS + CSS}</style>
-      <div className="rkpi" aria-label="Key figures for the selected period">
-        {cards.map((c) => (
-          <div key={c.label} className="ra-kpi" data-accent style={accent(c.color)}>
-            <div className="ra-kpi-top">
-              <span className="ra-icon" aria-hidden="true"><c.icon size={13} /></span>
-              <span className="ra-kpi-label">{c.label}</span>
-            </div>
-            <div className="ra-kpi-value">{c.value}</div>
-          </div>
-        ))}
-      </div>
-    </>
+    <section className="mg-card ra-kstrip" aria-label="Key figures for the selected period">
+      <style>{STRIP_CSS}</style>
+      <Cell
+        label="DCM shots (OP100)"
+        icon={Factory}
+        color={NAVY_3}
+        loading={loadingShot}
+        value={fmtInt(k.shots)}
+        pct={ngShotPct != null ? `NG ${fmtPct(ngShotPct, 2)}` : null}
+        sub={k.shots == null ? "No shot data in this period" : (
+          <>
+            <b style={{ color: OUTCOME_COLOR.ok }}>{n(k.goodShots)}</b> OK · <b style={{ color: OUTCOME_COLOR.ng }}>{n(k.ngShots)}</b> NG · <b style={{ color: SLATE[600] }}>{n(k.warmUp)}</b> warm-up
+          </>
+        )}
+        spark={sp.shots}
+        sparkColor={NAVY_3}
+        info={{
+          ...DEFINITIONS.shots,
+          formula: ["DCM shots = OK shots + NG shots + warm-up shots", "NG shot % = NG shots ÷ (OK shots + NG shots)", ...(k.shots != null ? [`${n(k.goodShots)} + ${n(k.ngShots)} + ${n(k.warmUp)} = ${n(k.shots)}`] : [])],
+          note: "NG shot = a process parameter out of limits (counted as CR). Warm-up shots are planned and not counted as scrap.",
+        }}
+      />
+      <Cell
+        label="Tracked parts"
+        icon={Layers}
+        color={SLATE[500]}
+        loading={loadingSummary}
+        value={fmtInt(k.traced)}
+        sub={k.traced != null && !k.tracedAddsUp ? `OK + NG + In progress = ${n(k.tracedSum)}` : "First scanned in the period"}
+        spark={sp.produced}
+        sparkColor={SLATE[500]}
+        info={{
+          what: DEFINITIONS.traced.what,
+          formula: ["Tracked = OK + NG parts + In progress", ...(eq ? [eq] : [])],
+          note: "Same figures as the Dashboard and the Historical page.",
+        }}
+      />
+      <Cell
+        label="OK"
+        icon={CheckCircle2}
+        color={OUTCOME_COLOR.ok}
+        loading={loadingSummary}
+        value={fmtInt(k.totalPass)}
+        valueColor={OUTCOME_COLOR.ok}
+        pct={ofTracked(k.totalPass)}
+        sub="Passed final inspection (OP160)"
+        spark={sp.ok}
+        sparkColor={OUTCOME_COLOR.ok}
+        info={DEFINITIONS.pass}
+      />
+      <Cell
+        label="NG"
+        icon={XCircle}
+        color={OUTCOME_COLOR.ng}
+        loading={loadingSummary}
+        value={fmtInt(k.totalNg)}
+        valueColor={OUTCOME_COLOR.ng}
+        pct={ofTracked(k.totalNg)}
+        sub={k.stationRejections != null ? `${n(k.stationRejections)} station rejections` : "Rejected parts"}
+        spark={sp.ng}
+        sparkColor={OUTCOME_COLOR.ng}
+        info={{
+          what: "Parts rejected in the period (same figure as the Dashboard and the Historical page). The station rejections underneath count every NG decision per station (decisive scan per part per station, leak test per machine) — a part can be rejected at more than one station, and the station charts use those counts.",
+          formula: ["Tracked = OK + NG + In progress"],
+          note: "NG shots of the die-casting machine are on the DCM shots card, not in this figure.",
+        }}
+      />
+      <Cell
+        label="In progress"
+        icon={Hourglass}
+        color={WARMUP_COLOR}
+        loading={loadingSummary}
+        value={fmtInt(k.inProgress)}
+        valueColor={SLATE[600]}
+        pct={ofTracked(k.inProgress)}
+        sub="No final result yet"
+        spark={sp.wip}
+        sparkColor={SLATE[400]}
+        info={DEFINITIONS.inProgress}
+      />
+    </section>
   );
 }

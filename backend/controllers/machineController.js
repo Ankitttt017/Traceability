@@ -544,6 +544,38 @@ async function normalizePayload(body = {}, existing = null) {
   return payload;
 }
 
+// Two machines may share one PLC (same IP / port) only with their own registers. If a second machine is given the
+// same START / STATUS / BLOCK / RESET / part / station / heartbeat register on the same PLC, each would read the other's
+// END OK / NG and write the other's START / BLOCK (e.g. a laser-marking interlock released by another station).
+const PLC_REGISTER_FIELDS = [
+  ["plc_start_register", "START"], ["plc_status_register", "STATUS"], ["plc_block_register", "BLOCK"],
+  ["plc_reset_register", "RESET"], ["plc_part_register", "PART"], ["plc_station_register", "STATION"],
+  ["plc_heartbeat_register", "HEARTBEAT"],
+];
+async function findPlcRegisterConflicts(payload = {}, excludeId = null) {
+  const ip = String(payload.plc_ip || "").trim();
+  if (!ip || ip === "0.0.0.0") return [];
+  const port = Number(payload.plc_port) || 0;
+  const mine = PLC_REGISTER_FIELDS
+    .map(([k, label]) => [Number(payload[k]), label])
+    .filter(([n]) => Number.isFinite(n) && n > 0);
+  if (!mine.length) return [];
+  const others = await Machine.findAll({ where: { plc_ip: ip }, raw: true });
+  const conflicts = [];
+  for (const m of others) {
+    if (excludeId && Number(m.id) === Number(excludeId)) continue;
+    if (m.is_active === false) continue;
+    if ((Number(m.plc_port) || 0) !== port) continue;
+    for (const [k, label] of PLC_REGISTER_FIELDS) {
+      const n = Number(m[k]);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      const hit = mine.find(([own]) => own === n);
+      if (hit) conflicts.push(`${hit[1]} register ${n} is already the ${label} register of "${m.machine_name}" on PLC ${ip}:${port}`);
+    }
+  }
+  return conflicts;
+}
+
 function parsePlcSnapshotFromPayload(payload = {}) {
   try {
     const parsed = payload?.plc_registers ? JSON.parse(payload.plc_registers) : {};
@@ -773,6 +805,10 @@ exports.createMachine = async (req, res) => {
         details: validationErrors,
       });
     }
+    const plcConflicts = await findPlcRegisterConflicts(payload);
+    if (plcConflicts.length) {
+      return res.status(409).json({ error: "PLC registers already used by another machine on the same PLC", details: plcConflicts });
+    }
 
     payload.machine_number = await ensureUniqueMachineNumber(buildMachineNumberSeed(req.body));
     let created = null;
@@ -812,6 +848,11 @@ exports.updateMachine = async (req, res) => {
         error: "Invalid machine PLC mapping",
         details: validationErrors,
       });
+    }
+
+    const plcConflicts = await findPlcRegisterConflicts(payload, id);
+    if (plcConflicts.length) {
+      return res.status(409).json({ error: "PLC registers already used by another machine on the same PLC", details: plcConflicts });
     }
 
     const requestedMachineNumber = toText(req.body.machineNumber || req.body.machine_number);

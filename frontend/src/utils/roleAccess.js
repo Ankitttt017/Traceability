@@ -42,7 +42,6 @@ export const MODULE_ACCESS_META = [
   { key: "parts", label: "Part Manager" },
   { key: "rejection_config", label: "Rejection Configuration" },
   { key: "station_control", label: "Station Control" },
-  { key: "report_config", label: "Report Configuration" },
   { key: "machines", label: "Machines" },
   { key: "plc_config", label: "PLC Config" },
   { key: "scanners", label: "Scanners" },

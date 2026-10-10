@@ -113,7 +113,9 @@ async function syncDateRangeNow(dateFrom, dateTo) {
         }
         
         const op = String(row.operationNo || row.stationNo || row.operation_no || row.station_no || "").trim().toUpperCase();
-        if (rowStatus === "OK" && (op === "OP160" || op === "OP150" || row.isFinalInspection === true)) {
+        // final pass = Final Inspection (OP160) OK only; a leak test OK (OP150) is not the end of the line — it made
+        // ~3,000 parts PASSED without a final inspection
+        if (rowStatus === "OK" && (op === "OP160" || row.isFinalInspection === true)) {
           hasFinalOk = true;
         }
       }
@@ -169,9 +171,12 @@ async function syncDateRangeNow(dateFrom, dateTo) {
       }
 
       const pData = plcData || {};
-      // Leak test: the LATEST reading decides (a part that failed and then passed on a retest — often on another
-      // leak machine — is OK, counted once). leakData[0] was the first machine by IP order, not the latest test.
-      // Every reading is kept in "readings" so both results can be shown.
+      // Leak test rule (plant decision, same as the Report page, Component Journey and the OP160 interlock):
+      // the LATEST leak test decides — NG on one leak machine then OK on a retest (same or another machine) = OK,
+      // like the latest OK / NG scan at every station. The decisive reading (top level of leak_data: result,
+      // matchedMachineId, cycleEndTime — what every report / count reads) is the latest test; every attempt is
+      // kept in "readings" so all results stay visible ("NG → OK (retest)").
+      // (leakData[0] used to be the first machine by IP order, not a deliberate choice.)
       const leakList = (Array.isArray(leakData) ? leakData : (leakData ? [leakData] : [])).filter((r) => r && typeof r === "object");
       const leakTime = (r) => new Date(r.cycleEndTime || r.Cycle_End_Time || 0).getTime() || 0;
       const leakSorted = [...leakList].sort((a, b) => leakTime(a) - leakTime(b));
@@ -188,13 +193,14 @@ async function syncDateRangeNow(dateFrom, dateTo) {
         }
         : {};
 
-      // The latest leak test is the part's OP150 result (report table only — packing / interlocks keep their own
-      // rules). A leak NG followed by a passing retest is OK and counted once; a retest that fails makes it NG.
-      const latestLeakResult = String(latestLeak?.result || latestLeak?.Result || "").trim().toUpperCase();
-      if (latestLeakResult === "OK" || latestLeakResult === "NG") {
-        opStatuses.op150_status = latestLeakResult;
+      // The part's OP150 result in the report table: the latest leak test's result (counted once). A leak NG
+      // followed by a passing retest is OK; a retest that fails makes it NG. An earlier leak NG attempt does not
+      // keep the part NG when no other station is NG.
+      const decisiveLeakResult = String(latestLeak?.result || latestLeak?.Result || "").trim().toUpperCase();
+      if (decisiveLeakResult === "OK" || decisiveLeakResult === "NG") {
+        opStatuses.op150_status = decisiveLeakResult;
         const otherStationNg = Object.entries(opStatuses).some(([k, v]) => k !== "op150_status" && v === "NG");
-        if (latestLeakResult === "NG") overallStatus = "NG";
+        if (decisiveLeakResult === "NG") overallStatus = "NG";
         else if (overallStatus === "NG" && !otherStationNg) overallStatus = hasFinalOk ? "PASSED" : "IN_PROGRESS";
       }
 
@@ -325,7 +331,7 @@ async function syncDateRangeNow(dateFrom, dateTo) {
             let hasFinalOk = false;
             fieldsToMerge.forEach(field => {
               if (record[field] === 'NG') hasNg = true;
-              if (record[field] === 'OK' && (field === 'op160_status' || field === 'op150_status')) hasFinalOk = true;
+              if (record[field] === 'OK' && field === 'op160_status') hasFinalOk = true; // final pass = OP160 OK only
             });
             if (hasNg) record.overall_status = 'NG';
             else if (hasFinalOk) record.overall_status = 'PASSED';

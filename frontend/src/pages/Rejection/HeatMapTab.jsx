@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { MapPin, X, Maximize2, Minimize2, Download, Layers, Crosshair, Activity, Gauge, ListOrdered } from "lucide-react";
-import { rejectionConfigApi } from "../../api/services";
+import React, { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { MapPin, Maximize2, Minimize2, Download, Layers, Crosshair, Activity, Gauge, ListOrdered, ArrowLeft, ChevronRight, AlertTriangle } from "lucide-react";
+import ParetoChart from "../../components/mgmt/ParetoChart";
+import { SkeletonBlock } from "../../components/mgmt/Skeleton";
 import { parseRowDefect, resolveDefectLocation, boxStyle, subBoxStyle, getFullImageUrl } from "./rejectionConstants";
 import CadStage from "./components/CadStage";
 import { useViewFrameAspect } from "../../utils/viewImageFrame";
@@ -8,6 +9,13 @@ import {
   SEQ_SCRAP, OUTCOME, INK, ACCENT, OTHER, DEFECT_CATEGORY, DEFECT_CATEGORY_LABEL, STATUS, FONT_FAMILY, CARD_CSS,
   shiftKey, accent, withAlpha,
 } from "./chartTheme";
+
+/* Defect Location Map — hierarchical drill-down on the part views of Rejection Configuration:
+   all views → one view (zone heat) → one zone (its sub-zones, % of the zone) → one sub-zone (reasons + categories),
+   with a breadcrumb + Back, the Rejection Pareto of the selected zone / sub-zone and its records.
+   Records = the page's NG records after the page filters; nothing is drawn (no misleading zeros) until they arrive.
+   boxStyle(zone) / subBoxStyle(zone, sz) and CadStage are used unchanged (sub-zones are % of the parent zone). */
+const PART_NAME = "Oil Pan K-12";
 
 /* ═══════════════════════════════════════════════════════════════════════════
    CONFIG
@@ -30,7 +38,6 @@ const CAT_KEYS = ["CR", "CRAM", "MR"];
 const NO_SUB = "__zone"; // location key suffix for rejects placed on a zone without a sub-zone
 const SELECT_RING = "#2563eb";
 const INFERRED = STATUS.warning; // amber — used sparingly (small marks only)
-const LIST_LIMIT = 12;
 
 /* ═══════════════════════════════════════════════════════════════════════════
    PURE HELPERS (no React — every number on the tab comes from these)
@@ -42,23 +49,11 @@ const viewKey = (v) => String(v?.id ?? v?.code ?? v?.name);
 const zoneKey = (v, z) => `${viewKey(v)}::${z?.id ?? z?.code ?? z?.name}`;
 const subKey = (v, z, s) => `${zoneKey(v, z)}::${s?.id ?? s?.code ?? s?.name}`;
 const rowMatchesView = (row, v) => !!v && row._vk === viewKey(v);
-const rowMatchesZone = (row, v, z) => !!v && !!z && row._zk === zoneKey(v, z);
-const rowMatchesSub = (row, v, z, s) => !!v && !!z && !!s && row._sk === subKey(v, z, s);
 const qtyOf = (r) => Number(r.quantity || r.scrap_quantity || 1) || 1;
 const sumQty = (list) => list.reduce((s, r) => s + qtyOf(r), 0);
-/** Rows at a location: a sub-zone, a whole zone, or a zone's remainder (placed on the zone, no sub-zone). */
-const rowsAtLocation = (list, loc) => {
-  if (loc.type === "subZone") return list.filter((r) => rowMatchesSub(r, loc.view, loc.zone, loc.subZone));
-  if (loc.remainder) return list.filter((r) => rowMatchesZone(r, loc.view, loc.zone) && !r._sk);
-  return list.filter((r) => rowMatchesZone(r, loc.view, loc.zone));
-};
 const zoneLabel = (z) => String(z?.name || z?.code || "").replace(/^ZONE[-\s]*/i, "Zone ");
 const subLabel = (s) => String(s?.code || s?.name || "");
 const bump = (obj, k, q) => { obj[k] = (obj[k] || 0) + q; };
-const locationName = (loc) => (loc
-  ? `${zoneLabel(loc.zone)}${loc.subZone ? ` › ${subLabel(loc.subZone)}` : loc.remainder ? " (no sub-zone)" : ""}`
-  : "");
-
 /** Parse + place every record once (location logic lives in rejectionConstants — unchanged). */
 const placeRows = (rows, views) => rows.map((r) => {
   const _parsed = parseRowDefect(r);
@@ -99,29 +94,6 @@ const countInferred = (rows) => {
     else bump(out, `${r._zk}::${NO_SUB}`, q);
   });
   return out;
-};
-
-/** Ranked locations — the most specific place recorded (sub-zone, else zone remainder). */
-const rankLocations = (scopeViews, zoneCounts, subZoneCounts, totalMapped) => {
-  const list = [];
-  scopeViews.forEach((v) => {
-    (v.zones || []).forEach((zone) => {
-      const zc = zoneCounts[zoneKey(v, zone)] || 0;
-      if (!zc) return;
-      let inSubs = 0;
-      (zone.subZones || []).forEach((sz) => {
-        const c = subZoneCounts[subKey(v, zone, sz)] || 0;
-        inSubs += c;
-        if (c > 0) list.push({ key: subKey(v, zone, sz), view: v, zone, sub: sz, count: c, label: `${zoneLabel(zone)} › ${subLabel(sz)}` });
-      });
-      if (zc - inSubs > 0) {
-        list.push({ key: `${zoneKey(v, zone)}::${NO_SUB}`, view: v, zone, sub: null, remainder: inSubs > 0, count: zc - inSubs, label: `${zoneLabel(zone)}${inSubs ? " (no sub-zone)" : ""}` });
-      }
-    });
-  });
-  return list
-    .map((h) => ({ ...h, fullLabel: `${h.view.name} · ${h.label}`, share: pctOf(h.count, totalMapped) }))
-    .sort((a, b) => b.count - a.count);
 };
 
 /** Breakdown of a set of rows: total, inferred, category mix, ranked reasons (quantity-weighted). */
@@ -205,17 +177,6 @@ const MapLegend = ({ max }) => (
   </div>
 );
 
-/** Recorded vs inferred proportion bar. */
-const SplitBar = ({ count, inferred, max, color }) => {
-  const w = Math.min(100, (count / Math.max(max, 1)) * 100);
-  const inf = Math.min(count, inferred || 0);
-  return (
-    <div className="dlm-bar" aria-hidden>
-      <i style={{ width: `${w}%`, background: inf ? `linear-gradient(90deg, ${color} ${pctOf(count - inf, count)}%, ${withAlpha(color, 0.35)} ${pctOf(count - inf, count)}%)` : color }} />
-    </div>
-  );
-};
-
 /** Compact breakdown of the selected location (or of the whole scope). */
 const Breakdown = ({ stats, located }) => {
   if (!stats.total) return <div className="dlm-empty">No located rejects for the current filters.</div>;
@@ -261,257 +222,7 @@ const Breakdown = ({ stats, located }) => {
   );
 };
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   MAIN
-   ═══════════════════════════════════════════════════════════════════════════ */
-export default function HeatMapTab({
-  rows = [],
-  allRejectionRecords = [],
-  rejectedRows = [],
-  recordsRows = [],
-  rejectionConfig = null,
-}) {
-  const sourceRows = useMemo(() => {
-    if (allRejectionRecords?.length > 0) return allRejectionRecords;
-    if (rejectedRows?.length > 0) return rejectedRows;
-    if (rows?.length > 0) return rows;
-    return Array.isArray(recordsRows) ? recordsRows : [];
-  }, [allRejectionRecords, rejectedRows, rows, recordsRows]);
-
-  const [parts, setParts] = useState([]);
-  const [partName, setPartName] = useState("OIL PAN K-12");
-  const [fetched, setFetched] = useState(null); // { partName, config } from the API
-  const [viewId, setViewId] = useState("all");
-  const [selectedLocation, setSelectedLocation] = useState(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [reasonFilter, setReasonFilter] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("ALL");
-  const [showAll, setShowAll] = useState(false);
-  const [hover, setHover] = useState(null); // { x, y, title, sub, rows }
-
-
-  /* Parts list */
-  useEffect(() => {
-    let active = true;
-    rejectionConfigApi.parts()
-      .then((result) => {
-        if (!active) return;
-        const names = (Array.isArray(result) ? result : result?.parts || [])
-          .map((i) => (typeof i === "string" ? i : i.part_name || i.partName || i.name))
-          .filter(Boolean);
-        if (names.length) {
-          setParts(names);
-          setPartName((cur) => (cur && names.includes(cur) ? cur : names[0] || "OIL PAN K-12"));
-        }
-      })
-      .catch(() => { if (active) setParts([]); });
-    return () => { active = false; };
-  }, []);
-
-  /* CAD configuration for the selected part */
-  // The part's own CAD config when it has views, else the config passed in by the page.
-  useEffect(() => {
-    if (!partName) return undefined;
-    let active = true;
-    rejectionConfigApi.operatorConfig({ partName })
-      .then((result) => {
-        if (!active) return;
-        setFetched({ partName, config: result?.views?.length ? result : null });
-        setSelectedLocation(null);
-      })
-      .catch(() => { if (active) setFetched({ partName, config: null }); });
-    return () => { active = false; };
-  }, [partName]);
-  const config = (partName && fetched?.partName === partName && fetched.config) || rejectionConfig || null;
-
-  useEffect(() => {
-    if (!isFullscreen) return undefined;
-    const onKey = (e) => { if (e.key === "Escape") setIsFullscreen(false); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [isFullscreen]);
-
-  /* Scope by part */
-  const scopedRows = useMemo(() => {
-    if (!sourceRows.length) return [];
-    if (!partName) return sourceRows;
-    const sel = normalize(partName);
-    return sourceRows.filter((row) => {
-      const rp = row.partName || row.part_name || "";
-      if (!rp || rp === "-") return true;
-      const n = normalize(rp);
-      if (n.includes("OILPAN") && sel.includes("OILPAN")) return true;
-      return n.includes(sel) || sel.includes(n) || parts.length <= 1;
-    });
-  }, [sourceRows, partName, parts.length]);
-
-  const views = useMemo(() => config?.views || [], [config]);
-
-  /* Parse + place every record once */
-  const parsedRows = useMemo(() => placeRows(scopedRows, views), [scopedRows, views]);
-
-  // Leak-test rejects come from the pressure-decay sensor and have no visual location.
-  const sensorRows = useMemo(() => parsedRows.filter((r) => r._parsed.sensorReject), [parsedRows]);
-  const visualRows = useMemo(() => parsedRows.filter((r) => !r._parsed.sensorReject), [parsedRows]);
-
-  const categoryOptions = useMemo(() => [...new Set(visualRows.map((r) => r._parsed.category).filter(Boolean))].sort(), [visualRows]);
-  const categoryRows = useMemo(
-    () => (categoryFilter === "ALL" ? visualRows : visualRows.filter((r) => r._parsed.category === categoryFilter)),
-    [visualRows, categoryFilter]
-  );
-  const heatRows = useMemo(
-    () => (reasonFilter ? categoryRows.filter((r) => r._parsed.reason === reasonFilter) : categoryRows),
-    [categoryRows, reasonFilter]
-  );
-  const reasonOptions = useMemo(() => [...new Set(categoryRows.map((r) => r._parsed.reason).filter(Boolean))].sort(), [categoryRows]);
-  const totalShown = useMemo(() => sumQty(heatRows), [heatRows]);
-
-  const currentView = useMemo(() => (viewId === "all" ? null : views.find((v) => String(v.id) === String(viewId)) || null), [views, viewId]);
-  const scopeViews = useMemo(() => (currentView ? [currentView] : views), [currentView, views]);
-  const scopeName = currentView ? currentView.name : "All views";
-
-  const { viewDefectCounts, zoneCounts, subZoneCounts, totalMappedDefects, inferredMapped } = useMemo(
-    () => countLocations(heatRows, views), [heatRows, views]
-  );
-  const inferredBy = useMemo(() => countInferred(heatRows), [heatRows]);
-
-  const unlocated = Math.max(0, totalShown - totalMappedDefects);
-  const zoneCount = (view, zone) => zoneCounts[zoneKey(view, zone)] || 0;
-  const subCount = (view, zone, sub) => subZoneCounts[subKey(view, zone, sub)] || 0;
-  const viewMax = (view) => {
-    let mz = 1, ms = 1;
-    (view?.zones || []).forEach((z) => {
-      mz = Math.max(mz, zoneCount(view, z));
-      (z.subZones || []).forEach((s) => { ms = Math.max(ms, subCount(view, z, s)); });
-    });
-    return { zone: mz, sub: ms };
-  };
-
-  /* Located rejects in the current scope (one view, or all) */
-  const scopeLocatedRows = useMemo(
-    () => (currentView ? heatRows.filter((r) => r._zk && rowMatchesView(r, currentView)) : heatRows.filter((r) => r._zk)),
-    [heatRows, currentView]
-  );
-  const scopeLocated = useMemo(() => sumQty(scopeLocatedRows), [scopeLocatedRows]);
-
-  /* Ranked locations of the current scope (share = of located rejects in scope) */
-  const hotspots = useMemo(
-    () => rankLocations(scopeViews, zoneCounts, subZoneCounts, scopeLocated),
-    [scopeViews, zoneCounts, subZoneCounts, scopeLocated]
-  );
-
-  /* Breakdown — selected location, else the whole scope */
-  const selectionRows = useMemo(
-    () => (selectedLocation ? rowsAtLocation(heatRows, selectedLocation) : null),
-    [selectedLocation, heatRows]
-  );
-  const breakdown = useMemo(() => summarize(selectionRows || scopeLocatedRows), [selectionRows, scopeLocatedRows]);
-
-  const filtersActive = !!reasonFilter || categoryFilter !== "ALL";
-  const clearAll = () => { setSelectedLocation(null); setReasonFilter(""); setCategoryFilter("ALL"); };
-  const pickView = (id) => { setViewId(String(id)); setSelectedLocation(null); setShowAll(false); };
-  const selectLoc = (loc) => setSelectedLocation((cur) => {
-    const same = cur && cur.view === loc.view && cur.zone === loc.zone && (cur.subZone || null) === (loc.subZone || null) && !!cur.remainder === !!loc.remainder;
-    return same ? null : loc;
-  });
-  const focusHotspot = (h) => {
-    setViewId(String(h.view.id));
-    selectLoc(h.sub
-      ? { type: "subZone", view: h.view, zone: h.zone, subZone: h.sub }
-      : { type: "zone", view: h.view, zone: h.zone, remainder: !!h.remainder });
-  };
-  const isHotSelected = (h) => !!selectedLocation && selectedLocation.zone === h.zone
-    && (selectedLocation.subZone || null) === (h.sub || null) && (!!selectedLocation.remainder === !!h.remainder);
-  const topLocation = hotspots[0];
-  const exportRows = selectionRows || heatRows;
-  const selTitle = selectedLocation ? `${selectedLocation.view?.name} · ${locationName(selectedLocation)}` : "";
-
-  // Fullscreen box follows the image's own shape (portrait views stay portrait)
-  const fsAspect = useViewFrameAspect(currentView?.imageUrl ? getFullImageUrl(currentView.imageUrl) : "");
-
-  /* ── Hover card for the map (light, same look as the chart tooltips) ── */
-  const showHover = (e, title, sub, rowsOut) => setHover({ x: e.clientX, y: e.clientY, title, sub, rows: rowsOut });
-  const hoverRows = (count, inferred, scopeTotal) => [
-    { label: "Rejects", value: fmt(count), color: OUTCOME.ng },
-    { label: "Share of located", value: `${pctOf(count, scopeTotal).toFixed(1)}%` },
-    inferred > 0 ? { label: "Inferred from defect type", value: fmt(inferred), color: INFERRED } : null,
-  ].filter(Boolean);
-
-  /* ── Overlay renderer for one view ─────────────────────────────────────── */
-  const renderOverlays = (view, interactive) => {
-    const mx = viewMax(view);
-    const viewLocated = (view.zones || []).reduce((s, z) => s + zoneCount(view, z), 0);
-    return (view.zones || []).map((zone) => {
-      const zc = zoneCount(view, zone);
-      const zInf = inferredBy[zoneKey(view, zone)] || 0;
-      const zCol = heatColorFor(zc, mx.zone);
-      const zSel = selectedLocation?.type === "zone" && selectedLocation.zone === zone;
-      const hasSubs = (zone.subZones || []).length > 0;
-      return (
-        <React.Fragment key={zone.id || zone.code}>
-          <div
-            className={`cad-zone ${interactive ? "dlm-hit" : ""}`}
-            onClick={interactive ? () => selectLoc({ type: "zone", view, zone }) : undefined}
-            onMouseMove={interactive ? (e) => showHover(e, `${view.name} · ${zoneLabel(zone)}`, hasSubs ? "Whole zone, incl. sub-zones" : null, hoverRows(zc, zInf, viewLocated)) : undefined}
-            onMouseLeave={interactive ? () => setHover(null) : undefined}
-            style={{
-              ...boxStyle(zone),
-              ...(zCol ? { border: `1.5px solid ${zCol}`, background: withAlpha(zCol, hasSubs ? 0.06 + Math.sqrt(zc / mx.zone) * 0.12 : 0.18 + Math.sqrt(zc / mx.zone) * 0.42) } : {}),
-              ...(zSel ? { border: `2px solid ${SELECT_RING}`, boxShadow: `0 0 0 3px ${withAlpha(SELECT_RING, 0.22)}` } : {}),
-            }}
-          >
-            <span className="cad-tag">
-              {zoneLabel(zone)}
-              {zc > 0 && <span className="cad-count" style={{ background: zCol, color: heatInk(zc, mx.zone) }}>{fmt(zc)}</span>}
-              {zInf > 0 && <b className="dlm-inf-dot" title={`${fmt(zInf)} inferred`} />}
-            </span>
-          </div>
-          {(zone.subZones || []).map((sz) => {
-            const sc = subCount(view, zone, sz);
-            const sInf = inferredBy[subKey(view, zone, sz)] || 0;
-            const sCol = heatColorFor(sc, mx.sub);
-            const sSel = selectedLocation?.type === "subZone" && selectedLocation.subZone === sz;
-            return (
-              <div
-                key={`s-${sz.id || sz.code}`}
-                className={`cad-sub ${interactive ? "dlm-hit" : ""}`}
-                onClick={interactive ? (e) => { e.stopPropagation(); selectLoc({ type: "subZone", view, zone, subZone: sz }); } : undefined}
-                onMouseMove={interactive ? (e) => { e.stopPropagation(); showHover(e, `${view.name} · ${zoneLabel(zone)} › ${subLabel(sz)}`, null, hoverRows(sc, sInf, viewLocated)); } : undefined}
-                onMouseLeave={interactive ? () => setHover(null) : undefined}
-                style={{
-                  ...subBoxStyle(zone, sz),
-                  ...(sCol ? { border: `1.5px solid ${sCol}`, background: withAlpha(sCol, 0.3 + Math.sqrt(sc / mx.sub) * 0.45) } : {}),
-                  ...(sSel ? { border: `2px solid ${SELECT_RING}`, boxShadow: `0 0 0 3px ${withAlpha(SELECT_RING, 0.25)}` } : {}),
-                }}
-              >
-                {(sc > 0 || interactive) && (
-                  <span className="cad-tag">
-                    {subLabel(sz)}
-                    {sc > 0 && <span className="cad-count" style={{ background: sCol, color: heatInk(sc, mx.sub) }}>{fmt(sc)}</span>}
-                    {sInf > 0 && <b className="dlm-inf-dot" />}
-                  </span>
-                )}
-              </div>
-            );
-          })}
-        </React.Fragment>
-      );
-    });
-  };
-
-  const listItems = showAll ? hotspots : hotspots.slice(0, LIST_LIMIT);
-  const hoverPos = hover ? {
-    left: Math.max(8, Math.min(hover.x + 14, (typeof window !== "undefined" ? window.innerWidth : 1200) - 250)),
-    top: Math.max(8, Math.min(hover.y + 14, (typeof window !== "undefined" ? window.innerHeight : 800) - 150)),
-  } : null;
-  const mapMax = currentView ? Math.max(viewMax(currentView).zone, viewMax(currentView).sub) : 0;
-
-  /* ═════════════════════════════════════════════════════════════════════
-     RENDER
-     ═════════════════════════════════════════════════════════════════════ */
-  return (
-    <div className="dlm">
-      <style>{CARD_CSS}{`
+const DLM_CSS = `
         .dlm{display:flex;flex-direction:column;gap:16px;font-family:${FONT_FAMILY};color:${INK.primary};min-width:0}
         .dlm *{box-sizing:border-box}
         .dlm-ellipsis{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
@@ -531,7 +242,9 @@ export default function HeatMapTab({
         @media(max-width:1000px){.dlm-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
         .dlm-kpi .ra-kpi-value{font-size:21px}
         .dlm-kpi-icon{width:26px;height:26px;border-radius:8px}
-        .dlm-views{display:flex;gap:4px;flex-wrap:wrap;padding:4px;background:${INK.grid};border-radius:12px}
+        .dlm-views{display:flex;gap:4px;flex-wrap:wrap;padding:4px;background:#fff;border:1px solid ${INK.border};border-radius:12px}
+        .dlm-view.active{background:#0f2a4a!important;color:#fff!important}
+        .dlm-view.active .n{background:rgba(255,255,255,.2);color:#fff}
         .dlm-view{display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border-radius:9px;border:0;background:transparent;font-size:12.5px;font-weight:600;color:${INK.body};cursor:pointer;transition:background .15s,color .15s}
         .dlm-view:hover{color:${INK.primary}}
         .dlm-view.active{background:#fff;color:${INK.primary};box-shadow:0 1px 3px rgba(15,23,42,.12)}
@@ -549,7 +262,7 @@ export default function HeatMapTab({
         .dlm-sel-mark{display:inline-block;width:14px;height:10px;border-radius:3px;border:2px solid ${SELECT_RING}}
         .dlm-map-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px}
         .dlm-map-note{font-size:11.5px;color:${INK.muted}}
-        .dlm-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr));gap:12px}
+        .dlm-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr));gap:12px}
         .dlm-gcard{border:1px solid ${INK.border};border-radius:12px;padding:10px;cursor:pointer;transition:border-color .15s,box-shadow .15s;background:#fff;text-align:left;font:inherit;color:inherit;min-width:0}
         .dlm-gcard:hover,.dlm-gcard:focus-visible{border-color:#93c5fd;box-shadow:0 4px 14px -6px rgba(37,99,235,.35);outline:none}
         .dlm-gcard-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;font-size:12.5px;font-weight:600}
@@ -610,216 +323,471 @@ export default function HeatMapTab({
           .dlm-ramp i{width:80px}
           .dlm-loc .vw{display:none}
         }
-      `}</style>
+      
+        .dlm-state{display:flex;align-items:center;gap:14px;padding:22px 20px;min-height:140px}
+        .dlm-state>div{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+        .dlm-state b{font-size:14px;color:${INK.primary}}
+        .dlm-state span{font-size:12.5px;color:${INK.muted}}
+        .dlm-state.err{color:#991b1b;border-color:#fecaca;background:#fff7f7}
+        .dlm-spin{width:22px;height:22px;border-radius:50%;border:3px solid ${INK.border};border-top-color:${ACCENT.process};animation:dlm-spin .8s linear infinite;flex-shrink:0}
+        @keyframes dlm-spin{to{transform:rotate(360deg)}}
+        .dlm-crumbs{margin:0;padding:6px 10px;background:#fff;border:1px solid ${INK.border};border-radius:12px}
+        .dlm-tip{max-width:280px}
+`;
 
-      {/* ── HEADER + FILTERS ─────────────────────────────────────────────── */}
+/* ═══════════════════════════════════════════════════════════════════════════
+   MAIN — hierarchical drill-down: all views → view (zones) → zone (sub-zones) → sub-zone (reasons + categories)
+   ═══════════════════════════════════════════════════════════════════════════ */
+const LEVEL_HINT = [
+  "Open a view, or click a zone in the ranking to drill into it.",
+  "Click a zone on the part (or in the ranking) for its sub-zones.",
+  "Click a sub-zone for its reasons and categories.",
+  "Reasons and categories of this sub-zone.",
+];
+
+const topReasonOf = (reasonsAt, k) => {
+  const e = Object.entries(reasonsAt[k] || {}).sort((a, b) => b[1] - a[1])[0];
+  return e ? { reason: e[0], count: e[1] } : null;
+};
+const topNote = (reasonsAt, k) => { const t = topReasonOf(reasonsAt, k); return t ? `Top reason: ${t.reason} (${fmt(t.count)})` : undefined; };
+
+export default function HeatMapTab({
+  allRejectionRecords = [],
+  rejectionConfig = null,
+  loading = false,
+  configLoading = false,
+  error = null,
+  onRetry,
+  filterText = "",
+}) {
+  const sourceRows = useMemo(() => (Array.isArray(allRejectionRecords) ? allRejectionRecords : []), [allRejectionRecords]);
+  const [drill, setDrill] = useState({ viewId: null, zk: null, sk: null });
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [hover, setHover] = useState(null); // { x, y, title, sub, rows }
+  const [paneRef, paneW] = usePaneWidth();
+
+  useEffect(() => {
+    if (!isFullscreen) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") setIsFullscreen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isFullscreen]);
+
+  const views = useMemo(() => rejectionConfig?.views || [], [rejectionConfig]);
+
+  /* Parse + place every record once */
+  const parsedRows = useMemo(() => placeRows(sourceRows, views), [sourceRows, views]);
+  // Leak-test rejects come from the pressure-decay sensor and have no visual location.
+  const sensorRows = useMemo(() => parsedRows.filter((r) => r._parsed.sensorReject), [parsedRows]);
+  const visualRows = useMemo(() => parsedRows.filter((r) => !r._parsed.sensorReject), [parsedRows]);
+  const totalVisual = useMemo(() => sumQty(visualRows), [visualRows]);
+
+  const { viewDefectCounts, zoneCounts, subZoneCounts, totalMappedDefects, inferredMapped } = useMemo(
+    () => countLocations(visualRows, views), [visualRows, views],
+  );
+  const inferredBy = useMemo(() => countInferred(visualRows), [visualRows]);
+  // reason counts per zone key / sub-zone key (for the map tooltips)
+  const reasonsAt = useMemo(() => {
+    const m = {};
+    visualRows.forEach((r) => {
+      const reason = r._parsed?.reason || "Unspecified";
+      [r._zk, r._sk].filter(Boolean).forEach((k) => { const b = m[k] || (m[k] = {}); bump(b, reason, qtyOf(r)); });
+    });
+    return m;
+  }, [visualRows]);
+  const topReasonAt = (k) => topReasonOf(reasonsAt, k);
+
+  /* Drill scope */
+  const currentView = drill.viewId != null ? views.find((v) => String(v.id) === String(drill.viewId)) || null : null;
+  const currentZone = currentView && drill.zk ? (currentView.zones || []).find((z) => zoneKey(currentView, z) === drill.zk) || null : null;
+  const remainderKey = currentZone ? `${zoneKey(currentView, currentZone)}::${NO_SUB}` : null;
+  const currentSub = currentZone && drill.sk && drill.sk !== remainderKey ? (currentZone.subZones || []).find((s) => subKey(currentView, currentZone, s) === drill.sk) || null : null;
+  const level = currentZone && drill.sk ? 3 : currentZone ? 2 : currentView ? 1 : 0;
+
+  const zoneCount = (view, zone) => zoneCounts[zoneKey(view, zone)] || 0;
+  const subCount = (view, zone, sub) => subZoneCounts[subKey(view, zone, sub)] || 0;
+
+  const scopeRows = useMemo(() => {
+    if (level === 3) return currentSub ? visualRows.filter((r) => r._sk === drill.sk) : visualRows.filter((r) => r._zk === drill.zk && !r._sk);
+    if (level === 2) return visualRows.filter((r) => r._zk === drill.zk);
+    if (level === 1) return visualRows.filter((r) => r._zk && rowMatchesView(r, currentView));
+    return visualRows.filter((r) => r._zk);
+  }, [level, visualRows, drill.sk, drill.zk, currentSub, currentView]);
+  const breakdown = useMemo(() => summarize(scopeRows), [scopeRows]);
+  const scopeTotal = breakdown.total;
+
+  /* Distribution of the current level: zones (levels 0–1) → sub-zones (level 2) */
+  const zoneItems = useMemo(() => {
+    const list = [];
+    (currentView ? [currentView] : views).forEach((v) => (v.zones || []).forEach((z) => {
+      const c = zoneCounts[zoneKey(v, z)] || 0;
+      if (c > 0) list.push({ key: zoneKey(v, z), view: v, zone: z, label: views.length > 1 && !currentView ? `${zoneLabel(z)} · ${v.name}` : zoneLabel(z), value: c });
+    }));
+    return list.sort((a, b) => b.value - a.value);
+  }, [views, currentView, zoneCounts]);
+  const subItems = useMemo(() => {
+    if (!currentZone) return [];
+    const list = (currentZone.subZones || []).map((s) => ({ key: subKey(currentView, currentZone, s), sub: s, label: `${zoneLabel(currentZone)} › ${subLabel(s)}`, value: subZoneCounts[subKey(currentView, currentZone, s)] || 0 }))
+      .filter((x) => x.value > 0);
+    const inSubs = list.reduce((a, x) => a + x.value, 0);
+    const rest = (zoneCounts[zoneKey(currentView, currentZone)] || 0) - inSubs;
+    if (rest > 0) list.push({ key: remainderKey, sub: null, label: (currentZone.subZones || []).length ? "No sub-zone recorded" : `${zoneLabel(currentZone)} (no sub-zones defined)`, value: rest });
+    return list.sort((a, b) => b.value - a.value);
+  }, [currentView, currentZone, subZoneCounts, zoneCounts, remainderKey]);
+  const reasonItems = useMemo(() => {
+    const byReason = {};
+    scopeRows.forEach((r) => {
+      const k = r._parsed?.reason || "Unspecified";
+      const b = byReason[k] || (byReason[k] = { value: 0, cats: {} });
+      b.value += qtyOf(r);
+      bump(b.cats, String(r._parsed?.category || "OTHER").toUpperCase(), qtyOf(r));
+    });
+    const list = Object.entries(byReason).map(([label, b]) => {
+      const cat = Object.entries(b.cats).sort((x, y) => y[1] - x[1])[0]?.[0] || "OTHER";
+      return { key: label, label, value: b.value, color: DEFECT_CATEGORY[cat] || OTHER, group: cat };
+    }).sort((a, b) => b.value - a.value);
+    if (list.length <= 13) return list;
+    const rest = list.slice(12);
+    return [...list.slice(0, 12), { key: null, label: `Other (${rest.length} reasons)`, value: rest.reduce((a, x) => a + x.value, 0), color: OTHER, group: "Mixed" }];
+  }, [scopeRows]);
+
+  const viewPareto = useMemo(() => {
+    const list = views.map((v) => ({ key: v.id, view: v, label: v.name, value: viewDefectCounts[v.id] || 0 })).filter((x) => x.value > 0).sort((a, b) => b.value - a.value);
+    const max = list[0]?.value || 1;
+    return list.map((x) => ({ ...x, color: heatColorFor(x.value, max) || INK.faint, note: "Click to open this view." }));
+  }, [views, viewDefectCounts]);
+  const onViewBar = (it) => { if (it?.view) openView(it.view.id); };
+
+  const zonePareto = useMemo(() => {
+    const max = zoneItems[0]?.value || 1;
+    const top = zoneItems.slice(0, 15).map((z) => ({ ...z, color: heatColorFor(z.value, max) || INK.faint, note: topNote(reasonsAt, z.key) }));
+    const rest = zoneItems.slice(15);
+    if (rest.length) top.push({ key: null, label: `Other (${rest.length} zones)`, value: rest.reduce((a, x) => a + x.value, 0), color: OTHER });
+    return top;
+  }, [zoneItems, reasonsAt]);
+  const subPareto = useMemo(() => {
+    const max = subItems.filter((x) => x.sub).reduce((m, x) => Math.max(m, x.value), 1);
+    return subItems.map((x) => ({ ...x, color: x.sub ? heatColorFor(x.value, max) || INK.faint : OTHER, note: x.sub ? topNote(reasonsAt, x.key) : "Placed on the zone without a sub-zone." }));
+  }, [subItems, reasonsAt]);
+
+  /* Navigation (the page filters stay as they are) */
+  const openView = (id) => { setDrill({ viewId: id, zk: null, sk: null }); setHover(null); };
+  const openZone = (view, zone) => { setDrill({ viewId: view.id, zk: zoneKey(view, zone), sk: null }); setHover(null); };
+  const openSub = (sk) => { setDrill((d) => ({ ...d, sk: d.sk === sk ? null : sk })); setHover(null); };
+  // a sub-zone clicked on the picture selects its zone and the sub-zone in one step
+  const openSubOf = (view, zone, sk) => { setDrill((d) => ({ viewId: view.id, zk: zoneKey(view, zone), sk: d.sk === sk ? null : sk })); setHover(null); };
+  const back = () => setDrill((d) => (d.sk ? { ...d, sk: null } : d.zk ? { ...d, zk: null } : { viewId: null, zk: null, sk: null }));
+  const onZoneBar = (it) => { if (it?.key && it.view) openZone(it.view, it.zone); };
+  const onSubBar = (it) => { if (it?.key) openSub(it.key); };
+
+  // Fullscreen box follows the image's own shape (portrait views stay portrait)
+  const fsAspect = useViewFrameAspect(currentView?.imageUrl ? getFullImageUrl(currentView.imageUrl) : "");
+
+  /* ── Hover card for the map ── */
+  const showHover = (e, title, sub, rowsOut) => setHover({ x: e.clientX, y: e.clientY, title, sub, rows: rowsOut });
+  const hoverRows = (count, inferred, base, baseLabel, key) => {
+    const top = topReasonAt(key);
+    return [
+      { label: "Rejections", value: fmt(count), color: OUTCOME.ng },
+      { label: baseLabel, value: `${pctOf(count, base).toFixed(1)}%` },
+      top ? { label: "Top reason", value: `${top.reason} (${fmt(top.count)})` } : null,
+      inferred > 0 ? { label: "Inferred from defect type", value: fmt(inferred), color: INFERRED } : null,
+    ].filter(Boolean);
+  };
+
+  /* ── Overlays: zones heat (sub-zones only inside the drilled zone) ── */
+  const renderOverlays = (view, mode) => {
+    const zones = view.zones || [];
+    const maxZone = Math.max(1, ...zones.map((z) => zoneCount(view, z)));
+    const viewLocated = zones.reduce((s, z) => s + zoneCount(view, z), 0);
+    const interactive = mode !== "gallery";
+    return zones.map((zone) => {
+      const zk = zoneKey(view, zone);
+      const zc = zoneCount(view, zone);
+      const zInf = inferredBy[zk] || 0;
+      const isSel = currentZone === zone;
+      const drilled = !!currentZone && view === currentView;
+      const zCol = heatColorFor(zc, maxZone);
+      const faded = drilled && !isSel;
+      // every zone shows its sub-zones on the view (heat = share of the zone); faded zones keep them faded
+      const subs = interactive ? zone.subZones || [] : [];
+      const maxSub = Math.max(1, ...subs.map((s) => subCount(view, zone, s)));
+      return (
+        <React.Fragment key={zone.id || zone.code}>
+          <div
+            className={`cad-zone ${interactive ? "dlm-hit" : ""}`}
+            role={interactive ? "button" : undefined}
+            tabIndex={interactive ? 0 : undefined}
+            aria-label={interactive ? `${zoneLabel(zone)}: ${fmt(zc)} rejections` : undefined}
+            onClick={interactive ? () => openZone(view, zone) : undefined}
+            onKeyDown={interactive ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openZone(view, zone); } } : undefined}
+            onMouseMove={interactive ? (e) => showHover(e, `${view.name} · ${zoneLabel(zone)}`, isSel ? "Selected zone" : drilled ? "Click to switch to this zone" : "Click for its sub-zones", hoverRows(zc, zInf, viewLocated, "Share of the view", zk)) : undefined}
+            onMouseLeave={interactive ? () => setHover(null) : undefined}
+            style={{
+              ...boxStyle(zone),
+              ...(zCol && !faded ? { border: `1.5px solid ${zCol}`, background: withAlpha(zCol, isSel ? 0.08 : 0.18 + Math.sqrt(zc / maxZone) * 0.42) } : {}),
+              ...(faded ? { opacity: 0.45, background: zCol ? withAlpha(zCol, 0.12) : undefined } : {}),
+              ...(isSel ? { border: `2px solid ${SELECT_RING}`, boxShadow: `0 0 0 3px ${withAlpha(SELECT_RING, 0.22)}` } : {}),
+            }}
+          >
+            <span className="cad-tag">
+              {zoneLabel(zone)}
+              {zc > 0 && <span className="cad-count" style={{ background: zCol, color: heatInk(zc, maxZone) }}>{fmt(zc)}</span>}
+              {zInf > 0 && <b className="dlm-inf-dot" title={`${fmt(zInf)} inferred`} />}
+            </span>
+          </div>
+          {subs.map((sz) => {
+            const sk = subKey(view, zone, sz);
+            const sc = subCount(view, zone, sz);
+            const sInf = inferredBy[sk] || 0;
+            const sCol = heatColorFor(sc, maxSub);
+            const sSel = drill.sk === sk;
+            return (
+              <div
+                key={`s-${sz.id || sz.code}`}
+                className="cad-sub dlm-hit"
+                role="button"
+                tabIndex={0}
+                aria-label={`${zoneLabel(zone)} › ${subLabel(sz)}: ${fmt(sc)} rejections`}
+                onClick={(e) => { e.stopPropagation(); openSubOf(view, zone, sk); }}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); openSubOf(view, zone, sk); } }}
+                onMouseMove={(e) => { e.stopPropagation(); showHover(e, `${zoneLabel(zone)} › ${subLabel(sz)}`, "Click for its reasons and categories", hoverRows(sc, sInf, zc, "Share of the zone", sk)); }}
+                onMouseLeave={() => setHover(null)}
+                style={{
+                  ...subBoxStyle(zone, sz),
+                  ...(sCol ? { border: `1.5px solid ${sCol}`, background: withAlpha(sCol, 0.3 + Math.sqrt(sc / maxSub) * 0.45) } : {}),
+                  ...(sSel ? { border: `2px solid ${SELECT_RING}`, boxShadow: `0 0 0 3px ${withAlpha(SELECT_RING, 0.25)}`, zIndex: 4 } : {}),
+                  ...(faded && !sSel ? { opacity: 0.45 } : {}),
+                }}
+              >
+                <span className="cad-tag">
+                  {subLabel(sz)}
+                  {sc > 0 && <span className="cad-count" style={{ background: sCol, color: heatInk(sc, maxSub) }}>{fmt(sc)}</span>}
+                  {sInf > 0 && <b className="dlm-inf-dot" />}
+                </span>
+              </div>
+            );
+          })}
+        </React.Fragment>
+      );
+    });
+  };
+
+  const hoverPos = hover ? {
+    left: Math.max(8, Math.min(hover.x + 14, (typeof window !== "undefined" ? window.innerWidth : 1200) - 270)),
+    top: Math.max(8, Math.min(hover.y + 14, (typeof window !== "undefined" ? window.innerHeight : 800) - 170)),
+  } : null;
+
+  const unlocated = Math.max(0, totalVisual - totalMappedDefects);
+  const topZone = zoneItems[0] || null;
+  const levelName = level === 3 ? (currentSub ? `${zoneLabel(currentZone)} › ${subLabel(currentSub)}` : `${zoneLabel(currentZone)} · no sub-zone`) : level === 2 ? zoneLabel(currentZone) : level === 1 ? currentView.name : "All views";
+  const exportRows = level === 0 ? visualRows : scopeRows;
+  const labelW = Math.max(96, Math.min(190, Math.round((paneW || 420) * 0.36)));
+  const showRecords = level >= 2 && scopeRows.length > 0;
+  const waitingRows = loading && !sourceRows.length;
+  const waitingViews = configLoading && !views.length;
+
+  /* ═════ RENDER ═════ */
+  return (
+    <div className="dlm">
+      <style>{CARD_CSS}{DLM_CSS}</style>
+
+      {/* ── HEADER ── */}
       <section className="ra-card">
         <div className="dlm-top">
           <div style={{ minWidth: 0 }}>
             <h2>Defect Location Map</h2>
-            <p>Where visual rejects occur on the casting, by view, zone and sub-zone.</p>
+            <p>Where visual rejections occur on the casting — start with the zones, drill into sub-zones, then their reasons and categories.{filterText ? ` Filtered: ${filterText}.` : ""}</p>
           </div>
           <div className="dlm-controls">
-            <select className="dlm-select" value={partName} onChange={(e) => setPartName(e.target.value)} aria-label="Part">
-              <option value="">All parts</option>
-              {parts.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
-            <select className="dlm-select" value={categoryFilter} onChange={(e) => { setCategoryFilter(e.target.value); setReasonFilter(""); }} aria-label="Category">
-              <option value="ALL">All categories</option>
-              {categoryOptions.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <select className="dlm-select" value={reasonFilter} onChange={(e) => setReasonFilter(e.target.value)} aria-label="Defect">
-              <option value="">All defects</option>
-              {reasonOptions.map((r) => <option key={r} value={r}>{r}</option>)}
-            </select>
-            <button className="dlm-btn" disabled={!exportRows.length}
-              onClick={() => exportCsv(exportRows, `defect_locations_${normalize(partName) || "all"}_${new Date().toISOString().slice(0, 10)}.csv`)}
-              title={selectionRows ? "Export records at the selected location" : "Export records matching the filters"}>
+            <button className="dlm-btn" disabled={!exportRows.length || waitingRows}
+              onClick={() => exportCsv(exportRows, `defect_locations_${normalize(levelName) || "all"}_${new Date().toISOString().slice(0, 10)}.csv`)}
+              title={level ? `Export the records of ${levelName}` : "Export every visual reject of the period"}>
               <Download size={14} /> Export
             </button>
           </div>
         </div>
-        {(filtersActive || selectedLocation) && (
-          <div className="dlm-chips">
-            {categoryFilter !== "ALL" && <span className="ra-chip" style={accent(DEFECT_CATEGORY[categoryFilter] || ACCENT.process)}>Category: {categoryFilter}<button onClick={() => { setCategoryFilter("ALL"); setReasonFilter(""); }} aria-label="Clear category"><X size={12} /></button></span>}
-            {reasonFilter && <span className="ra-chip" style={accent(OUTCOME.ng)}>Defect: {reasonFilter}<button onClick={() => setReasonFilter("")} aria-label="Clear defect"><X size={12} /></button></span>}
-            {selectedLocation && <span className="ra-chip" style={accent(ACCENT.location)}>Location: {selTitle}<button onClick={() => setSelectedLocation(null)} aria-label="Clear location"><X size={12} /></button></span>}
-            <button className="dlm-btn sm" onClick={clearAll}>Clear all</button>
-          </div>
-        )}
       </section>
 
-      {/* ── KPIs ─────────────────────────────────────────────────────────── */}
-      <div className="dlm-kpis">
-        <Kpi icon={Activity} label="Visual rejects" value={fmt(totalShown)} sub={filtersActive ? `of ${fmt(sumQty(visualRows))} before filters` : "Recorded at visual inspection"} color={OUTCOME.ng} />
-        <Kpi icon={Crosshair} label="Located on part" value={`${pctOf(totalMappedDefects, totalShown).toFixed(1)}%`}
-          sub={`${fmt(totalMappedDefects)} placed${inferredMapped ? ` · ${fmt(inferredMapped)} inferred` : ""}`} color={ACCENT.process} />
-        <Kpi icon={MapPin} label="Top location" value={topLocation ? fmt(topLocation.count) : "—"}
-          sub={topLocation ? `${topLocation.fullLabel} · ${topLocation.share.toFixed(1)}%` : "No located rejects"} color={ACCENT.location} />
-        <Kpi icon={Gauge} label="Leak-test rejects" value={fmt(sumQty(sensorRows))} sub="Sensor rejects, not on the map" color={ACCENT.quality} />
-      </div>
+      {error && !sourceRows.length ? (
+        <section className="ra-card dlm-state err" role="alert">
+          <AlertTriangle size={20} />
+          <div><b>NG records could not be loaded.</b><span>{String(error)}</span></div>
+          {onRetry && <button type="button" className="dlm-btn" onClick={onRetry}>Retry</button>}
+        </section>
+      ) : waitingRows ? (
+        <section className="ra-card dlm-state" role="status" aria-live="polite">
+          <span className="dlm-spin" aria-hidden="true" />
+          <div><b>Loading NG records…</b><span>The location map, counts and percentages appear once every rejection of the period has arrived.</span></div>
+        </section>
+      ) : (
+        <>
+          {/* ── KPIs (from the actual records) ── */}
+          <div className="dlm-kpis">
+            <Kpi icon={Activity} label="Visual rejects" value={fmt(totalVisual)} sub={filterText ? `Matching ${filterText}` : "Recorded at visual inspection"} color={OUTCOME.ng} />
+            <Kpi icon={Crosshair} label="Located on part" value={waitingViews ? "…" : `${pctOf(totalMappedDefects, totalVisual).toFixed(1)}%`}
+              sub={waitingViews ? "Loading part views…" : `${fmt(totalMappedDefects)} placed${inferredMapped ? ` · ${fmt(inferredMapped)} inferred` : ""}`} color={ACCENT.process} />
+            <Kpi icon={MapPin} label="Top zone" value={waitingViews ? "…" : topZone ? fmt(topZone.value) : "—"}
+              sub={waitingViews ? "Loading part views…" : topZone ? `${topZone.view.name} · ${zoneLabel(topZone.zone)} · ${pctOf(topZone.value, totalMappedDefects).toFixed(1)}%` : "No located rejects"} color={ACCENT.location} />
+            <Kpi icon={Gauge} label="Leak-test rejects" value={fmt(sumQty(sensorRows))} sub="Sensor rejects, not on the map" color={ACCENT.quality} />
+          </div>
 
-      {/* ── VIEW SELECTOR ────────────────────────────────────────────────── */}
-      {views.length > 0 && (
-        <div className="dlm-views" role="tablist" aria-label="Inspection view">
-          <button role="tab" aria-selected={viewId === "all"} className={`dlm-view ${viewId === "all" ? "active" : ""}`} onClick={() => pickView("all")}>
-            All views <span className="n">{fmt(totalShown)}</span>
-          </button>
-          {views.map((v) => {
-            const c = viewDefectCounts[v.id] || 0;
-            const active = String(viewId) === String(v.id);
-            return (
-              <button key={v.id} role="tab" aria-selected={active} className={`dlm-view ${active ? "active" : ""}`} onClick={() => pickView(v.id)}>
-                {v.name} <span className={`n ${c > 0 ? "hot" : ""}`}>{fmt(c)}</span>
+          {/* ── VIEW TABS: all views together, or one view ── */}
+          {views.length > 0 && !waitingViews && (
+            <div className="dlm-views" role="tablist" aria-label="Inspection views">
+              <button type="button" role="tab" aria-selected={!currentView} className={`dlm-view ${!currentView ? "active" : ""}`} onClick={() => setDrill({ viewId: null, zk: null, sk: null })}>
+                <Layers size={13} aria-hidden="true" />All views <span className="n">{fmt(totalMappedDefects)}</span>
               </button>
-            );
-          })}
-        </div>
-      )}
-
-      {/* ── MAP + HOT LOCATIONS + BREAKDOWN ──────────────────────────────── */}
-      <div className="dlm-main">
-        <Card
-          icon={Layers}
-          color={ACCENT.process}
-          title={currentView ? currentView.name : "All inspection views"}
-          sub={currentView ? "Click a zone or sub-zone to see its breakdown" : "Open a view to inspect its zones"}
-          right={currentView && <button className="dlm-btn icon" onClick={() => setIsFullscreen(true)} title="Full screen" aria-label="Full screen"><Maximize2 size={14} /></button>}
-        >
-          {!views.length ? (
-            <div className="dlm-empty">No CAD views are configured for this part (Rejection Configuration → View Setup).</div>
-          ) : !currentView ? (
-            <div className="dlm-gallery">
               {views.map((v) => {
                 const c = viewDefectCounts[v.id] || 0;
+                const on = currentView && String(currentView.id) === String(v.id);
                 return (
-                  <button type="button" key={v.id} className="dlm-gcard" onClick={() => pickView(v.id)} title={`Open ${v.name}`}>
-                    <div className="dlm-gcard-head"><span className="dlm-ellipsis" style={{ color: INK.primary, fontSize: 12.5 }}>{v.name}</span><span>{fmt(c)} rejects</span></div>
-                    <CadStage imageUrl={v.imageUrl} alt={v.name}>{renderOverlays(v, false)}</CadStage>
+                  <button key={v.id} type="button" role="tab" aria-selected={!!on} className={`dlm-view ${on ? "active" : ""}`} onClick={() => openView(v.id)}>
+                    {v.name} <span className={`n ${c > 0 && c === Math.max(...views.map((x) => viewDefectCounts[x.id] || 0)) ? "hot" : ""}`}>{fmt(c)}</span>
                   </button>
                 );
               })}
             </div>
-          ) : (
-            <>
-              <div className={isFullscreen ? "dlm-fs" : ""} onClick={isFullscreen ? (e) => { if (e.target === e.currentTarget) setIsFullscreen(false); } : undefined}>
-                <div
-                  className={isFullscreen ? "dlm-fs-inner" : ""}
-                  style={isFullscreen ? { width: `min(calc(100vw - 48px), calc((100vh - 68px) * ${fsAspect}))` } : undefined}
-                >
-                  {isFullscreen && <button className="dlm-fs-close" onClick={() => setIsFullscreen(false)} aria-label="Close full screen"><Minimize2 size={15} /></button>}
-                  <CadStage imageUrl={currentView.imageUrl} alt={`${currentView.name} defect map`}>{renderOverlays(currentView, true)}</CadStage>
-                </div>
-              </div>
-              <div className="dlm-map-foot">
-                <MapLegend max={mapMax} />
-                {unlocated > 0 && <span className="dlm-map-note">{fmt(unlocated)} rejects have no zone and are not drawn.</span>}
-              </div>
-            </>
           )}
-          {!currentView && views.length > 0 && (
-            <div className="dlm-map-foot">
-              <MapLegend max={0} />
-              {unlocated > 0 && <span className="dlm-map-note">{fmt(unlocated)} rejects have no zone and are not drawn.</span>}
-            </div>
-          )}
-        </Card>
 
-        <div className="dlm-side">
-          <Card
-            icon={ListOrdered}
-            color={ACCENT.location}
-            title="Hot locations"
-            sub={`${scopeName} · share of ${fmt(scopeLocated)} located rejects`}
-          >
-            {!hotspots.length ? (
-              <div className="dlm-empty">No located rejects for the current filters.</div>
-            ) : (
-              <>
-                <div className="dlm-list">
-                  {listItems.map((h, i) => {
-                    const inf = inferredBy[h.key] || 0;
-                    const col = heatColorFor(h.count, hotspots[0].count) || INK.faint;
-                    return (
-                      <button type="button" key={h.key} className={`dlm-loc ${i < 3 ? "top" : ""} ${isHotSelected(h) ? "sel" : ""}`} onClick={() => focusHotspot(h)}
-                        title={inf ? `${fmt(inf)} of ${fmt(h.count)} inferred from defect type` : undefined}>
-                        <span className="rk">{i + 1}</span>
-                        <div style={{ minWidth: 0 }}>
-                          <div className="nm">
-                            <span className="dlm-ellipsis">{h.label}</span>
-                            {inf > 0 && <b className="dlm-inf-dot" />}
-                            {!currentView && <span className="vw">{h.view.name}</span>}
-                          </div>
-                          <SplitBar count={h.count} inferred={inf} max={hotspots[0].count} color={col} />
-                        </div>
-                        <div className="ct"><b>{fmt(h.count)}</b><span>{h.share.toFixed(1)}%</span></div>
-                      </button>
-                    );
-                  })}
-                </div>
-                {hotspots.length > LIST_LIMIT && (
-                  <div className="dlm-actions" style={{ marginTop: 8 }}>
-                    <button className="dlm-btn sm" onClick={() => setShowAll((s) => !s)}>{showAll ? "Show top 12" : `Show all ${hotspots.length}`}</button>
+          {/* ── BREADCRUMB ── */}
+          <nav className="mg-crumbs dlm-crumbs" aria-label="Location drill-down">
+            {level > 0 && <button type="button" className="mg-back" onClick={back}><ArrowLeft size={14} />Back</button>}
+            {level > 0 ? <button type="button" onClick={() => setDrill({ viewId: null, zk: null, sk: null })}>All views</button> : <b aria-current="page">All views</b>}
+            {currentView && <><ChevronRight size={14} aria-hidden="true" />{level > 1 ? <button type="button" onClick={() => openView(currentView.id)}>{currentView.name}</button> : <b aria-current="page">{currentView.name}</b>}</>}
+            {currentZone && <><ChevronRight size={14} aria-hidden="true" />{level > 2 ? <button type="button" onClick={() => setDrill((d) => ({ ...d, sk: null }))}>{zoneLabel(currentZone)}</button> : <b aria-current="page">{zoneLabel(currentZone)}</b>}</>}
+            {level === 3 && <><ChevronRight size={14} aria-hidden="true" /><b aria-current="page">{currentSub ? subLabel(currentSub) : "No sub-zone"}</b></>}
+            <span className="mg-hint" style={{ marginLeft: "auto" }}>{LEVEL_HINT[level]}</span>
+          </nav>
+
+          {/* ── MAP + DISTRIBUTION ── */}
+          <div className="dlm-main">
+            <Card
+              icon={Layers}
+              color={ACCENT.process}
+              title={currentView ? `${currentView.name}${currentZone ? ` · ${zoneLabel(currentZone)}` : ""}` : "All inspection views"}
+              sub={level === 0 ? "Every view with its zone heat — click a view (or a view tab above) to open it" : level === 1 ? "Zone and sub-zone heat — darker = more rejections · click a zone or a sub-zone" : "Sub-zones of the selected zone (heat = share of the zone) · click a sub-zone for its records"}
+              right={currentView && <button className="dlm-btn icon" onClick={() => setIsFullscreen(true)} title="Full screen" aria-label="Full screen"><Maximize2 size={14} /></button>}
+            >
+              {waitingViews ? <SkeletonBlock lines={6} height={320} />
+                : !views.length ? (
+                  <div className="dlm-empty">No CAD views are configured for {PART_NAME} (Rejection Configuration → View Setup).</div>
+                ) : !currentView ? (
+                  <div className="dlm-gallery">
+                    {views.map((v) => {
+                      const c = viewDefectCounts[v.id] || 0;
+                      return (
+                        <button type="button" key={v.id} className="dlm-gcard" onClick={() => openView(v.id)} title={`Open ${v.name}`}>
+                          <div className="dlm-gcard-head"><span className="dlm-ellipsis" style={{ color: INK.primary, fontSize: 12.5 }}>{v.name}</span><span>{fmt(c)} rejects · {pctOf(c, totalMappedDefects).toFixed(0)}%</span></div>
+                          <CadStage imageUrl={v.imageUrl} alt={v.name}>{renderOverlays(v, "gallery")}</CadStage>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className={isFullscreen ? "dlm-fs" : ""} onClick={isFullscreen ? (e) => { if (e.target === e.currentTarget) setIsFullscreen(false); } : undefined}>
+                    <div
+                      className={isFullscreen ? "dlm-fs-inner" : ""}
+                      style={isFullscreen ? { width: `min(calc(100vw - 48px), calc((100vh - 68px) * ${fsAspect}))` } : undefined}
+                    >
+                      {isFullscreen && <button className="dlm-fs-close" onClick={() => setIsFullscreen(false)} aria-label="Close full screen"><Minimize2 size={15} /></button>}
+                      <CadStage imageUrl={currentView.imageUrl} alt={`${currentView.name} defect map`}>{renderOverlays(currentView, "view")}</CadStage>
+                    </div>
                   </div>
                 )}
-              </>
-            )}
-          </Card>
+              {views.length > 0 && !waitingViews && (
+                <div className="dlm-map-foot">
+                  <MapLegend max={level >= 2 ? Math.max(0, ...subItems.filter((x) => x.sub).map((x) => x.value)) : currentView ? Math.max(0, ...zoneItems.map((x) => x.value)) : 0} />
+                  {unlocated > 0 && <span className="dlm-map-note">{fmt(unlocated)} visual rejects have no zone on the part and are not drawn.</span>}
+                </div>
+              )}
+            </Card>
 
-          <Card
-            icon={MapPin}
-            color={selectedLocation ? SELECT_RING : ACCENT.neutral}
-            title={selectedLocation ? locationName(selectedLocation) : `${scopeName} breakdown`}
-            sub={selectedLocation ? selectedLocation.view?.name : "Select a location to narrow down"}
-            right={selectedLocation && <button className="dlm-btn icon" onClick={() => setSelectedLocation(null)} aria-label="Clear selection" title="Clear selection"><X size={14} /></button>}
-          >
-            <Breakdown stats={breakdown} located={scopeLocated} />
-            {selectionRows && selectionRows.length > 0 && (
-              <div className="dlm-actions">
-                <button className="dlm-btn sm" onClick={() => exportCsv(selectionRows, `location_${normalize(selTitle)}.csv`)}><Download size={13} /> Records CSV</button>
-              </div>
-            )}
-          </Card>
-        </div>
-      </div>
-
-      {/* ── RECORDS AT SELECTED LOCATION ─────────────────────────────────── */}
-      {selectionRows && selectionRows.length > 0 && (
-        <Card
-          icon={Activity}
-          color={ACCENT.neutral}
-          title={`Reject records · ${selTitle}`}
-          sub={`${fmt(selectionRows.length)} records${selectionRows.length > 50 ? " · first 50 shown, export for all" : ""}`}
-        >
-          <div className="dlm-table-wrap">
-            <table className="dlm-table">
-              <thead><tr><th>Part serial / QR</th><th>Category</th><th>Defect</th><th>Location</th><th>Shift</th><th>Machine</th></tr></thead>
-              <tbody>
-                {selectionRows.slice(0, 50).map((r, i) => (
-                  <tr key={r.id || i}>
-                    <td style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11.5 }}>{r.partId && r.partId !== "-" ? r.partId : r.customerQrCode || "—"}</td>
-                    <td>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                        <i style={{ width: 8, height: 8, borderRadius: 2, background: DEFECT_CATEGORY[String(r._parsed?.category || "").toUpperCase()] || OTHER }} />
-                        {r._parsed?.category || "—"}
-                      </span>
-                    </td>
-                    <td style={{ fontWeight: 600 }}>{r._parsed?.reason || "—"}</td>
-                    <td>
-                      {r._zoneName || "—"}{r._subName ? ` › ${r._subName}` : ""}
-                      {r._inferred && <span style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 600, color: "#b45309" }} title="No zone entered at inspection — placed by defect type">inferred</span>}
-                    </td>
-                    <td>{shiftKey(r.shiftCode || r.shift_code || r.shift)}</td>
-                    <td>{r.machineName || r.machine_name || "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="dlm-side" ref={paneRef}>
+              {level === 0 && (
+                <div id="dlm-view-pareto">
+                  <Card icon={ListOrdered} color={ACCENT.location} title="Rejections by view"
+                    sub={`${fmt(totalMappedDefects)} located rejects · count and share per inspection view · click a view to open it`}>
+                    {waitingViews ? <SkeletonBlock lines={5} height={240} />
+                      : !viewPareto.length ? <div className="dlm-empty">No located rejects for the current filters.</div>
+                        : <ParetoChart items={viewPareto} total={totalMappedDefects} labelWidth={labelW} showPct valueName="Rejections" onSelect={onViewBar} selectHint="Click to open this view." height={300} />}
+                  </Card>
+                </div>
+              )}
+              <Card icon={MapPin} color={level ? SELECT_RING : ACCENT.neutral}
+                title={level >= 2 ? `Categories — ${levelName}` : `${levelName} — category mix`}
+                sub={level ? `${fmt(scopeTotal)} rejects · ${pctOf(scopeTotal, totalMappedDefects).toFixed(1)}% of located` : "Select a zone to narrow down"}>
+                <Breakdown stats={breakdown} located={totalMappedDefects} />
+              </Card>
+            </div>
           </div>
-        </Card>
+
+          {/* ── ZONE PARETO (all views or the selected view) / SUB-ZONE PARETO ── */}
+          {level <= 1 && (
+            <div id="dlm-zone-pareto">
+              <Card icon={ListOrdered} color={ACCENT.location} title={level === 0 ? "Zone Pareto — all views" : `Zone Pareto — ${currentView.name}`}
+                sub={`${fmt(scopeTotal)} located rejects · biggest zone first · cumulative share and 80 % line · click a zone for its sub-zones`}>
+                {waitingViews ? <SkeletonBlock lines={5} height={260} />
+                  : !zonePareto.length ? <div className="dlm-empty">No located rejects for the current filters.</div>
+                    : <ParetoChart items={zonePareto} total={scopeTotal} labelWidth={140} showPct valueName="Rejections" onSelect={onZoneBar} selectHint="Click for the sub-zones of this zone." />}
+              </Card>
+            </div>
+          )}
+          {level === 2 && (
+            <div id="dlm-zone-pareto">
+              <Card icon={ListOrdered} color={ACCENT.location} title={`Sub-zone Pareto — ${zoneLabel(currentZone)}`}
+                sub={`${fmt(scopeTotal)} rejects in the zone · share = % of the zone · click a sub-zone`}>
+                {!subPareto.length ? <div className="dlm-empty">No rejects in this zone.</div>
+                  : <ParetoChart items={subPareto} total={scopeTotal} labelWidth={140} showPct valueName="Rejections" onSelect={onSubBar} selectHint="Click for the reasons and categories of this sub-zone." />}
+              </Card>
+            </div>
+          )}
+
+          {/* ── REJECTION PARETO OF THE SELECTED ZONE / SUB-ZONE ── */}
+          {level >= 2 && (
+            <Card icon={ListOrdered} color={OUTCOME.ng} title={`Rejection Pareto — ${levelName}`}
+              sub={`Reasons biggest first · ${fmt(scopeTotal)} rejects · bar colour = dominant category`}>
+              {!reasonItems.length ? <div className="dlm-empty">No rejects here.</div>
+                : <ParetoChart items={reasonItems} total={scopeTotal} labelWidth={140} showPct valueName="Rejections" />}
+            </Card>
+          )}
+
+          {/* ── RECORDS ── */}
+          {showRecords && (
+            <Card icon={Activity} color={ACCENT.neutral} title={`Reject records · ${levelName}`}
+              sub={`${fmt(scopeRows.length)} records${scopeRows.length > 50 ? " · first 50 shown, export for all" : ""}`}
+              right={<button className="dlm-btn sm" onClick={() => exportCsv(scopeRows, `location_${normalize(levelName)}.csv`)}><Download size={13} /> Records CSV</button>}>
+              <div className="dlm-table-wrap">
+                <table className="dlm-table">
+                  <thead><tr><th>Part serial / QR</th><th>Category</th><th>Defect</th><th>Location</th><th>Shift</th><th>Machine</th></tr></thead>
+                  <tbody>
+                    {scopeRows.slice(0, 50).map((r, i) => (
+                      <tr key={r.id || i}>
+                        <td style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11.5 }}>{r.partId && r.partId !== "-" ? r.partId : r.customerQrCode || "—"}</td>
+                        <td>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                            <i style={{ width: 8, height: 8, borderRadius: 2, background: DEFECT_CATEGORY[String(r._parsed?.category || "").toUpperCase()] || OTHER }} />
+                            {r._parsed?.category || "—"}
+                          </span>
+                        </td>
+                        <td style={{ fontWeight: 600 }}>{r._parsed?.reason || "—"}</td>
+                        <td>
+                          {r._zoneName || "—"}{r._subName ? ` › ${r._subName}` : ""}
+                          {r._inferred && <span style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 600, color: "#b45309" }} title="No zone entered at inspection — placed by defect type">inferred</span>}
+                        </td>
+                        <td>{shiftKey(r.shiftCode || r.shift_code || r.shift)}</td>
+                        <td>{r.machineName || r.machine_name || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+        </>
       )}
 
-      {/* ── MAP HOVER CARD ───────────────────────────────────────────────── */}
+      {/* ── MAP HOVER CARD ── */}
       {hover && hoverPos && (
         <div className="dlm-tip" style={hoverPos} role="tooltip">
           <h6>{hover.title}</h6>
@@ -836,4 +804,17 @@ export default function HeatMapTab({
       )}
     </div>
   );
+}
+
+/** Width of an element (ResizeObserver) — sizes the Pareto label gutter of the side panel. */
+function usePaneWidth() {
+  const [el, setEl] = useState(null);
+  const [w, setW] = useState(0);
+  useLayoutEffect(() => {
+    if (!el) return undefined;
+    const ro = new ResizeObserver((e) => setW(e[0]?.contentRect?.width || 0));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [el]);
+  return [setEl, w];
 }

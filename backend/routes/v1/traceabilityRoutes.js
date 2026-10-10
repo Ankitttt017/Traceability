@@ -54,7 +54,15 @@ router.post("/rejection-config/view-image", verifyToken, requireModuleAccess("re
 
 router.get("/traceability/operations", verifyToken, requireModuleAccess("traceability", "view"), traceabilityController.getOperationSequence);
 router.get("/traceability/process-flow", verifyToken, requireModuleAccess("process_flow", "view"), traceabilityController.getProcessFlow);
-router.get("/traceability/parts", verifyToken, requireModuleAccess("traceability", "view"), traceabilityController.getPartCatalog);
+router.get(
+  "/traceability/parts",
+  verifyToken,
+  requireAnyModuleAccess([
+    { moduleKey: "traceability", mode: "view" },
+    { moduleKey: "part_journey", mode: "view" },
+  ]),
+  traceabilityController.getPartCatalog
+);
 router.get(
   "/traceability/machine-stats",
   verifyToken,

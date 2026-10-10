@@ -19,5 +19,11 @@ const historicalReportController = require("../../controllers/historicalReportCo
 router.get("/report/historical", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.getHistoricalReportData);
 router.post("/report/historical/sync", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.syncHistoricalData);
 router.post("/report/historical/export", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.exportHistoricalReportExcel);
+// Background export: start → poll → download (a long export no longer has to fit in one HTTP request)
+router.post("/report/historical/export/jobs", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.createHistoricalExportJob);
+router.get("/report/historical/export/jobs/:jobId", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.getHistoricalExportJob);
+router.get("/report/historical/export/estimate", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.estimateHistoricalExport);
+router.delete("/report/historical/export/jobs/:jobId", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.cancelHistoricalExportJob);
+router.get("/report/historical/export/jobs/:jobId/file", verifyToken, requireModuleAccess("reports", "view"), historicalReportController.downloadHistoricalExportJob);
 
 module.exports = router;

@@ -1,25 +1,26 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Activity, ChevronLeft, ChevronRight, Database } from "lucide-react";
 import PageSkeleton from "../../components/PageSkeleton";
 
+// One vocabulary for every status cell: OK (green) / NG (red) / In Progress (amber)
 const StatusChip = ({ status }) => {
-  const normalized = String(status || "").trim().toUpperCase();
+  const normalized = String(status || "").trim().toUpperCase().replace(/\s+/g, "_");
   const base = "inline-flex items-center gap-1 px-3 py-1 rounded-full text-[10px] font-bold border transition-all";
   
   if (normalized === "PASSED" || normalized === "OK") {
     return <span className={`${base} bg-[rgba(34,197,94,0.1)] text-[rgb(34,197,94)] border-[rgba(34,197,94,0.2)] shadow-sm shadow-[rgba(34,197,94,0.05)]`}>
       <span className="w-1.5 h-1.5 rounded-full bg-[rgb(34,197,94)]" />
-      {normalized === "PASSED" ? "Passed" : "OK"}
+      OK
     </span>;
   }
   if (normalized === "FAILED" || normalized === "NG") {
     return <span className={`${base} bg-[rgba(239,68,68,0.1)] text-[rgb(239,68,68)] border-[rgba(239,68,68,0.2)] shadow-sm shadow-[rgba(239,68,68,0.05)]`}>
       <span className="w-1.5 h-1.5 rounded-full bg-[rgb(239,68,68)]" />
-      {normalized === "FAILED" ? "Failed" : "NG"}
+      NG
     </span>;
   }
-  if (normalized === "IN_PROGRESS") {
+  if (normalized === "IN_PROGRESS" || normalized === "WIP") {
     return <span className={`${base} bg-[rgba(249,115,22,0.1)] text-[rgb(249,115,22)] border-[rgba(249,115,22,0.2)] shadow-sm shadow-[rgba(249,115,22,0.05)]`}>
       <span className="w-1.5 h-1.5 rounded-full bg-[rgb(249,115,22)] animate-pulse" />
       In Progress

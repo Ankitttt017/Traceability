@@ -103,6 +103,7 @@ export const ENDPOINTS = {
     report: "/dashboard/report",
     rejectionAnalysis: "/rejection-analysis",
     rejectionSummary: "/rejection-summary",
+    shotAnalytics: "/shot-analytics",
     rejectionPareto: "/rejection-pareto",
     rejectionShiftScrap: "/rejection-shift-scrap",
     rejectionDaily: "/rejection-daily",
@@ -125,6 +126,11 @@ export const ENDPOINTS = {
     exportParts: "/reports/report/export-parts",
     exportAudit: "/reports/report/export-audit",
     exportHistorical: "/reports/report/historical/export",
+    // background export: start → poll → download
+    exportHistoricalJobs: "/reports/report/historical/export/jobs",
+    exportHistoricalJob: (jobId) => `/reports/report/historical/export/jobs/${encodeURIComponent(jobId)}`,
+    exportHistoricalJobFile: (jobId) => `/reports/report/historical/export/jobs/${encodeURIComponent(jobId)}/file`,
+    exportHistoricalEstimate: "/reports/report/historical/export/estimate",
   },
   alarms: {
     base: "/alarms",
